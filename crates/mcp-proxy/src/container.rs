@@ -973,6 +973,7 @@ mod tests {
             .find(|m| m.target.as_deref() == Some(target))
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn a_block_that_declares_nothing_more_gets_no_network_and_default_limits() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1005,6 +1006,7 @@ mod tests {
         assert_eq!(host_config.binds, Some(Vec::new()));
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn mounts_are_the_install_dir_and_the_declared_ones_read_only_unless_writable() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1034,6 +1036,7 @@ mod tests {
         assert!(plan.mounts.iter().all(|m| m.typ == Some(MountType::BIND)));
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn limits_override_the_defaults() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1049,6 +1052,7 @@ mod tests {
         assert_eq!(plan.nano_cpus, 500_000_000);
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn labels_name_the_instance_agent_and_server() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1060,6 +1064,7 @@ mod tests {
         assert_eq!(plan.labels[LABEL_SERVER], "github");
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn blocks_that_cannot_be_started_are_refused_with_a_reason() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1112,6 +1117,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn a_server_name_that_is_not_one_path_component_gets_no_scratch_dir() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1154,6 +1160,7 @@ mod tests {
         ContainerPlan::new(host, "agent-1", "github", "node", &[], env, block)
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn a_vault_value_is_delivered_as_a_file_by_default() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1187,6 +1194,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn a_secret_listed_in_secrets_in_env_goes_into_the_environment() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1202,6 +1210,7 @@ mod tests {
         assert!(body_env.contains(&"GITHUB_TOKEN=resolved-token-value".to_string()));
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn secrets_in_env_must_name_a_vault_value() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1219,6 +1228,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn a_secret_whose_name_cannot_be_a_file_name_is_refused() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1235,6 +1245,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn without_a_memory_backed_dir_file_secrets_are_unavailable() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1249,6 +1260,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn secret_files_are_0600_in_a_0700_dir() {
         use std::os::unix::fs::PermissionsExt;
@@ -1265,6 +1277,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn dev_shm_is_found_as_memory_backed_and_proc_is_not() {
         if Path::new("/dev/shm").exists() {
@@ -1283,6 +1296,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn egress_hosts_are_checked_sorted_and_deduplicated() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1307,6 +1321,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn egress_hosts_are_refused_where_the_runtime_cannot_proxy_them() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1336,6 +1351,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn under_a_rootless_runtime_the_server_runs_as_the_operator() {
         let dirs = tempfile::tempdir().unwrap();
@@ -1373,6 +1389,7 @@ mod tests {
         assert_eq!(a.len(), 16);
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn the_runtime_follows_the_sandbox_json_mode() {
         let dir = tempfile::tempdir().unwrap();
@@ -1443,6 +1460,7 @@ mod live_tests {
 
     /// JSON-RPC goes over the attached stdin and stdout, the container
     /// carries its labels and hardening, and shutdown removes it.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn a_contained_server_answers_on_stdio_and_is_removed_at_shutdown() {
         let Some(docker) = docker().await else {
@@ -1497,6 +1515,7 @@ mod live_tests {
     /// in no host process environment this user can read, the
     /// container's own processes included, and not in the container's
     /// recorded config. Its file is gone after shutdown.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn a_secret_file_reaches_the_server_and_no_environment() {
         let Some(docker) = docker().await else {
@@ -1558,6 +1577,7 @@ mod live_tests {
     /// A secret listed in `secrets_in_env` is in the container's
     /// environment, where `docker inspect` shows it: the exposure the
     /// operator opted into, which the start row names.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn an_env_delivered_secret_is_in_the_container_config() {
         let Some(docker) = docker().await else {
@@ -1618,6 +1638,7 @@ mod live_tests {
     /// a listed host is tunnelled, an unlisted one is refused, a direct
     /// connection has no route, and each verdict is a row naming the
     /// agent and the server. The route goes with the server.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn a_server_with_egress_hosts_reaches_only_those_through_its_sidecar() {
         let Some(docker) = docker().await else {
@@ -1752,6 +1773,7 @@ read rest"#;
 
     /// What a server wrote to stderr can still be read after its
     /// container has exited, until the container is removed.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn a_servers_stderr_is_read_after_it_exits() {
         let Some(docker) = docker().await else {
@@ -1778,6 +1800,7 @@ read rest"#;
 
     /// A container a dead proxy left behind is removed by the sweep the
     /// next proxy for the same data directory runs.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn the_sweep_removes_what_a_dead_proxy_left() {
         let Some(docker) = docker().await else {

@@ -212,6 +212,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "calls into C (SQLite); miri cannot")]
     #[test]
     fn a_verdict_row_names_the_agent_and_server_on_the_mcp_session() {
         let log: Arc<dyn SessionLog> =

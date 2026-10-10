@@ -266,6 +266,7 @@ mod handed_tests {
     }
 
     /// A token that is not near expiry is used without asking anyone.
+    #[cfg_attr(miri, ignore = "reads the wall clock, which miri's isolation refuses")]
     #[tokio::test]
     async fn a_fresh_oauth_token_needs_no_gateway() {
         let cred = OAuthCredential {

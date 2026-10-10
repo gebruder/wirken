@@ -327,6 +327,7 @@ async fn load_for_agent(
 mod tests {
     use super::load_agent_pubkey;
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn non_ascii_identity_pub_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();

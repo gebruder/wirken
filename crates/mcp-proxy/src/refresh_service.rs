@@ -435,6 +435,7 @@ mod tests {
         )
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn the_proxy_refreshes_through_the_gateway_and_the_vault_holds_the_new_token() {
         let gateway = gateway("t0k3n", std::process::id());
@@ -467,6 +468,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn a_refresh_with_the_wrong_token_changes_nothing() {
         let gateway = gateway("t0k3n", std::process::id());
@@ -480,6 +482,7 @@ mod tests {
         assert_eq!(stored.access_token, "AT-1");
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn a_refresh_from_any_process_but_the_proxy_is_refused() {
         let gateway = gateway("t0k3n", std::process::id() + 1);
@@ -491,6 +494,7 @@ mod tests {
         assert!(err.contains("is not the MCP proxy"), "{err}");
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn only_a_handed_oauth_credential_can_be_refreshed() {
         let gateway = gateway("t0k3n", std::process::id());
@@ -518,6 +522,7 @@ mod tests {
     /// The proxy holds the rotated value after asking, the vault's
     /// value and no other, and the gateway's row names the credential
     /// without its value.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn the_proxy_gets_a_rotated_value_and_the_row_names_only_the_credential() {
         let gateway = gateway("t0k3n", std::process::id());
@@ -545,6 +550,7 @@ mod tests {
 
     /// An OAuth credential's current value comes without its refresh
     /// token.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn a_current_oauth_value_has_no_refresh_token() {
         let gateway = gateway("t0k3n", std::process::id());
@@ -557,6 +563,7 @@ mod tests {
 
     /// Asking for a value goes through the same checks as a refresh,
     /// and a refused request sends nothing and writes no row.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn a_current_value_is_refused_like_a_refresh() {
         let gateway = gateway("t0k3n", std::process::id());

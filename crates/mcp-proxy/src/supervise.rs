@@ -467,6 +467,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg_attr(miri, ignore = "calls into C (SQLite); miri cannot")]
     #[tokio::test]
     async fn a_server_that_never_starts_is_given_up_after_eight_runs() {
         let log = log();
@@ -505,6 +506,7 @@ mod tests {
         assert_eq!(life.started, 7);
     }
 
+    #[cfg_attr(miri, ignore = "calls into C (SQLite); miri cannot")]
     #[tokio::test]
     async fn an_exit_after_initialize_is_recorded_restarted_and_resets_the_count() {
         let log = log();
@@ -582,6 +584,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "calls into C (SQLite); miri cannot")]
     #[tokio::test]
     async fn stopping_supervision_restarts_nothing() {
         let log = log();
@@ -613,6 +616,7 @@ mod tests {
     /// `initialize` is started again, re-initialized, and put back in
     /// the registry; the old container is gone and the rows say so.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn a_contained_server_that_exits_is_restarted_live() {
         let Ok(docker) = bollard::Docker::connect_with_local_defaults() else {

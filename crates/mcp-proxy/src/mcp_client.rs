@@ -258,6 +258,7 @@ mod shutdown_tests {
 
     /// A server that never answers is stopped within a few seconds, not
     /// after the 30-second request timeout.
+    #[cfg_attr(miri, ignore = "starts a process; miri cannot")]
     #[tokio::test]
     async fn a_server_that_never_answers_does_not_hold_shutdown() {
         let stdio = StdioTransport::spawn(

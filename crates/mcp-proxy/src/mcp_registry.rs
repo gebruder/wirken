@@ -908,6 +908,7 @@ mod start_tests {
             .collect()
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn an_entry_without_a_sandbox_block_is_refused_after_it_verifies() {
         let dir = tempfile::tempdir().unwrap();
@@ -924,6 +925,7 @@ mod start_tests {
         assert_eq!(refused(&events), [REFUSED_SANDBOX_CONFIG_INVALID]);
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn each_sandbox_refusal_has_its_reason() {
         let dir = tempfile::tempdir().unwrap();
@@ -962,6 +964,7 @@ mod start_tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn an_agent_whose_servers_were_all_refused_has_none() {
         let dir = tempfile::tempdir().unwrap();
@@ -978,6 +981,7 @@ mod start_tests {
         assert!(!registry.has_agent("agent-1"));
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn sandbox_off_starts_on_the_host_and_says_so() {
         let dir = tempfile::tempdir().unwrap();
@@ -1005,6 +1009,7 @@ mod start_tests {
 
     /// Live: an image the host does not have is refused, not pulled.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn an_image_not_on_the_host_is_refused() {
         let Some(docker) = docker_with("debian:bookworm-slim").await else {
@@ -1025,6 +1030,7 @@ mod start_tests {
     /// last stderr lines on the failure its supervisor starts from, read
     /// before its container was removed.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn a_server_that_fails_initialize_leaves_its_stderr() {
         let Some(docker) = docker_with("debian:bookworm-slim").await else {
@@ -1055,6 +1061,7 @@ mod start_tests {
     /// Live: a contained start writes what the server was given, by
     /// secret name only, and the server answers.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn a_contained_start_records_what_the_server_was_given() {
         let Some(docker) = docker_with("debian:bookworm-slim").await else {

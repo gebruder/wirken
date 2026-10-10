@@ -422,6 +422,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn the_key_is_created_once_owner_only_and_read_back() {
         let dir = tempfile::tempdir().unwrap();
