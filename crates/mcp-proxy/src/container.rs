@@ -750,7 +750,8 @@ pub struct ContainerHandle {
 
 impl ContainerHandle {
     /// Stop the container, giving the server two seconds, and remove it.
-    pub async fn stop_and_remove(&mut self) {
+    /// Returns the exit code the runtime recorded, when it gave one.
+    pub async fn stop_and_remove(&mut self) -> Option<i64> {
         let _ = self
             .docker
             .stop_container(
@@ -761,7 +762,18 @@ impl ContainerHandle {
                 }),
             )
             .await;
+        let exit_code = self
+            .docker
+            .inspect_container(
+                &self.id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+            .ok()
+            .and_then(|c| c.state)
+            .and_then(|s| s.exit_code);
         self.remove().await;
+        exit_code
     }
 
     /// Remove the container, running or not, its secret files, and its

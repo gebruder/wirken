@@ -394,15 +394,31 @@ impl StdioTransport {
         }
     }
 
-    /// Kill the host child, or stop and remove the container.
-    pub async fn shutdown(&mut self) {
+    /// Kill the host child, or stop and remove the container and say
+    /// how it exited.
+    pub async fn shutdown(&mut self) -> Option<ContainerExit> {
         match &mut self.process {
             StdioProcess::Host(child) => {
                 let _ = child.kill().await;
+                None
             }
-            StdioProcess::Container(handle) => handle.stop_and_remove().await,
+            StdioProcess::Container(handle) => {
+                let exit_code = handle.stop_and_remove().await;
+                Some(ContainerExit {
+                    container_id: handle.id.clone(),
+                    exit_code,
+                })
+            }
         }
     }
+}
+
+/// How a contained server's container ended when the proxy stopped it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerExit {
+    pub container_id: String,
+    /// The runtime's recorded exit code, when it gave one.
+    pub exit_code: Option<i64>,
 }
 
 /// Create `dir` and its parents, the last one readable only by its owner.
@@ -532,7 +548,9 @@ impl HttpTransport {
     }
 
     /// HTTP transports have no persistent connection; shutdown is a no-op.
-    pub async fn shutdown(&mut self) {}
+    pub async fn shutdown(&mut self) -> Option<ContainerExit> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -576,7 +594,7 @@ impl Transport {
         }
     }
 
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) -> Option<ContainerExit> {
         match self {
             Transport::Stdio(t) => t.shutdown().await,
             Transport::Http(t) => t.shutdown().await,

@@ -1095,8 +1095,12 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::McpServerExited {
             server_name,
             exit_code,
+            stopped_by_proxy,
             ..
-        } => format!("mcp_server_exited server={server_name} exit_code={exit_code:?}"),
+        } => format!(
+            "mcp_server_exited server={server_name} exit_code={exit_code:?} \
+             stopped_by_proxy={stopped_by_proxy}"
+        ),
         SessionEvent::McpServerRestart {
             server_name,
             attempt,
@@ -1191,7 +1195,15 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
             Cause::ConnectionPanicked | Cause::SpawnFailed => "error",
         },
         SessionEvent::AdapterRestartAbandoned { .. } => "error",
-        SessionEvent::McpServerExited { .. } => "warn",
+        SessionEvent::McpServerExited {
+            stopped_by_proxy, ..
+        } => {
+            if *stopped_by_proxy {
+                "info"
+            } else {
+                "warn"
+            }
+        }
         SessionEvent::McpServerRestart { cause, .. } => match cause {
             McpCause::Exited => "warn",
             McpCause::StartFailed | McpCause::InitializeFailed => "error",
@@ -2111,6 +2123,7 @@ mod identity_tests {
                     agent_id: agent(),
                     container_id: "c".into(),
                     exit_code: Some(1),
+                    stopped_by_proxy: false,
                 },
                 None,
                 None,

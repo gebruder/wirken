@@ -66,10 +66,13 @@ tagged.
   id and digest, runtime, container id, egress hosts, mounts, limits, and
   the names of secrets delivered as files and through the environment),
   `mcp_server_unsandboxed` at every start of a server with
-  `"sandbox": "off"`, `mcp_server_exited`, `mcp_server_restart` (`attempt`,
+  `"sandbox": "off"`, `mcp_server_exited` (exit code, and
+  `stopped_by_proxy` when the proxy stopped it at shutdown),
+  `mcp_server_restart` (`attempt`,
   `cause`, `detail`, `delay_ms`, `ran_for_ms`) and
-  `mcp_server_restart_abandoned`. Levels: `mcp_server_exited` and a restart
-  after an exit are `warn`; a restart after `start_failed` or
+  `mcp_server_restart_abandoned`. Levels: `mcp_server_exited` is `info`
+  when the proxy stopped the container and `warn` otherwise; a restart
+  after an exit is `warn`; a restart after `start_failed` or
   `initialize_failed`, and an abandoned restart, are `error`.
 - `wirken mcp verify` and `wirken doctor` name the stdio entries the proxy
   will refuse for want of a `sandbox` block, and the ones set to run on the

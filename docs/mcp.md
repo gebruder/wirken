@@ -209,7 +209,7 @@ Treat such a server like a third-party CLI: audit the source and the package pro
 |---|---|
 | `mcp_server_sandboxed` | At every contained start, restarts included: agent, image, image id and registry digest, runtime, container id, egress hosts, mounts, limits, and the names of secrets delivered as files and through the environment. Never a value. |
 | `mcp_server_unsandboxed` | At every start of a server with `"sandbox": "off"`. |
-| `mcp_server_exited` | A contained server's container exited on its own, with its exit code. |
+| `mcp_server_exited` | A contained server's container exited, with its exit code: on its own, or stopped by the proxy at shutdown (`stopped_by_proxy: true`). |
 | `mcp_server_restart` / `mcp_server_restart_abandoned` | See [Restarts](#restarts). |
 | `sandbox_egress_verdict` | One per request through a server's sidecar, with `mcp_server` set. |
 

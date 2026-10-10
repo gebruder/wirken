@@ -199,6 +199,7 @@ pub(crate) async fn supervise(
                         agent_id: agent_id.to_string(),
                         container_id,
                         exit_code,
+                        stopped_by_proxy: false,
                     },
                 );
                 life.retire().await;

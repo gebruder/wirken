@@ -3626,6 +3626,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             agent_id: String::new(),
             container_id: String::new(),
             exit_code: None,
+            stopped_by_proxy: false,
         },
         SessionEvent::McpServerRestart {
             server_name: String::new(),

@@ -104,6 +104,8 @@ pub struct ProxyRegistry {
     sandbox: SandboxHost,
     /// Contained servers loaded and not yet handed to a supervisor.
     pending: Vec<Pending>,
+    /// Where shutdown records the containers it stopped.
+    audit: Option<Arc<dyn SessionLog>>,
 }
 
 impl ProxyRegistry {
@@ -115,6 +117,7 @@ impl ProxyRegistry {
             oauth_refresh_locks: HashMap::new(),
             sandbox: SandboxHost::unavailable(),
             pending: Vec::new(),
+            audit: None,
         }
     }
 
@@ -168,6 +171,9 @@ impl ProxyRegistry {
     ) -> Result<usize, ProxyError> {
         let mut clients = HashMap::new();
         let bundled_root = bundled_mcp_pubkey();
+        if let Some(log) = audit {
+            self.audit = Some(log.clone());
+        }
 
         for (name, server_config) in &config.servers {
             let decision = pre_spawn_verify(name, server_config, bundled_root.as_ref());
@@ -449,18 +455,33 @@ impl ProxyRegistry {
     /// Shut down every MCP server for every agent.
     ///
     /// All servers stop at once, so the time this takes is one server's
-    /// rather than the sum of them.
+    /// rather than the sum of them. Each container stopped is an
+    /// `McpServerExited` row with `stopped_by_proxy` set.
     pub async fn shutdown(&mut self) {
         let stopping = self.by_agent.drain().flat_map(|(agent_id, servers)| {
             servers.into_iter().map(move |(name, mut client)| {
                 let agent_id = agent_id.clone();
                 async move {
                     tracing::info!("Shutting down MCP server '{name}' (agent '{agent_id}')");
-                    client.shutdown().await;
+                    let exit = client.shutdown().await;
+                    (agent_id, name, exit)
                 }
             })
         });
-        futures_util::future::join_all(stopping).await;
+        for (agent_id, server_name, exit) in futures_util::future::join_all(stopping).await {
+            if let Some(exit) = exit {
+                record(
+                    self.audit.as_ref(),
+                    SessionEvent::McpServerExited {
+                        server_name,
+                        agent_id,
+                        container_id: exit.container_id,
+                        exit_code: exit.exit_code,
+                        stopped_by_proxy: true,
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -1062,5 +1083,18 @@ mod start_tests {
         );
         assert_eq!(secrets_as_files, &["FILE_TOKEN"]);
         assert_eq!(secrets_in_env, &["ENV_TOKEN"]);
+        // The registry's shutdown stopped it and said so.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SessionEvent::McpServerExited {
+                    container_id: id,
+                    stopped_by_proxy: true,
+                    exit_code: Some(_),
+                    ..
+                } if id == container_id
+            )),
+            "{events:?}"
+        );
     }
 }

@@ -223,7 +223,8 @@ impl McpClient {
 
     /// Shut down the MCP server: ask it to stop, then stop it whether or
     /// not it answered within a second.
-    pub async fn shutdown(&mut self) {
+    /// For a contained server, returns how its container ended.
+    pub async fn shutdown(&mut self) -> Option<crate::mcp_transport::ContainerExit> {
         let _ = tokio::time::timeout(
             SHUTDOWN_REPLY_WAIT,
             self.transport.request("shutdown", None),
@@ -231,7 +232,7 @@ impl McpClient {
         .await;
         let _ =
             tokio::time::timeout(SHUTDOWN_REPLY_WAIT, self.transport.notify("exit", None)).await;
-        self.transport.shutdown().await;
+        self.transport.shutdown().await
     }
 }
 

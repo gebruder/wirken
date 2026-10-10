@@ -1827,9 +1827,10 @@ pub enum SessionEvent {
         server_name: String,
         agent_id: String,
     },
-    /// A contained stdio MCP server's container exited on its own,
-    /// after it had started and answered `initialize`. The proxy
-    /// restarts it; see [`SessionEvent::McpServerRestart`].
+    /// A contained stdio MCP server's container exited: on its own,
+    /// after it had started and answered `initialize`, which the proxy
+    /// follows with a restart (see [`SessionEvent::McpServerRestart`]);
+    /// or because the proxy stopped it at shutdown.
     McpServerExited {
         server_name: String,
         agent_id: String,
@@ -1837,6 +1838,9 @@ pub enum SessionEvent {
         /// The container's exit code, absent when the runtime gave none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i64>,
+        /// True when the proxy stopped the container at shutdown.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stopped_by_proxy: bool,
     },
     /// The proxy is starting a contained stdio MCP server again after
     /// `cause`, in `delay_ms`. `attempt` counts restarts since the
