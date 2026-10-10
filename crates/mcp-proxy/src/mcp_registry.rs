@@ -5,25 +5,25 @@
 //! 1. The registry is partitioned by `agent_id`. Tools from agent A's
 //!    `mcp.json` are never visible to agent B, even when both connect to
 //!    the same proxy process.
-//! 2. Vault `vault:`-prefixed env values are resolved here against
-//!    the real credential store. The agent crate took a resolver
-//!    closure that every caller wired to a no-op, so `vault:` parsed
-//!    and then silently resolved to nothing.
-//! 3. The vault handle never leaves this process.
+//! 2. Vault `vault:`-prefixed env values are resolved here against the
+//!    credentials the gateway handed the proxy at spawn. The agent
+//!    crate took a resolver closure that every caller wired to a no-op,
+//!    so `vault:` parsed and then silently resolved to nothing.
+//! 3. The proxy never opens the vault; the gateway holds it.
 //! 4. HTTP MCP servers with bearer or OAuth2 auth are loaded via
 //!    [`HttpTransport`] and a pluggable
 //!    [`AuthProvider`]. The auth provider holds an `Arc` to the
-//!    shared vault and resolves credentials on every request.
+//!    handed-over credentials and asks the gateway to refresh an OAuth
+//!    token.
 //!
 //! [`HttpTransport`]: crate::mcp_transport::HttpTransport
 //! [`AuthProvider`]: crate::auth::AuthProvider
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ed25519_dalek::VerifyingKey;
 use wirken_audit::{McpServerRestartCause, SessionEvent, SessionId, SessionLog, TrustLevel};
-use wirken_vault::{CredentialAccess, ScopedCredentialStore};
 
 use crate::auth::{AuthProvider, BearerAuth, NoAuth, OAuth2Auth};
 use crate::container::{ContainerPlan, PlanError, SandboxHost};
@@ -71,15 +71,9 @@ enum PreSpawnDecision {
     Refuse { reason: String },
 }
 
-/// Vault handle shared by every auth provider in the proxy. Wrapped
-/// in `Arc<Mutex<Option<_>>>` because:
-///
-/// - `Arc` so each long-lived [`AuthProvider`] can clone a reference
-/// - `Mutex` because `rusqlite::Connection` is not `Sync`
-/// - `Option` because the vault may be unavailable (no keychain,
-///   wrong passphrase) and the proxy still needs to serve `NoAuth`
-///   and stdio servers
-pub type SharedVault = Arc<Mutex<Option<ScopedCredentialStore>>>;
+/// The credentials the gateway handed the proxy, shared by every auth
+/// provider and the stdio start path. See [`crate::credentials`].
+pub use crate::credentials::SharedCredentials;
 
 /// All MCP clients owned by the proxy, keyed by agent id.
 pub struct ProxyRegistry {
@@ -154,10 +148,10 @@ impl ProxyRegistry {
             .clone()
     }
 
-    /// Load all MCP servers for one agent. The vault store is shared
-    /// by long-lived auth providers; vault `vault:`-prefixed env
-    /// values are resolved here at load time and baked into the
-    /// MCP server's spawn environment (legacy stdio behavior).
+    /// Load all MCP servers for one agent. The handed-over credentials
+    /// are shared by long-lived auth providers; `vault:`-prefixed env
+    /// values are resolved from them here and delivered to the server
+    /// as files or environment variables.
     ///
     /// `audit` is an optional session-log handle. When supplied, each
     /// entry's signature-verification outcome is recorded on the
@@ -169,7 +163,7 @@ impl ProxyRegistry {
         &mut self,
         agent_id: &str,
         config: &McpConfig,
-        vault: SharedVault,
+        credentials: SharedCredentials,
         audit: Option<&Arc<dyn SessionLog>>,
     ) -> Result<usize, ProxyError> {
         let mut clients = HashMap::new();
@@ -224,12 +218,7 @@ impl ProxyRegistry {
                     sandbox,
                     ..
                 } => {
-                    // Resolve `vault:`-prefixed env values via a
-                    // brief read on the shared vault.
-                    let resolved_env = {
-                        let guard = vault.lock().expect("vault mutex");
-                        resolve_env(env, guard.as_ref())
-                    };
+                    let resolved_env = resolve_env(env, &credentials);
 
                     let spawned = start_stdio(
                         &self.sandbox,
@@ -324,7 +313,7 @@ impl ProxyRegistry {
                         None => Box::new(NoAuth),
                         Some(McpAuth::Bearer { credential }) => Box::new(BearerAuth::new(
                             strip_vault_prefix(credential).to_string(),
-                            vault.clone(),
+                            credentials.clone(),
                         )),
                         Some(McpAuth::Oauth2 {
                             provider,
@@ -335,7 +324,7 @@ impl ProxyRegistry {
                             Box::new(OAuth2Auth::new(
                                 cred_name,
                                 provider.clone(),
-                                vault.clone(),
+                                credentials.clone(),
                                 refresh_lock,
                             ))
                         }
@@ -754,38 +743,27 @@ fn pre_spawn_verify(
     }
 }
 
-/// Resolve `vault:`-prefixed env values from the credential store.
-/// Values without the prefix are passed through unchanged. If the
-/// vault is None or a credential is missing, the value is left as
-/// the literal string `vault:NAME` and a warning is logged — the MCP
-/// server will most likely fail to authenticate, which is the right
-/// failure mode (loud, traceable).
+/// Resolve `vault:`-prefixed env values from the handed-over
+/// credentials. A name the gateway did not hand over is left as the
+/// literal `vault:NAME` and a warning is logged, so the server sees the
+/// reference rather than an empty value.
 pub(crate) fn resolve_env(
     env: &HashMap<String, String>,
-    vault: Option<&ScopedCredentialStore>,
+    credentials: &crate::credentials::ProxyCredentials,
 ) -> HashMap<String, String> {
     env.iter()
         .map(|(k, v)| {
-            let resolved = if let Some(vault_key) = v.strip_prefix("vault:") {
-                match vault {
-                    Some(store) => match store.retrieve(vault_key) {
-                        Ok((secret, _)) => secret.expose().to_string(),
-                        Err(e) => {
-                            tracing::warn!(
-                                "vault credential '{vault_key}' not found for env '{k}': {e}"
-                            );
-                            v.clone()
-                        }
-                    },
+            let resolved = match v.strip_prefix("vault:") {
+                Some(vault_key) => match credentials.get(vault_key) {
+                    Some(secret) => secret.expose().to_string(),
                     None => {
                         tracing::warn!(
-                            "vault not available; cannot resolve '{vault_key}' for env '{k}'"
+                            "credential '{vault_key}' for env '{k}' was not handed to the proxy"
                         );
                         v.clone()
                     }
-                }
-            } else {
-                v.clone()
+                },
+                None => v.clone(),
             };
             (k.clone(), resolved)
         })
@@ -848,36 +826,27 @@ mod scope_tests {
         assert_eq!(names, ["linear-token", "notion-oauth", "stdio-key"]);
     }
 
-    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
-    fn resolve_env_reads_only_names_in_the_scope() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let device_key = wirken_vault::VaultSecret::new("a".repeat(64));
-        let store =
-            wirken_vault::CredentialStore::open_with_key(&tmp.path().join("vault.db"), device_key)
-                .unwrap();
-        for name in ["stdio-key", "telegram-token"] {
-            store
-                .store(
-                    name,
-                    "",
-                    &wirken_vault::VaultSecret::new(format!("{name}-value")),
-                    None,
-                    None,
-                )
-                .unwrap();
-        }
-        let scoped = store.into_scoped("mcp-proxy", ["stdio-key".to_string()]);
+    fn resolve_env_reads_only_names_handed_over() {
+        let credentials = crate::credentials::ProxyCredentials::new(
+            HashMap::from([(
+                "stdio-key".to_string(),
+                wirken_vault::VaultSecret::new("stdio-key-value".into()),
+            )]),
+            None,
+        );
         let env: HashMap<String, String> = [
             ("OWN", "vault:stdio-key"),
             ("OTHER", "vault:telegram-token"),
+            ("PLAIN", "info"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-        let resolved = resolve_env(&env, Some(&scoped));
+        let resolved = resolve_env(&env, &credentials);
         assert_eq!(resolved["OWN"], "stdio-key-value");
         assert_eq!(resolved["OTHER"], "vault:telegram-token");
+        assert_eq!(resolved["PLAIN"], "info");
     }
 }
 
@@ -899,8 +868,8 @@ mod start_tests {
             .collect()
     }
 
-    fn no_vault() -> SharedVault {
-        Arc::new(Mutex::new(None))
+    fn no_vault() -> SharedCredentials {
+        Arc::new(crate::credentials::ProxyCredentials::none())
     }
 
     fn host(data_dir: &std::path::Path, docker: Option<bollard::Docker>) -> SandboxHost {

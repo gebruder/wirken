@@ -419,7 +419,7 @@ async fn server_rejects_tampered_signature() {
 // ---------------------------------------------------------------------------
 
 mod http_transport_test {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -505,24 +505,15 @@ mod http_transport_test {
         let (url, server) =
             spawn_test_server(Some("Bearer test-token".to_string()), response).await;
 
-        // Build a vault with one entry containing the bearer token.
-        // Use open_with_key with a deterministic test key — bypasses
-        // the keychain so the test doesn't depend on OS state.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let vault_path = tmp.path().join("vault.db");
-        // 64 hex chars = 32 raw bytes, which is what the vault's
-        // crypto module expects.
-        let device_key = wirken_vault::VaultSecret::new("a".repeat(64));
-        let store = wirken_vault::CredentialStore::open_with_key(&vault_path, device_key).unwrap();
-        let secret = wirken_vault::VaultSecret::new("test-token".into());
-        store
-            .store("linear-token", "test", &secret, None, None)
-            .unwrap();
-
-        let vault: Arc<Mutex<Option<wirken_vault::ScopedCredentialStore>>> = Arc::new(Mutex::new(
-            Some(store.into_scoped("mcp-proxy", ["linear-token".to_string()])),
+        // The token as the gateway hands it over at spawn.
+        let credentials = Arc::new(crate::credentials::ProxyCredentials::new(
+            std::collections::HashMap::from([(
+                "linear-token".to_string(),
+                wirken_vault::VaultSecret::new("test-token".into()),
+            )]),
+            None,
         ));
-        let auth = BearerAuth::new("linear-token".into(), vault);
+        let auth = BearerAuth::new("linear-token".into(), credentials);
         let mut transport = HttpTransport::new(url, Box::new(auth)).unwrap();
 
         let resp = transport
@@ -532,37 +523,6 @@ mod http_transport_test {
         assert!(resp.error.is_none());
 
         server.await.unwrap().unwrap();
-    }
-
-    /// A bearer credential outside the proxy's scope is refused before
-    /// any request leaves, even though the vault holds it.
-    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
-    #[tokio::test]
-    async fn bearer_auth_outside_the_scope_is_refused() {
-        use crate::auth::AuthProvider;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let device_key = wirken_vault::VaultSecret::new("a".repeat(64));
-        let store =
-            wirken_vault::CredentialStore::open_with_key(&tmp.path().join("vault.db"), device_key)
-                .unwrap();
-        for name in ["linear-token", "telegram-token"] {
-            store
-                .store(
-                    name,
-                    "test",
-                    &wirken_vault::VaultSecret::new("t".into()),
-                    None,
-                    None,
-                )
-                .unwrap();
-        }
-        let vault = Arc::new(Mutex::new(Some(
-            store.into_scoped("mcp-proxy", ["linear-token".to_string()]),
-        )));
-        let mut auth = BearerAuth::new("telegram-token".into(), vault);
-        let err = auth.authorization_header().await.unwrap_err().to_string();
-        assert!(err.contains("outside the 'mcp-proxy' scope"), "{err}");
     }
 
     #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]

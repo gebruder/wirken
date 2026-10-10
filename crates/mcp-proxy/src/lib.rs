@@ -1,9 +1,10 @@
 //! Out-of-process MCP proxy.
 //!
 //! This crate runs as a separate OS process spawned by the gateway. It
-//! owns the credential vault handle for any `vault:`-prefixed env values
-//! in `mcp.json`, and exposes the resulting MCP tools to the agent over
-//! a Unix domain socket.
+//! never opens the credential vault: the gateway hands it the values its
+//! `mcp.json` entries reference at spawn and refreshes OAuth tokens for
+//! it ([`credentials`], [`refresh_service`]). It exposes the resulting
+//! MCP tools to the agent over a Unix domain socket.
 //!
 //! Wire protocol: NDJSON, see [`wire`].
 
@@ -13,6 +14,7 @@
 
 pub mod auth;
 pub mod container;
+pub mod credentials;
 pub mod egress;
 pub mod error;
 pub mod mcp_client;
@@ -21,6 +23,7 @@ pub mod mcp_registry;
 pub mod mcp_signing;
 pub mod mcp_transport;
 pub mod oauth;
+pub mod refresh_service;
 pub mod server;
 pub mod supervise;
 pub mod tool_error;
@@ -35,7 +38,7 @@ pub use oauth::{
     default_selected_scopes, load_oauth_public, lookup_provider, parse_public_view,
     run_authorization_code_flow, store_oauth,
 };
-pub use runner::run;
+pub use runner::{ConfiguredCredentials, configured_credentials, run};
 pub use tool_error::{McpToolError, detect_scope_not_granted};
 
 #[cfg(test)]

@@ -10,17 +10,17 @@
 //! - [`NoAuth`] — for internal MCP servers that don't require auth
 //! - [`BearerAuth`] — for static personal-access-token style
 //!   credentials (Linear, Notion, GitHub, Datadog, Slack, …)
-//! - [`OAuth2Auth`] — for OAuth2-protected servers; refreshes the
-//!   access token from the vault when it's about to expire and
-//!   writes the new tokens back
+//! - [`OAuth2Auth`] — for OAuth2-protected servers; when the access
+//!   token is about to expire, asks the gateway to refresh it. The
+//!   gateway holds the refresh token, calls the provider and writes the
+//!   vault; the proxy gets the new access token.
 //!
-//! `OAuth2Auth` does the refresh inline on the request path. To
-//! prevent concurrent refreshes of the same credential from racing
-//! against each other (providers that rotate refresh tokens, like
-//! Google, invalidate the loser), every `OAuth2Auth` holds a shared
-//! per-credential [`tokio::sync::Mutex`] provided by the proxy
-//! registry. Only one refresh is in flight per credential at any
-//! time.
+//! Every credential comes from what the gateway handed the proxy at
+//! spawn ([`crate::credentials`]); the proxy never opens the vault.
+//! `OAuth2Auth` asks for a refresh on the request path. Every
+//! `OAuth2Auth` holds a shared per-credential [`tokio::sync::Mutex`]
+//! provided by the proxy registry, so one request per credential asks
+//! at a time; the gateway serializes refreshes of a credential too.
 //!
 //! The trait returns [`reqwest::header::HeaderValue`] directly rather
 //! than a `String` so the bearer-token bytes are not duplicated into
@@ -28,15 +28,15 @@
 //!
 //! [`HttpTransport`]: crate::mcp_transport::HttpTransport
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use reqwest::header::HeaderValue;
-use wirken_vault::{CredentialAccess, ScopedCredentialStore};
 use zeroize::Zeroizing;
 
+use crate::credentials::SharedCredentials;
 use crate::error::ProxyError;
-use crate::oauth::{OAuthCredential, refresh_oauth_token};
+use crate::oauth::OAuthCredential;
 
 /// Returns the value of an HTTP `Authorization` header for the next
 /// MCP request. Implementations may consult the vault and may
@@ -96,20 +96,18 @@ fn bearer_header(token: &str) -> Result<HeaderValue, ProxyError> {
     Ok(header)
 }
 
-/// Bearer-token provider. The vault entry stores the raw token as
-/// a UTF-8 string. The provider reads it on every request — there
-/// is no in-memory caching, which keeps the secret out of the
-/// proxy's address space for as long as possible.
+/// Bearer-token provider. The token is the value the gateway handed
+/// over under the credential's name.
 pub struct BearerAuth {
     credential_name: String,
-    vault: Arc<Mutex<Option<ScopedCredentialStore>>>,
+    credentials: SharedCredentials,
 }
 
 impl BearerAuth {
-    pub fn new(credential_name: String, vault: Arc<Mutex<Option<ScopedCredentialStore>>>) -> Self {
+    pub fn new(credential_name: String, credentials: SharedCredentials) -> Self {
         Self {
             credential_name,
-            vault,
+            credentials,
         }
     }
 }
@@ -117,16 +115,9 @@ impl BearerAuth {
 #[async_trait]
 impl AuthProvider for BearerAuth {
     async fn authorization_header(&mut self) -> Result<Option<HeaderValue>, ProxyError> {
-        let guard = self.vault.lock().expect("vault mutex");
-        let store = guard.as_ref().ok_or_else(|| {
+        let secret = self.credentials.get(&self.credential_name).ok_or_else(|| {
             ProxyError::Vault(format!(
-                "vault unavailable; cannot resolve bearer credential '{}'",
-                self.credential_name
-            ))
-        })?;
-        let (secret, _) = store.retrieve(&self.credential_name).map_err(|e| {
-            ProxyError::Vault(format!(
-                "bearer credential '{}' not found: {e}",
+                "bearer credential '{}' was not handed to the proxy",
                 self.credential_name
             ))
         })?;
@@ -137,22 +128,20 @@ impl AuthProvider for BearerAuth {
     }
 }
 
-/// OAuth2 provider. Reads the JSON-serialized
-/// [`OAuthCredential`] from the vault, checks expiry, refreshes via
-/// the configured provider's token endpoint if within 60 seconds of
-/// expiry, writes the refreshed credential back to the vault, and
-/// returns the (possibly new) `access_token` as a Bearer header.
+/// OAuth2 provider. Reads the access token the gateway handed over,
+/// and when it is within 60 seconds of expiry asks the gateway to
+/// refresh it, then returns the (possibly new) access token as a
+/// Bearer header.
 ///
-/// Refresh is serialized per credential via a shared
+/// Requests are serialized per credential via a shared
 /// [`tokio::sync::Mutex`] handed out by the proxy registry. Two
 /// concurrent tool calls that both hit the "about to expire" branch
 /// will find only one winner inside the critical section; the other
-/// will re-read the freshly refreshed credential and skip the
-/// refresh HTTP call entirely.
+/// will re-read the refreshed token and not ask again.
 pub struct OAuth2Auth {
     credential_name: String,
     provider: String,
-    vault: Arc<Mutex<Option<ScopedCredentialStore>>>,
+    credentials: SharedCredentials,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -160,47 +149,19 @@ impl OAuth2Auth {
     pub fn new(
         credential_name: String,
         provider: String,
-        vault: Arc<Mutex<Option<ScopedCredentialStore>>>,
+        credentials: SharedCredentials,
         refresh_lock: Arc<tokio::sync::Mutex<()>>,
     ) -> Self {
         Self {
             credential_name,
             provider,
-            vault,
+            credentials,
             refresh_lock,
         }
     }
 
-    /// Load the current credential from the vault. Held in a
-    /// dedicated helper so the vault mutex guard is scoped tightly
-    /// and released before any `.await`.
     fn load_current(&self) -> Result<OAuthCredential, ProxyError> {
-        let guard = self.vault.lock().expect("vault mutex");
-        let store = guard.as_ref().ok_or_else(|| {
-            ProxyError::Vault(format!(
-                "vault unavailable; cannot resolve oauth credential '{}'. \
-                 Run `wirken mcp authorize <server>` first.",
-                self.credential_name
-            ))
-        })?;
-        crate::oauth::load_oauth(store, &self.credential_name).map_err(|e| {
-            ProxyError::Vault(format!(
-                "oauth credential '{}' not found: {e}. \
-                 Run `wirken mcp authorize <server>` to bootstrap.",
-                self.credential_name
-            ))
-        })
-    }
-
-    /// Store a refreshed credential back to the vault. Same scoping
-    /// discipline as [`Self::load_current`].
-    fn store_refreshed(&self, cred: &OAuthCredential) -> Result<(), ProxyError> {
-        let guard = self.vault.lock().expect("vault mutex");
-        let store = guard.as_ref().ok_or_else(|| {
-            ProxyError::Vault("vault unavailable for oauth refresh writeback".into())
-        })?;
-        crate::oauth::store_oauth(store, &self.credential_name, cred)
-            .map_err(|e| ProxyError::Vault(format!("oauth refresh writeback failed: {e}")))
+        self.credentials.oauth(&self.credential_name)
     }
 }
 
@@ -214,31 +175,31 @@ impl AuthProvider for OAuth2Auth {
         let now = chrono::Utc::now().timestamp() as u64;
 
         if cred.expires_at <= now + 60 {
-            // Slow path: acquire the per-credential refresh mutex
-            // and re-check expiry. Whoever got here first may have
-            // already refreshed; the second arrival will see a
-            // bumped `expires_at` and exit without its own refresh.
+            // Slow path: acquire the per-credential mutex and re-check
+            // expiry. Whoever got here first may have already had it
+            // refreshed; the second arrival will see a bumped
+            // `expires_at` and exit without asking again.
             let _guard = self.refresh_lock.lock().await;
 
             cred = self.load_current()?;
             let now = chrono::Utc::now().timestamp() as u64;
             if cred.expires_at <= now + 60 {
                 tracing::info!(
-                    "oauth credential '{}' expires in {}s — refreshing",
+                    "oauth credential '{}' expires in {}s — asking the gateway to refresh it",
                     self.credential_name,
                     cred.expires_at.saturating_sub(now),
                 );
-                let refreshed = refresh_oauth_token(&self.provider, &cred)
+                cred = self
+                    .credentials
+                    .refresh_oauth(&self.credential_name)
                     .await
                     .map_err(|e| {
                         ProxyError::Vault(format!(
                             "oauth refresh failed for '{}': {e}. \
-                         Run `wirken mcp authorize <server>` to re-bootstrap.",
+                             Run `wirken mcp authorize <server>` to re-bootstrap.",
                             self.credential_name
                         ))
                     })?;
-                self.store_refreshed(&refreshed)?;
-                cred = refreshed;
             }
         }
 
@@ -252,75 +213,53 @@ impl AuthProvider for OAuth2Auth {
 }
 
 #[cfg(test)]
-mod scope_tests {
-    use super::*;
-    use crate::oauth::{OAuthCredential, store_oauth};
+mod handed_tests {
+    use std::collections::HashMap;
 
-    fn credential(access_token: &str) -> OAuthCredential {
-        OAuthCredential {
-            access_token: access_token.into(),
-            refresh_token: "RT".into(),
+    use super::*;
+    use crate::credentials::ProxyCredentials;
+    use wirken_vault::VaultSecret;
+
+    fn handed(entries: &[(&str, &str)]) -> SharedCredentials {
+        Arc::new(ProxyCredentials::new(
+            entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), VaultSecret::new(v.to_string())))
+                .collect::<HashMap<_, _>>(),
+            None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_bearer_token_is_the_handed_value_and_nothing_else() {
+        let credentials = handed(&[("linear-token", "lin_abc")]);
+        let mut auth = BearerAuth::new("linear-token".into(), credentials.clone());
+        let header = auth.authorization_header().await.unwrap().unwrap();
+        assert_eq!(header.to_str().unwrap(), "Bearer lin_abc");
+
+        let mut other = BearerAuth::new("notion-token".into(), credentials);
+        let err = other.authorization_header().await.unwrap_err().to_string();
+        assert!(err.contains("not handed to the proxy"), "{err}");
+    }
+
+    /// A token that is not near expiry is used without asking anyone.
+    #[tokio::test]
+    async fn a_fresh_oauth_token_needs_no_gateway() {
+        let cred = OAuthCredential {
+            access_token: "AT-linear".into(),
+            refresh_token: String::new(),
             expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
             scope: String::new(),
             provider: "linear".into(),
-        }
-    }
-
-    /// A vault holding two OAuth entries, opened limited to `names`.
-    fn vault_limited_to(
-        names: &[&str],
-    ) -> (tempfile::TempDir, Arc<Mutex<Option<ScopedCredentialStore>>>) {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let device_key = wirken_vault::VaultSecret::new("a".repeat(64));
-        let store =
-            wirken_vault::CredentialStore::open_with_key(&tmp.path().join("vault.db"), device_key)
-                .unwrap();
-        store_oauth(&store, "linear-oauth", &credential("AT-linear")).unwrap();
-        store_oauth(&store, "notion-oauth", &credential("AT-notion")).unwrap();
-        let scoped = store.into_scoped("mcp-proxy", names.iter().map(|n| n.to_string()));
-        (tmp, Arc::new(Mutex::new(Some(scoped))))
-    }
-
-    fn oauth(name: &str, vault: Arc<Mutex<Option<ScopedCredentialStore>>>) -> OAuth2Auth {
-        OAuth2Auth::new(
-            name.into(),
+        };
+        let credentials = handed(&[("linear-oauth", &serde_json::to_string(&cred).unwrap())]);
+        let mut auth = OAuth2Auth::new(
+            "linear-oauth".into(),
             "linear".into(),
-            vault,
+            credentials,
             Arc::new(tokio::sync::Mutex::new(())),
-        )
-    }
-
-    /// The proxy reads its own OAuth credential and writes a refreshed
-    /// one back, as before the scope.
-    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
-    #[tokio::test]
-    async fn oauth_reads_and_writes_back_its_own_credential() {
-        let (_tmp, vault) = vault_limited_to(&["linear-oauth"]);
-        let mut auth = oauth("linear-oauth", vault);
-
+        );
         let header = auth.authorization_header().await.unwrap().unwrap();
         assert_eq!(header.to_str().unwrap(), "Bearer AT-linear");
-
-        auth.store_refreshed(&credential("AT-refreshed")).unwrap();
-        assert_eq!(auth.load_current().unwrap().access_token, "AT-refreshed");
-        let header = auth.authorization_header().await.unwrap().unwrap();
-        assert_eq!(header.to_str().unwrap(), "Bearer AT-refreshed");
-    }
-
-    /// An OAuth credential outside the scope is neither read nor
-    /// written, though the vault holds it.
-    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
-    #[tokio::test]
-    async fn oauth_outside_the_scope_is_refused() {
-        let (_tmp, vault) = vault_limited_to(&["linear-oauth"]);
-        let mut auth = oauth("notion-oauth", vault.clone());
-
-        let err = auth.authorization_header().await.unwrap_err().to_string();
-        assert!(err.contains("outside the 'mcp-proxy' scope"), "{err}");
-        let err = auth
-            .store_refreshed(&credential("AT-overwrite"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("outside the 'mcp-proxy' scope"), "{err}");
     }
 }

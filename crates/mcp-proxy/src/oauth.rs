@@ -21,9 +21,10 @@
 //!    `CredentialStore` API.
 //!
 //! 4. **Refresh.** [`refresh_oauth_token`] POSTs to the provider's
-//!    token endpoint with `grant_type=refresh_token`. Used by
-//!    [`crate::auth::OAuth2Auth`] on the request path when the
-//!    access token is within 60 seconds of expiry.
+//!    token endpoint with `grant_type=refresh_token`. Run in the
+//!    gateway by [`crate::refresh_service`] when the proxy's
+//!    [`crate::auth::OAuth2Auth`] finds its access token within 60
+//!    seconds of expiry.
 //!
 //! ## OAuth client_id strategy
 //!
@@ -479,9 +480,9 @@ pub fn load_oauth(
 // Refresh
 // ---------------------------------------------------------------------------
 
-/// Refresh an access token using the stored refresh token. Called
-/// by [`crate::auth::OAuth2Auth`] on the request path when the
-/// existing token is within 60 seconds of expiry.
+/// Refresh an access token using the stored refresh token. Called by
+/// the gateway's [`crate::refresh_service`] when the MCP proxy asks,
+/// because its access token is within 60 seconds of expiry.
 ///
 /// The provider's `client_id` (and optional `client_secret`) come
 /// from environment variables — see the module-level docs for the

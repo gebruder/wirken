@@ -21,15 +21,21 @@ tagged.
   environment, so an adapter process no longer holds the passphrase or
   any credential outside its own set. `wirken adapter <channel>`
   is started by `wirken run`; run from a terminal it exits and says so.
-- The MCP proxy opens the vault limited to the credentials its loaded
-  `mcp.json` configs reference: the `vault:` env values of stdio servers
-  and the bearer and OAuth credentials of HTTP servers. A read or write
-  of any other name is refused and logged at error with the scope and
-  the name. It reads its own credentials and writes refreshed OAuth
-  tokens back as before. The limit is in the store's interface: the
-  proxy still receives the vault passphrase in its environment, clears
-  it at startup and holds the vault's device key, so it does not stop
-  code running inside the proxy from reading the vault file.
+- The MCP proxy never opens the vault (#178). The gateway hands it, on
+  stdin as it does adapters, the credentials its `mcp.json` configs
+  reference: the `vault:` env values of stdio servers and the bearer and
+  OAuth credentials of HTTP servers, OAuth credentials without their
+  refresh token. When an access token nears expiry the proxy asks the
+  gateway over a 0600 socket that serves only the proxy's pid holding a
+  token handed to it at spawn (on Windows, the token alone); the gateway
+  refreshes only credentials it
+  handed the proxy, calls the provider, writes the vault and answers with
+  the access token. No process the gateway starts holds the vault
+  passphrase or device key: the proxy spawn drops
+  `WIRKEN_VAULT_PASSPHRASE` as adapter spawns do, and the skill loader's
+  `which` check runs in-process instead of as a child. A bearer token or
+  stdio value rotated in the vault reaches the proxy at the next gateway
+  start; before, the proxy read the vault on each request.
 - The `exec` egress sidecar runs as the operator's uid, and its broker
   socket is mode 0600 in a 0700 directory. Before, the sidecar ran as its
   image's user and the socket was 0666 in a 0777 directory, so for the

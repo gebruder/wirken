@@ -153,7 +153,8 @@ MCP servers are an explicit trust extension by the operator. Read this section b
 
 ```
 wirken run                        gateway + agent (holds the vault key, provider API keys, audit handle)
-  └─ wirken mcp-proxy             separate subprocess; resolves vault: values for MCP servers
+  └─ wirken mcp-proxy             separate subprocess; holds the credentials the gateway hands it at spawn,
+                                  never opens the vault, asks the gateway to refresh OAuth tokens
        ├─ <server container>      one per agent and server, started through the container runtime
        └─ <egress sidecar>        one per server that lists egress hosts; that server's only route out
 ```
@@ -225,7 +226,7 @@ All of them are on the default typed-SIEM forwarded set; consumers can pivot on 
   - `BearerAuth`: static bearer token from the vault.
   - `OAuth2Auth`: authorization code flow with PKCE via the `oauth2` crate. Token refresh is automatic. Bootstrap an OAuth credential with `wirken mcp authorize <server>`; see [`credentials.md`](credentials.md) for the interactive scope picker and the inspection / rescoping commands.
 
-The MCP proxy runs as a separate process (`wirken-mcp-proxy`), communicating with the agent over a Unix domain socket. MCP credentials (bearer tokens, OAuth2 client secrets) are held in the proxy process and never exposed to the agent.
+The MCP proxy runs as a separate process (`wirken-mcp-proxy`), communicating with the agent over a Unix domain socket. MCP credentials (bearer tokens, OAuth access tokens) are handed to the proxy process by the gateway at spawn and never exposed to the agent; OAuth refresh tokens and client secrets stay in the gateway, which refreshes on the proxy's request.
 
 ## Declaring what a tool costs
 

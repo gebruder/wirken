@@ -1,9 +1,10 @@
-//! The credentials an adapter process starts with, handed over on stdin.
+//! The credentials an adapter process, or the MCP proxy, starts with,
+//! handed over on stdin.
 //!
-//! The gateway resolves an adapter's credentials from the vault, writes
-//! them to the child's stdin at spawn and closes the pipe. The adapter
-//! reads stdin once and never opens the vault, so it holds neither the
-//! vault passphrase nor any credential outside its own set.
+//! The gateway resolves the child's credentials from the vault, writes
+//! them to its stdin at spawn and closes the pipe. The child reads stdin
+//! once and never opens the vault, so it holds neither the vault
+//! passphrase nor any credential outside its own set.
 //!
 //! The set is decided by name, not by the vault's `channel` column:
 //! `wirken credentials add` writes an empty channel when none is given,
@@ -77,6 +78,16 @@ impl Handoff {
             }
         }
         Self { credentials }
+    }
+
+    /// A hand-off of exactly `credentials`.
+    pub(crate) fn from_entries(credentials: BTreeMap<String, VaultSecret>) -> Self {
+        Self { credentials }
+    }
+
+    /// Every entry, by name.
+    pub(crate) fn into_entries(self) -> BTreeMap<String, VaultSecret> {
+        self.credentials
     }
 
     /// The names this hand-off carries.
@@ -192,18 +203,18 @@ pub(crate) fn spawn_with_handoff(
     // Names are not secrets; the values never reach a log.
     tracing::debug!(
         credentials = ?handoff.names().collect::<Vec<_>>(),
-        "handing credentials to the adapter"
+        "handing credentials to a child process"
     );
     let payload = handoff.encode();
     drop(handoff);
     let mut child = cmd.spawn()?;
     let Some(mut stdin) = child.stdin.take() else {
-        return Err(std::io::Error::other("adapter stdin is not piped"));
+        return Err(std::io::Error::other("child stdin is not piped"));
     };
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         if let Err(e) = stdin.write_all(&payload).await {
-            tracing::warn!(error = %e, "credential hand-off to the adapter failed");
+            tracing::warn!(error = %e, "credential hand-off to a child process failed");
         }
         // Dropping the handle closes the pipe, which ends the hand-off.
         drop(stdin);

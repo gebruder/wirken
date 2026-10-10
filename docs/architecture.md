@@ -122,10 +122,25 @@ token, its adapter key and its channel's entries), writes them to the
 adapter's stdin and closes the pipe. The adapter reads them once into a buffer
 it zeroes and passes the values to its constructor. Credentials are never
 written to environment variables or command lines, and the adapter's
-environment carries no vault passphrase. The MCP proxy opens the vault itself,
-limited to the credentials its `mcp.json` configs reference, and refuses any
-other name; that limit is in the store's interface, since the proxy holds the
-vault's device key. See [credentials.md](credentials.md).
+environment carries no vault passphrase.
+
+The MCP proxy does not open the vault either. At spawn the gateway hands it,
+the same way, the credentials its `mcp.json` configs reference: stdio `vault:`
+values, bearer tokens, and OAuth credentials without their refresh token. When
+an OAuth access token nears expiry, the proxy asks the gateway to refresh it
+over a Unix socket in the gateway's socket directory, mode 0600. The gateway
+serves only the proxy's own process, checked by its pid, carrying a token it
+handed that proxy at spawn, and only for the OAuth credentials the proxy was
+handed. On Windows, where named pipes report no peer pid, the token alone
+admits. The gateway holds the refresh token, calls the provider, writes the
+refreshed credential to the vault, and answers with the access token.
+
+No child process holds the vault passphrase or the vault's device key. The
+gateway is the only process that opens the vault; every process it starts,
+adapters, the MCP proxy, the host `exec` shell, has `WIRKEN_VAULT_PASSPHRASE`
+removed from its environment or starts with a cleared one. A credential rotated
+in the vault reaches an adapter at its next spawn and the MCP proxy at the next
+gateway start. See [credentials.md](credentials.md).
 
 ## 3. Permissions
 
@@ -206,9 +221,9 @@ register a tool costs friction, never silent permission.
 one key shared across all agents means one leak exposes everything.
 
 All API keys live in the vault, never in environment variables or config
-files. The vault passphrase reaches two processes through the environment: the
-gateway, when the operator exports `WIRKEN_VAULT_PASSPHRASE`, and the MCP
-proxy, which `wirken run` starts with it and which clears it at startup.
+files. The vault passphrase reaches one process through the environment: the
+gateway, when the operator exports `WIRKEN_VAULT_PASSPHRASE`. No process the
+gateway starts receives it.
 Each agent has its own auth profile, so agent A can run `openai/gpt-4o` and
 agent B `anthropic/claude-sonnet-4` with separate keys.
 

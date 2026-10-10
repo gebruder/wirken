@@ -1,10 +1,11 @@
-//! Top-level runner that wires up the registry, the vault, and the server.
+//! Top-level runner that wires up the registry, the credentials the
+//! gateway handed over, and the server.
 //!
 //! Called by the CLI's hidden `wirken mcp-proxy` subcommand.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 use ed25519_dalek::VerifyingKey;
 use tokio::sync::Mutex;
@@ -12,12 +13,13 @@ use tokio::sync::Mutex;
 use wirken_audit::{SessionLog, SqliteSessionLog};
 use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::config::GatewayConfig;
-use wirken_vault::{CredentialStore, ScopedCredentialStore, probe_keychain};
 
 use crate::container::{self, SandboxHost};
+use crate::credentials::{ProxyCredentials, SharedCredentials};
 use crate::error::ProxyError;
 use crate::mcp_config::McpConfig;
-use crate::mcp_registry::{ProxyRegistry, SharedVault, vault_names};
+use crate::mcp_config::{McpAuth, McpServerConfig};
+use crate::mcp_registry::{ProxyRegistry, vault_names};
 use crate::server;
 
 /// Run the MCP proxy. Reads configuration from the standard wirken
@@ -30,9 +32,12 @@ use crate::server;
 ///   gateway uses, so parent and child cannot disagree about where
 ///   the vault and the audit log live.
 /// - `WIRKEN_MCP_SOCKET` — override for the listen socket path
-/// - `WIRKEN_VAULT_PASSPHRASE` — passphrase used by the keychain
-///   fallback when the OS keychain is unavailable
-pub async fn run() -> Result<(), ProxyError> {
+///
+/// `credentials` is what the gateway handed over on stdin: the values
+/// the MCP configs reference, and the channel to ask it for OAuth
+/// refreshes. The proxy never opens the vault and holds neither the
+/// vault passphrase nor its device key.
+pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
     let data_dir = GatewayConfig::default().data_dir;
 
     let socket_path = std::env::var("WIRKEN_MCP_SOCKET")
@@ -45,41 +50,14 @@ pub async fn run() -> Result<(), ProxyError> {
         socket_path.display()
     );
 
-    // Every agent's MCP config (per-agent or shared fallback), read
-    // before the vault opens so the vault can be limited to the names
-    // they reference. The shared config also loads under "default" for
-    // unbound channels. Nothing here spawns or awaits, which
-    // `open_vault`'s environment scrub depends on.
-    let mut identity_agent_ids = list_agent_ids(&data_dir);
-    if !identity_agent_ids.iter().any(|id| id == "default") {
-        identity_agent_ids.push("default".to_string());
-    }
-    let configs: Vec<(String, McpConfig)> = identity_agent_ids
-        .iter()
-        .filter_map(|id| load_config(id, &data_dir).map(|c| (id.clone(), c)))
-        .collect();
-    let vault_names: BTreeSet<String> = configs
-        .iter()
-        .flat_map(|(_, config)| vault_names(config))
-        .collect();
+    // Every agent's MCP config (per-agent or shared fallback). The
+    // shared config also loads under "default" for unbound channels.
+    let (identity_agent_ids, configs) = agent_configs(&data_dir);
+    let credentials: SharedCredentials = Arc::new(credentials);
 
-    // Open the credential vault limited to those names. The handle
-    // stays in this process for the lifetime of the proxy and is never
-    // sent to the agent. Wrapped in `Arc<Mutex<Option<_>>>` so the auth
-    // providers, BearerAuth and OAuth2Auth, can hold a long-lived
-    // reference and refresh tokens on the request path.
-    let vault: SharedVault = Arc::new(StdMutex::new(open_vault(&data_dir, vault_names)));
-    if vault.lock().expect("vault mutex").is_none() {
-        tracing::warn!(
-            "credential vault unavailable; vault:-prefixed env values and auth credentials will not be resolved"
-        );
-    }
-
-    // Stdio servers with a `sandbox` block run in containers. Built
-    // after the vault so nothing touches the environment, or awaits,
-    // before `open_vault`'s scrub. Containers an earlier proxy for this
-    // data directory left behind, for example after the gateway killed
-    // it, are removed before any new one starts.
+    // Stdio servers with a `sandbox` block run in containers. Containers
+    // an earlier proxy for this data directory left behind, for example
+    // after the gateway killed it, are removed before any new one starts.
     let mut sandbox = SandboxHost::new(&data_dir);
     sandbox.probe().await;
     if let Some(docker) = &sandbox.docker {
@@ -119,7 +97,7 @@ pub async fn run() -> Result<(), ProxyError> {
             &mut registry,
             agent_id,
             config,
-            vault.clone(),
+            credentials.clone(),
             audit.as_ref(),
         )
         .await;
@@ -162,7 +140,8 @@ pub async fn run() -> Result<(), ProxyError> {
 
     // Contained servers are restarted when their containers exit.
     let supervisors =
-        crate::supervise::Supervisors::start(registry.clone(), vault.clone(), audit.clone()).await;
+        crate::supervise::Supervisors::start(registry.clone(), credentials.clone(), audit.clone())
+            .await;
 
     // Serve until the socket fails or the proxy is told to stop, then
     // stop every server: host children are killed, containers stopped
@@ -232,45 +211,52 @@ fn load_agent_pubkey(data_dir: &Path, agent_id: &str) -> Result<Option<Verifying
     Ok(Some(key))
 }
 
-/// Open the vault limited to `names`, the credentials the loaded MCP
-/// configs reference. Any other name is refused and logged.
-fn open_vault(data_dir: &Path, names: BTreeSet<String>) -> Option<ScopedCredentialStore> {
-    let keychain = probe_keychain(data_dir, || {
-        let pp = std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default();
-        // Wipe the passphrase from this process's environ now that
-        // the AgeFileKeychain has copied it onto the heap. Defence
-        // in depth against a future code path that spawns a child
-        // without env_clear() — `mcp_transport::spawn` already
-        // clears, but a `/proc/<mcp-proxy-pid>/environ` read by
-        // another process at the same UID would otherwise still
-        // turn up the passphrase as a plaintext null-separated
-        // string in mcp-proxy's environ for the proxy's lifetime.
-        //
-        // SAFETY: `remove_var` is undefined behaviour while another
-        // thread reads or writes the environment. The `#[tokio::main]`
-        // runtime has worker threads by now, but nothing has been
-        // spawned onto them: `wirken mcp-proxy` dispatches straight
-        // into `run()`, and this closure is called by `probe_keychain`
-        // from `open_vault`, which `run()` reaches before its first
-        // `.await` and before any `tokio::spawn`. The workers are
-        // parked with no task to run, so the main thread is the only
-        // one executing. mcp-proxy reads `WIRKEN_VAULT_PASSPHRASE`
-        // nowhere else, and this call is the only writer.
-        //
-        // Anything spawned earlier in `run()` in a later change
-        // breaks this, which is why the scrub stays first.
-        unsafe {
-            std::env::remove_var("WIRKEN_VAULT_PASSPHRASE");
+/// Every agent id with an identity, plus `default`, and the MCP config
+/// each of them runs with.
+fn agent_configs(data_dir: &Path) -> (Vec<String>, Vec<(String, McpConfig)>) {
+    let mut ids = list_agent_ids(data_dir);
+    if !ids.iter().any(|id| id == "default") {
+        ids.push("default".to_string());
+    }
+    let configs = ids
+        .iter()
+        .filter_map(|id| load_config(id, data_dir).map(|c| (id.clone(), c)))
+        .collect();
+    (ids, configs)
+}
+
+/// The vault names the proxy needs handed over, and which of them are
+/// OAuth credentials the gateway refreshes for it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ConfiguredCredentials {
+    pub names: BTreeSet<String>,
+    pub oauth: BTreeSet<String>,
+}
+
+/// What the gateway must hand the proxy for `data_dir`: every name the
+/// MCP configs the proxy will load reference, read the way the proxy
+/// reads them.
+pub fn configured_credentials(data_dir: &Path) -> ConfiguredCredentials {
+    let (_, configs) = agent_configs(data_dir);
+    let mut out = ConfiguredCredentials::default();
+    for (_, config) in &configs {
+        out.names.extend(vault_names(config));
+        for server in config.servers.values() {
+            if let McpServerConfig::Http {
+                auth: Some(McpAuth::Oauth2 { credential, .. }),
+                ..
+            } = server
+            {
+                out.oauth.insert(
+                    credential
+                        .strip_prefix("vault:")
+                        .unwrap_or(credential)
+                        .to_string(),
+                );
+            }
         }
-        pp
-    });
-    CredentialStore::open_scoped(
-        &data_dir.join("vault.db"),
-        keychain.as_ref(),
-        "mcp-proxy",
-        names,
-    )
-    .ok()
+    }
+    out
 }
 
 fn list_agent_ids(data_dir: &Path) -> Vec<String> {
@@ -320,10 +306,13 @@ async fn load_for_agent(
     registry: &mut ProxyRegistry,
     agent_id: &str,
     config: &McpConfig,
-    vault: SharedVault,
+    credentials: SharedCredentials,
     audit: Option<&Arc<dyn SessionLog>>,
 ) {
-    match registry.load_agent(agent_id, config, vault, audit).await {
+    match registry
+        .load_agent(agent_id, config, credentials, audit)
+        .await
+    {
         Ok(n) if n > 0 => {
             tracing::info!("loaded {n} MCP server(s) for agent '{agent_id}'");
         }

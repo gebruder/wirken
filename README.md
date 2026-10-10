@@ -139,8 +139,11 @@ remove them there. See [docs/channels.md](docs/channels.md#platform-side-state).
 ## Architecture
 
 Each channel runs as its own process and starts with only its own
-credentials, which the gateway hands it at spawn. The gateway holds the vault;
-the MCP proxy opens it limited to the credentials its MCP configs name. The
+credentials, which the gateway hands it at spawn. The gateway holds the vault
+and is the only process that opens it: the MCP proxy, too, starts with the
+credentials its MCP configs name handed over at spawn, and asks the gateway to
+refresh OAuth tokens. No process the gateway starts holds the vault passphrase.
+The
 gateway writes the audit log, and the MCP proxy appends its server-verification
 and server-lifecycle rows. Each stdio MCP server runs in its own container,
 started and restarted by the MCP proxy. The agent is stateless: it is woken for each message and rebuilt from its
@@ -185,7 +188,7 @@ graph TD
     Permissions --> PermsDb[("permissions.db")]
     Operator --> Vault --> Keychain
     Agent[Agent Runtime] --> Permissions
-    McpProxy[MCP Proxy] --> Vault
+    McpProxy[MCP Proxy] -- "OAuth refresh · its credentials only" --> Gateway --> Vault
 
     Detect[Injection Detection] -.-> SessionLog
     Permissions -.-> SessionLog

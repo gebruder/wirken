@@ -4856,7 +4856,7 @@ async fn a_turn_offers_the_tools_the_proxy_has_now() {
     let socket_path = tmp.path().join("mcp-proxy.sock");
     let identity = AgentIdentity::generate("test-agent");
     let pubkey = ed25519_dalek::VerifyingKey::from_bytes(&identity.public_key_bytes()).unwrap();
-    let vault = Arc::new(std::sync::Mutex::new(None));
+    let vault = Arc::new(wirken_mcp_proxy::credentials::ProxyCredentials::none());
     let mut reg = ProxyRegistry::new();
     reg.register_identity("test-agent", pubkey);
     reg.load_agent("test-agent", &one_tool_server("alpha"), vault.clone(), None)

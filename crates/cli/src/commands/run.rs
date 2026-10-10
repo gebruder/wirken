@@ -37,7 +37,8 @@ use wirken_ipc::{AuthenticatedChannel, perform_gateway_handshake};
 use wirken_ipc::{IpcFrameReader, IpcFrameWriter, split_stream};
 #[cfg(unix)]
 use wirken_ipc::{Principal, Stream};
-use wirken_vault::{CredentialStore, probe_keychain};
+use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
+use zeroize::Zeroizing;
 
 use super::adapter_handoff::{self, Handoff};
 use super::config;
@@ -1038,32 +1039,92 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // --- Spawn MCP proxy ---
     //
-    // The proxy runs as a sibling process. The agent process never holds
-    // plaintext MCP credentials — the proxy owns the vault handle for any
-    // `vault:`-prefixed env values in mcp.json and resolves them inside its
-    // own address space.
+    // The proxy runs as a sibling process and never opens the vault. The
+    // gateway resolves the credentials its `mcp.json` entries reference
+    // and hands them over on its stdin, OAuth credentials without their
+    // refresh token, and serves OAuth refreshes for it on a socket of its
+    // own: the gateway calls the provider and writes the vault. Neither
+    // the vault passphrase nor its device key reaches the proxy.
     let mcp_proxy_socket = cfg.socket_dir().join("mcp-proxy.sock");
     if mcp_proxy_socket.exists() {
         let _ = std::fs::remove_file(&mcp_proxy_socket);
     }
     // The proxy's pid while it runs, zero otherwise, so shutdown can
-    // ask it to stop its servers before the handle is dropped.
+    // ask it to stop its servers before the handle is dropped, and the
+    // refresh socket serves no other process.
     let mcp_proxy_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let proxy_credentials = wirken_mcp_proxy::configured_credentials(&cfg.data_dir);
+    let proxy_vault: Option<Arc<std::sync::Mutex<CredentialStore>>> =
+        if proxy_credentials.names.is_empty() {
+            None
+        } else {
+            let keychain = probe_keychain(&cfg.data_dir, || {
+                prompt_vault_passphrase(&mut vault_passphrase)
+            });
+            match CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()) {
+                Ok(store) => Some(Arc::new(std::sync::Mutex::new(store))),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "vault unavailable; the MCP proxy starts with no credentials"
+                    );
+                    None
+                }
+            }
+        };
+    let refresh_token = Zeroizing::new({
+        use rand::Rng;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    });
+    let proxy_handoff = mcp_proxy_handoff(
+        proxy_vault.as_deref(),
+        &proxy_credentials,
+        refresh_token.as_str(),
+    );
+    let mcp_refresh_socket = cfg.socket_dir().join("mcp-refresh.sock");
+    let _ = std::fs::remove_file(&mcp_refresh_socket);
+    let mcp_refresh_handle =
+        match wirken_mcp_proxy::refresh_service::RefreshListener::bind(&mcp_refresh_socket) {
+            Ok(listener) => {
+                let service = Arc::new(wirken_mcp_proxy::refresh_service::RefreshService::new(
+                    proxy_vault.clone(),
+                    proxy_credentials.oauth.clone(),
+                    refresh_token,
+                    mcp_proxy_pid.clone(),
+                ));
+                Some(tokio::spawn(service.serve(listener)))
+            }
+            Err(e) => {
+                tracing::error!(
+                    "could not bind the MCP proxy refresh socket {}: {e}; OAuth tokens will \
+                 not be refreshed",
+                    mcp_refresh_socket.display()
+                );
+                None
+            }
+        };
     let mut mcp_proxy_handle = {
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
-        let vp = vault_passphrase.clone().unwrap_or_default();
         let socket = mcp_proxy_socket.clone();
+        let refresh_socket = mcp_refresh_socket.clone();
         let pid = mcp_proxy_pid.clone();
         tokio::spawn(async move {
             tracing::info!("Spawning MCP proxy");
-            let result = Command::new(&exe)
-                .arg("mcp-proxy")
+            let mut cmd = Command::new(&exe);
+            cmd.arg("mcp-proxy")
                 .env("WIRKEN_DATA_DIR", &data_dir)
                 .env("WIRKEN_MCP_SOCKET", &socket)
-                .env("WIRKEN_VAULT_PASSPHRASE", &vp)
-                .kill_on_drop(true)
-                .spawn();
+                .env(
+                    wirken_mcp_proxy::credentials::GATEWAY_SOCKET_ENV,
+                    &refresh_socket,
+                )
+                .env_remove("WIRKEN_VAULT_PASSPHRASE")
+                .stdin(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            let result = adapter_handoff::spawn_with_handoff(&mut cmd, proxy_handoff);
             match result {
                 Ok(mut child) => {
                     pid.store(
@@ -2058,6 +2119,9 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         handle.abort();
     }
     stop_mcp_proxy(&mcp_proxy_pid, &mut mcp_proxy_handle).await;
+    if let Some(handle) = mcp_refresh_handle {
+        handle.abort();
+    }
     accept_handle.abort();
     hooks_accept_handle.abort();
     #[cfg(unix)]
@@ -2171,6 +2235,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // Cleanup sockets
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&mcp_proxy_socket);
+    let _ = std::fs::remove_file(&mcp_refresh_socket);
     #[cfg(unix)]
     let _ = std::fs::remove_file(&orchestrator_socket_path);
 
@@ -2357,6 +2422,52 @@ impl StopSignal {
             tokio::signal::ctrl_c().await
         }
     }
+}
+
+/// The MCP proxy's hand-off: every name its configs reference that the
+/// vault holds, OAuth credentials without their refresh token, and the
+/// token that admits it to the refresh socket. A vault credential that
+/// happens to carry the token's entry name is left out.
+fn mcp_proxy_handoff(
+    vault: Option<&std::sync::Mutex<CredentialStore>>,
+    wanted: &wirken_mcp_proxy::ConfiguredCredentials,
+    refresh_token: &str,
+) -> Handoff {
+    use wirken_mcp_proxy::credentials::{GATEWAY_TOKEN_ENTRY, without_refresh_token};
+    let mut entries = std::collections::BTreeMap::new();
+    match vault.map(|v| v.lock()) {
+        Some(Ok(store)) => {
+            for name in &wanted.names {
+                if name == GATEWAY_TOKEN_ENTRY {
+                    tracing::warn!("vault credential '{name}' is not handed to the MCP proxy");
+                    continue;
+                }
+                match store.retrieve(name) {
+                    Ok((secret, _)) => {
+                        let value = if wanted.oauth.contains(name) {
+                            without_refresh_token(secret.expose())
+                        } else {
+                            secret.expose().to_string()
+                        };
+                        entries.insert(name.clone(), VaultSecret::new(value));
+                    }
+                    Err(wirken_vault::VaultError::NotFound(_)) => {}
+                    Err(e) => tracing::warn!(
+                        credential = %name,
+                        error = %e,
+                        "MCP proxy credential left out of the hand-off"
+                    ),
+                }
+            }
+        }
+        Some(Err(_)) => tracing::error!("vault mutex poisoned; the MCP proxy starts with none"),
+        None => {}
+    }
+    entries.insert(
+        GATEWAY_TOKEN_ENTRY.to_string(),
+        VaultSecret::new(refresh_token.to_string()),
+    );
+    Handoff::from_entries(entries)
 }
 
 /// How long the MCP proxy gets to stop its servers at shutdown.
@@ -5814,5 +5925,69 @@ mod reply_outbound_tests {
         let (result, rows) = send(false).await;
         assert!(result.is_err(), "the write to a closed adapter fails");
         assert_eq!(rows, 0, "no row claims a reply that never left");
+    }
+}
+
+#[cfg(test)]
+mod proxy_handoff_tests {
+    use super::mcp_proxy_handoff;
+    use std::collections::BTreeSet;
+    use wirken_mcp_proxy::credentials::GATEWAY_TOKEN_ENTRY;
+    use wirken_mcp_proxy::{ConfiguredCredentials, OAuthCredential, store_oauth};
+    use wirken_vault::{CredentialStore, VaultSecret};
+
+    /// The proxy gets the names its configs reference and nothing else,
+    /// an OAuth credential without its refresh token, and the refresh
+    /// channel's token, which no vault credential can stand in for.
+    #[test]
+    fn the_proxy_gets_its_names_oauth_without_refresh_and_the_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &tmp.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        for (name, value) in [
+            ("linear-token", "lin_abc"),
+            ("telegram-token", "tg_other"),
+            (GATEWAY_TOKEN_ENTRY, "planted"),
+        ] {
+            store
+                .store(name, "", &VaultSecret::new(value.into()), None, None)
+                .unwrap();
+        }
+        store_oauth(
+            &store,
+            "notion-oauth",
+            &OAuthCredential {
+                access_token: "AT".into(),
+                refresh_token: "RT-secret".into(),
+                expires_at: 1,
+                scope: String::new(),
+                provider: "notion".into(),
+            },
+        )
+        .unwrap();
+        let wanted = ConfiguredCredentials {
+            names: BTreeSet::from([
+                "linear-token".to_string(),
+                "notion-oauth".to_string(),
+                GATEWAY_TOKEN_ENTRY.to_string(),
+            ]),
+            oauth: BTreeSet::from(["notion-oauth".to_string()]),
+        };
+
+        let mut entries =
+            mcp_proxy_handoff(Some(&std::sync::Mutex::new(store)), &wanted, "real-token")
+                .into_entries();
+        assert_eq!(
+            entries.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["linear-token", "notion-oauth", GATEWAY_TOKEN_ENTRY]
+        );
+        assert_eq!(entries[GATEWAY_TOKEN_ENTRY].expose(), "real-token");
+        assert_eq!(entries["linear-token"].expose(), "lin_abc");
+        let oauth = entries.remove("notion-oauth").unwrap();
+        assert!(oauth.expose().contains("\"access_token\":\"AT\""));
+        assert!(!oauth.expose().contains("RT-secret"), "{}", oauth.expose());
     }
 }

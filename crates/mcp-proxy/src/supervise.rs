@@ -26,7 +26,7 @@ use crate::container::SandboxHost;
 use crate::mcp_client::McpClient;
 use crate::mcp_config::StdioSandbox;
 use crate::mcp_registry::{
-    ProxyRegistry, SharedVault, StartError, StdioEntry, init_and_list, record, resolve_env,
+    ProxyRegistry, SharedCredentials, StartError, StdioEntry, init_and_list, record, resolve_env,
     start_stdio,
 };
 use crate::mcp_transport::Transport;
@@ -110,15 +110,15 @@ impl Supervisors {
     /// Supervise every server the registry loaded or tried to.
     pub async fn start(
         registry: Arc<Mutex<ProxyRegistry>>,
-        vault: SharedVault,
+        credentials: SharedCredentials,
         audit: Option<Arc<dyn SessionLog>>,
     ) -> Self {
-        Self::start_with(registry, vault, audit, MCP_RESTART_BACKOFF).await
+        Self::start_with(registry, credentials, audit, MCP_RESTART_BACKOFF).await
     }
 
     pub(crate) async fn start_with(
         registry: Arc<Mutex<ProxyRegistry>>,
-        vault: SharedVault,
+        credentials: SharedCredentials,
         audit: Option<Arc<dyn SessionLog>>,
         backoff: RestartBackoff,
     ) -> Self {
@@ -130,7 +130,7 @@ impl Supervisors {
                 let first = p.first.clone();
                 let mut life = ContainerLife {
                     registry: registry.clone(),
-                    vault: vault.clone(),
+                    credentials: credentials.clone(),
                     audit: audit.clone(),
                     pending: p,
                 };
@@ -299,7 +299,7 @@ pub(crate) async fn supervise(
 /// The real thing: a server started through the registry's start path.
 struct ContainerLife {
     registry: Arc<Mutex<ProxyRegistry>>,
-    vault: SharedVault,
+    credentials: SharedCredentials,
     audit: Option<Arc<dyn SessionLog>>,
     pending: Pending,
 }
@@ -308,12 +308,9 @@ struct ContainerLife {
 impl ServerLife for ContainerLife {
     async fn start(&mut self) -> Result<String, Failure> {
         let p = &self.pending;
-        // Resolved afresh, so a credential rotated in the vault reaches
-        // the next run.
-        let resolved = {
-            let guard = self.vault.lock().expect("vault mutex");
-            resolve_env(&p.env, guard.as_ref())
-        };
+        // Resolved from what the gateway handed over at spawn; a value
+        // rotated in the vault reaches a run after the next gateway start.
+        let resolved = resolve_env(&p.env, &self.credentials);
         let entry = StdioEntry {
             agent_id: &p.agent_id,
             server: &p.server,
@@ -641,7 +638,7 @@ mod tests {
         }))
         .unwrap();
         let log = log();
-        let vault: SharedVault = Arc::new(std::sync::Mutex::new(None));
+        let vault: SharedCredentials = Arc::new(crate::credentials::ProxyCredentials::none());
         let mut registry = ProxyRegistry::new().with_sandbox(host);
         registry
             .load_agent("agent-1", &config, vault.clone(), Some(&log))

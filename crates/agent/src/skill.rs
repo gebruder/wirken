@@ -399,14 +399,27 @@ fn check_bins_available(bins: &[String]) -> bool {
     bins.iter().all(|bin| which_exists(bin))
 }
 
+/// Whether `bin` is an executable on `PATH`, or at `bin` when it names
+/// a path. Looked up in this process rather than by running `which`: a
+/// child would inherit the gateway's environment, the vault passphrase
+/// included when the operator exported it.
 fn which_exists(bin: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(bin)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    if bin.contains(std::path::MAIN_SEPARATOR) || bin.contains('/') {
+        return is_executable(std::path::Path::new(bin));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| is_executable(&dir.join(bin))))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file() || path.with_extension("exe").is_file()
 }
 
 /// Canonical form of a skill name: lowercase letter prefix, then any
@@ -716,5 +729,21 @@ mod root_branch_tests {
         write_delegation(&dir, &signer, &other_root);
         verify_skill_signature_with_root(&dir, &dir.join("SKILL.md"), Some(&root.verifying_key()))
             .expect_err("strict rejects a delegation signed by a different root");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod which_tests {
+    use super::which_exists;
+
+    #[test]
+    fn a_binary_on_path_is_found_without_running_which() {
+        assert!(which_exists("sh"));
+        assert!(which_exists("/bin/sh"));
+        assert!(!which_exists("wirken-no-such-binary-on-path"));
+        assert!(
+            !which_exists("/etc/hostname"),
+            "a file that is not executable"
+        );
     }
 }

@@ -10,8 +10,8 @@ feature keep it in the OS keychain. Two kinds of credentials live in it:
 - **OAuth-managed credentials**: bootstrapped via `wirken mcp
   authorize <server>` against a known OAuth provider. The vault
   stores the access token, refresh token, and the granted scope
-  set; the MCP proxy refreshes the access token automatically when
-  it expires.
+  set; the gateway refreshes the access token when it nears expiry,
+  on the MCP proxy's request, and writes the vault.
 
 ## Which processes read the vault
 
@@ -21,15 +21,19 @@ feature keep it in the OS keychain. Two kinds of credentials live in it:
 - **Adapters** never open the vault. Each starts with its own
   channel's credentials, which the gateway writes to its stdin, and
   gets no vault passphrase.
-- **The MCP proxy** opens the vault limited to the names its
-  `mcp.json` configs reference: the `vault:` env values of stdio
-  servers and the `credential` of HTTP servers' bearer and OAuth auth.
-  It reads those and writes refreshed OAuth tokens back. Any other
-  name is refused and logged at error with the scope `mcp-proxy` and
-  the name. The limit is in the store's interface, not the key: the
-  proxy still receives the vault passphrase from `wirken run` in its
-  environment, clears it at startup and holds the vault's device key,
-  so code running inside the proxy could still read the vault file.
+- **The MCP proxy** never opens the vault. At spawn the gateway
+  writes to its stdin the names its `mcp.json` configs reference: the
+  `vault:` env values of stdio servers and the `credential` of HTTP
+  servers' bearer and OAuth auth, each OAuth credential without its
+  refresh token. When an access token nears expiry the proxy asks the
+  gateway, over a 0600 Unix socket that serves only the proxy's own
+  process holding a token handed to it at spawn (on Windows, the token
+  alone), to refresh it; the
+  gateway refreshes only credentials it handed the proxy, calls the
+  provider, writes the vault, and answers with the access token. The
+  proxy gets no vault passphrase and never holds the device key or a
+  refresh token. A credential rotated in the vault reaches it at the
+  next gateway start.
 - **`wirken` commands** that manage credentials (`credentials`,
   `channel add`, `setup`, `mcp authorize`) open the full vault in the
   operator's own process.
