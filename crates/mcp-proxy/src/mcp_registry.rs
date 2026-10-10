@@ -391,14 +391,20 @@ impl ProxyRegistry {
     }
 
     /// Shut down every MCP server for every agent.
+    ///
+    /// All servers stop at once, so the time this takes is one server's
+    /// rather than the sum of them.
     pub async fn shutdown(&mut self) {
-        for (agent_id, servers) in self.by_agent.iter_mut() {
-            for (name, client) in servers.iter_mut() {
-                tracing::info!("Shutting down MCP server '{name}' (agent '{agent_id}')");
-                client.shutdown().await;
-            }
-        }
-        self.by_agent.clear();
+        let stopping = self.by_agent.drain().flat_map(|(agent_id, servers)| {
+            servers.into_iter().map(move |(name, mut client)| {
+                let agent_id = agent_id.clone();
+                async move {
+                    tracing::info!("Shutting down MCP server '{name}' (agent '{agent_id}')");
+                    client.shutdown().await;
+                }
+            })
+        });
+        futures_util::future::join_all(stopping).await;
     }
 }
 

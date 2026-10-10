@@ -10,6 +10,12 @@ use crate::mcp_transport::Transport;
 use crate::tool_error::{McpToolError, detect_scope_not_granted};
 use crate::wire::ToolDefWire;
 
+/// How long a server gets to answer each shutdown message before it is
+/// stopped anyway. A server that never answers must not hold the
+/// proxy's shutdown past the gateway's grace, after which the proxy is
+/// killed with its containers still running.
+const SHUTDOWN_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Result of executing an MCP tool. Mirrors `wirken_agent::tool::ToolResult`
 /// but is defined locally so the proxy does not depend on `wirken-agent`.
 ///
@@ -215,10 +221,16 @@ impl McpClient {
         &self.tools
     }
 
-    /// Shut down the MCP server.
+    /// Shut down the MCP server: ask it to stop, then stop it whether or
+    /// not it answered within [`SHUTDOWN_REPLY_WAIT`].
     pub async fn shutdown(&mut self) {
-        let _ = self.transport.request("shutdown", None).await;
-        let _ = self.transport.notify("exit", None).await;
+        let _ = tokio::time::timeout(
+            SHUTDOWN_REPLY_WAIT,
+            self.transport.request("shutdown", None),
+        )
+        .await;
+        let _ =
+            tokio::time::timeout(SHUTDOWN_REPLY_WAIT, self.transport.notify("exit", None)).await;
         self.transport.shutdown().await;
     }
 }
@@ -231,4 +243,31 @@ impl McpClient {
 fn classify_error(oauth_ctx: &Option<(String, String)>, error_text: &str) -> Option<McpToolError> {
     let (credential, provider) = oauth_ctx.as_ref()?;
     detect_scope_not_granted(provider, credential, error_text)
+}
+
+#[cfg(all(test, unix))]
+mod shutdown_tests {
+    use super::*;
+    use crate::mcp_transport::StdioTransport;
+
+    /// A server that never answers is stopped within a few seconds, not
+    /// after the 30-second request timeout.
+    #[tokio::test]
+    async fn a_server_that_never_answers_does_not_hold_shutdown() {
+        let stdio = StdioTransport::spawn(
+            "sh",
+            &["-c".to_string(), "sleep 300".to_string()],
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let mut client = McpClient::new("silent".into(), Transport::Stdio(Box::new(stdio)));
+        let started = std::time::Instant::now();
+        client.shutdown().await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 }
