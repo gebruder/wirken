@@ -11,7 +11,7 @@ latest release to receive them.
 Report security vulnerabilities via one of:
 
 - GitHub private vulnerability reporting: [github.com/gebruder/wirken/security/advisories](https://github.com/gebruder/wirken/security/advisories)
-- Email: security@gebruder.ottenheimer.app
+- Email: security@ottenheimer.app
 
 Do not open a public issue for security vulnerabilities.
 

@@ -293,6 +293,11 @@ tagged.
   which is only ever set inside the gateway, so it printed `disconnected`
   for every adapter. The webchat status page reads the same states.
 
+### Docs
+
+- `SECURITY.md` gives security@ottenheimer.app as the address for
+  vulnerability reports.
+
 ## [1.28.0] - 2026-10-08
 
 ### Fixed
