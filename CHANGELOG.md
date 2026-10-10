@@ -30,6 +30,13 @@ tagged.
   proxy still receives the vault passphrase in its environment, clears
   it at startup and holds the vault's device key, so it does not stop
   code running inside the proxy from reading the vault file.
+- The `exec` egress sidecar runs as the operator's uid, and its broker
+  socket is mode 0600 in a 0700 directory. Before, the sidecar ran as its
+  image's user and the socket was 0666 in a 0777 directory, so for the
+  life of an exec with egress any local user could connect to the broker
+  and write `sandbox_egress_verdict` rows attributed to the exec's agent,
+  or replace the socket with one of their own and answer the sidecar,
+  handing it addresses outside the allowlist.
 - Stdio MCP servers run in containers (#269). Each server whose
   `mcp.json` entry has a `sandbox` block runs in its own container, one per
   agent and server, with every capability dropped, `no-new-privileges`, a

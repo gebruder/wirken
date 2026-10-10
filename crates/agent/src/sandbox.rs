@@ -500,21 +500,19 @@ impl DockerSandbox {
         // network, socket, or container behind.
         let sidecar_binary = self.sidecar_binary()?;
 
-        let id = short_id();
-        // The sidecar runs as the image's user, a different uid from
-        // this process, so the socket directory and the socket are
-        // left open for it to connect.
-        let spec = SidecarSpec {
-            name_prefix: "wirken-egress".into(),
-            socket_dir: std::env::temp_dir().join(format!("wirken-egress-{id}")),
-            id,
-            image: self.config.image.clone(),
-            binary: sidecar_binary,
-            labels: Default::default(),
-            user: None,
-            socket_dir_mode: 0o777,
-            socket_mode: 0o666,
-        };
+        // A runtime that cannot be asked is taken as rootful. Were it
+        // rootless, the sidecar's uid would not be the operator's, it
+        // could not open the socket, and the exec is refused when the
+        // sidecar never reports ready.
+        let rootless = wirken_sandbox::RuntimeFacts::probe(&self.client)
+            .await
+            .is_ok_and(|f| f.rootless);
+        let spec = exec_sidecar_spec(
+            short_id(),
+            self.config.image.clone(),
+            sidecar_binary,
+            rootless,
+        );
         let route = wirken_sandbox::egress_net::provision(
             &self.client,
             spec,
@@ -688,6 +686,29 @@ pub(crate) fn build_host_config(
         nano_cpus: None,
         runtime: config.mode.runtime_name(),
     })
+}
+
+/// The sidecar for one exec. It runs as the operator, so the broker's
+/// socket directory and socket admit the operator alone: no other local
+/// user can ask the broker for decisions or write rows through it.
+#[cfg(unix)]
+pub(crate) fn exec_sidecar_spec(
+    id: String,
+    image: String,
+    binary: std::path::PathBuf,
+    rootless: bool,
+) -> SidecarSpec {
+    SidecarSpec {
+        name_prefix: "wirken-egress".into(),
+        socket_dir: std::env::temp_dir().join(format!("wirken-egress-{id}")),
+        id,
+        image,
+        binary,
+        labels: Default::default(),
+        user: Some(wirken_sandbox::operator_user(rootless)),
+        socket_dir_mode: 0o700,
+        socket_mode: 0o600,
+    }
 }
 
 /// Detect if Docker is available.

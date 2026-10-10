@@ -173,6 +173,27 @@ pub fn hardened_host_config(settings: HostSettings) -> HostConfig {
     }
 }
 
+/// The `uid:gid` a container runs as to act as the operator: the
+/// operator's own, or `0:0` under a rootless runtime, where container
+/// uid 0 is the operator and every other uid a subordinate one that
+/// could not open the operator's files or sockets.
+pub fn operator_user(rootless: bool) -> String {
+    if rootless {
+        return "0:0".to_string();
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` and `getegid` are always-safe FFI;
+        // documented as never failing.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        format!("{uid}:{gid}")
+    }
+    #[cfg(not(unix))]
+    {
+        "1000:1000".to_string()
+    }
+}
+
 /// What the container runtime behind a Docker API socket is, as far
 /// as proxied egress is concerned.
 ///
@@ -317,6 +338,15 @@ mod tests {
             ..Default::default()
         };
         (info, version)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_operator_user_is_this_process_or_root_under_rootless() {
+        // SAFETY: as in `operator_user`.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        assert_eq!(operator_user(false), format!("{uid}:{gid}"));
+        assert_eq!(operator_user(true), "0:0");
     }
 
     #[test]

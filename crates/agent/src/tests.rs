@@ -4001,6 +4001,35 @@ fn host_config_without_egress_network_has_no_networking() {
     );
 }
 
+/// The exec sidecar runs as the operator, and its broker socket and
+/// directory admit the operator alone.
+#[cfg(unix)]
+#[test]
+fn the_exec_sidecar_runs_as_the_operator_behind_a_private_socket() {
+    use crate::sandbox::exec_sidecar_spec;
+
+    let spec = exec_sidecar_spec(
+        "abc".into(),
+        "debian:bookworm-slim".into(),
+        "/bin/wirken".into(),
+        false,
+    );
+    assert_eq!(spec.socket_dir_mode, 0o700);
+    assert_eq!(spec.socket_mode, 0o600);
+    assert_eq!(spec.user, Some(wirken_sandbox::operator_user(false)));
+    assert_eq!(
+        spec.socket_dir,
+        std::env::temp_dir().join("wirken-egress-abc")
+    );
+
+    let rootless = exec_sidecar_spec("abc".into(), "img".into(), "/bin/wirken".into(), true);
+    assert_eq!(rootless.user.as_deref(), Some("0:0"));
+    assert_eq!(
+        (rootless.socket_dir_mode, rootless.socket_mode),
+        (0o700, 0o600)
+    );
+}
+
 #[test]
 fn host_config_joins_the_egress_network_and_pins_dns() {
     use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};

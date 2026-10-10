@@ -10,6 +10,7 @@ description = "Container hardening, sandbox mode, and the egress proxy shared by
 async-trait = { workspace = true }
 bollard = { workspace = true }
 futures-util = "0.3"
+libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

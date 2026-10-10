@@ -156,11 +156,7 @@ impl SandboxHost {
     /// subordinate one that could not read the install directory or the
     /// secret files.
     fn container_user(&self) -> String {
-        if self.facts.is_some_and(|f| f.rootless) {
-            "0:0".to_string()
-        } else {
-            container_user()
-        }
+        wirken_sandbox::operator_user(self.facts.is_some_and(|f| f.rootless))
     }
 }
 
@@ -653,22 +649,6 @@ fn path_component<'a>(name: &'a str, what: &str) -> Result<&'a str, PlanError> {
         return Err(format!("{what} {name:?} cannot name a host directory").into());
     }
     Ok(name)
-}
-
-/// The uid:gid the server runs as: the operator's own, so it can read
-/// the install directory and write its scratch directory, and nothing
-/// else on the host that the operator could not.
-#[cfg(unix)]
-fn container_user() -> String {
-    // SAFETY: `geteuid` and `getegid` are always-safe FFI; documented
-    // as never failing.
-    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
-    format!("{uid}:{gid}")
-}
-
-#[cfg(not(unix))]
-fn container_user() -> String {
-    "1000:1000".to_string()
 }
 
 /// A contained server's route out: its networks, sidecar and broker.
@@ -1294,7 +1274,10 @@ mod tests {
     fn under_a_rootless_runtime_the_server_runs_as_the_operator() {
         let dirs = tempfile::tempdir().unwrap();
         let mut host = host(dirs.path());
-        assert_eq!(plan(&host, &block(&dirs)).unwrap().user, container_user());
+        assert_eq!(
+            plan(&host, &block(&dirs)).unwrap().user,
+            wirken_sandbox::operator_user(false)
+        );
         host.facts = Some(RuntimeFacts {
             rootless: true,
             ..Default::default()

@@ -180,7 +180,7 @@ graph LR
     Sandbox -.->|"no route"| Internet
 ```
 
-The sidecar holds no policy. For each request it asks the gateway over a per-exec Unix socket bind-mounted into it, and receives either already-resolved addresses or a refusal. Policy, DNS resolution, the global-unicast filter, and the audit row all stay in the gateway process, so a compromised sidecar can misreport what it wants but cannot widen what it gets, and cannot forge attribution.
+The sidecar holds no policy. For each request it asks the gateway over a per-exec Unix socket bind-mounted into it, and receives either already-resolved addresses or a refusal. The sidecar runs as the operator's uid (uid 0 under a rootless runtime, which is the operator), so the socket is mode 0600 in a 0700 directory and no other local user can reach the broker. Policy, DNS resolution, the global-unicast filter, and the audit row all stay in the gateway process, so a compromised sidecar can misreport what it wants but cannot widen what it gets, and cannot forge attribution.
 
 **No host port is involved anywhere.** The gateway listens on a Unix socket, which is a filesystem object, so a default-deny host firewall has no bearing on the path. This is verified on a host running ufw with default-deny inbound.
 
@@ -222,7 +222,6 @@ A contained stdio MCP server whose entry lists `sandbox.egress.hosts` gets the s
 - **Policy.** The allowlist is the entry's `egress.hosts`, inside the signed entry hash, so widening it breaks the signature. `*` allows any domain name, still bounded by the port and address rules. There is no confidentiality stage: the proxy has no session whose reads could condition the verdict.
 - **Broker.** It runs in `wirken-mcp-proxy`, not the gateway.
 - **Lifetime.** The sidecar and both networks are created before the server's container and live as long as it; they are removed when it stops or is restarted, and swept at the next proxy start if the proxy died.
-- **Socket.** The sidecar runs as the operator's uid, so the broker socket and its directory are mode 0600 and 0700.
 - **Audit.** Each verdict is a `SandboxEgressVerdict` on the `gateway-mcp` session with `mcp_server` set to the server's name and `agent_id` to its agent; `channel`, `adapter_id` and `sender_id` are absent. `mode` is `allowlist`, or `open` when the hosts list `*`.
 - **Runtime.** Refused on rootless Docker, Podman and Windows with `McpEntryRefused` reason `egress_unsupported_runtime`; the server does not start rather than start without its proxy.
 
