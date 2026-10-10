@@ -29,7 +29,7 @@ use crate::auth::{AuthProvider, BearerAuth, NoAuth, OAuth2Auth};
 use crate::container::{ContainerPlan, SandboxHost};
 use crate::error::ProxyError;
 use crate::mcp_client::{McpClient, McpToolResult};
-use crate::mcp_config::{ContainerSandbox, McpAuth, McpConfig, McpServerConfig, StdioSandbox};
+use crate::mcp_config::{McpAuth, McpConfig, McpServerConfig, StdioSandbox};
 use crate::mcp_signing::{McpVerifyResult, bundled_mcp_pubkey, verify_mcp_entry};
 use crate::mcp_transport::{HttpTransport, StdioTransport, Transport};
 use crate::wire::ToolDefWire;
@@ -99,24 +99,19 @@ impl ProxyRegistry {
         self
     }
 
-    /// Start `server`'s container from its `sandbox` block.
+    /// Start the container `plan` describes, handing it the resolved
+    /// vault values.
     async fn spawn_contained(
         &self,
-        agent_id: &str,
-        server: &str,
-        command: &str,
-        args: &[String],
-        env: &HashMap<String, String>,
-        block: &ContainerSandbox,
+        plan: &ContainerPlan,
+        resolved_env: &HashMap<String, String>,
     ) -> Result<StdioTransport, ProxyError> {
         let docker = self
             .sandbox
             .docker
             .as_ref()
             .ok_or_else(|| ProxyError::Mcp("no container runtime is reachable".into()))?;
-        let plan = ContainerPlan::new(&self.sandbox, agent_id, server, command, args, env, block)
-            .map_err(ProxyError::Mcp)?;
-        StdioTransport::spawn_container(docker, &plan).await
+        StdioTransport::spawn_container(docker, plan, resolved_env).await
     }
 
     /// Register an Ed25519 public key as the authoritative identity
@@ -219,15 +214,18 @@ impl ProxyRegistry {
 
                     let spawned = match sandbox.as_deref() {
                         Some(StdioSandbox::Container(block)) => {
-                            self.spawn_contained(
+                            match ContainerPlan::new(
+                                &self.sandbox,
                                 agent_id,
                                 name,
                                 command,
                                 args,
-                                &resolved_env,
+                                env,
                                 block,
-                            )
-                            .await
+                            ) {
+                                Ok(plan) => self.spawn_contained(&plan, &resolved_env).await,
+                                Err(e) => Err(ProxyError::Mcp(e.to_string())),
+                            }
                         }
                         Some(StdioSandbox::Invalid(_)) => Err(ProxyError::Mcp(
                             "sandbox is neither \"off\" nor a sandbox block".into(),

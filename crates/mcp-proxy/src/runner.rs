@@ -82,7 +82,7 @@ pub async fn run() -> Result<(), ProxyError> {
     // it, are removed before any new one starts.
     let sandbox = SandboxHost::new(&data_dir);
     if let Some(docker) = &sandbox.docker {
-        let removed = container::sweep(docker, &sandbox.instance).await;
+        let removed = container::sweep(docker, &sandbox).await;
         if removed > 0 {
             tracing::info!(
                 "removed {removed} MCP server container(s) an earlier proxy left behind"

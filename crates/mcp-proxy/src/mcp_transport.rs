@@ -173,9 +173,13 @@ impl StdioTransport {
     ///
     /// The attach comes before the start, so nothing the server writes
     /// first is lost. Any failure after the container exists removes it.
+    /// `secrets` holds the resolved `vault:` values: those the plan
+    /// delivers as files are written before the container is created,
+    /// the rest go into its environment.
     pub async fn spawn_container(
         docker: &bollard::Docker,
         plan: &ContainerPlan,
+        secrets: &HashMap<String, String>,
     ) -> Result<Self, ProxyError> {
         use bollard::container::LogOutput;
         use bollard::query_parameters::{AttachContainerOptions, CreateContainerOptions};
@@ -186,6 +190,17 @@ impl StdioTransport {
             })?;
         }
 
+        if let Some(dir) = &plan.secrets_dir {
+            crate::container::write_secret_files(dir, &plan.secret_file_names, secrets).map_err(
+                |e| ProxyError::Mcp(format!("write secret files for '{}': {e}", plan.server)),
+            )?;
+        }
+        let remove_secrets = || {
+            if let Some(dir) = &plan.secrets_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        };
+
         let name = format!("wirken-mcp-{}", random_suffix());
         let created = docker
             .create_container(
@@ -193,13 +208,17 @@ impl StdioTransport {
                     name: Some(name),
                     platform: String::new(),
                 }),
-                plan.create_body(),
+                plan.create_body(secrets),
             )
             .await
-            .map_err(|e| ProxyError::Mcp(format!("create container for '{}': {e}", plan.server)))?;
+            .map_err(|e| {
+                remove_secrets();
+                ProxyError::Mcp(format!("create container for '{}': {e}", plan.server))
+            })?;
         let handle = ContainerHandle {
             docker: docker.clone(),
             id: created.id,
+            secrets_dir: plan.secrets_dir.clone(),
         };
 
         let attached = match docker

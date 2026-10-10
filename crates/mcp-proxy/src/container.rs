@@ -32,12 +32,16 @@ pub const LABEL_AGENT: &str = "wirken.mcp.agent";
 /// The server's name in `mcp.json`.
 pub const LABEL_SERVER: &str = "wirken.mcp.server";
 
+/// Where a server's secret files appear inside its container.
+pub const SECRETS_TARGET: &str = "/run/wirken-secrets";
+
 /// Paths inside the container a declared mount may not cover or sit
-/// under: the install and scratch targets, and what the runtime or the
-/// hardening already owns.
+/// under: the install, scratch and secrets targets, and what the
+/// runtime or the hardening already owns.
 const RESERVED_TARGETS: &[&str] = &[
     INSTALL_DIR_TARGET,
     SCRATCH_TARGET,
+    SECRETS_TARGET,
     "/tmp",
     "/proc",
     "/sys",
@@ -60,6 +64,9 @@ pub struct SandboxHost {
     pub data_dir: PathBuf,
     /// OCI runtime from `sandbox.json`'s mode; `None` is runc.
     pub runtime: Option<String>,
+    /// RAM-backed directory secret files are written under; `None`
+    /// where there is none, which refuses any server needing one.
+    pub secrets_base: Option<PathBuf>,
 }
 
 impl SandboxHost {
@@ -70,6 +77,7 @@ impl SandboxHost {
             instance: instance_id(data_dir),
             data_dir: data_dir.to_path_buf(),
             runtime: sandbox_runtime(data_dir),
+            secrets_base: ram_backed_dir(),
         }
     }
 
@@ -81,7 +89,82 @@ impl SandboxHost {
             instance: String::new(),
             data_dir: PathBuf::new(),
             runtime: None,
+            secrets_base: None,
         }
+    }
+
+    /// The directory this instance's secret files live under.
+    fn secrets_root(&self) -> Option<PathBuf> {
+        self.secrets_base
+            .as_ref()
+            .map(|base| base.join(format!("wirken-mcp-{}", self.instance)))
+    }
+}
+
+/// A directory backed by memory, for secret files: `$XDG_RUNTIME_DIR`,
+/// else `/dev/shm`, whichever is a tmpfs. Elsewhere there is none.
+#[cfg(target_os = "linux")]
+pub fn ram_backed_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(std::iter::once(PathBuf::from("/dev/shm")))
+        .find(|dir| is_tmpfs(dir))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn ram_backed_dir() -> Option<PathBuf> {
+    None
+}
+
+/// Whether `dir` is on a tmpfs.
+#[cfg(target_os = "linux")]
+fn is_tmpfs(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    const TMPFS_MAGIC: i64 = 0x0102_1994;
+    let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `path` is a valid NUL-terminated string and `stat` points
+    // at writable memory the size of `struct statfs`.
+    let rc = unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return false;
+    }
+    // SAFETY: statfs returned 0, so it filled `stat`.
+    let stat = unsafe { stat.assume_init() };
+    #[allow(clippy::unnecessary_cast, reason = "f_type's width differs by target")]
+    let f_type = stat.f_type as i64;
+    f_type == TMPFS_MAGIC
+}
+
+/// Why a block cannot be started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanError {
+    /// The block itself is wrong.
+    Invalid(String),
+    /// The block is fine but this host cannot provide what it needs.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(why) | Self::Unavailable(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<String> for PlanError {
+    fn from(why: String) -> Self {
+        Self::Invalid(why)
+    }
+}
+
+impl From<&str> for PlanError {
+    fn from(why: &str) -> Self {
+        Self::Invalid(why.to_string())
     }
 }
 
@@ -112,8 +195,18 @@ pub struct ContainerPlan {
     pub server: String,
     pub image: String,
     pub cmd: Vec<String>,
-    /// `NAME=value`, sorted.
+    /// `NAME=value` for the variables that are not secrets, and
+    /// `NAME_FILE=<path>` for each secret delivered as a file. Sorted.
     pub env: Vec<String>,
+    /// Secrets delivered as environment variables, by name, because
+    /// the block lists them in `secrets_in_env`. Their values are added
+    /// only when the container is created.
+    pub env_secret_names: Vec<String>,
+    /// Secrets delivered as files, by name.
+    pub secret_file_names: Vec<String>,
+    /// Host directory holding the secret files, bind-mounted read-only
+    /// at [`SECRETS_TARGET`]. `None` when there are none.
+    pub secrets_dir: Option<PathBuf>,
     pub user: String,
     pub working_dir: Option<String>,
     pub mounts: Vec<Mount>,
@@ -138,7 +231,7 @@ impl ContainerPlan {
         args: &[String],
         env: &HashMap<String, String>,
         block: &ContainerSandbox,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PlanError> {
         let image = block
             .image
             .as_deref()
@@ -162,7 +255,7 @@ impl ContainerPlan {
             let source = existing_absolute(&m.source, "mount source")?;
             let target = container_target(&m.target)?;
             if targets.contains(&target) {
-                return Err(format!("two mounts target {target}"));
+                return Err(format!("two mounts target {target}").into());
             }
             mounts.push(bind(&source, &target, m.writable));
             targets.push(target);
@@ -199,8 +292,51 @@ impl ContainerPlan {
             None => DEFAULT_NANO_CPUS,
         };
 
-        let mut env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        env.sort();
+        // `env` is the config's, so a `vault:` value is still a
+        // reference here: it marks the variable as a secret.
+        for name in &block.secrets_in_env {
+            if !env.get(name).is_some_and(|v| v.starts_with("vault:")) {
+                return Err(format!(
+                    "secrets_in_env names {name}, which is not a vault: value in env"
+                )
+                .into());
+            }
+        }
+        let mut plain = Vec::new();
+        let mut env_secret_names = Vec::new();
+        let mut secret_file_names = Vec::new();
+        for (name, value) in env {
+            if !value.starts_with("vault:") {
+                plain.push(format!("{name}={value}"));
+            } else if block.secrets_in_env.contains(name) {
+                env_secret_names.push(name.clone());
+            } else {
+                secret_file_name(name)?;
+                plain.push(format!("{name}_FILE={SECRETS_TARGET}/{name}"));
+                secret_file_names.push(name.clone());
+            }
+        }
+        plain.sort();
+        env_secret_names.sort();
+        secret_file_names.sort();
+
+        let secrets_dir = if secret_file_names.is_empty() {
+            None
+        } else {
+            let root = host.secrets_root().ok_or_else(|| {
+                PlanError::Unavailable(
+                    "no memory-backed directory for secret files on this host; \
+                     list the secrets in secrets_in_env to deliver them as environment \
+                     variables instead"
+                        .to_string(),
+                )
+            })?;
+            let dir = root
+                .join(path_component(agent_id, "agent id")?)
+                .join(path_component(server, "server name")?);
+            mounts.push(bind(&dir, SECRETS_TARGET, false));
+            Some(dir)
+        };
 
         let labels = HashMap::from([
             (LABEL_ROLE.to_string(), "1".to_string()),
@@ -216,7 +352,10 @@ impl ContainerPlan {
             cmd: std::iter::once(command.to_string())
                 .chain(args.iter().cloned())
                 .collect(),
-            env,
+            env: plain,
+            env_secret_names,
+            secret_file_names,
+            secrets_dir,
             user: container_user(),
             working_dir,
             mounts,
@@ -233,11 +372,20 @@ impl ContainerPlan {
     /// The body sent to Docker. Stdin stays open for the JSON-RPC
     /// stream and closes when the proxy's attach does, so a server that
     /// exits at end of input exits with the proxy.
-    pub fn create_body(&self) -> ContainerCreateBody {
+    ///
+    /// `secrets` holds the resolved `vault:` values; only those named in
+    /// [`Self::env_secret_names`] go into the body.
+    pub fn create_body(&self, secrets: &HashMap<String, String>) -> ContainerCreateBody {
+        let mut env = self.env.clone();
+        for name in &self.env_secret_names {
+            if let Some(value) = secrets.get(name) {
+                env.push(format!("{name}={value}"));
+            }
+        }
         ContainerCreateBody {
             image: Some(self.image.clone()),
             cmd: Some(self.cmd.clone()),
-            env: Some(self.env.clone()),
+            env: Some(env),
             user: Some(self.user.clone()),
             working_dir: self.working_dir.clone(),
             labels: Some(self.labels.clone()),
@@ -306,10 +454,59 @@ fn container_target(target: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// A secret's variable name as a file name: letters, digits and `_`,
+/// not starting with a digit, as environment variable names are.
+fn secret_file_name(name: &str) -> Result<(), PlanError> {
+    let ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(PlanError::Invalid(format!(
+            "env name {name:?} cannot name a secret file"
+        )))
+    }
+}
+
+/// Write each named secret from `resolved` to its own 0600 file in
+/// `dir`, which is created 0700. A name missing from `resolved` is
+/// written empty, as an unresolved env value would have been passed.
+pub fn write_secret_files(
+    dir: &Path,
+    names: &[String],
+    resolved: &HashMap<String, String>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    for name in names {
+        let path = dir.join(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        std::io::Write::write_all(
+            &mut file,
+            resolved.get(name).map(String::as_bytes).unwrap_or_default(),
+        )?;
+    }
+    Ok(())
+}
+
 /// A name used as one path component on the host.
-fn path_component<'a>(name: &'a str, what: &str) -> Result<&'a str, String> {
+fn path_component<'a>(name: &'a str, what: &str) -> Result<&'a str, PlanError> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
-        return Err(format!("{what} {name:?} cannot name a scratch directory"));
+        return Err(format!("{what} {name:?} cannot name a host directory").into());
     }
     Ok(name)
 }
@@ -334,6 +531,8 @@ fn container_user() -> String {
 pub struct ContainerHandle {
     pub docker: Docker,
     pub id: String,
+    /// Its secret files, removed with it.
+    pub secrets_dir: Option<PathBuf>,
 }
 
 impl ContainerHandle {
@@ -352,7 +551,7 @@ impl ContainerHandle {
         self.remove().await;
     }
 
-    /// Remove the container, running or not.
+    /// Remove the container, running or not, and its secret files.
     pub async fn remove(&self) {
         let _ = self
             .docker
@@ -364,11 +563,19 @@ impl ContainerHandle {
                 }),
             )
             .await;
+        if let Some(dir) = &self.secrets_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
-/// Remove every container `instance` left behind. Returns how many.
-pub async fn sweep(docker: &Docker, instance: &str) -> usize {
+/// Remove every container `host`'s instance left behind, and its
+/// secret files. Returns how many containers.
+pub async fn sweep(docker: &Docker, host: &SandboxHost) -> usize {
+    if let Some(root) = host.secrets_root() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let instance = &host.instance;
     let filters = HashMap::from([(
         "label".to_string(),
         vec![format!("{LABEL_INSTANCE}={instance}")],
@@ -388,6 +595,7 @@ pub async fn sweep(docker: &Docker, instance: &str) -> usize {
         ContainerHandle {
             docker: docker.clone(),
             id,
+            secrets_dir: None,
         }
         .remove()
         .await;
@@ -407,10 +615,11 @@ mod tests {
             instance: instance_id(data_dir),
             data_dir: data_dir.to_path_buf(),
             runtime: Some("runsc".into()),
+            secrets_base: Some(data_dir.join("ram")),
         }
     }
 
-    fn plan(host: &SandboxHost, block: &ContainerSandbox) -> Result<ContainerPlan, String> {
+    fn plan(host: &SandboxHost, block: &ContainerSandbox) -> Result<ContainerPlan, PlanError> {
         ContainerPlan::new(
             host,
             "agent-1",
@@ -450,7 +659,7 @@ mod tests {
         let dirs = tempfile::tempdir().unwrap();
         let host = host(dirs.path());
         let plan = plan(&host, &block(&dirs)).unwrap();
-        let body = plan.create_body();
+        let body = plan.create_body(&HashMap::new());
         let host_config = body.host_config.as_ref().unwrap();
 
         assert_eq!(body.image.as_deref(), Some("node:22-slim"));
@@ -603,6 +812,151 @@ mod tests {
         assert!(result.is_err());
     }
 
+    fn vault_env() -> HashMap<String, String> {
+        HashMap::from([
+            ("GITHUB_TOKEN".to_string(), "vault:github-token".to_string()),
+            ("LOG".to_string(), "info".to_string()),
+        ])
+    }
+
+    fn resolved() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                "GITHUB_TOKEN".to_string(),
+                "resolved-token-value".to_string(),
+            ),
+            ("LOG".to_string(), "info".to_string()),
+        ])
+    }
+
+    fn plan_with_env(
+        host: &SandboxHost,
+        block: &ContainerSandbox,
+        env: &HashMap<String, String>,
+    ) -> Result<ContainerPlan, PlanError> {
+        ContainerPlan::new(host, "agent-1", "github", "node", &[], env, block)
+    }
+
+    #[test]
+    fn a_vault_value_is_delivered_as_a_file_by_default() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        let plan = plan_with_env(&host, &block(&dirs), &vault_env()).unwrap();
+
+        assert_eq!(
+            plan.env,
+            [
+                format!("GITHUB_TOKEN_FILE={SECRETS_TARGET}/GITHUB_TOKEN"),
+                "LOG=info".to_string()
+            ]
+        );
+        assert_eq!(plan.secret_file_names, ["GITHUB_TOKEN"]);
+        assert!(plan.env_secret_names.is_empty());
+        assert_eq!(
+            plan.secrets_dir.as_deref(),
+            Some(
+                dirs.path()
+                    .join("ram")
+                    .join(format!("wirken-mcp-{}", host.instance))
+                    .join("agent-1/github")
+                    .as_path()
+            )
+        );
+        assert_eq!(mount(&plan, SECRETS_TARGET).unwrap().read_only, Some(true));
+        let body_env = plan.create_body(&resolved()).env.unwrap();
+        assert!(
+            body_env.iter().all(|e| !e.contains("resolved-token-value")),
+            "{body_env:?}"
+        );
+    }
+
+    #[test]
+    fn a_secret_listed_in_secrets_in_env_goes_into_the_environment() {
+        let dirs = tempfile::tempdir().unwrap();
+        let mut block = block(&dirs);
+        block.secrets_in_env = vec!["GITHUB_TOKEN".into()];
+        let plan = plan_with_env(&host(dirs.path()), &block, &vault_env()).unwrap();
+
+        assert_eq!(plan.env_secret_names, ["GITHUB_TOKEN"]);
+        assert!(plan.secret_file_names.is_empty());
+        assert!(plan.secrets_dir.is_none());
+        assert!(mount(&plan, SECRETS_TARGET).is_none());
+        let body_env = plan.create_body(&resolved()).env.unwrap();
+        assert!(body_env.contains(&"GITHUB_TOKEN=resolved-token-value".to_string()));
+    }
+
+    #[test]
+    fn secrets_in_env_must_name_a_vault_value() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        for name in ["LOG", "MISSING"] {
+            let mut block = block(&dirs);
+            block.secrets_in_env = vec![name.into()];
+            assert!(
+                matches!(
+                    plan_with_env(&host, &block, &vault_env()),
+                    Err(PlanError::Invalid(_))
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_secret_whose_name_cannot_be_a_file_name_is_refused() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        for name in ["A/B", "..", "1TOKEN", ""] {
+            let env = HashMap::from([(name.to_string(), "vault:x".to_string())]);
+            assert!(
+                matches!(
+                    plan_with_env(&host, &block(&dirs), &env),
+                    Err(PlanError::Invalid(_))
+                ),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_memory_backed_dir_file_secrets_are_unavailable() {
+        let dirs = tempfile::tempdir().unwrap();
+        let mut host = host(dirs.path());
+        host.secrets_base = None;
+        assert!(matches!(
+            plan_with_env(&host, &block(&dirs), &vault_env()),
+            Err(PlanError::Unavailable(_))
+        ));
+        let no_secrets = HashMap::from([("LOG".to_string(), "info".to_string())]);
+        assert!(plan_with_env(&host, &block(&dirs), &no_secrets).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_files_are_0600_in_a_0700_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dirs = tempfile::tempdir().unwrap();
+        let dir = dirs.path().join("secrets");
+        write_secret_files(&dir, &["GITHUB_TOKEN".to_string()], &resolved()).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("GITHUB_TOKEN")), 0o600);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("GITHUB_TOKEN")).unwrap(),
+            "resolved-token-value"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dev_shm_is_found_as_memory_backed_and_proc_is_not() {
+        if Path::new("/dev/shm").exists() {
+            assert!(is_tmpfs(Path::new("/dev/shm")));
+            assert!(ram_backed_dir().is_some());
+        }
+        assert!(!is_tmpfs(Path::new("/proc")));
+    }
+
     #[test]
     fn instance_ids_are_stable_and_differ_by_data_dir() {
         let a = instance_id(Path::new("/srv/wirken-a"));
@@ -653,6 +1007,7 @@ mod live_tests {
             instance: instance_id(data_dir),
             data_dir: data_dir.to_path_buf(),
             runtime: None,
+            secrets_base: Some(data_dir.join("ram")),
         }
     }
 
@@ -689,7 +1044,7 @@ mod live_tests {
             &host,
             r#"read line; printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'; read rest"#,
         );
-        let mut transport = StdioTransport::spawn_container(&docker, &plan)
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &HashMap::new())
             .await
             .unwrap();
         let id = transport.container_id().unwrap().to_string();
@@ -709,6 +1064,129 @@ mod live_tests {
         assert!(!exists(&docker, &id).await, "container outlived shutdown");
     }
 
+    /// Every host process environment this test can read, joined.
+    fn readable_host_environments() -> Vec<u8> {
+        let mut all = Vec::new();
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            if entry.file_name().to_string_lossy().parse::<u32>().is_ok()
+                && let Ok(env) = std::fs::read(entry.path().join("environ"))
+            {
+                all.extend(env);
+            }
+        }
+        all
+    }
+
+    fn contains(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|w| w == needle.as_bytes())
+    }
+
+    /// The server reads its secret from the mounted file. The value is
+    /// in no host process environment this user can read, the
+    /// container's own processes included, and not in the container's
+    /// recorded config. Its file is gone after shutdown.
+    #[tokio::test]
+    async fn a_secret_file_reaches_the_server_and_no_environment() {
+        let Some(docker) = docker().await else {
+            return;
+        };
+        let data = tempfile::tempdir().unwrap();
+        let host = host(&docker, data.path());
+        let secret = format!("wirken-test-secret-{}", instance_id(data.path()));
+        let plan = ContainerPlan::new(
+            &host,
+            "agent-1",
+            "echo",
+            "sh",
+            &[
+                "-c".to_string(),
+                r#"read line; v=$(cat "$TOKEN_FILE"); printf '{"jsonrpc":"2.0","id":1,"result":{"v":"%s"}}\n' "$v"; read rest"#
+                    .to_string(),
+            ],
+            &HashMap::from([("TOKEN".to_string(), "vault:token".to_string())]),
+            &ContainerSandbox {
+                image: Some(IMAGE.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret.clone())]);
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &secrets)
+            .await
+            .unwrap();
+        let id = transport.container_id().unwrap().to_string();
+
+        let response = transport.request("ping", None).await.unwrap();
+        assert_eq!(response.result, Some(serde_json::json!({ "v": secret })));
+
+        assert!(
+            !contains(&readable_host_environments(), &secret),
+            "the secret is in a host process environment"
+        );
+        let config_env = docker
+            .inspect_container(&id, None)
+            .await
+            .unwrap()
+            .config
+            .unwrap()
+            .env
+            .unwrap_or_default();
+        assert!(
+            config_env.iter().all(|e| !e.contains(&secret)),
+            "{config_env:?}"
+        );
+
+        transport.shutdown().await;
+        assert!(
+            !plan.secrets_dir.unwrap().exists(),
+            "secret files outlived shutdown"
+        );
+    }
+
+    /// A secret listed in `secrets_in_env` is in the container's
+    /// environment, where `docker inspect` shows it: the exposure the
+    /// operator opted into, which the start row names.
+    #[tokio::test]
+    async fn an_env_delivered_secret_is_in_the_container_config() {
+        let Some(docker) = docker().await else {
+            return;
+        };
+        let data = tempfile::tempdir().unwrap();
+        let host = host(&docker, data.path());
+        let secret = format!("wirken-test-env-secret-{}", instance_id(data.path()));
+        let plan = ContainerPlan::new(
+            &host,
+            "agent-1",
+            "echo",
+            "sh",
+            &["-c".to_string(), "sleep 300".to_string()],
+            &HashMap::from([("TOKEN".to_string(), "vault:token".to_string())]),
+            &ContainerSandbox {
+                image: Some(IMAGE.into()),
+                secrets_in_env: vec!["TOKEN".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret.clone())]);
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &secrets)
+            .await
+            .unwrap();
+        let id = transport.container_id().unwrap().to_string();
+        let config_env = docker
+            .inspect_container(&id, None)
+            .await
+            .unwrap()
+            .config
+            .unwrap()
+            .env
+            .unwrap_or_default();
+        transport.shutdown().await;
+        assert!(config_env.contains(&format!("TOKEN={secret}")));
+    }
+
     /// A container a dead proxy left behind is removed by the sweep the
     /// next proxy for the same data directory runs.
     #[tokio::test]
@@ -718,15 +1196,16 @@ mod live_tests {
         };
         let data = tempfile::tempdir().unwrap();
         let host = host(&docker, data.path());
-        let transport = StdioTransport::spawn_container(&docker, &plan(&host, "sleep 300"))
-            .await
-            .unwrap();
+        let transport =
+            StdioTransport::spawn_container(&docker, &plan(&host, "sleep 300"), &HashMap::new())
+                .await
+                .unwrap();
         let id = transport.container_id().unwrap().to_string();
         // The proxy dies without shutting the server down.
         drop(transport);
         assert!(exists(&docker, &id).await);
 
-        assert!(sweep(&docker, &host.instance).await >= 1);
+        assert!(sweep(&docker, &host).await >= 1);
         assert!(!exists(&docker, &id).await, "the sweep left the container");
     }
 }
