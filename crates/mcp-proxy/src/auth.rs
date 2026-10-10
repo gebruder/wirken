@@ -17,6 +17,8 @@
 //!
 //! Every credential comes from what the gateway handed the proxy at
 //! spawn ([`crate::credentials`]); the proxy never opens the vault.
+//! When a server refuses a credential, [`AuthProvider::refused`] asks
+//! the gateway for its current value, which the next request carries.
 //! `OAuth2Auth` asks for a refresh on the request path. Every
 //! `OAuth2Auth` holds a shared per-credential [`tokio::sync::Mutex`]
 //! provided by the proxy registry, so one request per credential asks
@@ -44,6 +46,14 @@ use crate::oauth::OAuthCredential;
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
     async fn authorization_header(&mut self) -> Result<Option<HeaderValue>, ProxyError>;
+
+    /// The server refused the credential the last header carried. Ask
+    /// the gateway for the vault's current value, so a credential
+    /// rotated there reaches the next request. Returns whether there
+    /// was a credential to ask about.
+    async fn refused(&mut self) -> Result<bool, ProxyError> {
+        Ok(false)
+    }
 
     /// OAuth-credential context for typed error reporting. Returns
     /// `Some((credential_name, provider_name))` when this auth
@@ -126,6 +136,11 @@ impl AuthProvider for BearerAuth {
         let header = bearer_header(secret.expose())?;
         Ok(Some(header))
     }
+
+    async fn refused(&mut self) -> Result<bool, ProxyError> {
+        self.credentials.refetch(&self.credential_name).await?;
+        Ok(true)
+    }
 }
 
 /// OAuth2 provider. Reads the access token the gateway handed over,
@@ -205,6 +220,14 @@ impl AuthProvider for OAuth2Auth {
 
         let header = bearer_header(&cred.access_token)?;
         Ok(Some(header))
+    }
+
+    /// A credential the operator authorized again replaces the one held
+    /// here. Under the refresh lock, so it does not cross a refresh.
+    async fn refused(&mut self) -> Result<bool, ProxyError> {
+        let _guard = self.refresh_lock.lock().await;
+        self.credentials.refetch(&self.credential_name).await?;
+        Ok(true)
     }
 
     fn oauth_context(&self) -> Option<(String, String)> {

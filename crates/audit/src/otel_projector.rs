@@ -553,6 +553,8 @@ impl OtelProjector {
             SessionEvent::McpServerExited { .. } => Vec::new(),
             SessionEvent::McpServerRestart { .. } => Vec::new(),
             SessionEvent::McpServerRestartAbandoned { .. } => Vec::new(),
+            // A credential handed to the proxy; no span to attach it to.
+            SessionEvent::McpCredentialRefetched { .. } => Vec::new(),
             // Rides the tool result the tool span times.
             SessionEvent::EgressHookDispatched { .. } => Vec::new(),
             // Rides the tool result the tool span times.

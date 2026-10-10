@@ -1,4 +1,5 @@
-//! The gateway's side of the MCP proxy's OAuth refreshes.
+//! The gateway's side of the MCP proxy's credential requests: OAuth
+//! refreshes, and current values after a server refused a credential.
 //!
 //! Runs in the gateway, which holds the vault. The proxy asks over a
 //! socket in the gateway's socket directory. A request is served only
@@ -6,20 +7,26 @@
 //! only from the proxy's own process, checked by the peer's pid on a
 //! socket of mode 0600. Windows named pipes report no peer pid, so
 //! there the token alone admits.
-//! Only the credentials the proxy was handed can be refreshed. The
-//! refresh token never leaves the gateway: it calls the provider, writes
-//! the refreshed credential to the vault, and answers with the access
-//! token and its expiry.
+//! Only the credentials the proxy was handed can be asked for, and only
+//! the OAuth ones refreshed. The refresh token never leaves the gateway:
+//! it calls the provider, writes the refreshed credential to the vault,
+//! and answers with the access token and its expiry. A current value is
+//! sent as the vault holds it, an OAuth credential without its refresh
+//! token, and each one sent is an `mcp_credential_refetched` row naming
+//! the credential.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use wirken_audit::{MCP_CREDENTIAL_SESSION, SessionEvent, SessionId, SessionLog, TrustLevel};
 use wirken_vault::CredentialStore;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::credentials::{HandedOAuth, RefreshReply, RefreshRequest};
+use crate::credentials::{
+    HandedOAuth, RefreshReply, RefreshRequest, RequestKind, without_refresh_token,
+};
 use crate::error::ProxyError;
 use crate::oauth::{OAuthCredential, load_oauth, refresh_oauth_token, store_oauth};
 
@@ -68,15 +75,19 @@ impl RefreshListener {
     }
 }
 
-/// Everything the gateway needs to serve one proxy's refreshes.
+/// Everything the gateway needs to serve one proxy's requests.
 pub struct RefreshService {
     store: Option<Arc<std::sync::Mutex<CredentialStore>>>,
-    /// The OAuth credentials the proxy was handed.
-    allowed: BTreeSet<String>,
+    /// The credentials the proxy was handed.
+    handed: BTreeSet<String>,
+    /// Which of them are OAuth credentials.
+    oauth: BTreeSet<String>,
     token: Zeroizing<String>,
     /// The proxy's pid; zero until it is spawned.
     proxy_pid: Arc<AtomicU32>,
     refresher: Arc<dyn Refresher>,
+    /// Where each current value sent is recorded.
+    audit: Option<Arc<dyn SessionLog>>,
     /// One refresh per credential at a time.
     locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -84,16 +95,20 @@ pub struct RefreshService {
 impl RefreshService {
     pub fn new(
         store: Option<Arc<std::sync::Mutex<CredentialStore>>>,
-        allowed: BTreeSet<String>,
+        handed: BTreeSet<String>,
+        oauth: BTreeSet<String>,
         token: Zeroizing<String>,
         proxy_pid: Arc<AtomicU32>,
+        audit: Option<Arc<dyn SessionLog>>,
     ) -> Self {
         Self {
             store,
-            allowed,
+            handed,
+            oauth,
             token,
             proxy_pid,
             refresher: Arc::new(ProviderRefresher),
+            audit,
             locks: Default::default(),
         }
     }
@@ -137,26 +152,37 @@ impl RefreshService {
             .read_line(&mut line)
             .await?;
 
-        let reply = match self.admit(peer, &line) {
+        let mut reply = match self.admit(peer, &line) {
             Err(reason) => {
-                tracing::warn!("MCP proxy refresh request refused: {reason}");
+                tracing::warn!("MCP proxy credential request refused: {reason}");
                 RefreshReply::Refused { reason }
             }
-            Ok(name) => match self.refresh(&name).await {
+            Ok((name, RequestKind::Refresh)) => match self.refresh(&name).await {
                 Ok(cred) => RefreshReply::Refreshed(HandedOAuth::from_credential(&cred)),
                 Err(reason) => {
                     tracing::warn!("MCP proxy refresh of '{name}' failed: {reason}");
                     RefreshReply::Refused { reason }
                 }
             },
+            Ok((name, RequestKind::Current)) => match self.current(&name) {
+                Ok(value) => RefreshReply::Current { value },
+                Err(reason) => {
+                    tracing::warn!("MCP proxy fetch of '{name}' failed: {reason}");
+                    RefreshReply::Refused { reason }
+                }
+            },
         };
         let mut out = Zeroizing::new(serde_json::to_vec(&reply).unwrap_or_default());
+        if let RefreshReply::Current { value } = &mut reply {
+            value.zeroize();
+        }
         out.push(b'\n');
         wr.write_all(&out).await
     }
 
-    /// The credential name a request may refresh, or why it may not.
-    fn admit(&self, peer: Option<i32>, line: &str) -> Result<String, String> {
+    /// The credential a request names and what it asks, or why it may
+    /// not be served.
+    fn admit(&self, peer: Option<i32>, line: &str) -> Result<(String, RequestKind), String> {
         let expected = self.proxy_pid.load(Ordering::Acquire);
         if expected == 0 {
             return Err("the MCP proxy is not running".to_string());
@@ -170,13 +196,49 @@ impl RefreshService {
         if !same_bytes(request.token.as_bytes(), self.token.as_bytes()) {
             return Err("wrong refresh token".to_string());
         }
-        if !self.allowed.contains(request.credential) {
+        if !self.handed.contains(request.credential) {
+            return Err(format!(
+                "'{}' is not a credential the proxy was handed",
+                request.credential
+            ));
+        }
+        if request.kind == RequestKind::Refresh && !self.oauth.contains(request.credential) {
             return Err(format!(
                 "'{}' is not an OAuth credential the proxy was handed",
                 request.credential
             ));
         }
-        Ok(request.credential.to_string())
+        Ok((request.credential.to_string(), request.kind))
+    }
+
+    /// The vault's current value of `name`, as the proxy may hold it,
+    /// recorded as sent.
+    fn current(&self, name: &str) -> Result<String, String> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| "the gateway has no vault open".to_string())?;
+        let (secret, _) = store
+            .lock()
+            .map_err(|_| "vault mutex poisoned".to_string())?
+            .retrieve(name)
+            .map_err(|e| e.to_string())?;
+        let value = if self.oauth.contains(name) {
+            without_refresh_token(secret.expose())
+        } else {
+            secret.expose().to_string()
+        };
+        if let Some(log) = &self.audit {
+            let lane = log.handle_for(SessionId::new(MCP_CREDENTIAL_SESSION));
+            let event = SessionEvent::McpCredentialRefetched {
+                credential: name.to_string(),
+            };
+            if let Err(e) = log.append(&lane, TrustLevel::System, event) {
+                tracing::warn!("could not record the MCP proxy's fetch of '{name}': {e}");
+            }
+        }
+        tracing::info!("sent the MCP proxy the current value of credential '{name}'");
+        Ok(value)
     }
 
     /// Refresh `name` and write it to the vault, unless the vault already
@@ -260,7 +322,23 @@ mod tests {
         _dir: tempfile::TempDir,
         store: Arc<std::sync::Mutex<CredentialStore>>,
         socket: std::path::PathBuf,
+        audit: Arc<dyn SessionLog>,
         task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Gateway {
+        /// The rows on the gateway's MCP credential lane.
+        fn rows(&self) -> Vec<SessionEvent> {
+            let lane = self
+                .audit
+                .handle_for(SessionId::new(MCP_CREDENTIAL_SESSION));
+            self.audit
+                .get_since(&lane, 0)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.event)
+                .collect()
+        }
     }
 
     impl Drop for Gateway {
@@ -269,8 +347,9 @@ mod tests {
         }
     }
 
-    /// A vault holding an expired OAuth credential, and the refresh
-    /// service over it, admitting this process as the proxy.
+    /// A vault holding an expired OAuth credential and a bearer token,
+    /// and the refresh service over it, admitting this process as the
+    /// proxy, which was handed both.
     fn gateway(token: &str, proxy_pid: u32) -> Gateway {
         let dir = tempfile::tempdir().unwrap();
         let store = CredentialStore::open_with_key(
@@ -290,15 +369,28 @@ mod tests {
             },
         )
         .unwrap();
+        store
+            .store(
+                "linear-token",
+                "mcp",
+                &VaultSecret::new("tok-1".into()),
+                None,
+                None,
+            )
+            .unwrap();
         let store = Arc::new(std::sync::Mutex::new(store));
         let socket = dir.path().join("refresh.sock");
         let listener = RefreshListener::bind(&socket).unwrap();
+        let audit: Arc<dyn SessionLog> =
+            Arc::new(wirken_audit::SqliteSessionLog::open_in_memory().unwrap());
         let service = Arc::new(
             RefreshService::new(
                 Some(store.clone()),
+                BTreeSet::from(["linear-oauth".to_string(), "linear-token".to_string()]),
                 BTreeSet::from(["linear-oauth".to_string()]),
                 Zeroizing::new(token.to_string()),
                 Arc::new(AtomicU32::new(proxy_pid)),
+                Some(audit.clone()),
             )
             .with_refresher(Arc::new(FakeProvider)),
         );
@@ -307,6 +399,7 @@ mod tests {
             _dir: dir,
             store,
             socket,
+            audit,
             task,
         }
     }
@@ -322,7 +415,10 @@ mod tests {
             .unwrap();
         let handed = without_refresh_token(stored.expose());
         Arc::new(ProxyCredentials::new(
-            HashMap::from([("linear-oauth".to_string(), VaultSecret::new(handed))]),
+            HashMap::from([
+                ("linear-oauth".to_string(), VaultSecret::new(handed)),
+                ("linear-token".to_string(), VaultSecret::new("tok-1".into())),
+            ]),
             Some(GatewayLink::new(
                 gateway.socket.clone(),
                 Zeroizing::new(token.to_string()),
@@ -398,27 +494,18 @@ mod tests {
     #[tokio::test]
     async fn only_a_handed_oauth_credential_can_be_refreshed() {
         let gateway = gateway("t0k3n", std::process::id());
-        let credentials = Arc::new(ProxyCredentials::new(
-            HashMap::from([(
-                "telegram-token".to_string(),
-                VaultSecret::new(
-                    serde_json::to_string(&OAuthCredential {
-                        access_token: "x".into(),
-                        refresh_token: String::new(),
-                        expires_at: 1,
-                        scope: String::new(),
-                        provider: "linear".into(),
-                    })
-                    .unwrap(),
-                ),
-            )]),
-            Some(GatewayLink::new(
-                gateway.socket.clone(),
-                Zeroizing::new("t0k3n".to_string()),
-            )),
-        ));
+        let credentials = proxy(&gateway, "t0k3n");
         let err = credentials
             .refresh_oauth("telegram-token")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not a credential the proxy was handed"),
+            "{err}"
+        );
+        let err = credentials
+            .refresh_oauth("linear-token")
             .await
             .unwrap_err()
             .to_string();
@@ -426,5 +513,80 @@ mod tests {
             err.contains("not an OAuth credential the proxy was handed"),
             "{err}"
         );
+    }
+
+    /// The proxy holds the rotated value after asking, the vault's
+    /// value and no other, and the gateway's row names the credential
+    /// without its value.
+    #[tokio::test]
+    async fn the_proxy_gets_a_rotated_value_and_the_row_names_only_the_credential() {
+        let gateway = gateway("t0k3n", std::process::id());
+        let credentials = proxy(&gateway, "t0k3n");
+        gateway
+            .store
+            .lock()
+            .unwrap()
+            .rotate("linear-token", &VaultSecret::new("tok-2".into()), None)
+            .unwrap();
+        assert_eq!(credentials.get("linear-token").unwrap().expose(), "tok-1");
+
+        credentials.refetch("linear-token").await.unwrap();
+        assert_eq!(credentials.get("linear-token").unwrap().expose(), "tok-2");
+
+        let rows = gateway.rows();
+        assert_eq!(rows.len(), 1, "one row per value sent: {rows:?}");
+        assert!(
+            matches!(&rows[0], SessionEvent::McpCredentialRefetched { credential } if credential == "linear-token"),
+            "{rows:?}"
+        );
+        let json = serde_json::to_string(&rows).unwrap();
+        assert!(!json.contains("tok-"), "the row carries a value: {json}");
+    }
+
+    /// An OAuth credential's current value comes without its refresh
+    /// token.
+    #[tokio::test]
+    async fn a_current_oauth_value_has_no_refresh_token() {
+        let gateway = gateway("t0k3n", std::process::id());
+        let credentials = proxy(&gateway, "t0k3n");
+        credentials.refetch("linear-oauth").await.unwrap();
+        let held = credentials.get("linear-oauth").unwrap();
+        assert!(held.expose().contains("AT-1"), "{}", held.expose());
+        assert!(!held.expose().contains("RT-1"), "{}", held.expose());
+    }
+
+    /// Asking for a value goes through the same checks as a refresh,
+    /// and a refused request sends nothing and writes no row.
+    #[tokio::test]
+    async fn a_current_value_is_refused_like_a_refresh() {
+        let gateway = gateway("t0k3n", std::process::id());
+        let credentials = proxy(&gateway, "t0k3n");
+        let err = credentials
+            .refetch("telegram-token")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not a credential the proxy was handed"),
+            "{err}"
+        );
+
+        let err = proxy(&gateway, "guess")
+            .refetch("linear-token")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("wrong refresh token"), "{err}");
+
+        let other = self::gateway("t0k3n", std::process::id() + 1);
+        let err = proxy(&other, "t0k3n")
+            .refetch("linear-token")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not the MCP proxy"), "{err}");
+
+        assert!(gateway.rows().is_empty());
+        assert!(other.rows().is_empty());
     }
 }

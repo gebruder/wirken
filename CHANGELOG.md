@@ -33,9 +33,17 @@ tagged.
   the access token. No process the gateway starts holds the vault
   passphrase or device key: the proxy spawn drops
   `WIRKEN_VAULT_PASSPHRASE` as adapter spawns do, and the skill loader's
-  `which` check runs in-process instead of as a child. A bearer token or
-  stdio value rotated in the vault reaches the proxy at the next gateway
-  start; before, the proxy read the vault on each request.
+  `which` check runs in-process instead of as a child. When an HTTP MCP
+  server refuses a credential (a 401, or a `WWW-Authenticate` challenge
+  with `error="invalid_token"`), the proxy asks the gateway on the same
+  socket, under the same checks, for that credential's current value; the
+  gateway sends it only for a credential it handed the proxy, an OAuth one
+  without its refresh token, and writes an `mcp_credential_refetched` row
+  on the `gateway-mcp-credentials` lane naming the credential, never the
+  value. The refused call fails and the next one carries the value rotated
+  in the vault, with no restart. A stdio server is given its `vault:`
+  values when it starts, so a value rotated in the vault reaches it at the
+  next gateway start.
 - The `exec` egress sidecar runs as the operator's uid, and its broker
   socket is mode 0600 in a 0700 directory. Before, the sidecar ran as its
   image's user and the socket was 0666 in a 0777 directory, so for the

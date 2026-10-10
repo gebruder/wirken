@@ -133,14 +133,21 @@ serves only the proxy's own process, checked by its pid, carrying a token it
 handed that proxy at spawn, and only for the OAuth credentials the proxy was
 handed. On Windows, where named pipes report no peer pid, the token alone
 admits. The gateway holds the refresh token, calls the provider, writes the
-refreshed credential to the vault, and answers with the access token.
+refreshed credential to the vault, and answers with the access token. When an
+HTTP server refuses a credential, with a 401 or an `invalid_token` challenge,
+the proxy asks on the same socket, under the same checks, for that credential's
+current vault value. The gateway sends it, an OAuth credential without its
+refresh token, and records an `mcp_credential_refetched` row naming the
+credential, never the value; the refused call fails and the next one carries
+the new value.
 
 No child process holds the vault passphrase or the vault's device key. The
 gateway is the only process that opens the vault; every process it starts,
 adapters, the MCP proxy, the host `exec` shell, has `WIRKEN_VAULT_PASSPHRASE`
 removed from its environment or starts with a cleared one. A credential rotated
-in the vault reaches an adapter at its next spawn and the MCP proxy at the next
-gateway start. See [credentials.md](credentials.md).
+in the vault reaches an adapter at its next spawn, an HTTP MCP server at the
+first call it refuses, and a stdio MCP server at the next gateway start. See
+[credentials.md](credentials.md).
 
 ## 3. Permissions
 

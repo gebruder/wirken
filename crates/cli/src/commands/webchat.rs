@@ -4305,6 +4305,9 @@ pub fn session_events(
             SessionEvent::McpServerExited { .. } => None,
             SessionEvent::McpServerRestart { .. } => None,
             SessionEvent::McpServerRestartAbandoned { .. } => None,
+            // A credential the gateway sent the MCP proxy again; on the
+            // gateway's own lane, not a conversation's.
+            SessionEvent::McpCredentialRefetched { .. } => None,
             // The verdict rides the tool row it gated.
             SessionEvent::EgressHookDispatched { .. } => None,
             // The tool row already carries the output as redacted.

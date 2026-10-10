@@ -7,8 +7,9 @@
 //! with their refresh token removed. When an OAuth access token nears
 //! expiry, the proxy asks the gateway to refresh it; the gateway holds
 //! the refresh token, calls the provider, writes the vault, and answers
-//! with the new access token. A credential rotated in the vault reaches
-//! the proxy at the next gateway start.
+//! with the new access token. When an MCP server refuses a credential,
+//! the proxy asks the gateway for its current vault value, so a
+//! credential rotated in the vault reaches the proxy without a restart.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -87,7 +88,19 @@ impl ProxyCredentials {
                 "no gateway to refresh oauth credential '{name}' through"
             ))
         })?;
-        let refreshed = gateway.refresh(name).await?;
+        let refreshed = match gateway.ask(name, RequestKind::Refresh).await? {
+            RefreshReply::Refreshed(cred) => cred.into_credential(),
+            RefreshReply::Current { .. } => {
+                return Err(ProxyError::Vault(format!(
+                    "the gateway answered the refresh of '{name}' with a current value"
+                )));
+            }
+            RefreshReply::Refused { reason } => {
+                return Err(ProxyError::Vault(format!(
+                    "the gateway did not refresh '{name}': {reason}"
+                )));
+            }
+        };
         let json = serde_json::to_string(&refreshed)
             .map_err(|e| ProxyError::Vault(format!("serialize oauth credential: {e}")))?;
         self.values
@@ -95,6 +108,32 @@ impl ProxyCredentials {
             .expect("credentials mutex")
             .insert(name.to_string(), VaultSecret::new(json));
         Ok(refreshed)
+    }
+
+    /// Have the gateway send the vault's current value of `name`, after
+    /// a server refused the one held here, and keep it in its place.
+    pub async fn refetch(&self, name: &str) -> Result<(), ProxyError> {
+        let gateway = self.gateway.as_ref().ok_or_else(|| {
+            ProxyError::Vault(format!("no gateway to fetch credential '{name}' from"))
+        })?;
+        let value = match gateway.ask(name, RequestKind::Current).await? {
+            RefreshReply::Current { value } => VaultSecret::new(value),
+            RefreshReply::Refreshed(_) => {
+                return Err(ProxyError::Vault(format!(
+                    "the gateway answered the fetch of '{name}' with a refresh"
+                )));
+            }
+            RefreshReply::Refused { reason } => {
+                return Err(ProxyError::Vault(format!(
+                    "the gateway did not send '{name}': {reason}"
+                )));
+            }
+        };
+        self.values
+            .lock()
+            .expect("credentials mutex")
+            .insert(name.to_string(), value);
+        Ok(())
     }
 }
 
@@ -109,7 +148,8 @@ impl GatewayLink {
         Self { socket, token }
     }
 
-    async fn refresh(&self, name: &str) -> Result<OAuthCredential, ProxyError> {
+    /// One request to the gateway and its answer.
+    async fn ask(&self, name: &str, kind: RequestKind) -> Result<RefreshReply, ProxyError> {
         let exchange = async {
             let stream = wirken_ipc::connect(&self.socket).await.map_err(|e| {
                 ProxyError::Vault(format!(
@@ -121,6 +161,7 @@ impl GatewayLink {
             let request = RefreshRequest {
                 token: self.token.as_str(),
                 credential: name,
+                kind,
             };
             let mut line = Zeroizing::new(
                 serde_json::to_vec(&request)
@@ -129,38 +170,46 @@ impl GatewayLink {
             line.push(b'\n');
             wr.write_all(&line)
                 .await
-                .map_err(|e| ProxyError::Vault(format!("send refresh request: {e}")))?;
+                .map_err(|e| ProxyError::Vault(format!("send request to the gateway: {e}")))?;
             let mut reply = Zeroizing::new(String::new());
             BufReader::new(rd)
                 .read_line(&mut reply)
                 .await
-                .map_err(|e| ProxyError::Vault(format!("read refresh reply: {e}")))?;
-            match serde_json::from_str::<RefreshReply>(&reply)
-                .map_err(|e| ProxyError::Vault(format!("parse refresh reply: {e}")))?
-            {
-                RefreshReply::Refreshed(cred) => Ok(cred.into_credential()),
-                RefreshReply::Refused { reason } => Err(ProxyError::Vault(format!(
-                    "the gateway did not refresh '{name}': {reason}"
-                ))),
-            }
+                .map_err(|e| ProxyError::Vault(format!("read the gateway's reply: {e}")))?;
+            serde_json::from_str::<RefreshReply>(&reply)
+                .map_err(|e| ProxyError::Vault(format!("parse the gateway's reply: {e}")))
         };
         tokio::time::timeout(REFRESH_TIMEOUT, exchange)
             .await
             .map_err(|_| {
                 ProxyError::Vault(format!(
-                    "the gateway did not answer the refresh of '{name}' within {}s",
+                    "the gateway did not answer about '{name}' within {}s",
                     REFRESH_TIMEOUT.as_secs()
                 ))
             })?
     }
 }
 
-/// One refresh request: the token that admits the proxy, and the
-/// credential to refresh. One request per connection.
+/// One request: the token that admits the proxy, the credential, and
+/// what to do with it. One request per connection.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct RefreshRequest<'a> {
     pub token: &'a str,
     pub credential: &'a str,
+    #[serde(default)]
+    pub kind: RequestKind,
+}
+
+/// What the proxy asks for.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RequestKind {
+    /// Refresh an OAuth credential near expiry.
+    #[default]
+    Refresh,
+    /// The vault's current value, after a server refused the one the
+    /// proxy holds.
+    Current,
 }
 
 /// The gateway's answer.
@@ -168,7 +217,14 @@ pub(crate) struct RefreshRequest<'a> {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RefreshReply {
     Refreshed(HandedOAuth),
-    Refused { reason: String },
+    /// The vault's current value; an OAuth credential without its
+    /// refresh token.
+    Current {
+        value: String,
+    },
+    Refused {
+        reason: String,
+    },
 }
 
 /// An OAuth credential as the proxy may hold it: everything but the

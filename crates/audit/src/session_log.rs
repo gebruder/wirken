@@ -1868,6 +1868,11 @@ pub enum SessionEvent {
         last_cause: McpServerRestartCause,
         last_detail: String,
     },
+    /// The gateway gave the MCP proxy the vault's current value of
+    /// `credential`, which the proxy asked for after an MCP server
+    /// refused it. Names the credential, never its value. Written on
+    /// the [`MCP_CREDENTIAL_SESSION`] lane.
+    McpCredentialRefetched { credential: String },
     /// One egress-hook invocation completed. Emitted per hook per
     /// tool result in registration order (parallel to
     /// `HookDispatched` on the veto path). The invocation runs
@@ -2190,6 +2195,11 @@ pub enum SandboxEgressModeLabel {
 /// [`SessionEvent::AdapterRestart`] and
 /// [`SessionEvent::AdapterRestartAbandoned`].
 pub const ADAPTER_LIFECYCLE_SESSION: &str = "gateway-adapters";
+
+/// The session lane the gateway writes the MCP proxy's credential
+/// requests on: [`SessionEvent::McpCredentialRefetched`]. The proxy
+/// writes its own rows on `gateway-mcp`; each lane has one writer.
+pub const MCP_CREDENTIAL_SESSION: &str = "gateway-mcp-credentials";
 
 /// Why an adapter's gateway connection ended.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -72,6 +72,8 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 /// - `McpServerExited`, `McpServerRestart`, `McpServerRestartAbandoned`:
 ///   a contained server's container exiting, being started again, and
 ///   being given up on.
+/// - `McpCredentialRefetched`: the gateway giving the MCP proxy a
+///   credential's current vault value after a server refused it.
 /// - `EgressHookDispatched`, `ToolOutputRedacted`: post-execution
 ///   egress-hook outcomes and redaction events. Plaintext is never
 ///   on the row; both carry sha256 hashes only.
@@ -137,6 +139,7 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::McpServerExited { .. } => true,
         SessionEvent::McpServerRestart { .. } => true,
         SessionEvent::McpServerRestartAbandoned { .. } => true,
+        SessionEvent::McpCredentialRefetched { .. } => true,
         SessionEvent::EgressHookDispatched { .. } => true,
         SessionEvent::ToolOutputRedacted { .. } => true,
         SessionEvent::BudgetExceeded { .. } => true,
@@ -299,6 +302,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::McpServerExited { .. } => "mcp_server_exited",
         SessionEvent::McpServerRestart { .. } => "mcp_server_restart",
         SessionEvent::McpServerRestartAbandoned { .. } => "mcp_server_restart_abandoned",
+        SessionEvent::McpCredentialRefetched { .. } => "mcp_credential_refetched",
         SessionEvent::EgressHookDispatched { .. } => "egress_hook_dispatched",
         SessionEvent::SandboxEgressVerdict { .. } => "sandbox_egress_verdict",
         SessionEvent::SandboxEgressUnsupported { .. } => "sandbox_egress_unsupported",

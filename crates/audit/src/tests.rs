@@ -3644,6 +3644,9 @@ fn every_session_event() -> Vec<SessionEvent> {
             last_cause: crate::session_log::McpServerRestartCause::StartFailed,
             last_detail: String::new(),
         },
+        SessionEvent::McpCredentialRefetched {
+            credential: String::new(),
+        },
         SessionEvent::AdapterConnect {
             adapter_id: String::new(),
             channel: String::new(),
@@ -3745,12 +3748,13 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::McpServerExited { .. } => "McpServerExited",
         SessionEvent::McpServerRestart { .. } => "McpServerRestart",
         SessionEvent::McpServerRestartAbandoned { .. } => "McpServerRestartAbandoned",
+        SessionEvent::McpCredentialRefetched { .. } => "McpCredentialRefetched",
         SessionEvent::McpEntryVerified { .. } => "McpEntryVerified",
     }
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 65;
+const SESSION_EVENT_VARIANTS: usize = 66;
 
 /// The list covers the enum.
 #[test]

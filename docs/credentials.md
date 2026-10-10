@@ -32,8 +32,14 @@ feature keep it in the OS keychain. Two kinds of credentials live in it:
   gateway refreshes only credentials it handed the proxy, calls the
   provider, writes the vault, and answers with the access token. The
   proxy gets no vault passphrase and never holds the device key or a
-  refresh token. A credential rotated in the vault reaches it at the
-  next gateway start.
+  refresh token. When an HTTP server refuses a credential (a 401, or
+  `error="invalid_token"`), the proxy asks the gateway, on the same
+  socket and under the same checks, for its current value, and the next
+  call carries it: a credential rotated in the vault reaches an HTTP
+  server without a restart. Each value sent is an
+  `mcp_credential_refetched` row naming the credential. A stdio server's
+  `vault:` values are fixed when it starts and change at the next
+  gateway start.
 - **`wirken` commands** that manage credentials (`credentials`,
   `channel add`, `setup`, `mcp authorize`) open the full vault in the
   operator's own process.

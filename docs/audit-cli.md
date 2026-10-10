@@ -42,6 +42,7 @@ adapter handshake records). Variants are serde-tagged with `kind =
 | `mcp_entry_verified` / `mcp_entry_refused` | `server_name`, `signer` | MCP entry signature check, and the stdio sandbox's refusals, on the `gateway-mcp` sentinel session. See [mcp](mcp.md#when-a-server-is-not-started). |
 | `mcp_server_sandboxed` / `mcp_server_unsandboxed` | `server_name`, `agent_id` | How a stdio MCP server started: in its container, with what it was given, or on the host. See [mcp](mcp.md#signing-mcp-entries). |
 | `mcp_server_exited` / `mcp_server_restart` / `mcp_server_restart_abandoned` | `server_name`, `agent_id` | A contained MCP server's container exiting, on its own or at shutdown, and being restarted. See [mcp](mcp.md#restarts). |
+| `mcp_credential_refetched` | `credential` | The gateway sent the MCP proxy a credential's current vault value after an HTTP server refused it, on the `gateway-mcp-credentials` lane. Never the value. See [mcp](mcp.md#supported-transports). |
 | `memory_entry_written` / `cross_channel_memory_read` | `agent_id` | Memory provenance and trust-zone crossings. |
 | `import_started` / `import_completed` / `imported_chat_read` / `imported_chat_searched` | `agent_id` | Archive imports and gated reads. See [imported archives](imported-archives.md). |
 | `compaction` | `agent_id`, `provider`, `model` | Context engine trimmed the conversation. |

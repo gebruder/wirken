@@ -1042,9 +1042,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // The proxy runs as a sibling process and never opens the vault. The
     // gateway resolves the credentials its `mcp.json` entries reference
     // and hands them over on its stdin, OAuth credentials without their
-    // refresh token, and serves OAuth refreshes for it on a socket of its
-    // own: the gateway calls the provider and writes the vault. Neither
-    // the vault passphrase nor its device key reaches the proxy.
+    // refresh token, and serves the proxy's requests on a socket of its
+    // own: OAuth refreshes, for which the gateway calls the provider and
+    // writes the vault, and a handed credential's current value after a
+    // server refused it, each recorded on the chain by name. Neither the
+    // vault passphrase nor its device key reaches the proxy.
     let mcp_proxy_socket = cfg.socket_dir().join("mcp-proxy.sock");
     if mcp_proxy_socket.exists() {
         let _ = std::fs::remove_file(&mcp_proxy_socket);
@@ -1078,7 +1080,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         rand::rng().fill_bytes(&mut bytes);
         bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
     });
-    let proxy_handoff = mcp_proxy_handoff(
+    let (proxy_handoff, proxy_handed) = mcp_proxy_handoff(
         proxy_vault.as_deref(),
         &proxy_credentials,
         refresh_token.as_str(),
@@ -1090,16 +1092,18 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             Ok(listener) => {
                 let service = Arc::new(wirken_mcp_proxy::refresh_service::RefreshService::new(
                     proxy_vault.clone(),
+                    proxy_handed,
                     proxy_credentials.oauth.clone(),
                     refresh_token,
                     mcp_proxy_pid.clone(),
+                    Some(session_log.clone()),
                 ));
                 Some(tokio::spawn(service.serve(listener)))
             }
             Err(e) => {
                 tracing::error!(
                     "could not bind the MCP proxy refresh socket {}: {e}; OAuth tokens will \
-                 not be refreshed",
+                 not be refreshed, nor a refused credential fetched again",
                     mcp_refresh_socket.display()
                 );
                 None
@@ -2427,12 +2431,13 @@ impl StopSignal {
 /// The MCP proxy's hand-off: every name its configs reference that the
 /// vault holds, OAuth credentials without their refresh token, and the
 /// token that admits it to the refresh socket. A vault credential that
-/// happens to carry the token's entry name is left out.
+/// happens to carry the token's entry name is left out. Also returns
+/// the credential names handed, the ones the proxy may ask for again.
 fn mcp_proxy_handoff(
     vault: Option<&std::sync::Mutex<CredentialStore>>,
     wanted: &wirken_mcp_proxy::ConfiguredCredentials,
     refresh_token: &str,
-) -> Handoff {
+) -> (Handoff, std::collections::BTreeSet<String>) {
     use wirken_mcp_proxy::credentials::{GATEWAY_TOKEN_ENTRY, without_refresh_token};
     let mut entries = std::collections::BTreeMap::new();
     match vault.map(|v| v.lock()) {
@@ -2463,11 +2468,12 @@ fn mcp_proxy_handoff(
         Some(Err(_)) => tracing::error!("vault mutex poisoned; the MCP proxy starts with none"),
         None => {}
     }
+    let handed = entries.keys().cloned().collect();
     entries.insert(
         GATEWAY_TOKEN_ENTRY.to_string(),
         VaultSecret::new(refresh_token.to_string()),
     );
-    Handoff::from_entries(entries)
+    (Handoff::from_entries(entries), handed)
 }
 
 /// How long the MCP proxy gets to stop its servers at shutdown.
@@ -5977,9 +5983,14 @@ mod proxy_handoff_tests {
             oauth: BTreeSet::from(["notion-oauth".to_string()]),
         };
 
-        let mut entries =
-            mcp_proxy_handoff(Some(&std::sync::Mutex::new(store)), &wanted, "real-token")
-                .into_entries();
+        let (handoff, handed) =
+            mcp_proxy_handoff(Some(&std::sync::Mutex::new(store)), &wanted, "real-token");
+        assert_eq!(
+            handed,
+            BTreeSet::from(["linear-token".to_string(), "notion-oauth".to_string()]),
+            "the names the proxy may ask for again: its credentials, not the token"
+        );
+        let mut entries = handoff.into_entries();
         assert_eq!(
             entries.keys().map(String::as_str).collect::<Vec<_>>(),
             ["linear-token", "notion-oauth", GATEWAY_TOKEN_ENTRY]

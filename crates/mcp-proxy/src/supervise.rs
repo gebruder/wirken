@@ -308,8 +308,10 @@ struct ContainerLife {
 impl ServerLife for ContainerLife {
     async fn start(&mut self) -> Result<String, Failure> {
         let p = &self.pending;
-        // Resolved from what the gateway handed over at spawn; a value
-        // rotated in the vault reaches a run after the next gateway start.
+        // Resolved from what the proxy holds: what the gateway handed over
+        // at spawn, or sent again after an HTTP server refused it. A value
+        // rotated in the vault reaches a stdio server at the next gateway
+        // start.
         let resolved = resolve_env(&p.env, &self.credentials);
         let entry = StdioEntry {
             agent_id: &p.agent_id,

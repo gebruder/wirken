@@ -518,6 +518,20 @@ impl HttpTransport {
             .map_err(|e| ProxyError::Mcp(format!("MCP HTTP {method}: {e}")))?;
 
         let status = resp.status();
+        if credential_refused(status, resp.headers()) {
+            let body = resp.text().await.unwrap_or_default();
+            let after = match self.auth.refused().await {
+                Ok(true) => {
+                    "; the next request carries the credential's current value from the vault"
+                        .to_string()
+                }
+                Ok(false) => String::new(),
+                Err(e) => format!("; fetching the credential's current value failed: {e}"),
+            };
+            return Err(ProxyError::Mcp(format!(
+                "MCP HTTP {method} returned {status}: {body}{after}"
+            )));
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(ProxyError::Mcp(format!(
@@ -560,6 +574,18 @@ impl HttpTransport {
     pub async fn shutdown(&mut self) -> Option<ContainerExit> {
         None
     }
+}
+
+/// Whether a response says the server refused the request's
+/// credential: a 401, or any status whose `WWW-Authenticate` challenge
+/// carries `error="invalid_token"` (RFC 6750 section 3.1).
+fn credential_refused(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED
+        || headers
+            .get_all(reqwest::header::WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|v| v.to_ascii_lowercase().contains("invalid_token"))
 }
 
 // ---------------------------------------------------------------------------
@@ -783,5 +809,45 @@ mod env_isolation_tests {
              the reason in the SAFE_ENV_PASSTHROUGH docstring and \
              update this test in the same commit."
         );
+    }
+}
+
+#[cfg(test)]
+mod refused_credential_tests {
+    use super::credential_refused;
+    use reqwest::StatusCode;
+    use reqwest::header::{HeaderMap, HeaderValue, WWW_AUTHENTICATE};
+
+    fn challenge(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(WWW_AUTHENTICATE, HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn a_401_or_an_invalid_token_challenge_is_a_refused_credential() {
+        assert!(credential_refused(
+            StatusCode::UNAUTHORIZED,
+            &HeaderMap::new()
+        ));
+        assert!(credential_refused(
+            StatusCode::FORBIDDEN,
+            &challenge(r#"Bearer realm="mcp", error="invalid_token""#)
+        ));
+        // A missing scope is not a refused credential: a new value of
+        // the same grant would not help.
+        assert!(!credential_refused(
+            StatusCode::FORBIDDEN,
+            &challenge(r#"Bearer error="insufficient_scope", scope="repo""#)
+        ));
+        assert!(!credential_refused(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new()
+        ));
+        assert!(!credential_refused(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &HeaderMap::new()
+        ));
+        assert!(!credential_refused(StatusCode::OK, &HeaderMap::new()));
     }
 }

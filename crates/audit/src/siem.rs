@@ -872,6 +872,8 @@ fn extract_identity_for_sentinel(
         | SessionEvent::McpServerRestartAbandoned { agent_id, .. } => {
             (None, None, Some(agent_id.clone()))
         }
+        // A credential name; none of the three.
+        SessionEvent::McpCredentialRefetched { .. } => (None, None, None),
     }
 }
 
@@ -1120,6 +1122,9 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             "mcp_server_restart_abandoned server={server_name} attempts={attempts} last_cause={}",
             last_cause.as_str()
         ),
+        SessionEvent::McpCredentialRefetched { credential } => {
+            format!("mcp_credential_refetched credential={credential}")
+        }
         // A hook id, a tool and an egress decision.
         SessionEvent::EgressHookDispatched { .. } => debug_summary(event),
         // A call id, a hook id and the two sizes.
@@ -2154,6 +2159,14 @@ mod identity_tests {
                 None,
                 None,
                 Some("worker"),
+            ),
+            (
+                SessionEvent::McpCredentialRefetched {
+                    credential: "linear-token".into(),
+                },
+                None,
+                None,
+                None,
             ),
             (
                 SessionEvent::SandboxEgressUnsupported {
