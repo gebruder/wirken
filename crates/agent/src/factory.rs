@@ -54,7 +54,6 @@ use crate::llm::LlmConfig;
 use crate::mcp::McpProxyClient;
 use crate::runtime::{Agent, SUBAGENT_SESSION_MARKER, ToolGate};
 use crate::skill::Skill;
-use crate::wasm_sandbox::WasmSkill;
 
 /// Default LRU capacity. 64 hot sessions per process — covers
 /// chatty Slack DM bots and most expected workloads. Override with
@@ -131,7 +130,6 @@ pub struct AgentStaticConfig {
     /// agent-wide-default level.
     pub api_key_credential: Option<String>,
     pub skills: Vec<Skill>,
-    pub wasm_skills: Vec<WasmSkill>,
     /// Long-lived MCP proxy connection shared across every waked
     /// Agent for this agent_id. Concurrent waked Agents serialize
     /// through this Mutex on each MCP call. The contention is
@@ -664,7 +662,7 @@ impl AgentFactory {
         // checked against its own grants rather than its caller's.
         agent.set_agent_id(agent_id);
         // Inject the per-agent shared resources.
-        agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone())?;
+        agent.attach_skills(cfg.skills.clone())?;
         if let ToolGate::Store(perms) = &self.permissions {
             // Replay session-scoped approval events for this
             // session id so a wake-after-crash re-establishes any

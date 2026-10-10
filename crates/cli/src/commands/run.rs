@@ -695,7 +695,6 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     api_key: agent_api_key,
                     api_key_credential: agent_api_key_credential,
                     skills,
-                    wasm_skills: Vec::new(),
                     mcp_client: None, // populated below after the proxy starts
                     identity,
                     allowed_subagents: agent_cfg.allowed_subagents.clone(),
@@ -780,7 +779,6 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 api_key,
                 api_key_credential,
                 skills,
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: default_identity,
                 allowed_subagents: Default::default(),

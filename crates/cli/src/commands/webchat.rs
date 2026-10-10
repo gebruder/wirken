@@ -823,7 +823,6 @@ function approvalSentence(ev) {
       : 'Shell command outside the read-only allowlist.') + tail;
   }
   if (key.startsWith('mcp:')) return 'MCP tool call.' + tail;
-  if (key.startsWith('wasm:')) return 'Wasm skill call.' + tail;
   if (key.startsWith('imported_')) return 'Reads an imported archive.' + tail;
   if (key.startsWith('cross_channel_memory:')) return 'Reads another channel’s memory.' + tail;
   if (key.startsWith('file:')) return 'File access outside the workspace.' + tail;
@@ -4427,7 +4426,7 @@ fn tool_tier_entry(name: &str, description: &str) -> serde_json::Value {
             "description": description,
             "tier": "tier3",
             "tier_depends_on_arguments": false,
-            "tier_rule": if name.starts_with("wasm_") { "Wasm skill call: Tier 3" } else { "not in the classifier: Tier 3 as an unknown tool" },
+            "tier_rule": "not in the classifier: Tier 3 as an unknown tool",
             "action_key": Value::Null,
         }),
     }
@@ -6955,7 +6954,12 @@ mod tests {
         assert!(spawn["tier"].is_null());
         assert_eq!(spawn["tier_rule"], "intercepted before the tier gate");
         assert_eq!(tool_tier_entry("mcp_github_issues", "")["tier"], "tier3");
-        assert_eq!(tool_tier_entry("wasm_summarize", "")["tier"], "tier3");
+        let unknown = tool_tier_entry("summarize", "");
+        assert_eq!(unknown["tier"], "tier3");
+        assert_eq!(
+            unknown["tier_rule"],
+            "not in the classifier: Tier 3 as an unknown tool"
+        );
         let script = page_script();
         assert!(script.contains("t.tier_depends_on_arguments ? 'by argument'"));
         assert!(
@@ -7244,7 +7248,6 @@ mod tests {
                 api_key: None,
                 api_key_credential: None,
                 skills: vec![skill],
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: BTreeMap::new(),
@@ -8265,7 +8268,6 @@ mod tests {
                     api_key: None,
                     api_key_credential: None,
                     skills: Vec::new(),
-                    wasm_skills: Vec::new(),
                     mcp_client: None,
                     identity: None,
                     allowed_subagents: BTreeMap::new(),

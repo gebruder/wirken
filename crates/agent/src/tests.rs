@@ -2006,7 +2006,6 @@ mod wake {
                 api_key: None,
                 api_key_credential: None,
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
@@ -2041,7 +2040,6 @@ mod wake {
                 api_key: None,
                 api_key_credential: None,
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
@@ -2500,7 +2498,6 @@ mod wake {
                 api_key: None,
                 api_key_credential: None,
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
@@ -2574,7 +2571,6 @@ mod subagent {
                 api_key: None,
                 api_key_credential: None,
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: parent_ceilings,
@@ -2594,7 +2590,6 @@ mod subagent {
                 api_key: None,
                 api_key_credential: None,
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: BTreeMap::new(),
@@ -3313,7 +3308,6 @@ mod subagent {
                     api_key: None,
                     api_key_credential: None,
                     skills: Vec::new(),
-                    wasm_skills: Vec::new(),
                     mcp_client: None,
                     identity: None,
                     allowed_subagents: Default::default(),
@@ -3606,9 +3600,9 @@ mod subagent {
 
     #[tokio::test]
     async fn unknown_tool_is_default_denied_not_ungated() {
-        // A tool name matching no built-in, MCP, or Wasm-skill
-        // classification must be gated, not run ungated. The residual
-        // arm in the runtime tier gate builds an `UnknownTool` (Tier 3)
+        // A tool name matching no built-in or MCP classification must be
+        // gated, not run ungated. The residual arm in the runtime tier
+        // gate builds an `UnknownTool` (Tier 3)
         // and routes it through the permission store, so an unapproved
         // unknown tool returns a permission-denial rather than reaching
         // dispatch.
@@ -4794,18 +4788,6 @@ fn tool_to_action_mcp_prefixed_is_tier3_with_mcp_key() {
     }
     assert_eq!(action.tier(), PermissionTier::Tier3);
     assert_eq!(action.approval_key(), "mcp:mcp_foo_bar");
-}
-
-#[test]
-fn tool_to_action_wasm_prefixed_not_caught_by_mcp_arm() {
-    // A wasm_-prefixed name must not be classified by the mcp_ arm. It
-    // returns None at the classifier; the Wasm sandbox and the
-    // per-skill profile gate govern it, and the runtime tier gate
-    // exempts known Wasm skills from the residual default-deny.
-    use crate::tool::tool_to_action;
-
-    let args = serde_json::json!({});
-    assert!(tool_to_action("wasm_summarize", &args).is_none());
 }
 
 #[test]
@@ -7175,7 +7157,6 @@ mod per_channel_llm_override {
                 api_key: default_api_key,
                 api_key_credential: None,
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
@@ -7325,7 +7306,6 @@ mod per_channel_llm_override {
                 api_key: Some("default-key".into()),
                 api_key_credential: None,
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
@@ -7485,7 +7465,6 @@ mod per_channel_llm_override {
                 api_key: Some("default-key".into()),
                 api_key_credential: Some("anthropic-api-key".into()),
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
@@ -7610,7 +7589,6 @@ mod org_tool_policy {
                 api_key: None,
                 api_key_credential: None,
                 skills: Vec::new(),
-                wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
@@ -12766,19 +12744,16 @@ mod http_request_after_a_restricting_read {
         )
         .unwrap();
         agent
-            .attach_skills(
-                vec![crate::skill::Skill {
-                    name: "reader".into(),
-                    description: "reads and fetches".into(),
-                    required_bins: vec![],
-                    body: "Read, then fetch.".into(),
-                    path: tmp.path().join("SKILL.md"),
-                    available: true,
-                    permissions: profile,
-                    disable_model_invocation: false,
-                }],
-                Vec::new(),
-            )
+            .attach_skills(vec![crate::skill::Skill {
+                name: "reader".into(),
+                description: "reads and fetches".into(),
+                required_bins: vec![],
+                body: "Read, then fetch.".into(),
+                path: tmp.path().join("SKILL.md"),
+                available: true,
+                permissions: profile,
+                disable_model_invocation: false,
+            }])
             .unwrap();
         let scripted = gate.map(|o| Arc::new(ScriptedGate::new(vec![o])));
         if let Some(g) = &scripted {

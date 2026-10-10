@@ -1856,8 +1856,8 @@ impl Drop for HostGroup {
 }
 
 /// Map a built-in tool invocation to a permission Action for tier checking.
-/// Returns None for tools that don't map to a permission-checkable action
-/// (e.g., unknown MCP or Wasm tools are not subject to permission checks).
+/// Returns None for tools with no action of their own; the runtime gates
+/// those at Tier 3.
 pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Action> {
     match tool_name {
         "exec" => {
@@ -1950,11 +1950,9 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
         name if name.starts_with("mcp_") => Some(Action::McpToolCall {
             tool: name.to_string(),
         }),
-        // Everything else returns None. Two cases reach the runtime
-        // tier gate from here: a known Wasm skill (`wasm_{skill}`),
-        // which the Wasm sandbox and the per-skill profile gate govern
-        // and which the gate exempts from the residual deny; and a
-        // genuinely unregistered name, which the gate default-denies.
+        // Everything else returns None: a name with no action of its
+        // own, which the runtime tier gate default-denies as
+        // `UnknownTool` (Tier 3).
         //
         // No built-in agent tool produces DestructiveFileOp,
         // CredentialAccess, CronCreate, ExternalFileAccess,

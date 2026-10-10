@@ -76,24 +76,12 @@ pub enum Action {
     McpToolCall {
         tool: String,
     },
-    /// A tool name matching no built-in, MCP, or known Wasm-skill
-    /// classification. Default-denied at Tier 3 so an unregistered
+    /// A tool name matching no built-in or MCP classification.
+    /// Default-denied at Tier 3 so an unregistered
     /// tool cannot run ungated. Constructed by the runtime tier gate
     /// for the residual case, never by `tool_to_action`.
     UnknownTool {
         tool: String,
-    },
-    /// A tool call dispatching to a loaded Wasm skill (`wasm_{skill}`).
-    /// Always Tier 3: the Wasm sandbox and the per-skill permission
-    /// profile bound what the call can reach, but neither asks the
-    /// operator, so the tier gate makes every Wasm dispatch default-deny
-    /// like any other unclassified call. The sandbox and profile remain
-    /// additional constraints layered on top, not replacements.
-    /// Constructed by the runtime tier gate for known Wasm skills;
-    /// `tool_to_action` returns `None` for `wasm_`-prefixed names so they
-    /// are not confused with the `mcp_` arm.
-    WasmSkillCall {
-        skill: String,
     },
     /// Reading an agent's memory entries that were written on a
     /// different channel. Always Tier 3: channels are distinct trust
@@ -165,7 +153,6 @@ impl std::fmt::Display for Action {
             Action::CronCreate => "cron_create",
             Action::McpToolCall { .. } => "mcp_tool_call",
             Action::UnknownTool { .. } => "unknown_tool",
-            Action::WasmSkillCall { .. } => "wasm_skill_call",
             Action::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
             Action::ImportedChatRead { .. } => "imported_chat_read",
             Action::ImportedChatSearch { .. } => "imported_chat_search",
@@ -262,7 +249,6 @@ impl Action {
             | Action::CronCreate
             | Action::McpToolCall { .. }
             | Action::UnknownTool { .. }
-            | Action::WasmSkillCall { .. }
             | Action::CrossChannelMemoryRead { .. }
             | Action::ImportedChatRead { .. }
             | Action::ImportedChatSearch { .. } => PermissionTier::Tier3,
@@ -283,7 +269,6 @@ impl Action {
             Action::CrossConversationMessage => "cross-conversation".to_string(),
             Action::McpToolCall { tool } => format!("mcp:{tool}"),
             Action::UnknownTool { tool } => format!("tool:{tool}"),
-            Action::WasmSkillCall { skill } => format!("wasm:{skill}"),
             Action::CrossChannelMemoryRead { from_channel } => {
                 format!("cross_channel_memory:{from_channel}")
             }
@@ -1953,7 +1938,6 @@ mod tier_tests {
                 Action::CronCreate => "cron_create",
                 Action::McpToolCall { .. } => "mcp_tool_call",
                 Action::UnknownTool { .. } => "unknown_tool",
-                Action::WasmSkillCall { .. } => "wasm_skill_call",
                 Action::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
                 Action::ImportedChatRead { .. } => "imported_chat_read",
                 Action::ImportedChatSearch { .. } => "imported_chat_search",
@@ -3339,7 +3323,6 @@ mod tier_tests {
             Action::CronCreate,
             Action::McpToolCall { tool: sample() },
             Action::UnknownTool { tool: sample() },
-            Action::WasmSkillCall { skill: sample() },
             Action::CrossChannelMemoryRead {
                 from_channel: sample(),
             },
@@ -3377,7 +3360,6 @@ mod tier_tests {
                 Action::CronCreate => "cron_create".to_string(),
                 Action::McpToolCall { tool } => format!("mcp:{tool}"),
                 Action::UnknownTool { tool } => format!("tool:{tool}"),
-                Action::WasmSkillCall { skill } => format!("wasm:{skill}"),
                 Action::CrossChannelMemoryRead { from_channel } => {
                     format!("cross_channel_memory:{from_channel}")
                 }
@@ -3444,9 +3426,6 @@ mod tier_tests {
             },
             Action::UnknownTool {
                 tool: "unregistered".into(),
-            },
-            Action::WasmSkillCall {
-                skill: "my_skill".into(),
             },
             Action::CrossChannelMemoryRead {
                 from_channel: "slack".into(),

@@ -457,10 +457,6 @@ fn coverage(action: &Action) -> Coverage {
             Coverage::NotFromAToolCall("credentials are mediated by the vault and the MCP proxy")
         }
         Action::CronCreate => Coverage::NotFromAToolCall("cron is created through the CLI"),
-        Action::WasmSkillCall { .. } => Coverage::NotFromAToolCall(
-            "the runtime builds it for a known Wasm skill; the classifier returns None, \
-             which the corpus covers as refused",
-        ),
     }
 }
 
@@ -483,7 +479,6 @@ fn all_variants() -> Vec<Action> {
         Action::CronCreate,
         Action::McpToolCall { tool: s() },
         Action::UnknownTool { tool: s() },
-        Action::WasmSkillCall { skill: s() },
         Action::CrossChannelMemoryRead { from_channel: s() },
         Action::ImportedChatRead { source_id: s() },
         Action::ImportedChatSearch {
@@ -494,7 +489,7 @@ fn all_variants() -> Vec<Action> {
 
 /// Pinned so `all_variants` cannot fall behind the enum. Raise it in
 /// the same edit that adds the variant.
-const ACTION_VARIANTS: usize = 17;
+const ACTION_VARIANTS: usize = 16;
 
 /// Every gateable action and every built-in tool has corpus lines.
 ///

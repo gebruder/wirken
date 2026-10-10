@@ -4,11 +4,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # One PR per batch instead of one per crate. Two reasons, both
-    # observed: sibling crates that share an API surface (wasmtime and
-    # wasmtime-wasi) do not compile when bumped separately, and every
-    # merge of a lockfile-touching PR invalidates the rest of the
-    # queue, so a batch of N costs N rebase cycles.
+    # One PR per batch instead of one per crate: every merge of a
+    # lockfile-touching PR invalidates the rest of the queue, so a
+    # batch of N costs N rebase cycles.
     #
     # Security updates keep their own group so a routine bump that
     # fails CI cannot hold an advisory fix behind it.

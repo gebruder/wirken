@@ -469,7 +469,6 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             api_key: None, // verify never calls the LLM
             api_key_credential: None,
             skills,
-            wasm_skills: Vec::new(),
             mcp_client: None,
             identity: None, // verify never signs new attestations
             allowed_subagents,

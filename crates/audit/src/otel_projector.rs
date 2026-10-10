@@ -932,12 +932,11 @@ impl OtelProjector {
     /// prefixed `mcp_` are routed to the MCP proxy client at
     /// execution time, so the same prefix identifies them as
     /// `MCP Server` for Defender's `ExecuteToolByMCPServer`
-    /// ActionType. Everything else (built-in tools, Wasm skills,
-    /// `exec`, `web_search`, `generate_image`) runs in-process at
-    /// the gateway and is reported as `function` for Defender's
-    /// `ExecuteToolByGateway` ActionType. Microsoft's enum has no
-    /// Wasm-skill category; `function` is the documented catch-all
-    /// for runtime-executed tools.
+    /// ActionType. Everything else (built-in tools, `exec`,
+    /// `web_search`, `generate_image`) is dispatched by the gateway
+    /// and is reported as `function` for Defender's
+    /// `ExecuteToolByGateway` ActionType; `function` is the
+    /// documented catch-all for runtime-executed tools.
     fn tool_type_for(tool_name: &str) -> &'static str {
         if tool_name.starts_with("mcp_") {
             "MCP Server"
@@ -1180,8 +1179,8 @@ impl OtelProjector {
             parent_span_id: Some(buf.root_span_id.clone()),
             name: "execute_tool".to_string(),
             // `Internal` for execute_tool: from the agent's
-            // perspective the call is in-process (built-in tool,
-            // Wasm skill, or local MCP proxy), not a direct
+            // perspective the call is in-process (built-in tool or
+            // local MCP proxy), not a direct
             // outbound HTTPS call. Defender's ActionType split
             // between gateway and MCP server dispatch is carried
             // by `gen_ai.tool.type`, not span.kind.
@@ -2633,7 +2632,6 @@ mod tests {
         assert_eq!(OtelProjector::tool_type_for("web_search"), "function");
         assert_eq!(OtelProjector::tool_type_for("workspace_files"), "function");
         assert_eq!(OtelProjector::tool_type_for("exec"), "function");
-        assert_eq!(OtelProjector::tool_type_for("wasm_my_skill"), "function");
         assert_eq!(
             OtelProjector::tool_type_for("mcp_github_issue"),
             "MCP Server"

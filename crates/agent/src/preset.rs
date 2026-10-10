@@ -60,7 +60,7 @@ pub struct PresetMetadata {
 
 /// What [`PresetLoader::load_dir`] returns: the manifest plus the
 /// loaded skills. The caller decides what to do with them — typically
-/// `agent.attach_skills(loaded.skills, vec![])`.
+/// `agent.attach_skills(loaded.skills)`.
 #[derive(Debug)]
 pub struct LoadedPreset {
     pub metadata: PresetMetadata,

@@ -27,9 +27,10 @@ members = [
 [workspace.package]
 version = "1.28.0"
 edition = "2024"
-# Floor is set by the wasmtime family: 49.x declares rust-version 1.96.
+# Floor is set by the workspace's own code: `str::floor_char_boundary`
+# is stable from 1.91. No dependency declares a higher one.
 # Verified by the MSRV job in ci.yml, not by hand.
-rust-version = "1.96.0"
+rust-version = "1.91.0"
 license = "MIT"
 repository = "https://github.com/gebruder/wirken"
 description = "Team-scale AI agent orchestration with per-channel process isolation, encrypted credential vault, and per-session hash-chained audit log."
@@ -82,26 +83,7 @@ secret-service = "5.1"
 # IPC
 capnp = "0.27"
 
-# Sandbox. Pinned >=45 per RUSTSEC-2026-0149 (wasmtime-wasi
-# path_open(TRUNCATE) bypasses FilePerms::WRITE; fixed in 44.0.2 /
-# 45.0.0). Floor raised to 45.0.2 per RUSTSEC-2026-0182 (WASIp1
-# fd_renumber leak; fixed in 45.0.2). Floor raised to 46.0.1 per
-# RUSTSEC-2026-0188 (hard-link/rename FilePerms bypass for the
-# destination; fixed in 46.0.1). Floor raised to 47.0.3 per
-# RUSTSEC-2026-0222 (stores mix up type indices between engines) and
-# RUSTSEC-2026-0223 (preemption/traps during bulk operations break
-# internal VM state); both fixed in 46.0.2 and 47.0.3, so 47.0.2 is
-# inside the vulnerable range and must be skipped. Floor raised to
-# 48.0.4 per RUSTSEC-2026-0314 through -0326 (fuel accounting, GC
-# rooting, component lifting and WASI host panics); the last of them
-# are fixed in 48.0.4, and on the 49 line in 49.0.2, the floor now.
-#
-# The two crates share an API surface and a mismatched pair does not
-# compile, so they are declared together here and inherited by the
-# member rather than pinned in separate files. Move both or neither;
-# a diff that touches one line and not the next is the bug.
-wasmtime = "49.0.2"
-wasmtime-wasi = "49.0.2"
+# Sandbox
 bollard = "0.21"
 
 # CLI

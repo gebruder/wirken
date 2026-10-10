@@ -184,7 +184,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // what narrow the tool set, exactly as `wirken run` builds the
     // same agent.
     agent
-        .attach_skills(super::skills_for_default_agent(&cfg), Vec::new())
+        .attach_skills(super::skills_for_default_agent(&cfg))
         .context("attach skills")?;
 
     println!();
@@ -279,7 +279,7 @@ async fn send_with_agent_config(
     // builds the same agent. A dangling preset reference is an
     // operator-actionable error, not silent skill absence.
     agent
-        .attach_skills(super::skills_for_agent(cfg, agent_cfg)?, Vec::new())
+        .attach_skills(super::skills_for_agent(cfg, agent_cfg)?)
         .context("attach skills")?;
 
     println!();

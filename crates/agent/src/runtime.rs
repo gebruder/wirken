@@ -16,7 +16,6 @@ use crate::llm_stream::StreamEvent;
 use crate::mcp::McpProxyClient;
 use crate::skill::{Skill, SkillLoader};
 use crate::tool::{ToolConfig, ToolRegistry, tool_to_action};
-use crate::wasm_sandbox::WasmSkill;
 use wirken_gateway::agent_config::SubagentCeiling;
 use wirken_gateway::budget::{AgentBudget, BudgetMode, BudgetStore, BudgetWindow, now_unix_secs};
 use wirken_gateway::permissions::{PermissionCheck, PermissionStore, PermissionTier};
@@ -232,7 +231,6 @@ pub struct Agent {
     tools: ToolRegistry,
     mcp: Option<Arc<tokio::sync::Mutex<McpProxyClient>>>,
     skills: Vec<Skill>,
-    wasm_skills: Vec<WasmSkill>,
     system_prompt: String,
     /// API key passed per-request — agent never stores it long-term.
     /// In production, the gateway's LLM proxy handles this.
@@ -466,7 +464,6 @@ mod turn_tools {
             let mut tool_defs = if agent.llm.config().tools_enabled {
                 let mut defs = agent.tools.definitions();
                 defs.extend(mcp_defs);
-                defs.extend(agent.wasm_skills.iter().map(|s| s.tool_def()));
                 // Expose `spawn_subagent` to the LLM only when the
                 // agent has at least one allowed child.
                 // Empty allowed_subagents = never offer the tool.
@@ -647,7 +644,6 @@ impl Agent {
             tools,
             mcp: None,
             skills: Vec::new(),
-            wasm_skills: Vec::new(),
             system_prompt,
             api_key,
             api_key_credential,
@@ -752,7 +748,6 @@ impl Agent {
             tools,
             mcp: None,
             skills: Vec::new(),
-            wasm_skills: Vec::new(),
             system_prompt,
             api_key,
             api_key_credential,
@@ -1090,15 +1085,11 @@ impl Agent {
         self.tools.set_credential_resolver(resolver);
     }
 
-    /// Attach skill collections. Used by
+    /// Attach a skill collection. Used by
     /// [`crate::factory::AgentFactory`] to inject per-agent skills
     /// loaded once at startup, then rebuild the system prompt to
     /// include them.
-    pub fn attach_skills(
-        &mut self,
-        skills: Vec<Skill>,
-        wasm_skills: Vec<WasmSkill>,
-    ) -> Result<(), AgentError> {
+    pub fn attach_skills(&mut self, skills: Vec<Skill>) -> Result<(), AgentError> {
         // Coherence checks:
         // - Skill names are unique among the loaded set, else `/<name>`
         //   slash invocation is ambiguous.
@@ -1170,7 +1161,6 @@ impl Agent {
         // re-enter the phase explicitly on the next turn if needed.
         self.effective_permissions = crate::skill_perms::PhasedEffective::from_base(effective);
         self.skills = skills;
-        self.wasm_skills = wasm_skills;
         self.rebuild_system_prompt();
         Ok(())
     }
@@ -1345,7 +1335,7 @@ impl Agent {
     /// Map a tool call to a (filesystem axis, absolutized requested path)
     /// pair when the tool is a built-in file tool. Returns `None` for tool
     /// calls that don't touch the filesystem in a path-addressable way
-    /// (`exec`, `web_search`, MCP, Wasm, etc. — `exec` shells out and is
+    /// (`exec`, `web_search`, MCP, etc. — `exec` shells out and is
     /// gated by the tools axis instead). The path is absolutized against
     /// the agent's workspace so the comparison against the (already
     /// workspace-expanded) allow-set is apples to apples.
@@ -3067,29 +3057,7 @@ impl Agent {
         self.rebuild_system_prompt();
     }
 
-    /// Load Wasm skills from a directory.
-    pub fn load_wasm_skills(&mut self, dir: &std::path::Path) -> usize {
-        let skills = crate::wasm_sandbox::load_wasm_skills(dir);
-        let count = skills.len();
-        self.wasm_skills.extend(skills);
-        count
-    }
-
-    /// True when `name` matches a loaded Wasm skill, by its
-    /// `wasm_`-prefixed tool name or its bare skill name (mirrors the
-    /// dispatch routing in `execute_tool`). A match routes the call to
-    /// the dedicated `Action::WasmSkillCall` (Tier 3) at the dispatch
-    /// gate, so Wasm skills are tier-classified and default-deny like
-    /// any other call; the Wasm sandbox and the per-skill profile gate
-    /// apply as additional constraints on top.
-    fn is_known_wasm_skill(&self, name: &str) -> bool {
-        let bare = name.strip_prefix("wasm_").unwrap_or(name);
-        self.wasm_skills
-            .iter()
-            .any(|s| s.name == bare || s.name == name)
-    }
-
-    /// Execute a tool call, trying built-in tools, then MCP, then Wasm skills.
+    /// Execute a tool call, trying MCP, then built-in tools.
     /// Permission checks are applied when a PermissionStore is configured.
     pub(crate) async fn execute_tool(
         &mut self,
@@ -3400,20 +3368,11 @@ impl Agent {
                 serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
             // Resolve the action to gate on. Built-in, MCP (`mcp_`),
             // and exec names are classified by `tool_to_action`. A
-            // `None` return is either a known Wasm skill, which is
-            // gated by a dedicated `WasmSkillCall` action (Tier 3,
-            // always-prompt) on top of the Wasm sandbox and the
-            // per-skill profile gate, or a genuinely unregistered
-            // tool, which is default-denied via `UnknownTool` (also
-            // Tier 3) so it cannot run ungated. Both reach the tier
-            // gate; neither skips approval.
+            // `None` return is a tool with no action of its own, which
+            // is default-denied via `UnknownTool` (Tier 3) so it cannot
+            // run ungated.
             let action = match tool_to_action(name, &args) {
                 Some(action) => Some(action),
-                None if self.is_known_wasm_skill(name) => {
-                    Some(wirken_gateway::permissions::Action::WasmSkillCall {
-                        skill: name.to_string(),
-                    })
-                }
                 None => Some(wirken_gateway::permissions::Action::UnknownTool {
                     tool: name.to_string(),
                 }),
@@ -3432,9 +3391,7 @@ impl Agent {
             {
                 let observed = match crate::tool::tool_to_read_sensitivity(name) {
                     Some(sensitivity) => Some(sensitivity),
-                    None if crate::tool::tool_to_action(name, &args).is_none()
-                        && !self.is_known_wasm_skill(name) =>
-                    {
+                    None if crate::tool::tool_to_action(name, &args).is_none() => {
                         Some(crate::tool::ReadSensitivity::Workspace)
                     }
                     None => None,
@@ -3655,20 +3612,6 @@ impl Agent {
                 self.charge_budget(Some(cost));
             }
             return result;
-        }
-
-        // Wasm skills carry an explicit `wasm_` prefix.
-        if let Some(wasm_name) = name.strip_prefix("wasm_") {
-            for skill in &self.wasm_skills {
-                if skill.name == wasm_name {
-                    return skill.execute(arguments);
-                }
-            }
-        }
-        for skill in &self.wasm_skills {
-            if skill.name == name {
-                return skill.execute(arguments);
-            }
         }
 
         // Otherwise, built-in tools.
@@ -5290,7 +5233,6 @@ impl Agent {
         let mut defs = if self.llm.config().tools_enabled {
             let mut d = self.tools.definitions();
             d.extend(mcp_defs);
-            d.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
             if self
                 .effective_permissions
                 .skills_admit_tool(WIRKEN_ENTER_PHASE_TOOL)
@@ -5877,8 +5819,8 @@ pub struct VerifyReport {
     /// Events that successfully passed every applicable check.
     pub events_verified: usize,
     /// Events that the verifier could not check (LLM responses,
-    /// non-deterministic tool results, MCP tools, Wasm skills,
-    /// failed re-execution attempts).
+    /// non-deterministic tool results, MCP tools, failed re-execution
+    /// attempts).
     pub events_unverifiable: usize,
     /// Events whose recomputed hash or re-executed output diverged
     /// from the recorded value. Empty on a clean verify.

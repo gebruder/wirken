@@ -597,7 +597,7 @@ async fn dispatch_via_agent_runtime(
     let run_skills = lyrik_run_skills(&lyrik_staged_dir, walks_staged_dir.as_deref())?;
     let skills_attached: Vec<String> = run_skills.iter().map(|s| s.name.clone()).collect();
     agent
-        .attach_skills(run_skills, Vec::new())
+        .attach_skills(run_skills)
         .context("attach run skills")?;
 
     let effective_budget_tokens =
@@ -1146,11 +1146,7 @@ async fn dispatch_walks_concurrent(
 
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))
-                .and_then(|skills| {
-                    local_agent
-                        .attach_skills(skills, Vec::new())
-                        .map_err(|e| e.to_string())
-                });
+                .and_then(|skills| local_agent.attach_skills(skills).map_err(|e| e.to_string()));
             if let Err(e) = attached {
                 return WalkOutcome {
                     walk_name: walk_name.clone(),
