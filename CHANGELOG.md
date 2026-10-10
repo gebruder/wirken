@@ -308,6 +308,9 @@ tagged.
 
 - `SECURITY.md` gives security@ottenheimer.app as the address for
   vulnerability reports.
+- `docs/threat-model.md` states the threat model: each trust boundary and
+  the inputs that cross it, what is in and out of scope, a severity rubric,
+  and how a report, its proof and its patch are written.
 
 ## [1.28.0] - 2026-10-08
 

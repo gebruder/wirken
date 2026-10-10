@@ -253,7 +253,8 @@ compromise impossible. The honest edges:
 [Sandbox properties](docs/sandbox-properties.md) ·
 [Egress](docs/egress.md) ·
 [Signing](docs/signing.md) ·
-[Enforcement model](docs/enforcement-model.md)
+[Enforcement model](docs/enforcement-model.md) ·
+[Threat model](docs/threat-model.md)
 
 **Operating**
 [Deploying for a team](docs/enterprise.md) ·
