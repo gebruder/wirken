@@ -35,7 +35,7 @@ pub use session_log::{
     ApprovalScopeKind, ApprovalSource, BudgetAction, ChainHeadReason, CrossCheckDisagreement,
     CrossCheckStatus, DenialSource, EgressDecision, ExecLocation, GrantExpiryDetection, HashHex,
     HexBytes, HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, ImportedSearchOutcome,
-    MCP_CREDENTIAL_SESSION, McpServerRestartCause, OwnSession, PermissionDenialRecord,
+    LeakSurface, MCP_CREDENTIAL_SESSION, McpServerRestartCause, OwnSession, PermissionDenialRecord,
     PhaseDenyContent, PhaseExitReason, RedactionRecord, SandboxEgressDenyReason,
     SandboxEgressModeLabel, SandboxModeLabel, SandboxProvenance, SandboxRuntimeLabel,
     SchemaDriftRecord, SessionEvent, SessionHandle, SessionId, SessionLog, SessionScope,

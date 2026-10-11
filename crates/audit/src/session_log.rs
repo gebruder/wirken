@@ -1873,6 +1873,32 @@ pub enum SessionEvent {
     /// refused it. Names the credential, never its value. Written on
     /// the [`MCP_CREDENTIAL_SESSION`] lane.
     McpCredentialRefetched { credential: String },
+    /// Content contained a stored secret and was refused before it
+    /// went further: a tool's output before it entered the
+    /// conversation, a tool call's arguments as the model wrote them,
+    /// the request to the model, the agent's reply, a user's message,
+    /// or a skill as it loaded. Names the credential, never the value.
+    /// Written on the session the content belonged to.
+    LeakRefused {
+        credential: String,
+        surface: LeakSurface,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+        /// The tool whose output or arguments carried it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+        /// The MCP server behind that tool.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_name: Option<String>,
+        /// The skill that carried it, on `skill_load`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skill_name: Option<String>,
+    },
     /// One egress-hook invocation completed. Emitted per hook per
     /// tool result in registration order (parallel to
     /// `HookDispatched` on the veto path). The invocation runs
@@ -2210,6 +2236,38 @@ pub enum AdapterDisconnectReason {
     Ended,
     /// The connection's message loop panicked.
     Panic,
+}
+
+/// Where leak detection found a stored secret.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LeakSurface {
+    /// A tool's output, before it entered the conversation.
+    ToolOutput,
+    /// A tool call's arguments, as the model wrote them.
+    ToolArguments,
+    /// The request about to be sent to the model.
+    ProviderRequest,
+    /// The agent's reply, before it was sent.
+    Reply,
+    /// A user's message, before it reached the model.
+    UserMessage,
+    /// A skill, as it loaded.
+    SkillLoad,
+}
+
+impl LeakSurface {
+    /// The wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolOutput => "tool_output",
+            Self::ToolArguments => "tool_arguments",
+            Self::ProviderRequest => "provider_request",
+            Self::Reply => "reply",
+            Self::UserMessage => "user_message",
+            Self::SkillLoad => "skill_load",
+        }
+    }
 }
 
 /// Why the MCP proxy restarted a contained stdio server.

@@ -3647,6 +3647,17 @@ fn every_session_event() -> Vec<SessionEvent> {
         SessionEvent::McpCredentialRefetched {
             credential: String::new(),
         },
+        SessionEvent::LeakRefused {
+            credential: String::new(),
+            surface: crate::session_log::LeakSurface::ToolOutput,
+            agent_id: String::new(),
+            channel: None,
+            adapter_id: None,
+            sender_id: None,
+            tool_name: None,
+            server_name: None,
+            skill_name: None,
+        },
         SessionEvent::AdapterConnect {
             adapter_id: String::new(),
             channel: String::new(),
@@ -3749,12 +3760,13 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::McpServerRestart { .. } => "McpServerRestart",
         SessionEvent::McpServerRestartAbandoned { .. } => "McpServerRestartAbandoned",
         SessionEvent::McpCredentialRefetched { .. } => "McpCredentialRefetched",
+        SessionEvent::LeakRefused { .. } => "LeakRefused",
         SessionEvent::McpEntryVerified { .. } => "McpEntryVerified",
     }
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 66;
+const SESSION_EVENT_VARIANTS: usize = 67;
 
 /// The list covers the enum.
 #[test]

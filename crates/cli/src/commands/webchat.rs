@@ -1400,6 +1400,12 @@ function renderEvent(ev, live) {
       addDecision('egress ' + (ev.allowed ? 'allowed' : 'refused') + ' · ' + ev.host + ':' + ev.port +
         (ev.reason ? ' · ' + ev.reason : '') + (ev.escalated ? ' · escalated' : '') + ' · recorded', ev.allowed ? '✓' : '✕');
       break;
+    case 'leak_refused':
+      addBlock('refusal', 'Stored credential refused', '✕',
+        ev.surface.replace(/_/g, ' ') + (ev.tool ? ' · ' + ev.tool : '') +
+        (ev.skill ? ' · skill ' + ev.skill : ''),
+        'The record names the credential. From the leak row on the record.');
+      break;
     case 'budget_exceeded':
       addBlock('refusal', 'Spending limit reached', '✕',
         usd(ev.window_spend_usd_micros) + ' of ' + usd(ev.ceiling_usd_micros) + ' this ' + ev.window +
@@ -4307,6 +4313,19 @@ pub fn session_events(
             // A credential the gateway sent the MCP proxy again; on the
             // gateway's own lane, not a conversation's.
             SessionEvent::McpCredentialRefetched { .. } => None,
+            // Without the credential's name, which the page withholds as
+            // it does on the `http_request` row.
+            SessionEvent::LeakRefused {
+                surface,
+                tool_name,
+                skill_name,
+                ..
+            } => Some(json!({
+                "kind": "leak_refused",
+                "surface": surface.as_str(),
+                "tool": tool_name,
+                "skill": skill_name,
+            })),
             // The verdict rides the tool row it gated.
             SessionEvent::EgressHookDispatched { .. } => None,
             // The tool row already carries the output as redacted.
@@ -6286,6 +6305,20 @@ mod tests {
                     agent_id: agent(),
                 },
             ),
+            (
+                TrustLevel::System,
+                SessionEvent::LeakRefused {
+                    credential: "provider-key".into(),
+                    surface: wirken_audit::LeakSurface::ToolOutput,
+                    agent_id: agent(),
+                    channel: None,
+                    adapter_id: None,
+                    sender_id: None,
+                    tool_name: Some("read_file".into()),
+                    server_name: None,
+                    skill_name: None,
+                },
+            ),
         ];
         let row_count = rows.len() as u64;
         for (trust, ev) in rows {
@@ -6321,6 +6354,7 @@ mod tests {
                 "chain_head",
                 "compaction",
                 "http_request",
+                "leak_refused",
             ],
             "every kind the projection emits, one row each"
         );
@@ -6363,7 +6397,7 @@ mod tests {
         assert_eq!(v["head"]["seq"], row_count - 1, "the last row appended");
         assert_eq!(v["head"]["last_signed_head_seq"], 6, "from the chain head");
         assert_eq!(
-            v["head"]["unsigned_tail_len"], 2,
+            v["head"]["unsigned_tail_len"], 3,
             "the rows written after that head"
         );
         assert_eq!(v["totals"]["attestations"], 1);

@@ -874,6 +874,18 @@ fn extract_identity_for_sentinel(
         }
         // A credential name; none of the three.
         SessionEvent::McpCredentialRefetched { .. } => (None, None, None),
+        // Refused content in one agent's session, from a channel when
+        // a sender's message drove it.
+        SessionEvent::LeakRefused {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
     }
 }
 
@@ -1125,6 +1137,16 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::McpCredentialRefetched { credential } => {
             format!("mcp_credential_refetched credential={credential}")
         }
+        SessionEvent::LeakRefused {
+            credential,
+            surface,
+            tool_name,
+            ..
+        } => format!(
+            "leak_refused credential={credential} surface={} tool={}",
+            surface.as_str(),
+            tool_name.as_deref().unwrap_or("-")
+        ),
         // A hook id, a tool and an egress decision.
         SessionEvent::EgressHookDispatched { .. } => debug_summary(event),
         // A call id, a hook id and the two sizes.
@@ -1214,6 +1236,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
             McpCause::StartFailed | McpCause::InitializeFailed => "error",
         },
         SessionEvent::McpServerRestartAbandoned { .. } => "error",
+        SessionEvent::LeakRefused { .. } => "error",
         SessionEvent::AuditLegacy { action, detail, .. } => severity(action, detail),
         _ => "info",
     }
@@ -1381,6 +1404,124 @@ mod adapter_lifecycle_tests {
                 build_webhook_typed_request(&[&row], &config(SiemTarget::Webhook)).unwrap();
             let entries: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(entries[0]["level"], level, "{event:?}");
+            assert_eq!(back(&entries[0]["event"]), event);
+        }
+    }
+}
+
+#[cfg(test)]
+mod leak_refused_tests {
+    use super::*;
+    use crate::session_log::{
+        HashHex, LeakSurface, SessionEvent, SessionId, StoredSessionEvent, TrustLevel,
+    };
+
+    fn config(target: SiemTarget) -> SiemConfig {
+        SiemConfig {
+            target,
+            endpoint: "http://127.0.0.1:0/x".into(),
+            api_key: String::new(),
+            service: "wirken".into(),
+            environment: "test".into(),
+            hmac_secret: None,
+            sentinel_typed: None,
+            typed_include_variants: None,
+            typed_exclude_variants: None,
+            typed_forwarding_enabled: None,
+            typed_poll_interval_ms: None,
+        }
+    }
+
+    /// One refusal per surface, the tool-borne ones naming their tool.
+    fn cases() -> Vec<SessionEvent> {
+        [
+            LeakSurface::ToolOutput,
+            LeakSurface::ToolArguments,
+            LeakSurface::ProviderRequest,
+            LeakSurface::Reply,
+            LeakSurface::UserMessage,
+            LeakSurface::SkillLoad,
+        ]
+        .into_iter()
+        .map(|surface| SessionEvent::LeakRefused {
+            credential: "telegram-token".into(),
+            surface,
+            agent_id: "work".into(),
+            channel: Some("telegram".into()),
+            adapter_id: Some("telegram".into()),
+            sender_id: Some("U1".into()),
+            tool_name: matches!(
+                surface,
+                LeakSurface::ToolOutput | LeakSurface::ToolArguments
+            )
+            .then(|| "mcp_github_search".into()),
+            server_name: matches!(
+                surface,
+                LeakSurface::ToolOutput | LeakSurface::ToolArguments
+            )
+            .then(|| "github".into()),
+            skill_name: (surface == LeakSurface::SkillLoad).then(|| "notes".into()),
+        })
+        .collect()
+    }
+
+    fn stored(event: SessionEvent) -> StoredSessionEvent {
+        StoredSessionEvent {
+            id: 1,
+            session_id: SessionId::new("work/telegram/c1"),
+            seq: 0,
+            ts: chrono::Utc::now(),
+            trust: TrustLevel::System,
+            event,
+            leaf_hash: HashHex(String::new()),
+            prev_hash: HashHex(String::new()),
+            hash: HashHex(String::new()),
+        }
+    }
+
+    fn back(value: &serde_json::Value) -> SessionEvent {
+        serde_json::from_value(value.clone()).expect("the event deserializes")
+    }
+
+    #[test]
+    fn a_refusal_is_forwarded_by_default_at_error_and_names_no_value() {
+        for event in cases() {
+            assert!(
+                crate::siem_typed::should_forward(&event, &config(SiemTarget::Webhook)),
+                "{event:?}"
+            );
+            assert_eq!(typed_level(&event), "error");
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(json.contains("\"kind\":\"leak_refused\""), "{json}");
+            assert_eq!(back(&serde_json::from_str(&json).unwrap()), event);
+        }
+    }
+
+    #[test]
+    fn every_target_carries_the_refusal_at_error() {
+        for event in cases() {
+            let entry =
+                build_datadog_typed_entry(&stored(event.clone()), &config(SiemTarget::Datadog));
+            assert_eq!(entry["status"], "error", "{event:?}");
+            assert_eq!(back(&entry["wirken"]["event"]), event);
+
+            let row = stored(event.clone());
+            let body = build_splunk_typed_body(&[&row]);
+            let hec: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+            assert_eq!(hec["event"]["level"], "error", "{event:?}");
+            assert_eq!(back(&hec["event"]["event"]), event);
+
+            let payload = build_sentinel_typed_payload(&[&row]);
+            assert_eq!(payload[0]["Level"], "error", "{event:?}");
+            assert_eq!(payload[0]["AdapterId"], "telegram", "{event:?}");
+            assert_eq!(payload[0]["SenderId"], "U1", "{event:?}");
+            assert_eq!(payload[0]["AgentId"], "work", "{event:?}");
+            assert_eq!(back(&payload[0]["Event"]), event);
+
+            let (body, _) =
+                build_webhook_typed_request(&[&row], &config(SiemTarget::Webhook)).unwrap();
+            let entries: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(entries[0]["level"], "error", "{event:?}");
             assert_eq!(back(&entries[0]["event"]), event);
         }
     }
