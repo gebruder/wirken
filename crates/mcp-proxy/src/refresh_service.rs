@@ -88,6 +88,9 @@ pub struct RefreshService {
     refresher: Arc<dyn Refresher>,
     /// Where each current value sent is recorded.
     audit: Option<Arc<dyn SessionLog>>,
+    /// Learns each value read from the vault and each refreshed token,
+    /// for leak detection in the gateway.
+    leak: Option<Arc<wirken_gateway::leak::LeakMatcher>>,
     /// One refresh per credential at a time.
     locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -109,8 +112,15 @@ impl RefreshService {
             proxy_pid,
             refresher: Arc::new(ProviderRefresher),
             audit,
+            leak: None,
             locks: Default::default(),
         }
+    }
+
+    /// Have `leak` learn every value this service reads or refreshes.
+    pub fn with_leak_matcher(mut self, leak: Arc<wirken_gateway::leak::LeakMatcher>) -> Self {
+        self.leak = Some(leak);
+        self
     }
 
     /// Refresh through `refresher` instead of the provider.
@@ -218,11 +228,14 @@ impl RefreshService {
             .store
             .as_ref()
             .ok_or_else(|| "the gateway has no vault open".to_string())?;
-        let (secret, _) = store
+        let (secret, meta) = store
             .lock()
             .map_err(|_| "vault mutex poisoned".to_string())?
             .retrieve(name)
             .map_err(|e| e.to_string())?;
+        if let Some(leak) = &self.leak {
+            leak.learn(name, secret.expose(), meta.kind);
+        }
         let value = if self.oauth.contains(name) {
             without_refresh_token(secret.expose())
         } else {
@@ -277,6 +290,11 @@ impl RefreshService {
                 .lock()
                 .map_err(|_| "vault mutex poisoned".to_string())?;
             store_oauth(&*store, name, &refreshed).map_err(|e| e.to_string())?;
+        }
+        if let Some(leak) = &self.leak {
+            let json =
+                zeroize::Zeroizing::new(serde_json::to_string(&refreshed).unwrap_or_default());
+            leak.learn(name, &json, wirken_vault::CredentialKind::Secret);
         }
         tracing::info!("refreshed oauth credential '{name}' for the MCP proxy");
         Ok(refreshed)
@@ -517,6 +535,81 @@ mod tests {
             err.contains("not an OAuth credential the proxy was handed"),
             "{err}"
         );
+    }
+
+    /// The gateway's leak detection learns each value the service reads
+    /// and each token a refresh brings back.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn the_service_teaches_leak_detection_what_it_reads_and_refreshes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &dir.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        store_oauth(
+            &store,
+            "linear-oauth",
+            &OAuthCredential {
+                access_token: "AT-1-expired-token".into(),
+                refresh_token: "RT-1".into(),
+                expires_at: 1,
+                scope: "read".into(),
+                provider: "linear".into(),
+            },
+        )
+        .unwrap();
+        store
+            .store(
+                "linear-token",
+                "",
+                &VaultSecret::new("tok-rotated-0002".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        let leak = Arc::new(wirken_gateway::leak::LeakMatcher::new());
+        let service = RefreshService::new(
+            Some(Arc::new(std::sync::Mutex::new(store))),
+            BTreeSet::from(["linear-oauth".to_string(), "linear-token".to_string()]),
+            BTreeSet::from(["linear-oauth".to_string()]),
+            Zeroizing::new("t".to_string()),
+            Arc::new(AtomicU32::new(std::process::id())),
+            None,
+        )
+        .with_refresher(Arc::new(LongTokens))
+        .with_leak_matcher(leak.clone());
+
+        service.current("linear-token").unwrap();
+        assert_eq!(
+            leak.find("tok-rotated-0002").as_deref(),
+            Some("linear-token")
+        );
+        service.refresh("linear-oauth").await.unwrap();
+        for token in ["AT-refreshed-0003", "RT-refreshed-0003"] {
+            assert_eq!(
+                leak.find(&format!("x {token} y")).as_deref(),
+                Some("linear-oauth"),
+                "{token}"
+            );
+        }
+    }
+
+    /// A provider whose refreshed tokens are long enough to match.
+    struct LongTokens;
+
+    #[async_trait::async_trait]
+    impl Refresher for LongTokens {
+        async fn refresh(&self, cred: &OAuthCredential) -> Result<OAuthCredential, ProxyError> {
+            Ok(OAuthCredential {
+                access_token: "AT-refreshed-0003".into(),
+                refresh_token: "RT-refreshed-0003".into(),
+                expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+                scope: cred.scope.clone(),
+                provider: cred.provider.clone(),
+            })
+        }
     }
 
     /// The proxy holds the rotated value after asking, the vault's

@@ -804,6 +804,43 @@ pub(crate) fn keychain_needs_seal(data_dir: &Path) -> bool {
 /// real passphrase ever reached the keychain). Callers now propagate
 /// the error; setup refuses to proceed without a passphrase rather
 /// than caching empty.
+/// The leak matcher for a process that runs agents, seeded with every
+/// stored secret in the vault at `db_path` ([`wirken_vault::CredentialStore::secrets_for_matching`]).
+/// With no vault there is nothing stored to match, and the vault is not
+/// opened, since opening one creates it. A vault that will not open is
+/// reported, and the matcher starts empty and learns what the process
+/// decrypts later.
+pub(crate) fn seed_leak_matcher(
+    data_dir: &Path,
+    db_path: &Path,
+    passphrase: impl FnOnce() -> String,
+) -> wirken_gateway::leak::LeakMatcher {
+    use wirken_gateway::leak::LeakMatcher;
+    if !db_path.exists() {
+        return LeakMatcher::new();
+    }
+    let keychain = wirken_vault::probe_keychain(data_dir, passphrase);
+    match wirken_vault::CredentialStore::open(db_path, keychain.as_ref())
+        .and_then(|store| store.secrets_for_matching())
+    {
+        Ok(secrets) => {
+            tracing::info!(
+                secrets = secrets.len(),
+                "leak detection seeded from the vault"
+            );
+            LeakMatcher::seeded(secrets)
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "leak detection could not read the vault; it knows only the secrets this \
+                 process decrypts from here on"
+            );
+            LeakMatcher::new()
+        }
+    }
+}
+
 pub fn cached_vault_passphrase() -> anyhow::Result<String> {
     if let Some(p) = vault_passphrase_source() {
         return Ok(p);
@@ -1151,5 +1188,97 @@ mod tests {
         std::fs::write(tmp.path().join("sandbox.json"), "not json").unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::default());
+    }
+}
+
+#[cfg(test)]
+mod leak_seed_tests {
+    use super::seed_leak_matcher;
+    use wirken_vault::{AgeFileKeychain, CredentialKind, CredentialStore, VaultSecret};
+
+    const PASSPHRASE: &str = "seed-test-passphrase";
+
+    /// With no vault there is nothing stored to match, and none is
+    /// created to find that out.
+    #[test]
+    fn no_vault_seeds_nothing_and_creates_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("vault.db");
+        let matcher = seed_leak_matcher(dir.path(), &db, || PASSPHRASE.to_string());
+        assert!(matcher.is_empty());
+        assert!(!db.exists());
+        assert!(!dir.path().join("keychain").exists());
+    }
+
+    /// Every stored secret is known at the start; identifiers are not.
+    #[test]
+    fn the_seed_knows_every_stored_secret_and_no_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("vault.db");
+        {
+            let kc = AgeFileKeychain::new(dir.path().join("keychain"), PASSPHRASE.into());
+            let store = CredentialStore::open(&db, &kc).unwrap();
+            let put = |name: &str, value: &str, kind| {
+                store
+                    .store_with_kind(
+                        name,
+                        "",
+                        &VaultSecret::new(value.into()),
+                        None,
+                        None,
+                        &[],
+                        kind,
+                    )
+                    .unwrap()
+            };
+            put(
+                "anthropic-api-key",
+                "sk-ant-seeded-0001",
+                CredentialKind::Secret,
+            );
+            put(
+                "my-mcp-token",
+                "mcp-token-seeded-01",
+                CredentialKind::Secret,
+            );
+            put(
+                "matrix-username",
+                "@wirken:example.org",
+                CredentialKind::Identifier,
+            );
+        }
+        let matcher = seed_leak_matcher(dir.path(), &db, || PASSPHRASE.to_string());
+        assert_eq!(
+            matcher.find("key sk-ant-seeded-0001").as_deref(),
+            Some("anthropic-api-key")
+        );
+        assert_eq!(
+            matcher.find("mcp-token-seeded-01").as_deref(),
+            Some("my-mcp-token")
+        );
+        assert_eq!(matcher.find("hi @wirken:example.org"), None);
+    }
+
+    /// A vault that will not open leaves the matcher empty rather than
+    /// stopping the process.
+    #[test]
+    fn a_vault_that_will_not_open_seeds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("vault.db");
+        {
+            let kc = AgeFileKeychain::new(dir.path().join("keychain"), PASSPHRASE.into());
+            CredentialStore::open(&db, &kc)
+                .unwrap()
+                .store(
+                    "some-token",
+                    "",
+                    &VaultSecret::new("value-12345678".into()),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let matcher = seed_leak_matcher(dir.path(), &db, || "wrong".to_string());
+        assert!(matcher.is_empty());
     }
 }

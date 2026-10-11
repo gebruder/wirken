@@ -268,6 +268,10 @@ pub struct AgentFactory {
     /// refuses rather than proceeding. The CLI runs
     /// `attach_credential_resolver` after opening the vault.
     credential_resolver: std::sync::RwLock<Option<Arc<dyn crate::http_tool::CredentialResolver>>>,
+    /// The stored secrets every waked Agent refuses to let model-authored
+    /// content carry. Empty (the default) refuses nothing; the CLI
+    /// attaches one seeded from the vault.
+    leak_matcher: std::sync::RwLock<Arc<wirken_gateway::leak::LeakMatcher>>,
     /// Default approval gate injected into every waked Agent.
     /// `None` preserves the pre-out-of-band behavior — `NeedsApproval`
     /// short-circuits with a terminal deny. The daemon-mode `wirken
@@ -422,6 +426,9 @@ impl AgentFactory {
             imported_store: std::sync::RwLock::new(None),
             imported_search_key: std::sync::RwLock::new(None),
             credential_resolver: std::sync::RwLock::new(None),
+            leak_matcher: std::sync::RwLock::new(
+                Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+            ),
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
             signal_approval_gate: std::sync::RwLock::new(None),
@@ -572,6 +579,12 @@ impl AgentFactory {
         *self.credential_resolver.write().unwrap() = Some(resolver);
     }
 
+    /// Install the leak matcher every subsequently-waked Agent checks
+    /// model-authored content against.
+    pub fn attach_leak_matcher(&self, matcher: Arc<wirken_gateway::leak::LeakMatcher>) {
+        *self.leak_matcher.write().unwrap() = matcher;
+    }
+
     /// Install the budget enforcement wiring (spend store + budget
     /// config) shared across every waked Agent. Called once by the CLI
     /// after opening `budget.db` and loading `budget.json`.
@@ -661,6 +674,8 @@ impl AgentFactory {
         // woken as a different config carries that config's id and is
         // checked against its own grants rather than its caller's.
         agent.set_agent_id(agent_id);
+        // Before the skills: a skill is checked against it as it loads.
+        agent.set_leak_matcher(self.leak_matcher.read().unwrap().clone());
         // Inject the per-agent shared resources.
         agent.attach_skills(cfg.skills.clone())?;
         if let ToolGate::Store(perms) = &self.permissions {

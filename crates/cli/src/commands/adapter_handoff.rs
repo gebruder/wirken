@@ -61,11 +61,17 @@ impl Handoff {
     /// not hold, or holds expired, is left out, and the adapter reports
     /// a missing required credential as it did when it read the vault
     /// itself.
-    pub(crate) fn resolve(store: &CredentialStore, adapter_id: &str) -> Self {
+    /// Each value read is learned by `leak`.
+    pub(crate) fn resolve(
+        store: &CredentialStore,
+        adapter_id: &str,
+        leak: &wirken_gateway::leak::LeakMatcher,
+    ) -> Self {
         let mut credentials = BTreeMap::new();
         for name in credential_names(adapter_id) {
             match store.retrieve(&name) {
-                Ok((secret, _)) => {
+                Ok((secret, meta)) => {
+                    leak.learn(&name, secret.expose(), meta.kind);
                     credentials.insert(name, secret);
                 }
                 Err(VaultError::NotFound(_)) => {}
@@ -356,7 +362,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = full_vault(dir.path());
         for (adapter, names) in BEFORE {
-            let mut handoff = Handoff::resolve(&store, adapter);
+            let mut handoff =
+                Handoff::resolve(&store, adapter, &wirken_gateway::leak::LeakMatcher::new());
             assert_eq!(
                 sorted(handoff.names()),
                 sorted(names.iter().copied()),
@@ -367,6 +374,24 @@ mod tests {
                 assert_eq!(secret.expose(), value_for(name));
             }
         }
+    }
+
+    /// Each secret a hand-off reads is learned by leak detection, so a
+    /// value rotated since the start is known; an identifier is not.
+    #[test]
+    fn resolve_teaches_leak_detection_the_secrets_it_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = full_vault(dir.path());
+        let leak = wirken_gateway::leak::LeakMatcher::new();
+        Handoff::resolve(&store, "signal", &leak);
+        for name in ["signal-token", "signal-adapter-key"] {
+            assert_eq!(
+                leak.find(&format!("x {} y", value_for(name))).as_deref(),
+                Some(name)
+            );
+        }
+        assert_eq!(leak.find(&value_for("signal-phone-number")), None);
+        assert_eq!(leak.find(&value_for("telegram-token")), None, "not read");
     }
 
     #[test]
@@ -393,7 +418,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let handoff = Handoff::resolve(&store, "signal");
+        let handoff = Handoff::resolve(&store, "signal", &wirken_gateway::leak::LeakMatcher::new());
         assert_eq!(sorted(handoff.names()), sorted(["signal-token"]));
     }
 
@@ -402,7 +427,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = full_vault(dir.path());
         for (adapter, names) in BEFORE {
-            let encoded = Handoff::resolve(&store, adapter).encode();
+            let encoded =
+                Handoff::resolve(&store, adapter, &wirken_gateway::leak::LeakMatcher::new())
+                    .encode();
             let mut decoded = Handoff::read_from(&encoded[..]).unwrap();
             assert_eq!(sorted(decoded.names()), sorted(names.iter().copied()));
             for name in *names {
@@ -487,7 +514,11 @@ mod tests {
                 .arg("cat")
                 .stdout(std::process::Stdio::piped());
             configure_adapter_command(&mut cmd, adapter, dir.path(), &dir.path().join("gw.sock"));
-            let child = spawn_with_handoff(&mut cmd, Handoff::resolve(&store, adapter)).unwrap();
+            let child = spawn_with_handoff(
+                &mut cmd,
+                Handoff::resolve(&store, adapter, &wirken_gateway::leak::LeakMatcher::new()),
+            )
+            .unwrap();
             let out =
                 tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output())
                     .await

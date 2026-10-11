@@ -2021,6 +2021,30 @@ mod wake {
         )
     }
 
+    /// Every agent the factory wakes checks content against the leak
+    /// matcher the process attached, set before its skills load.
+    #[tokio::test]
+    async fn a_woken_agent_carries_the_attached_leak_matcher() {
+        use wirken_gateway::leak::{CredentialKind, LeakMatcher};
+        let (factory, _tmp) = make_factory("a", make_log());
+        let matcher = Arc::new(LeakMatcher::new());
+        matcher.learn(
+            "telegram-token",
+            "123456:telegram-bot-token",
+            CredentialKind::Secret,
+        );
+        factory.attach_leak_matcher(matcher);
+        let agent = factory.wake("a", "leaky").unwrap();
+        let agent = agent.lock().await;
+        assert_eq!(
+            agent
+                .leak_matcher()
+                .find("here: 123456:telegram-bot-token")
+                .as_deref(),
+            Some("telegram-token")
+        );
+    }
+
     /// The agent `wirken sessions verify` wakes dispatches nothing: a
     /// built-in read, an unregistered name and the sub-agent intercept
     /// are all refused, and the refusals write no row.

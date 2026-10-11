@@ -100,6 +100,29 @@ pub fn matchable_parts(value: &str) -> Vec<Zeroizing<String>> {
     }
 }
 
+/// `value`, stored under `name` as `kind`, as leak detection matches
+/// it: `None` for an identifier, or when no part is at least
+/// [`MIN_MATCH_BYTES`] long. A part shorter than that is dropped with a
+/// warning naming the credential, never the value.
+pub fn matchable_secret(name: &str, value: &str, kind: CredentialKind) -> Option<MatchableSecret> {
+    if kind == CredentialKind::Identifier {
+        return None;
+    }
+    let (parts, short): (Vec<_>, Vec<_>) = matchable_parts(value)
+        .into_iter()
+        .partition(|p| p.len() >= MIN_MATCH_BYTES);
+    if !short.is_empty() {
+        tracing::warn!(
+            credential = %name,
+            "stored credential is shorter than {MIN_MATCH_BYTES} bytes; leak detection does not match it"
+        );
+    }
+    (!parts.is_empty()).then(|| MatchableSecret {
+        name: name.to_string(),
+        parts,
+    })
+}
+
 fn oauth_parts(value: &str) -> Option<Vec<Zeroizing<String>>> {
     let json: Zeroizing<String> = Zeroizing::new(value.trim_start().to_string());
     if !json.starts_with('{') {

@@ -16,6 +16,7 @@ pub mod imported;
 pub mod imported_archive;
 pub mod imported_format;
 pub mod injection_detect;
+pub mod leak;
 pub mod memory;
 pub mod migrate;
 pub mod org;

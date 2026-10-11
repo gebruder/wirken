@@ -7,8 +7,7 @@ use crate::crypto::{decrypt, encrypt, generate_key};
 use crate::error::VaultError;
 use crate::keychain::Keychain;
 use crate::kind::{
-    BUILTIN_IDENTIFIERS, CredentialKind, MIN_MATCH_BYTES, MatchableSecret, default_kind,
-    matchable_parts,
+    BUILTIN_IDENTIFIERS, CredentialKind, MatchableSecret, default_kind, matchable_secret,
 };
 use crate::secret::VaultSecret;
 
@@ -494,27 +493,17 @@ impl CredentialStore {
         let mut out = Vec::new();
         for row in rows {
             let (name, encrypted, kind) = row?;
-            if CredentialKind::from_column(kind.as_deref()) == CredentialKind::Identifier {
+            let kind = CredentialKind::from_column(kind.as_deref());
+            if kind == CredentialKind::Identifier {
                 continue;
             }
-            let secret = match decrypt(&name, &encrypted, &self.device_key) {
-                Ok(secret) => secret,
-                Err(e) => {
-                    tracing::warn!(credential = %name, error = %e, "stored credential not decrypted for leak detection");
-                    continue;
-                }
-            };
-            let (parts, short): (Vec<_>, Vec<_>) = matchable_parts(secret.expose())
-                .into_iter()
-                .partition(|p| p.len() >= MIN_MATCH_BYTES);
-            if !short.is_empty() {
-                tracing::warn!(
+            match decrypt(&name, &encrypted, &self.device_key) {
+                Ok(secret) => out.extend(matchable_secret(&name, secret.expose(), kind)),
+                Err(e) => tracing::warn!(
                     credential = %name,
-                    "stored credential is shorter than {MIN_MATCH_BYTES} bytes; leak detection does not match it"
-                );
-            }
-            if !parts.is_empty() {
-                out.push(MatchableSecret { name, parts });
+                    error = %e,
+                    "stored credential not decrypted for leak detection"
+                ),
             }
         }
         Ok(out)

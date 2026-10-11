@@ -231,6 +231,9 @@ pub struct Agent {
     tools: ToolRegistry,
     mcp: Option<Arc<tokio::sync::Mutex<McpProxyClient>>>,
     skills: Vec<Skill>,
+    /// The stored secrets model-authored content may not carry. Empty
+    /// until the process that built the agent attaches one.
+    leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
     system_prompt: String,
     /// API key passed per-request — agent never stores it long-term.
     /// In production, the gateway's LLM proxy handles this.
@@ -644,6 +647,7 @@ impl Agent {
             tools,
             mcp: None,
             skills: Vec::new(),
+            leak_matcher: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
             system_prompt,
             api_key,
             api_key_credential,
@@ -748,6 +752,7 @@ impl Agent {
             tools,
             mcp: None,
             skills: Vec::new(),
+            leak_matcher: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
             system_prompt,
             api_key,
             api_key_credential,
@@ -1083,6 +1088,17 @@ impl Agent {
     /// rather than proceeding unauthenticated.
     pub fn set_credential_resolver(&self, resolver: Arc<dyn crate::http_tool::CredentialResolver>) {
         self.tools.set_credential_resolver(resolver);
+    }
+
+    /// Check model-authored content against `matcher`. Set before
+    /// [`Self::attach_skills`], which checks each skill as it loads.
+    pub fn set_leak_matcher(&mut self, matcher: Arc<wirken_gateway::leak::LeakMatcher>) {
+        self.leak_matcher = matcher;
+    }
+
+    /// The stored secrets this agent refuses to let content carry.
+    pub fn leak_matcher(&self) -> &Arc<wirken_gateway::leak::LeakMatcher> {
+        &self.leak_matcher
     }
 
     /// Attach a skill collection. Used by

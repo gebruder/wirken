@@ -183,6 +183,13 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // Attached, not just loaded: the skills' permission blocks are
     // what narrow the tool set, exactly as `wirken run` builds the
     // same agent.
+    // Every stored secret, set before the skills, which are checked
+    // against it as they load.
+    agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
+        &cfg.data_dir,
+        &cfg.vault_db_path(),
+        || super::cached_vault_passphrase().unwrap_or_default(),
+    )));
     agent
         .attach_skills(super::skills_for_default_agent(&cfg))
         .context("attach skills")?;
@@ -278,6 +285,13 @@ async fn send_with_agent_config(
     // permission blocks narrow the tool set exactly as `wirken run`
     // builds the same agent. A dangling preset reference is an
     // operator-actionable error, not silent skill absence.
+    // Every stored secret, set before the skills, which are checked
+    // against it as they load.
+    agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
+        &cfg.data_dir,
+        &cfg.vault_db_path(),
+        || super::cached_vault_passphrase().unwrap_or_default(),
+    )));
     agent
         .attach_skills(super::skills_for_agent(cfg, agent_cfg)?)
         .context("attach skills")?;

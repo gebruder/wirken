@@ -29,6 +29,8 @@ reqwest = { workspace = true }
 base64 = "0.23"
 async-trait = { workspace = true }
 capnp = { workspace = true }
+aho-corasick = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

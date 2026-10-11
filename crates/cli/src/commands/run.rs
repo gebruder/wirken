@@ -50,6 +50,9 @@ use super::config;
 /// results, or model context.
 struct VaultCredentialResolver {
     store: std::sync::Mutex<CredentialStore>,
+    /// Learns each value resolved, so one rotated since the start is
+    /// known to leak detection once it is used.
+    leak: Arc<wirken_gateway::leak::LeakMatcher>,
 }
 
 impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
@@ -83,7 +86,10 @@ impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
         }
 
         match store.retrieve(name) {
-            Ok((secret, _)) => Ok(ResolvedSecret::new(secret.expose().to_string())),
+            Ok((secret, meta)) => {
+                self.leak.learn(name, secret.expose(), meta.kind);
+                Ok(ResolvedSecret::new(secret.expose().to_string()))
+            }
             Err(wirken_vault::VaultError::NotFound(_)) => {
                 Err(CredentialError::NotFound(name.to_string()))
             }
@@ -215,6 +221,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
     };
     let siem_config = load_siem_config(&cfg);
+
+    // --- Leak detection ---
+    // Every stored secret, so model-authored content that carries one is
+    // refused. The decrypt sites below add the values they read, which
+    // covers a credential rotated after this point.
+    let leak_matcher = Arc::new(super::seed_leak_matcher(
+        &cfg.data_dir,
+        &cfg.vault_db_path(),
+        || prompt_vault_passphrase(&mut vault_passphrase),
+    ));
 
     // The webchat status route reads the alarm log with the same key
     // the writer signs with, so a record it shows is verified rather
@@ -420,7 +436,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             .context("Failed to open credential store")?;
         let cred_name = format!("{provider}-api-key");
         match store.retrieve(&cred_name) {
-            Ok((secret, _)) => {
+            Ok((secret, meta)) => {
+                leak_matcher.learn(&cred_name, secret.expose(), meta.kind);
                 api_key_credential = Some(cred_name.clone());
                 Some(secret.expose().to_string())
             }
@@ -630,7 +647,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 vault
                     .as_ref()
                     .and_then(|v| v.retrieve(&agent_cfg.api_key_credential).ok())
-                    .map(|(secret, _)| secret.expose().to_string())
+                    .map(|(secret, meta)| {
+                        leak_matcher.learn(
+                            &agent_cfg.api_key_credential,
+                            secret.expose(),
+                            meta.kind,
+                        );
+                        secret.expose().to_string()
+                    })
             } else {
                 None
             };
@@ -978,6 +1002,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
         let vault = adapter_vault.clone();
+        let leak = leak_matcher.clone();
 
         let handle = tokio::spawn(async move {
             // Small delay to let the listener start
@@ -986,7 +1011,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             let spawn = || {
                 tracing::info!("Spawning adapter: {adapter_id}");
                 let handoff = match vault.as_ref().map(|v| v.lock()) {
-                    Some(Ok(store)) => Handoff::resolve(&store, &adapter_id),
+                    Some(Ok(store)) => Handoff::resolve(&store, &adapter_id, &leak),
                     Some(Err(_)) => {
                         tracing::error!("vault mutex poisoned; adapter starts with no credentials");
                         Handoff::default()
@@ -1082,20 +1107,24 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         proxy_vault.as_deref(),
         &proxy_credentials,
         refresh_token.as_str(),
+        &leak_matcher,
     );
     let mcp_refresh_socket = cfg.socket_dir().join("mcp-refresh.sock");
     let _ = std::fs::remove_file(&mcp_refresh_socket);
     let mcp_refresh_handle =
         match wirken_mcp_proxy::refresh_service::RefreshListener::bind(&mcp_refresh_socket) {
             Ok(listener) => {
-                let service = Arc::new(wirken_mcp_proxy::refresh_service::RefreshService::new(
-                    proxy_vault.clone(),
-                    proxy_handed,
-                    proxy_credentials.oauth.clone(),
-                    refresh_token,
-                    mcp_proxy_pid.clone(),
-                    Some(session_log.clone()),
-                ));
+                let service = Arc::new(
+                    wirken_mcp_proxy::refresh_service::RefreshService::new(
+                        proxy_vault.clone(),
+                        proxy_handed,
+                        proxy_credentials.oauth.clone(),
+                        refresh_token,
+                        mcp_proxy_pid.clone(),
+                        Some(session_log.clone()),
+                    )
+                    .with_leak_matcher(leak_matcher.clone()),
+                );
                 Some(tokio::spawn(service.serve(listener)))
             }
             Err(e) => {
@@ -1390,6 +1419,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // tool can attach an operator-provisioned credential host-side.
     // Non-interactive keychain probe: if the vault is unavailable the
     // tool refuses credentialed calls rather than blocking startup.
+    factory.attach_leak_matcher(leak_matcher.clone());
     match CredentialStore::open(
         &cfg.vault_db_path(),
         probe_keychain(&cfg.data_dir, || {
@@ -1399,6 +1429,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     ) {
         Ok(store) => factory.attach_credential_resolver(Arc::new(VaultCredentialResolver {
             store: std::sync::Mutex::new(store),
+            leak: leak_matcher.clone(),
         })),
         Err(e) => tracing::warn!(
             vault = %cfg.vault_db_path().display(),
@@ -2435,6 +2466,7 @@ fn mcp_proxy_handoff(
     vault: Option<&std::sync::Mutex<CredentialStore>>,
     wanted: &wirken_mcp_proxy::ConfiguredCredentials,
     refresh_token: &str,
+    leak: &wirken_gateway::leak::LeakMatcher,
 ) -> (Handoff, std::collections::BTreeSet<String>) {
     use wirken_mcp_proxy::credentials::{GATEWAY_TOKEN_ENTRY, without_refresh_token};
     let mut entries = std::collections::BTreeMap::new();
@@ -2446,7 +2478,8 @@ fn mcp_proxy_handoff(
                     continue;
                 }
                 match store.retrieve(name) {
-                    Ok((secret, _)) => {
+                    Ok((secret, meta)) => {
+                        leak.learn(name, secret.expose(), meta.kind);
                         let value = if wanted.oauth.contains(name) {
                             without_refresh_token(secret.expose())
                         } else {
@@ -5933,12 +5966,83 @@ mod reply_outbound_tests {
 }
 
 #[cfg(test)]
+mod resolver_tests {
+    use super::VaultCredentialResolver;
+    use std::sync::Arc;
+    use wirken_agent::http_tool::CredentialResolver;
+    use wirken_vault::{CredentialStore, VaultSecret};
+
+    /// A value the resolver reads for `http_request` is learned by leak
+    /// detection, so a credential rotated since the start is known once
+    /// it is used.
+    #[test]
+    fn a_resolved_credential_is_learned_by_leak_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &tmp.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        store
+            .store_with_hosts(
+                "api-token",
+                "",
+                &VaultSecret::new("rotated-api-token-02".into()),
+                None,
+                None,
+                &["api.example.com".to_string()],
+            )
+            .unwrap();
+        let leak = Arc::new(wirken_gateway::leak::LeakMatcher::new());
+        let resolver = VaultCredentialResolver {
+            store: std::sync::Mutex::new(store),
+            leak: leak.clone(),
+        };
+        assert!(resolver.resolve("api-token", "api.example.com").is_ok());
+        assert_eq!(
+            leak.find("x rotated-api-token-02").as_deref(),
+            Some("api-token")
+        );
+    }
+}
+
+#[cfg(test)]
 mod proxy_handoff_tests {
     use super::mcp_proxy_handoff;
     use std::collections::BTreeSet;
     use wirken_mcp_proxy::credentials::GATEWAY_TOKEN_ENTRY;
     use wirken_mcp_proxy::{ConfiguredCredentials, OAuthCredential, store_oauth};
     use wirken_vault::{CredentialStore, VaultSecret};
+
+    /// Each value the proxy is handed is learned by leak detection.
+    #[test]
+    fn the_proxy_handoff_teaches_leak_detection_what_it_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &tmp.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        store
+            .store(
+                "linear-token",
+                "",
+                &VaultSecret::new("lin-api-token-0001".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        let wanted = ConfiguredCredentials {
+            names: BTreeSet::from(["linear-token".to_string()]),
+            oauth: BTreeSet::new(),
+        };
+        let leak = wirken_gateway::leak::LeakMatcher::new();
+        let _ = mcp_proxy_handoff(Some(&std::sync::Mutex::new(store)), &wanted, "t", &leak);
+        assert_eq!(
+            leak.find("a lin-api-token-0001 b").as_deref(),
+            Some("linear-token")
+        );
+    }
 
     /// The proxy gets the names its configs reference and nothing else,
     /// an OAuth credential without its refresh token, and the refresh
@@ -5981,8 +6085,12 @@ mod proxy_handoff_tests {
             oauth: BTreeSet::from(["notion-oauth".to_string()]),
         };
 
-        let (handoff, handed) =
-            mcp_proxy_handoff(Some(&std::sync::Mutex::new(store)), &wanted, "real-token");
+        let (handoff, handed) = mcp_proxy_handoff(
+            Some(&std::sync::Mutex::new(store)),
+            &wanted,
+            "real-token",
+            &wirken_gateway::leak::LeakMatcher::new(),
+        );
         assert_eq!(
             handed,
             BTreeSet::from(["linear-token".to_string(), "notion-oauth".to_string()]),

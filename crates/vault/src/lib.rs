@@ -18,7 +18,7 @@ pub use keychain::{
 };
 pub use kind::{
     BUILTIN_IDENTIFIERS, CredentialKind, MIN_MATCH_BYTES, MatchableSecret, default_kind,
-    matchable_parts,
+    matchable_parts, matchable_secret,
 };
 pub use scoped::{CredentialAccess, ScopedCredentialStore};
 pub use secret::VaultSecret;

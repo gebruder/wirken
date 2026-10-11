@@ -521,6 +521,12 @@ async fn dispatch_via_agent_runtime(
     // `.lyrik/state/runs/<run-id>/` per the Lyrik skill instructions.
     let perms = open_permission_store(&cfg)?;
     let perms_arc = Arc::new(Mutex::new(perms));
+    // Every stored secret, for the run's agent and each walk's.
+    let leak_matcher = Arc::new(super::seed_leak_matcher(
+        &cfg.data_dir,
+        &cfg.vault_db_path(),
+        || super::cached_vault_passphrase().unwrap_or_default(),
+    ));
     let mut agent = Agent::new_with_sandbox(
         agent_id.clone(),
         target.to_path_buf(),
@@ -596,6 +602,7 @@ async fn dispatch_via_agent_runtime(
     // run: tools, read paths across the target, writes under `.lyrik`.
     let run_skills = lyrik_run_skills(&lyrik_staged_dir, walks_staged_dir.as_deref())?;
     let skills_attached: Vec<String> = run_skills.iter().map(|s| s.name.clone()).collect();
+    agent.set_leak_matcher(leak_matcher.clone());
     agent
         .attach_skills(run_skills)
         .context("attach run skills")?;
@@ -680,6 +687,7 @@ async fn dispatch_via_agent_runtime(
                 session_log.clone(),
                 super::load_sandbox_config(&cfg.data_dir),
                 perms_arc.clone(),
+                leak_matcher.clone(),
                 lyrik_staged_dir.clone(),
                 walks_staged_dir
                     .clone()
@@ -1021,6 +1029,7 @@ async fn dispatch_walks_concurrent(
     session_log: Arc<dyn wirken_audit::SessionLog>,
     sandbox: wirken_agent::sandbox::SandboxConfig,
     permissions: Arc<Mutex<PermissionStore>>,
+    leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
     lyrik_staged_dir: PathBuf,
     walks_staged_dir: PathBuf,
     // `walk_seed_suffix`: per-walk seed/decline protocol text appended
@@ -1096,6 +1105,7 @@ async fn dispatch_walks_concurrent(
         let session_log_t = session_log.clone();
         let sandbox_t = sandbox.clone();
         let permissions_t = permissions.clone();
+        let leak_t = leak_matcher.clone();
         let terminal_t = terminal.clone();
         let lyrik_staged_dir_t = lyrik_staged_dir.clone();
         let walks_staged_dir_t = walks_staged_dir.clone();
@@ -1138,6 +1148,7 @@ async fn dispatch_walks_concurrent(
             // above: an agent that has not named itself gets no
             // persisted grants.
             local_agent.set_agent_id(agent_id_t.clone());
+            local_agent.set_leak_matcher(leak_t);
             if let Some(terminal) = terminal_t {
                 local_agent.set_approval_gate(Arc::new(
                     super::stdin_approval::LyrikPromptGate::new(&walk_name, terminal),
