@@ -221,6 +221,16 @@ tagged.
 
 ### Fixed
 
+- A web chat turn whose model request fails ends, and the page gets the
+  error. Before, the page got neither a reply nor the error, and the
+  conversation answered every later message with "turn open" until
+  `wirken run` restarted; 1.28.0 does the same. A failed model call, in
+  any channel, is now recorded as an `llm_request_failed` row answering
+  the turn's `llm_request` by `request_id`, with the error and the
+  latency; before, the request row was left without a pair. The error is
+  cut to 1024 bytes, and one carrying a stored secret is replaced by a
+  notice naming the credential. The row is off the default SIEM set and
+  `warn` when an include list brings it.
 - A rewind no longer hands out a session's sequence numbers again. Its
   `rewind` marker takes the number after the highest one the session
   issued and later rows carry on from it, so `(session_id, seq)` names

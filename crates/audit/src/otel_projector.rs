@@ -557,6 +557,9 @@ impl OtelProjector {
             SessionEvent::McpCredentialRefetched { .. } => Vec::new(),
             // A refusal; the row it replaced carries the refusal text.
             SessionEvent::LeakRefused { .. } => Vec::new(),
+            // A failed model call produces no chat span; the request
+            // it pairs with stays pending, as an unanswered one did.
+            SessionEvent::LlmRequestFailed { .. } => Vec::new(),
             // Rides the tool result the tool span times.
             SessionEvent::EgressHookDispatched { .. } => Vec::new(),
             // Rides the tool result the tool span times.

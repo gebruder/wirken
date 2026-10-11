@@ -14068,3 +14068,94 @@ mod leak_detection {
         assert!(!request.contains("Deploy with token"));
     }
 }
+
+/// A model call that fails ends the turn with the error, and the chain
+/// pairs its request row with an `LlmRequestFailed` row.
+mod llm_request_failure {
+    use tempfile::TempDir;
+    use wirken_audit::SessionEvent;
+
+    use super::leak_detection::{
+        NAME, Reply, SECRET, agent, assert_no_secret_recorded, events, stub,
+    };
+
+    /// The request row's id, and each failure row's id and error.
+    fn request_and_failures(events: &[SessionEvent]) -> (String, Vec<(String, String)>) {
+        let request = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::LlmRequest { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("a request row");
+        let failures = events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::LlmRequestFailed {
+                    request_id, error, ..
+                } => Some((request_id.clone(), error.clone())),
+                _ => None,
+            })
+            .collect();
+        (request, failures)
+    }
+
+    /// A provider that answers 404, streamed and not: the turn fails
+    /// with the error, and the request is answered on the chain by a
+    /// failure row carrying it, not left without a pair.
+    #[tokio::test]
+    async fn a_model_call_answered_with_404_fails_the_turn_and_is_recorded() {
+        for streaming in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (base_url, server, _) =
+                stub(vec![Reply::Error(404, "404 page not found".into())]).await;
+            let (mut agent, log) = agent(&tmp, &base_url);
+            let result = if streaming {
+                let (tx, _rx) = tokio::sync::mpsc::channel(64);
+                agent.process_message_stream("hello", "m1".into(), tx).await
+            } else {
+                agent.process_message("hello", "m1".into()).await
+            };
+            server.await.unwrap();
+
+            let err = result.err().expect("the turn fails");
+            assert!(err.to_string().contains("404"), "{err}");
+            let events = events(&log, "leaky");
+            let (request, failures) = request_and_failures(&events);
+            assert_eq!(failures.len(), 1, "streaming={streaming}: {events:?}");
+            assert_eq!(failures[0].0, request, "the failure answers the request");
+            assert!(
+                failures[0].1.contains("404 page not found"),
+                "{}",
+                failures[0].1
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, SessionEvent::LlmResponse { .. })),
+                "no response row for a call that failed"
+            );
+        }
+    }
+
+    /// An error whose text carries a stored secret is recorded as a
+    /// notice naming the credential, never the text itself.
+    #[tokio::test]
+    async fn an_error_carrying_a_stored_secret_is_recorded_without_it() {
+        let tmp = TempDir::new().unwrap();
+        let (base_url, server, _) =
+            stub(vec![Reply::Error(401, format!("invalid key {SECRET}"))]).await;
+        let (mut agent, log) = agent(&tmp, &base_url);
+        let result = agent.process_message("hello", "m1".into()).await;
+        server.await.unwrap();
+
+        assert!(result.is_err());
+        let events = events(&log, "leaky");
+        let (_, failures) = request_and_failures(&events);
+        assert_eq!(
+            failures[0].1,
+            format!("error withheld: it contained stored credential {NAME}")
+        );
+        assert_no_secret_recorded(&events);
+    }
+}

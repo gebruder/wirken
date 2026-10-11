@@ -673,6 +673,11 @@ fn extract_identity_for_sentinel(
             agent_id,
             sender_id,
             ..
+        }
+        | SessionEvent::LlmRequestFailed {
+            agent_id,
+            sender_id,
+            ..
         } => (None, sender_id.clone(), Some(agent_id.clone())),
         // An agent ran this one, unlike an import, so it attributes
         // like every other agent event rather than to an operator.
@@ -1000,6 +1005,9 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::LlmRequest { .. } => debug_summary(event),
         // Token and cost accounting; the debug form is the summary.
         SessionEvent::LlmResponse { .. } => debug_summary(event),
+        // The request id, the error and the latency; the debug form is
+        // the summary.
+        SessionEvent::LlmRequestFailed { .. } => debug_summary(event),
         // An action key and who approved it.
         SessionEvent::PermissionApproved { .. } => debug_summary(event),
         // A request id and why it was refused.
@@ -1237,6 +1245,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
         },
         SessionEvent::McpServerRestartAbandoned { .. } => "error",
         SessionEvent::LeakRefused { .. } => "error",
+        SessionEvent::LlmRequestFailed { .. } => "warn",
         SessionEvent::AuditLegacy { action, detail, .. } => severity(action, detail),
         _ => "info",
     }

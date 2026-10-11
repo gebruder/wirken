@@ -1400,6 +1400,10 @@ function renderEvent(ev, live) {
       addDecision('egress ' + (ev.allowed ? 'allowed' : 'refused') + ' · ' + ev.host + ':' + ev.port +
         (ev.reason ? ' · ' + ev.reason : '') + (ev.escalated ? ' · escalated' : '') + ' · recorded', ev.allowed ? '✓' : '✕');
       break;
+    case 'llm_request_failed':
+      addBlock('refusal', 'Model request failed', '✕', ev.error,
+        'The turn ended here. From the failure row on the record.');
+      break;
     case 'leak_refused':
       addBlock('refusal', 'Stored credential refused', '✕',
         ev.surface.replace(/_/g, ' ') + (ev.tool ? ' · ' + ev.tool : '') +
@@ -3105,7 +3109,14 @@ async fn run_turn(turn: AcceptedTurn, stream: &mut tokio::net::TcpStream, shared
             let forward_future = async {
                 loop {
                     tokio::select! {
-                        Some(event) = rx.recv() => {
+                        event = rx.recv() => {
+                            // The agent's stream closing ends the turn. A
+                            // turn that succeeds sends `Done` first; one
+                            // whose model request fails returns without
+                            // it, and the approval channel stays open for
+                            // the whole turn, so waiting for both to close
+                            // would wait for ever.
+                            let Some(event) = event else { break };
                             let line = match event {
                                 wirken_agent::llm_stream::StreamEvent::TextDelta(text) => {
                                     format!(
@@ -4022,6 +4033,15 @@ pub fn session_events(
                 ..
             } => Some(json!({
                 "kind": "llm_request", "provider": provider, "model": model, "request_id": request_id,
+            })),
+            SessionEvent::LlmRequestFailed {
+                request_id,
+                error,
+                latency_ms,
+                ..
+            } => Some(json!({
+                "kind": "llm_request_failed", "request_id": request_id, "error": error,
+                "latency_ms": latency_ms,
             })),
             SessionEvent::LlmResponse {
                 request_id,
@@ -6319,6 +6339,17 @@ mod tests {
                     skill_name: None,
                 },
             ),
+            (
+                TrustLevel::System,
+                SessionEvent::LlmRequestFailed {
+                    request_id: "req-2".into(),
+                    error: "LLM error: HTTP 404 Not Found: 404 page not found".into(),
+                    latency_ms: 3,
+                    agent_id: agent(),
+                    credential_id: None,
+                    sender_id: None,
+                },
+            ),
         ];
         let row_count = rows.len() as u64;
         for (trust, ev) in rows {
@@ -6355,6 +6386,7 @@ mod tests {
                 "compaction",
                 "http_request",
                 "leak_refused",
+                "llm_request_failed",
             ],
             "every kind the projection emits, one row each"
         );
@@ -6397,7 +6429,7 @@ mod tests {
         assert_eq!(v["head"]["seq"], row_count - 1, "the last row appended");
         assert_eq!(v["head"]["last_signed_head_seq"], 6, "from the chain head");
         assert_eq!(
-            v["head"]["unsigned_tail_len"], 3,
+            v["head"]["unsigned_tail_len"], 4,
             "the rows written after that head"
         );
         assert_eq!(v["totals"]["attestations"], 1);
@@ -8279,6 +8311,11 @@ mod tests {
 
     impl Routes {
         fn open() -> Self {
+            Self::open_with(wirken_agent::llm::LlmConfig::ollama("local"))
+        }
+
+        /// The same, with the `default` agent's model at `llm_config`.
+        fn open_with(llm_config: wirken_agent::llm::LlmConfig) -> Self {
             use std::collections::{BTreeMap, HashMap};
             let dir = tempfile::tempdir().expect("tempdir");
             let cfg = cfg_at(dir.path());
@@ -8297,7 +8334,7 @@ mod tests {
                 wirken_agent::AgentStaticConfig {
                     agent_id: "default".into(),
                     workspace,
-                    llm_config: wirken_agent::llm::LlmConfig::ollama("local"),
+                    llm_config,
                     channel_overrides: HashMap::new(),
                     api_key: None,
                     api_key_credential: None,
@@ -8406,6 +8443,117 @@ mod tests {
             "{line} HTTP/1.1\r\n{headers}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    /// A model provider that answers every request with 404, as Ollama
+    /// does for a path it does not serve. Returns its base URL.
+    async fn provider_answering_404() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                // The whole request first, so the answer is not taken
+                // for a connection reset.
+                let mut request = Vec::new();
+                let mut buf = vec![0u8; 16384];
+                while let Ok(n) = socket.read(&mut buf).await {
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    let complete = text.find("\r\n\r\n").is_some_and(|end| {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        request.len() >= end + 4 + length
+                    });
+                    if n == 0 || complete {
+                        break;
+                    }
+                }
+                let body = "404 page not found";
+                let response = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        base_url
+    }
+
+    /// A turn whose model request fails ends: the page gets the error,
+    /// the chain answers the request with an `llm_request_failed` row,
+    /// and the conversation takes another turn. Before, the stream
+    /// waited for ever on the approval channel, which stays open for
+    /// the whole turn, and the conversation answered every later
+    /// message with "turn open".
+    #[tokio::test]
+    async fn a_turn_whose_model_request_fails_ends_with_the_error() {
+        use tokio::io::AsyncReadExt;
+        use wirken_audit::{SessionEvent, SessionLog as _};
+        let mut llm = wirken_agent::llm::LlmConfig::ollama("local");
+        llm.base_url = provider_answering_404().await;
+        let routes = Routes::open_with(llm);
+        let send = request(
+            "POST /api/chat",
+            r#"{"message":"hello","conversation":"c-0123456789ab"}"#,
+        );
+        let Response::Turn(turn) = routes.call(&send).await else {
+            panic!("the turn was not accepted");
+        };
+
+        let page = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut browser = tokio::net::TcpStream::connect(page.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server_end, _) = page.accept().await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            super::run_turn(*turn, &mut server_end, &routes.shared),
+        )
+        .await
+        .expect("the turn ends");
+        drop(server_end);
+        let mut shown = String::new();
+        browser.read_to_string(&mut shown).await.unwrap();
+        assert!(
+            shown.contains(r#""type":"error""#) && shown.contains("404"),
+            "the page is told: {shown}"
+        );
+
+        assert!(
+            matches!(routes.call(&send).await, Response::Turn(_)),
+            "the conversation takes another turn"
+        );
+
+        let log = wirken_audit::SqliteSessionLog::open(&cfg_at(routes.dir.path()).audit_db_path())
+            .unwrap();
+        let handle = log.handle_for(SessionId::new(super::webchat_session_id("c-0123456789ab")));
+        let events: Vec<SessionEvent> = log
+            .get_since(&handle, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        let request_id = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::LlmRequest { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("a request row");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SessionEvent::LlmRequestFailed { request_id: failed, error, .. }
+                    if *failed == request_id && error.contains("404 page not found"))),
+            "{events:?}"
+        );
     }
 
     /// The header block and JSON body of a response the route

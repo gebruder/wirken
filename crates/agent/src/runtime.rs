@@ -433,6 +433,10 @@ pub(crate) fn message_refused(credential: &str) -> String {
     )
 }
 
+/// The longest error text an [`SessionEvent::LlmRequestFailed`] row
+/// carries.
+const LLM_ERROR_MAX_BYTES: usize = 1024;
+
 /// What a channel gets in place of a reply that carried a stored secret.
 pub(crate) fn reply_withheld(credential: &str) -> String {
     format!("Reply withheld: it contained stored credential {credential}.")
@@ -1132,6 +1136,44 @@ impl Agent {
     fn note_provider_refusal(&self, e: AgentError) -> AgentError {
         if let AgentError::LeakRefused { credential } = &e {
             self.record_leak(credential, LeakSurface::ProviderRequest, None, None, None);
+        }
+        e
+    }
+
+    /// `e`, unchanged, after recording that the model call
+    /// `request_id`, started at `started`, failed with it: a
+    /// [`SessionEvent::LlmRequestFailed`] row pairs with the request row,
+    /// so the turn's record says how it ended. The error text is cut to
+    /// [`LLM_ERROR_MAX_BYTES`], since a provider's error body can be a
+    /// whole page, and text carrying a stored secret is replaced by a
+    /// notice naming the credential.
+    fn fail_llm_request(
+        &self,
+        request_id: &str,
+        started: std::time::Instant,
+        e: AgentError,
+    ) -> AgentError {
+        let e = self.note_provider_refusal(e);
+        let mut text = e.to_string();
+        let error = match self.leak_matcher.find(&text) {
+            Some(credential) => {
+                format!("error withheld: it contained stored credential {credential}")
+            }
+            None => {
+                text.truncate(text.floor_char_boundary(LLM_ERROR_MAX_BYTES));
+                text
+            }
+        };
+        let event = SessionEvent::LlmRequestFailed {
+            request_id: request_id.to_string(),
+            error,
+            latency_ms: started.elapsed().as_millis() as u64,
+            agent_id: self.audited_agent_id(),
+            credential_id: self.api_key_credential.clone(),
+            sender_id: self.current_inbound.sender_id.clone(),
+        };
+        if let Err(log_err) = self.log_event(TrustLevel::System, event) {
+            tracing::error!(error = %log_err, request_id, "the failed model call was not recorded");
         }
         e
     }
@@ -2860,7 +2902,7 @@ impl Agent {
                     self.api_key.as_deref(),
                 )
                 .await
-                .map_err(|e| self.note_provider_refusal(e))?;
+                .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let latency_ms = started.elapsed().as_millis() as u64;
             let LlmResponseAttribution {
                 input_tokens,
@@ -3226,7 +3268,7 @@ impl Agent {
 
                 let result = stream_future.await;
                 let _ = forward_handle.await;
-                result.map_err(|e| self.note_provider_refusal(e))?
+                result.map_err(|e| self.fail_llm_request(&request_id, started, e))?
             };
             let latency_ms = started.elapsed().as_millis() as u64;
             let LlmResponseAttribution {

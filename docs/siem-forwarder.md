@@ -120,8 +120,9 @@ or cause: `AdapterConnect` is `info`; `AdapterDisconnect` is `info`, or
 `error`. `McpServerExited` is `info` when the proxy stopped the container and
 `warn` otherwise; `McpServerRestart` is `warn` after an exit and `error` after
 `start_failed` or `initialize_failed`; `McpServerRestartAbandoned` is `error`.
-`LeakRefused` is `error`. A legacy row an include list brings onto the typed
-pipe keeps its legacy level, and every other typed event is `info`.
+`LeakRefused` is `error`. `LlmRequestFailed`, off the default set, is `warn`
+when an include list brings it. A legacy row an include list brings onto the
+typed pipe keeps its legacy level, and every other typed event is `info`.
 
 On the legacy pipe only Datadog carries a level, `status`. `connection.panic`
 is `error`. Other legacy rows are `error` when the action names a failure,

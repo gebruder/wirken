@@ -167,6 +167,9 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::LlmRequest { .. } => false,
         // Token accounting.
         SessionEvent::LlmResponse { .. } => false,
+        // A failed model call. Off like its pair: a provider's error
+        // text can quote the request it refused.
+        SessionEvent::LlmRequestFailed { .. } => false,
         // A grant made. The set carries denials and lapses, which are what
         // turn a call away.
         SessionEvent::PermissionApproved { .. } => false,
@@ -257,6 +260,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::HttpRequest { .. } => "http_request",
         SessionEvent::LlmRequest { .. } => "llm_request",
         SessionEvent::LlmResponse { .. } => "llm_response",
+        SessionEvent::LlmRequestFailed { .. } => "llm_request_failed",
         SessionEvent::BudgetExceeded { .. } => "budget_exceeded",
         SessionEvent::PermissionDenied { .. } => "permission_denied",
         SessionEvent::PermissionApproved { .. } => "permission_approved",

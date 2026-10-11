@@ -822,6 +822,28 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// The model call an [`Self::LlmRequest`] started failed: the
+    /// request was refused before it was sent, the provider answered
+    /// with an error status, or the request could not be sent or its
+    /// answer read. Written in place of the paired [`Self::LlmResponse`],
+    /// with the same `request_id`, and the turn ends with the error.
+    ///
+    /// `error` is the error as the runtime saw it, cut to a bounded
+    /// length; one that carries a stored secret is replaced by a
+    /// notice naming the credential.
+    LlmRequestFailed {
+        request_id: String,
+        error: String,
+        latency_ms: u64,
+        #[serde(default)]
+        agent_id: String,
+        /// See [`Self::LlmRequest::credential_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_id: Option<String>,
+        /// See [`Self::LlmRequest::sender_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
     /// A per-agent spend ceiling was reached for the current budget
     /// window. Emitted by the runtime's pre-LLM-call budget gate,
     /// before any `LlmRequest` for the gated call, so the pairing
