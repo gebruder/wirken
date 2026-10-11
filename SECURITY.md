@@ -19,7 +19,7 @@ You should receive an initial response within 72 hours. If the vulnerability is 
 
 ## Release signing
 
-Release artifacts are signed offline with an Ed25519 SSH key. The public key is pinned in [KEYS](KEYS) at the repository root and embedded in `install.sh` so installer verification needs no network fetch of the key. The full procedure, including key rotation, is in [docs/signing.md](docs/signing.md#build-provenance).
+Release artifacts are signed offline with an Ed25519 SSH key. The public key is pinned in [KEYS](KEYS) at the repository root and embedded in `install.sh` so installer verification needs no network fetch of the key. The full procedure, including key rotation, is in [docs/signing.md](docs/signing.md#release-signing).
 
 Current active key:
 
