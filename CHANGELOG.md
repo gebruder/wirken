@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-11
+
 ### Security
 
 - Exact-match leak detection. `wirken run`, `wirken ask` and `wirken
