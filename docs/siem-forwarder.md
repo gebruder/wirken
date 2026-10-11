@@ -282,7 +282,7 @@ the request's `sinceSeq`. Wirken keeps no per-hook cursor state.
 **Delivery is at-least-once.** A hook that receives a batch and crashes before
 persisting the cursor sees the same rows on its next connection. The
 per-session `seq` is the dedup key: treat `(sessionId, seq)` as a primary key
-and ignore duplicates. The chain is append-only and per-session monotonic, so
+and ignore duplicates. The chain is tamper-evident and per-session monotonic, so
 the dedup is unambiguous.
 
 **Multi-session.** The hook requests each session id independently. To

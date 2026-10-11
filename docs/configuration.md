@@ -52,8 +52,9 @@ a loose 0o755 left by an earlier run or a permissive umask converges back.
 ```
 
 Values `wirken setup` writes: `openai`, `anthropic`, `gemini`, `bedrock`,
-`ollama`, `tinfoil`, `infomaniak`, `hetzner`, `custom`. `custom` covers any
-OpenAI-compatible endpoint, including NIM and the Privatemode proxy.
+`ollama`, `tinfoil`, `infomaniak`, `hetzner`, `custom`. Privatemode is saved
+as `openai` pointed at its loopback proxy (`http://localhost:8080/v1` by
+default), and NIM as `custom`, which covers any OpenAI-compatible endpoint.
 
 Bedrock adds a `region` field:
 

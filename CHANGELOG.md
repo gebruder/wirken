@@ -350,6 +350,12 @@ tagged.
 - `docs/threat-model.md` states the threat model: each trust boundary and
   the inputs that cross it, what is in and out of scope, a severity rubric,
   and how a report, its proof and its patch are written.
+- The audit chain is described as tamper-evident, not append-only.
+  `docs/architecture.md` states that the audit crate can redact a row
+  under a signed record, prune old rows to a checkpoint and rewind the
+  latest rows behind a marker, that any other edit, deletion or
+  reordering breaks the chain, and that rows cut from the end of a session
+  leave a shorter chain that still verifies.
 
 ## [1.28.0] - 2026-10-08
 

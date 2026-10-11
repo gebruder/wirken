@@ -18,7 +18,7 @@ compiler provides and a garbage-collected runtime cannot.
 1. Every channel gets its own credential. Compromise of one does not leak
    another.
 2. Credentials are encrypted at rest and scoped by lifetime.
-3. Every agent action is logged to an append-only ledger before execution.
+3. Every agent action is logged to a tamper-evident ledger before execution.
 4. Shell commands a skill has the agent run go through `exec`, which runs in a container by default, not as opt-in.
 5. The user never configures security. Secure defaults are the only defaults.
 6. Security boundaries are enforced by the type system where the code carries
@@ -204,9 +204,13 @@ before attaching a permission store.
 investigate or respond. Logging only control-plane commands misses tool
 invocations, credential access and file operations.
 
-An append-only per-session hash chain in SQLite, written before each action
-executes, with per-agent Ed25519 attestation over the chain head. Owned by
-[audit-cli.md](audit-cli.md).
+A tamper-evident per-session hash chain in SQLite, written before each action
+executes, with per-agent Ed25519 attestation over the chain head. The audit
+crate's own operations can redact a row (recorded in a signed
+`RedactionRecord`), prune old rows to a checkpoint, or rewind the latest rows
+behind a `Rewind` marker; any other edit, deletion or reordering breaks the
+chain, except rows cut from the end of a session, which leave a shorter chain
+that still verifies. Owned by [audit-cli.md](audit-cli.md).
 
 **Crash recovery.** Agents are stateless between turns. The `AgentFactory`
 wakes each agent by replaying its session log. An incomplete tool round, an
@@ -386,7 +390,7 @@ binary with subcommands; one `cargo build --release` produces everything.
 | No per-channel isolation | CWE-653 | Separate adapter processes |
 | Excessive agent privileges | OWASP T3 | Three-tier model with expiring approvals |
 | Unsandboxed code execution | OWASP T11 | Docker and gVisor sandboxes for `exec`, workspace confinement |
-| No audit trail | OWASP T8 | Append-only hash-chained log, SIEM forwarding |
+| No audit trail | OWASP T8 | Tamper-evident hash-chained log, SIEM forwarding |
 | Localhost rate limit exemption | CWE-307 | Uniform limiting, no loopback exemption |
 | No session expiry | CWE-613 | 24h inactivity expiry |
 | Runtime memory unsafety | CWE-119 | Rust |
