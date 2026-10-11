@@ -62,6 +62,14 @@ regexes = [
   # `SHA256:` prefix as its secret value, so the allowlist
   # matches that extracted form.
   '''tzlfNHy4G1KIsmAR\+cM3MGwVndheh2ak/usA6rw7SuE''',
+
+  # Made-up OAuth tokens in crates/vault/src/kind.rs tests (commit
+  # 1f9ab5c), the access and refresh tokens of a fixture credential
+  # that check which parts leak detection matches. They name no real
+  # account; generic-api-key flags them by the `access_token` key
+  # beside them.
+  '''at-1234567890''',
+  '''rt-0987654321''',
 ]
 
 # Non-canonical ottenheimer.app identities. davi@ottenheimer.app is
