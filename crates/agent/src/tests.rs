@@ -13946,4 +13946,75 @@ mod leak_detection {
         assert_no_secret_recorded(&events);
         assert!(!requests.lock().unwrap()[1].contains(SECRET));
     }
+
+    /// A user's message that carries a stored secret goes no further:
+    /// not recorded, not sent to the model. The user is told, with
+    /// `wirken credentials add` named as the way to store a credential.
+    #[tokio::test]
+    async fn a_user_message_carrying_a_stored_secret_is_refused_on_arrival() {
+        for streaming in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (base_url, server, requests) = stub(vec![text("never asked")]).await;
+            let (mut agent, log) = agent(&tmp, &base_url);
+            let message = format!("use this key: {SECRET}");
+
+            let (response, shown) = if streaming {
+                let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+                let collect = tokio::spawn(async move {
+                    let mut shown = String::new();
+                    while let Some(event) = rx.recv().await {
+                        if let crate::llm_stream::StreamEvent::TextDelta(piece) = event {
+                            shown.push_str(&piece);
+                        }
+                    }
+                    shown
+                });
+                let r = agent
+                    .process_message_stream(&message, "m1".into(), tx)
+                    .await
+                    .unwrap();
+                (r.response, collect.await.unwrap())
+            } else {
+                let r = agent.process_message(&message, "m1".into()).await.unwrap();
+                (r.response.clone(), r.response)
+            };
+            server.abort();
+
+            let notice = crate::runtime::message_refused(NAME);
+            assert_eq!(response, notice);
+            assert_eq!(shown, notice, "streaming={streaming}");
+            assert!(notice.contains("wirken credentials add"));
+            assert!(requests.lock().unwrap().is_empty(), "sent to the model");
+            let events = events(&log, "leaky");
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, SessionEvent::UserMessage { .. })),
+                "{events:?}"
+            );
+            assert_eq!(
+                refusals(&events),
+                [(NAME.to_string(), LeakSurface::UserMessage, None)]
+            );
+            assert_no_secret_recorded(&events);
+        }
+    }
+
+    /// An identifier in a user's message reaches the model.
+    #[tokio::test]
+    async fn an_identifier_in_a_user_message_passes() {
+        let tmp = TempDir::new().unwrap();
+        let (base_url, server, requests) = stub(vec![text("Will do.")]).await;
+        let (mut agent, log) = agent(&tmp, &base_url);
+
+        let r = agent
+            .process_message(&format!("text {IDENTIFIER} at noon"), "m1".into())
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(r.response, "Will do.");
+        assert!(requests.lock().unwrap()[0].contains(IDENTIFIER));
+        assert!(refusals(&events(&log, "leaky")).is_empty());
+    }
 }

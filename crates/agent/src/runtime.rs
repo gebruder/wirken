@@ -423,6 +423,16 @@ pub struct Agent {
     approval_bypass: Option<wirken_gateway::permissions::Action>,
 }
 
+/// What a user gets in place of an answer when their message carried a
+/// stored secret.
+pub(crate) fn message_refused(credential: &str) -> String {
+    format!(
+        "Your message was not sent: it contained stored credential {credential}. \
+         Store credentials with `wirken credentials add` and refer to them by name; \
+         do not paste them into a message."
+    )
+}
+
 /// What a channel gets in place of a reply that carried a stored secret.
 pub(crate) fn reply_withheld(credential: &str) -> String {
     format!("Reply withheld: it contained stored credential {credential}.")
@@ -2344,6 +2354,16 @@ impl Agent {
         }
     }
 
+    /// A user's message, on arrival: one that carries a stored secret
+    /// goes no further. It is not recorded, not handed to an
+    /// interceptor and not sent to the model; the refusal is recorded
+    /// and the user gets the notice.
+    fn refuse_leaked_message(&self, message: &str) -> Option<String> {
+        let credential = self.leak_matcher.find(message)?;
+        self.record_leak(&credential, LeakSurface::UserMessage, None, None, None);
+        Some(message_refused(&credential))
+    }
+
     /// The agent's reply, or the text it wrote beside its tool calls,
     /// before it is recorded or sent: one that carries a stored secret
     /// is replaced by a notice naming the credential, and the refusal is
@@ -2655,6 +2675,14 @@ impl Agent {
         }
 
         self.begin_turn(&inbound);
+
+        // Before anything records it or an interceptor reads it.
+        if let Some(notice) = self.refuse_leaked_message(user_message) {
+            return Ok(ProcessResult {
+                response: notice,
+                denials: Vec::new(),
+            });
+        }
 
         // agent-runtime-error-recovery: reset the per-turn
         // tool-validation counter so a tool that hit its retry cap on
@@ -2999,6 +3027,18 @@ impl Agent {
                 )))
                 .await;
             return Ok(replay);
+        }
+
+        // Before anything records it or an interceptor reads it.
+        if let Some(notice) = self.refuse_leaked_message(user_message) {
+            let _ = tx.send(StreamEvent::TextDelta(notice.clone())).await;
+            let _ = tx
+                .send(StreamEvent::Done(LlmResponse::Text(notice.clone())))
+                .await;
+            return Ok(ProcessResult {
+                response: notice,
+                denials: Vec::new(),
+            });
         }
 
         self.maybe_log_system_prompt()?;
