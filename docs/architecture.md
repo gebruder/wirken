@@ -149,6 +149,38 @@ in the vault reaches an adapter at its next spawn, an HTTP MCP server at the
 first call it refuses, and a stdio MCP server at the next gateway start. See
 [credentials.md](credentials.md).
 
+**Leak detection.** A process that runs agents (`wirken run`, `wirken ask`,
+`wirken lyrik`) knows the stored secrets: at start it reads every vault entry
+that is a secret rather than an identifier, and it adds each value it decrypts
+later, so a credential rotated since the start is known once it is read. Each
+secret is matched on the parts it can appear as: an OAuth credential on its
+access and refresh tokens, a Bedrock key on its secret access key and session
+token, anything else whole. Content that carries one is refused before it goes
+further, and a `leak_refused` row names the credential, never the value:
+
+- a tool's output, or a sub-agent's result, before it is recorded or enters
+  the conversation; the model reads the refusal instead;
+- a tool call's arguments, as the model's calls arrive and before anything
+  records or runs them; the call is recorded with the refusal in place of its
+  arguments and does not run;
+- the request to the model, checked in full before it is sent, as a backstop
+  for anything that got past the other checks; the turn fails;
+- the reply, and any text the model writes beside its tool calls; the channel
+  gets a notice instead, and web chat's stream holds back the last bytes, as
+  many as the longest stored secret less one, so no part of a secret is sent
+  before it can be checked;
+- a user's message, on arrival, before it is recorded or reaches the model;
+  the user is told to store credentials with `wirken credentials add`;
+- a skill, as it loads; it is not loaded.
+
+What it does not catch: it matches exact raw bytes only, so a secret in an
+encoded form (base64, URL or JSON escaping) passes, and so does one split across
+two pieces of content; a secret under 8 bytes is not matched (a warning names
+it at start); and there is no pattern list for secrets the vault does not hold.
+Identifiers (phone numbers, URLs, usernames, project numbers) are not matched;
+the nine built-in adapter identifiers are marked as such, and an operator marks
+others with `wirken credentials add --identifier`.
+
 ## 3. Permissions
 
 **Threat (OWASP T3):** without a granular model, authenticated agents have

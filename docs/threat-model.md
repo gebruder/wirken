@@ -241,6 +241,9 @@ proxy or a hook process, which all run as that user.
   flags and does not block, by design. What the gate lets the request do is in
   scope.
 - LLM token and cost exhaustion.
+- Reading stored secrets out of the leak matcher's memory. Its search
+  automaton keeps unzeroized copies of them for the life of the process, which
+  already holds the decrypted values and the vault's device key.
 - Vulnerabilities inside third-party crates; report those upstream. Known
   advisories with their exposure analysis are in `osv-scanner.toml` and
   `deny.toml`. A wirken call site that uses a crate unsafely is in scope.

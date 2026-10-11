@@ -13,6 +13,19 @@ feature keep it in the OS keychain. Two kinds of credentials live in it:
   set; the gateway refreshes the access token when it nears expiry,
   on the MCP proxy's request, and writes the vault.
 
+Each entry is a **secret** or an **identifier**. Leak detection refuses
+model-authored content, and content on its way to the model, that carries a
+stored secret ([architecture.md](architecture.md#2-credential-lifecycle)); an
+identifier (a phone number, a URL, a username, a project number) may appear
+in messages and is not matched. An entry is a secret unless it is marked an
+identifier: the nine built-in adapter identifiers (`teams-app-id`,
+`matrix-homeserver`, `matrix-username`, `whatsapp-phone-number-id`,
+`signal-endpoint`, `signal-phone-number`, `signal-allowed-senders`,
+`google-chat-project-number`, `imessage-bluebubbles-url`) are marked when
+stored, and an operator marks others with `wirken credentials add NAME
+--identifier`. `wirken credentials list` and `show` print the kind. A secret
+under 8 bytes is not matched, and the gateway names it in a warning at start.
+
 ## Which processes read the vault
 
 - **The gateway** (`wirken run`) opens the vault. It resolves provider

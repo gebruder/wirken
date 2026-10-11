@@ -12,6 +12,24 @@ tagged.
 
 ### Security
 
+- Exact-match leak detection. `wirken run`, `wirken ask` and `wirken
+  lyrik` seed a matcher at start with every stored secret, split into the
+  parts it can appear as (an OAuth credential's access and refresh tokens,
+  a Bedrock key's secret access key and session token), and add each value
+  they decrypt later. Content that carries one is refused before it goes
+  further, with a `leak_refused` row naming the credential, never the
+  value: a tool's output or a sub-agent's result, before it is recorded or
+  enters the conversation; a tool call's arguments, as the model's calls
+  arrive, recorded with the refusal in their place and not run; the request
+  to the model, as a backstop, which fails the turn; the reply and the text
+  beside tool calls, replaced by a notice, with web chat's stream holding
+  back the last bytes so no part of a secret is sent; a user's message, on
+  arrival, with a notice pointing to `wirken credentials add`; and a skill,
+  which is not loaded. Limits: exact raw bytes only, so encoded forms
+  (base64, URL or JSON escaping) and a secret split across two pieces of
+  content pass; secrets under 8 bytes are not matched and are named in a
+  warning at start; there is no pattern list for secrets the vault does
+  not hold.
 - Adapter processes no longer open the vault. On every spawn and
   respawn the gateway reads the adapter's own credentials (its token,
   its adapter key and its channel's entries) by name, writes them to
@@ -75,6 +93,18 @@ tagged.
 
 ### Added
 
+- Each vault entry is a secret or an identifier, in a new `kind` column.
+  Opening an existing vault marks the nine built-in adapter identifiers
+  (`teams-app-id`, `matrix-homeserver`, `matrix-username`,
+  `whatsapp-phone-number-id`, `signal-endpoint`, `signal-phone-number`,
+  `signal-allowed-senders`, `google-chat-project-number`,
+  `imessage-bluebubbles-url`); every other entry is a secret.
+  `wirken credentials add --identifier` marks one, and `credentials list`
+  and `show` print the kind. Leak detection matches only secrets.
+- `leak_refused` audit event, forwarded by default at `error`, with the
+  credential's name, the surface (`tool_output`, `tool_arguments`,
+  `provider_request`, `reply`, `user_message`, `skill_load`) and the agent,
+  channel, tool, MCP server or skill involved.
 - Audit events on the `gateway-mcp` session, all on the default typed SIEM
   set: `mcp_server_sandboxed` at every contained start (agent, image, image
   id and digest, runtime, container id, egress hosts, mounts, limits, and
@@ -186,6 +216,8 @@ tagged.
 ### Removed
 
 - Removed the Wasm skill loader and wasmtime; no path loaded a Wasm skill.
+- `wirken_vault::ScopedCredentialStore` and its `CredentialAccess` trait,
+  unused since the MCP proxy stopped opening the vault.
 
 ### Fixed
 
