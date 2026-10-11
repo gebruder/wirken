@@ -10,6 +10,9 @@
 //! with the new access token. When an MCP server refuses a credential,
 //! the proxy asks the gateway for its current vault value, so a
 //! credential rotated in the vault reaches the proxy without a restart.
+//! The proxy also holds one connection to the gateway open for its whole
+//! life: when that closes, the gateway is gone, however it went, and the
+//! proxy stops its servers and exits.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use wirken_vault::VaultSecret;
 use zeroize::Zeroizing;
 
@@ -95,6 +98,11 @@ impl ProxyCredentials {
                     "the gateway answered the refresh of '{name}' with a current value"
                 )));
             }
+            RefreshReply::Watching => {
+                return Err(ProxyError::Vault(format!(
+                    "the gateway answered the refresh of '{name}' with a watch"
+                )));
+            }
             RefreshReply::Refused { reason } => {
                 return Err(ProxyError::Vault(format!(
                     "the gateway did not refresh '{name}': {reason}"
@@ -123,6 +131,11 @@ impl ProxyCredentials {
                     "the gateway answered the fetch of '{name}' with a refresh"
                 )));
             }
+            RefreshReply::Watching => {
+                return Err(ProxyError::Vault(format!(
+                    "the gateway answered the fetch of '{name}' with a watch"
+                )));
+            }
             RefreshReply::Refused { reason } => {
                 return Err(ProxyError::Vault(format!(
                     "the gateway did not send '{name}': {reason}"
@@ -135,6 +148,22 @@ impl ProxyCredentials {
             .insert(name.to_string(), value);
         Ok(())
     }
+
+    /// Resolves once the gateway that started this proxy is gone: the
+    /// connection held open on its refresh socket has closed, which the
+    /// operating system does when the gateway exits, a kill included.
+    /// Never resolves when there is no gateway to watch or the watch
+    /// could not be set up; the proxy then runs until it is signalled,
+    /// and the next proxy's start removes what it leaves behind.
+    pub async fn gateway_gone(&self) {
+        let Some(gateway) = &self.gateway else {
+            return std::future::pending().await;
+        };
+        if let Err(e) = gateway.watch().await {
+            tracing::warn!("{e}; this proxy will not notice the gateway exiting");
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 /// The gateway's refresh socket and the token that admits this proxy.
@@ -146,6 +175,61 @@ pub struct GatewayLink {
 impl GatewayLink {
     pub fn new(socket: PathBuf, token: Zeroizing<String>) -> Self {
         Self { socket, token }
+    }
+
+    /// Ask the gateway to hold this connection open, then wait for it
+    /// to close. An error means the watch was never set up; once it is,
+    /// any end of the connection is the gateway gone.
+    async fn watch(&self) -> Result<(), ProxyError> {
+        let stream = tokio::time::timeout(REFRESH_TIMEOUT, async {
+            let stream = wirken_ipc::connect(&self.socket).await.map_err(|e| {
+                ProxyError::Vault(format!(
+                    "reach the gateway at {}: {e}",
+                    self.socket.display()
+                ))
+            })?;
+            let (rd, mut wr) = tokio::io::split(stream);
+            let request = RefreshRequest {
+                token: self.token.as_str(),
+                credential: "",
+                kind: RequestKind::Watch,
+            };
+            let mut line = Zeroizing::new(
+                serde_json::to_vec(&request)
+                    .map_err(|e| ProxyError::Vault(format!("watch request: {e}")))?,
+            );
+            line.push(b'\n');
+            wr.write_all(&line)
+                .await
+                .map_err(|e| ProxyError::Vault(format!("ask the gateway to watch: {e}")))?;
+            let mut reader = BufReader::new(rd);
+            let mut reply = String::new();
+            reader
+                .read_line(&mut reply)
+                .await
+                .map_err(|e| ProxyError::Vault(format!("read the gateway's reply: {e}")))?;
+            match serde_json::from_str::<RefreshReply>(&reply) {
+                Ok(RefreshReply::Watching) => Ok((reader, wr)),
+                Ok(RefreshReply::Refused { reason }) => Err(ProxyError::Vault(format!(
+                    "the gateway refused the watch: {reason}"
+                ))),
+                _ => Err(ProxyError::Vault(
+                    "the gateway did not take the watch".to_string(),
+                )),
+            }
+        })
+        .await
+        .map_err(|_| ProxyError::Vault("the gateway did not answer the watch".to_string()))??;
+        // Nothing more is sent either way; the read ends when the
+        // gateway's end closes.
+        let (mut reader, _wr) = stream;
+        let mut rest = [0u8; 64];
+        while let Ok(n) = reader.read(&mut rest).await {
+            if n == 0 {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// One request to the gateway and its answer.
@@ -210,6 +294,9 @@ pub(crate) enum RequestKind {
     /// The vault's current value, after a server refused the one the
     /// proxy holds.
     Current,
+    /// Hold the connection open for the gateway's life, naming no
+    /// credential. Its closing tells the proxy the gateway is gone.
+    Watch,
 }
 
 /// The gateway's answer.
@@ -225,6 +312,8 @@ pub(crate) enum RefreshReply {
     Refused {
         reason: String,
     },
+    /// A watch was taken; the connection stays open.
+    Watching,
 }
 
 /// An OAuth credential as the proxy may hold it: everything but the

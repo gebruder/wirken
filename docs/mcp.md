@@ -131,7 +131,7 @@ On startup, `wirken-mcp-proxy`:
 4. Performs the MCP `initialize` handshake and calls `tools/list` to discover tools.
 5. Adds discovered tools to the agent's tool definitions, prefixed with `mcp_{server}_`.
 
-When the LLM calls an MCP tool, the proxy routes the call to the correct server via `tools/call` and returns the result. When the gateway stops, the proxy stops and removes every container, sidecar, network and secret file it started.
+When the LLM calls an MCP tool, the proxy routes the call to the correct server via `tools/call` and returns the result. When the gateway stops, the proxy stops and removes every container, sidecar, network and secret file it started. A gateway killed outright is noticed too: the proxy holds a connection open on the gateway's refresh socket, and when it closes the proxy shuts down the same way and exits. The removal at startup (step 2) stays as the backstop.
 
 ### Restarts
 

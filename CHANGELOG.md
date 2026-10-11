@@ -221,6 +221,13 @@ tagged.
 
 ### Fixed
 
+- The MCP proxy exits when its gateway is gone, a gateway killed outright
+  included, stopping and removing its containers on the way out. It holds
+  a connection open on the gateway's refresh socket, admitted by the same
+  pid and token checks as a refresh, and shuts down when that connection
+  closes. Before, a proxy whose gateway was killed kept running, with its
+  containers, until the next gateway start removed what it had left
+  behind; that removal at start stays as the backstop.
 - A web chat turn whose model request fails ends, and the page gets the
   error. Before, the page got neither a reply nor the error, and the
   conversation answered every later message with "turn open" until

@@ -55,6 +55,13 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
     let (identity_agent_ids, configs) = agent_configs(&data_dir);
     let credentials: SharedCredentials = Arc::new(credentials);
 
+    // Watched from the start, so a gateway that dies while servers are
+    // still starting is noticed as well.
+    let mut gateway_gone = {
+        let credentials = credentials.clone();
+        tokio::spawn(async move { credentials.gateway_gone().await })
+    };
+
     // Stdio servers with a `sandbox` block run in containers. Containers
     // an earlier proxy for this data directory left behind, for example
     // after the gateway killed it, are removed before any new one starts.
@@ -143,17 +150,23 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
         crate::supervise::Supervisors::start(registry.clone(), credentials.clone(), audit.clone())
             .await;
 
-    // Serve until the socket fails or the proxy is told to stop, then
-    // stop every server: host children are killed, containers stopped
-    // and removed. Supervision stops first, so the containers stopping
-    // are not taken for exits to restart from.
+    // Serve until the socket fails, the proxy is told to stop or the
+    // gateway that started it is gone, then stop every server: host
+    // children are killed, containers stopped and removed. Supervision
+    // stops first, so the containers stopping are not taken for exits
+    // to restart from.
     let served = tokio::select! {
         result = server::serve(socket_path, registry.clone()) => result,
         () = shutdown_signal() => {
             tracing::info!("wirken-mcp-proxy shutting down");
             Ok(())
         }
+        _ = &mut gateway_gone => {
+            tracing::warn!("the gateway is gone; wirken-mcp-proxy shutting down");
+            Ok(())
+        }
     };
+    gateway_gone.abort();
     supervisors.stop().await;
     registry.lock().await.shutdown().await;
     served

@@ -158,14 +158,24 @@ impl RefreshService {
     {
         let (rd, mut wr) = tokio::io::split(stream);
         let mut line = Zeroizing::new(String::new());
-        BufReader::new(rd.take(MAX_REQUEST_BYTES))
-            .read_line(&mut line)
-            .await?;
+        let mut reader = BufReader::new(rd.take(MAX_REQUEST_BYTES));
+        reader.read_line(&mut line).await?;
 
         let mut reply = match self.admit(peer, &line) {
             Err(reason) => {
                 tracing::warn!("MCP proxy credential request refused: {reason}");
                 RefreshReply::Refused { reason }
+            }
+            Ok((_, RequestKind::Watch)) => {
+                // Held until the proxy closes it, or this process ends
+                // and the operating system closes it, which is how the
+                // proxy learns the gateway is gone.
+                let mut out = serde_json::to_vec(&RefreshReply::Watching).unwrap_or_default();
+                out.push(b'\n');
+                wr.write_all(&out).await?;
+                let mut rest = [0u8; 64];
+                while reader.read(&mut rest).await? > 0 {}
+                return Ok(());
             }
             Ok((name, RequestKind::Refresh)) => match self.refresh(&name).await {
                 Ok(cred) => RefreshReply::Refreshed(HandedOAuth::from_credential(&cred)),
@@ -205,6 +215,9 @@ impl RefreshService {
             .map_err(|_| "malformed refresh request".to_string())?;
         if !same_bytes(request.token.as_bytes(), self.token.as_bytes()) {
             return Err("wrong refresh token".to_string());
+        }
+        if request.kind == RequestKind::Watch {
+            return Ok((String::new(), RequestKind::Watch));
         }
         if !self.handed.contains(request.credential) {
             return Err(format!(
@@ -510,6 +523,69 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("is not the MCP proxy"), "{err}");
+    }
+
+    /// The proxy's watch is held while the gateway lives and ends when
+    /// the gateway is gone. The gateway here runs in a runtime of its
+    /// own, and dropping that runtime closes its end of the connection
+    /// the way a killed process's is closed. A watch with the wrong
+    /// token is refused, and never ends.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn a_watch_ends_when_the_gateway_is_gone() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let gateway_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let gateway = runtime.block_on(async { gateway("t0k3n", std::process::id()) });
+            ready_tx.send(gateway.socket.clone()).unwrap();
+            let _ = stop_rx.recv();
+            drop(gateway);
+            drop(runtime);
+        });
+        let socket = ready_rx.recv().unwrap();
+        let link = |token: &str| {
+            ProxyCredentials::new(
+                HashMap::new(),
+                Some(GatewayLink::new(
+                    socket.clone(),
+                    Zeroizing::new(token.to_string()),
+                )),
+            )
+        };
+
+        let credentials = Arc::new(link("t0k3n"));
+        let watching = tokio::spawn({
+            let credentials = credentials.clone();
+            async move { credentials.gateway_gone().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !watching.is_finished(),
+            "the watch ended with the gateway up"
+        );
+
+        let refused = link("guess");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                refused.gateway_gone()
+            )
+            .await
+            .is_err(),
+            "a refused watch ended"
+        );
+
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), watching)
+            .await
+            .expect("the watch ends when the gateway is gone")
+            .unwrap();
+        gateway_thread.join().unwrap();
     }
 
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
