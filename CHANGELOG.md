@@ -12,6 +12,8 @@ tagged.
 
 ## [2.0.0] - 2026-10-11
 
+Open dependency updates (#283, four Cargo crates; #280, two GitHub Actions) are deferred to 2.0.1.
+
 ### Security
 
 - Exact-match leak detection. `wirken run`, `wirken ask` and `wirken
