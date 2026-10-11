@@ -226,11 +226,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // Every stored secret, so model-authored content that carries one is
     // refused. The decrypt sites below add the values they read, which
     // covers a credential rotated after this point.
-    let leak_matcher = Arc::new(super::seed_leak_matcher(
-        &cfg.data_dir,
-        &cfg.vault_db_path(),
-        || prompt_vault_passphrase(&mut vault_passphrase),
-    ));
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            prompt_vault_passphrase(&mut vault_passphrase)
+        })
+    }));
 
     // The webchat status route reads the alarm log with the same key
     // the writer signs with, so a record it shows is verified rather

@@ -806,20 +806,19 @@ pub(crate) fn keychain_needs_seal(data_dir: &Path) -> bool {
 /// than caching empty.
 /// The leak matcher for a process that runs agents, seeded with every
 /// stored secret in the vault at `db_path` ([`wirken_vault::CredentialStore::secrets_for_matching`]).
-/// With no vault there is nothing stored to match, and the vault is not
-/// opened, since opening one creates it. A vault that will not open is
-/// reported, and the matcher starts empty and learns what the process
-/// decrypts later.
+/// With no vault there is nothing stored to match, and `keychain` is not
+/// called, so nothing is prompted for and no vault is created. A vault
+/// that will not open is reported, and the matcher starts empty and
+/// learns what the process decrypts later.
 pub(crate) fn seed_leak_matcher(
-    data_dir: &Path,
     db_path: &Path,
-    passphrase: impl FnOnce() -> String,
+    keychain: impl FnOnce() -> Box<dyn wirken_vault::Keychain>,
 ) -> wirken_gateway::leak::LeakMatcher {
     use wirken_gateway::leak::LeakMatcher;
     if !db_path.exists() {
         return LeakMatcher::new();
     }
-    let keychain = wirken_vault::probe_keychain(data_dir, passphrase);
+    let keychain = keychain();
     match wirken_vault::CredentialStore::open(db_path, keychain.as_ref())
         .and_then(|store| store.secrets_for_matching())
     {
@@ -1204,7 +1203,12 @@ mod leak_seed_tests {
     fn no_vault_seeds_nothing_and_creates_none() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("vault.db");
-        let matcher = seed_leak_matcher(dir.path(), &db, || PASSPHRASE.to_string());
+        let matcher = seed_leak_matcher(&db, || {
+            Box::new(AgeFileKeychain::new(
+                dir.path().join("keychain"),
+                PASSPHRASE.into(),
+            ))
+        });
         assert!(matcher.is_empty());
         assert!(!db.exists());
         assert!(!dir.path().join("keychain").exists());
@@ -1247,7 +1251,12 @@ mod leak_seed_tests {
                 CredentialKind::Identifier,
             );
         }
-        let matcher = seed_leak_matcher(dir.path(), &db, || PASSPHRASE.to_string());
+        let matcher = seed_leak_matcher(&db, || {
+            Box::new(AgeFileKeychain::new(
+                dir.path().join("keychain"),
+                PASSPHRASE.into(),
+            ))
+        });
         assert_eq!(
             matcher.find("key sk-ant-seeded-0001").as_deref(),
             Some("anthropic-api-key")
@@ -1278,7 +1287,12 @@ mod leak_seed_tests {
                 )
                 .unwrap();
         }
-        let matcher = seed_leak_matcher(dir.path(), &db, || "wrong".to_string());
+        let matcher = seed_leak_matcher(&db, || {
+            Box::new(AgeFileKeychain::new(
+                dir.path().join("keychain"),
+                "wrong".into(),
+            ))
+        });
         assert!(matcher.is_empty());
     }
 }

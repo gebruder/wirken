@@ -522,11 +522,11 @@ async fn dispatch_via_agent_runtime(
     let perms = open_permission_store(&cfg)?;
     let perms_arc = Arc::new(Mutex::new(perms));
     // Every stored secret, for the run's agent and each walk's.
-    let leak_matcher = Arc::new(super::seed_leak_matcher(
-        &cfg.data_dir,
-        &cfg.vault_db_path(),
-        || super::cached_vault_passphrase().unwrap_or_default(),
-    ));
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            super::cached_vault_passphrase().unwrap_or_default()
+        })
+    }));
     let mut agent = Agent::new_with_sandbox(
         agent_id.clone(),
         target.to_path_buf(),

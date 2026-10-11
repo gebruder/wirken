@@ -186,9 +186,12 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // Every stored secret, set before the skills, which are checked
     // against it as they load.
     agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
-        &cfg.data_dir,
         &cfg.vault_db_path(),
-        || super::cached_vault_passphrase().unwrap_or_default(),
+        || {
+            probe_keychain(&cfg.data_dir, || {
+                super::cached_vault_passphrase().unwrap_or_default()
+            })
+        },
     )));
     agent
         .attach_skills(super::skills_for_default_agent(&cfg))
@@ -288,9 +291,12 @@ async fn send_with_agent_config(
     // Every stored secret, set before the skills, which are checked
     // against it as they load.
     agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
-        &cfg.data_dir,
         &cfg.vault_db_path(),
-        || super::cached_vault_passphrase().unwrap_or_default(),
+        || {
+            probe_keychain(&cfg.data_dir, || {
+                super::cached_vault_passphrase().unwrap_or_default()
+            })
+        },
     )));
     agent
         .attach_skills(super::skills_for_agent(cfg, agent_cfg)?)
