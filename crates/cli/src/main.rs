@@ -937,6 +937,12 @@ enum CredentialCommands {
         /// binding cannot be widened by a skill's permissions block.
         #[arg(long = "host")]
         host: Vec<String>,
+        /// Store the value as an identifier (an address, a number, a
+        /// URL) rather than a secret. Leak detection refuses
+        /// model-authored content that contains a stored secret; an
+        /// identifier may appear in messages.
+        #[arg(long)]
+        identifier: bool,
     },
     /// Rotate a credential's value. Prompts for the new value on
     /// stderr unless --stdin or --value-file supplies it.
@@ -1308,12 +1314,18 @@ async fn main() -> Result<()> {
                 stdin,
                 value_file,
                 host,
+                identifier,
             } => {
                 commands::credential::add(
                     &name,
                     channel.as_deref(),
                     commands::credential::ValueSource::from_flags(stdin, value_file),
                     &host,
+                    if identifier {
+                        wirken_vault::CredentialKind::Identifier
+                    } else {
+                        wirken_vault::default_kind(&name)
+                    },
                 )
                 .await
             }

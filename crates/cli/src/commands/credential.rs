@@ -32,13 +32,14 @@ pub async fn list() -> Result<()> {
     }
 
     println!(
-        "  {:24}  {:12}  {:20}  {:12}  SCOPES",
-        "NAME", "CHANNEL", "CREATED", "STATUS"
+        "  {:24}  {:12}  {:10}  {:20}  {:12}  SCOPES",
+        "NAME", "CHANNEL", "KIND", "CREATED", "STATUS"
     );
     println!(
-        "  {}  {}  {}  {}  {}",
+        "  {}  {}  {}  {}  {}  {}",
         "─".repeat(24),
         "─".repeat(12),
+        "─".repeat(10),
         "─".repeat(20),
         "─".repeat(12),
         "─".repeat(10),
@@ -71,9 +72,10 @@ pub async fn list() -> Result<()> {
         };
 
         println!(
-            "  {:24}  {:12}  {:20}  {:12}  {}",
+            "  {:24}  {:12}  {:10}  {:20}  {:12}  {}",
             cred.name,
             cred.channel,
+            cred.kind.as_str(),
             cred.created_at.format("%Y-%m-%d %H:%M:%S"),
             status,
             scope_summary,
@@ -114,6 +116,7 @@ pub async fn show(name: &str) -> Result<()> {
     println!();
     println!("  Credential: {name}");
     println!("    channel:        {}", meta.channel);
+    println!("    kind:           {}", meta.kind.as_str());
     println!(
         "    created:        {}",
         meta.created_at.format("%Y-%m-%d %H:%M:%S")
@@ -356,6 +359,7 @@ pub async fn add(
     channel: Option<&str>,
     source: ValueSource,
     allowed_hosts: &[String],
+    kind: wirken_vault::CredentialKind,
 ) -> Result<()> {
     let cfg = config();
 
@@ -379,21 +383,25 @@ pub async fn add(
 
     let secret = VaultSecret::new(value);
     store
-        .store_with_hosts(
+        .store_with_kind(
             name,
             channel.unwrap_or(""),
             &secret,
             None,
             None,
             &allowed_hosts,
+            kind,
         )
         .context(format!("Failed to store '{name}'"))?;
 
+    let kind = kind.as_str();
     if allowed_hosts.is_empty() {
-        println!("  Credential '{name}' stored (no host binding; not usable by http_request).");
+        println!(
+            "  Credential '{name}' stored as {kind} (no host binding; not usable by http_request)."
+        );
     } else {
         println!(
-            "  Credential '{name}' stored, bound to: {}",
+            "  Credential '{name}' stored as {kind}, bound to: {}",
             allowed_hosts.join(", ")
         );
     }

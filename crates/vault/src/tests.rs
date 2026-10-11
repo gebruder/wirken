@@ -909,3 +909,186 @@ fn names_are_listable_without_the_device_key() {
     std::fs::write(&bare, b"").unwrap();
     assert!(CredentialStore::names(&bare).unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Secret and identifier kinds, and what leak detection is given
+// ---------------------------------------------------------------------------
+
+/// A vault from before the `kind` column: every row has none. Opening
+/// it marks the nine built-in adapter identifiers and leaves every
+/// other row a secret.
+#[test]
+fn the_kind_migration_marks_the_builtin_identifiers_and_nothing_else() {
+    use crate::kind::{BUILTIN_IDENTIFIERS, CredentialKind};
+    let tmp = TempDir::new().unwrap();
+    let db = tmp.path().join("vault.db");
+    let key = generate_key();
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE credentials (
+                 name TEXT PRIMARY KEY,
+                 channel TEXT NOT NULL,
+                 encrypted_value BLOB NOT NULL,
+                 created_at TEXT NOT NULL,
+                 expires_at TEXT,
+                 last_used_at TEXT,
+                 rotation_due_at TEXT,
+                 allowed_hosts TEXT
+             );",
+        )
+        .unwrap();
+        for name in BUILTIN_IDENTIFIERS.iter().copied().chain([
+            "telegram-token",
+            "matrix-adapter-key",
+            "my-mcp-token",
+        ]) {
+            let enc = encrypt(name, &VaultSecret::new("value-12345".into()), &key).unwrap();
+            conn.execute(
+                "INSERT INTO credentials (name, channel, encrypted_value, created_at)
+                 VALUES (?1, '', ?2, ?3)",
+                rusqlite::params![name, enc, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+    }
+    let store = CredentialStore::open_with_key(&db, key).unwrap();
+    for meta in store.list().unwrap() {
+        let expected = if BUILTIN_IDENTIFIERS.contains(&meta.name.as_str()) {
+            CredentialKind::Identifier
+        } else {
+            CredentialKind::Secret
+        };
+        assert_eq!(meta.kind, expected, "{}", meta.name);
+    }
+}
+
+/// `store` gives a built-in identifier its kind; `store_with_kind` sets
+/// one explicitly; `retrieve`, `peek` and `list` read it back, and
+/// `rotate` keeps it.
+#[test]
+fn the_kind_is_stored_and_read_back() {
+    use crate::kind::CredentialKind;
+    let tmp = TempDir::new().unwrap();
+    let store =
+        CredentialStore::open_with_key(&tmp.path().join("vault.db"), generate_key()).unwrap();
+    let v = || VaultSecret::new("value-12345".into());
+    store
+        .store("signal-phone-number", "signal", &v(), None, None)
+        .unwrap();
+    store
+        .store("signal-token", "signal", &v(), None, None)
+        .unwrap();
+    store
+        .store_with_kind(
+            "support-address",
+            "",
+            &v(),
+            None,
+            None,
+            &[],
+            CredentialKind::Identifier,
+        )
+        .unwrap();
+
+    assert_eq!(
+        store.retrieve("signal-phone-number").unwrap().1.kind,
+        CredentialKind::Identifier
+    );
+    assert_eq!(
+        store.peek("signal-token").unwrap().1.kind,
+        CredentialKind::Secret
+    );
+    store.rotate("support-address", &v(), None).unwrap();
+    let kinds: Vec<_> = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.name, m.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (
+                "signal-phone-number".to_string(),
+                CredentialKind::Identifier
+            ),
+            ("signal-token".to_string(), CredentialKind::Secret),
+            ("support-address".to_string(), CredentialKind::Identifier),
+        ]
+    );
+}
+
+/// Leak detection gets every secret's matchable parts: identifiers are
+/// left out, an OAuth credential gives its tokens, a Bedrock key its
+/// secret, and a value under eight bytes nothing.
+#[test]
+fn secrets_for_matching_skips_identifiers_splits_and_drops_short_values() {
+    use crate::kind::CredentialKind;
+    let tmp = TempDir::new().unwrap();
+    let store =
+        CredentialStore::open_with_key(&tmp.path().join("vault.db"), generate_key()).unwrap();
+    let put = |name: &str, value: &str| {
+        store
+            .store(name, "", &VaultSecret::new(value.into()), None, None)
+            .unwrap()
+    };
+    put("telegram-token", "123456:telegram-bot-token");
+    put("matrix-username", "@wirken:example.org");
+    put(
+        "linear-oauth",
+        r#"{"access_token":"lin-access-0001","refresh_token":"lin-refresh-0001","expires_at":1,"scope":"","provider":"linear"}"#,
+    );
+    put(
+        "bedrock-api-key",
+        "AKIAIOSFODNN7EXAMPLE:bedrock-secret-access-key",
+    );
+    put("short-pin", "1234");
+    store
+        .store_with_kind(
+            "support-address",
+            "",
+            &VaultSecret::new("help@example.org".into()),
+            None,
+            None,
+            &[],
+            CredentialKind::Identifier,
+        )
+        .unwrap();
+
+    let got: Vec<(String, Vec<String>)> = store
+        .secrets_for_matching()
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.name, s.parts.iter().map(|p| p.to_string()).collect()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "bedrock-api-key".to_string(),
+                vec!["bedrock-secret-access-key".to_string()]
+            ),
+            (
+                "linear-oauth".to_string(),
+                vec![
+                    "lin-access-0001".to_string(),
+                    "lin-refresh-0001".to_string()
+                ]
+            ),
+            (
+                "telegram-token".to_string(),
+                vec!["123456:telegram-bot-token".to_string()]
+            ),
+        ]
+    );
+    // Reading them for matching is not a use.
+    assert!(
+        store
+            .peek("telegram-token")
+            .unwrap()
+            .1
+            .last_used_at
+            .is_none()
+    );
+}

@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::crypto::{decrypt, encrypt, generate_key};
 use crate::error::VaultError;
 use crate::keychain::Keychain;
+use crate::kind::{
+    BUILTIN_IDENTIFIERS, CredentialKind, MIN_MATCH_BYTES, MatchableSecret, default_kind,
+    matchable_parts,
+};
 use crate::secret::VaultSecret;
 
 /// Metadata for a stored credential.
@@ -24,6 +28,9 @@ pub struct CredentialMetadata {
     /// block widens to.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// Secret or identifier; leak detection matches only secrets.
+    #[serde(default)]
+    pub kind: CredentialKind,
 }
 
 impl CredentialMetadata {
@@ -101,10 +108,12 @@ impl CredentialStore {
                  expires_at TEXT,
                  last_used_at TEXT,
                  rotation_due_at TEXT,
-                 allowed_hosts TEXT
+                 allowed_hosts TEXT,
+                 kind TEXT
              );",
         )?;
         migrate_allowed_hosts(&conn)?;
+        migrate_kind(&conn)?;
 
         Ok(Self { conn, device_key })
     }
@@ -127,10 +136,12 @@ impl CredentialStore {
                  expires_at TEXT,
                  last_used_at TEXT,
                  rotation_due_at TEXT,
-                 allowed_hosts TEXT
+                 allowed_hosts TEXT,
+                 kind TEXT
              );",
         )?;
         migrate_allowed_hosts(&conn)?;
+        migrate_kind(&conn)?;
 
         Ok(Self { conn, device_key })
     }
@@ -203,6 +214,31 @@ impl CredentialStore {
         rotation_due_at: Option<DateTime<Utc>>,
         allowed_hosts: &[String],
     ) -> Result<(), VaultError> {
+        self.store_with_kind(
+            name,
+            channel,
+            secret,
+            expires_at,
+            rotation_due_at,
+            allowed_hosts,
+            default_kind(name),
+        )
+    }
+
+    /// Store a credential as `kind`. [`Self::store_with_hosts`] stores
+    /// it as its name's default: an identifier for the built-in adapter
+    /// identifiers, a secret otherwise.
+    #[allow(clippy::too_many_arguments, reason = "one column each")]
+    pub fn store_with_kind(
+        &self,
+        name: &str,
+        channel: &str,
+        secret: &VaultSecret,
+        expires_at: Option<DateTime<Utc>>,
+        rotation_due_at: Option<DateTime<Utc>>,
+        allowed_hosts: &[String],
+        kind: CredentialKind,
+    ) -> Result<(), VaultError> {
         let encrypted = encrypt(name, secret, &self.device_key)?;
         let now = Utc::now().to_rfc3339();
         let hosts_json = if allowed_hosts.is_empty() {
@@ -213,8 +249,8 @@ impl CredentialStore {
 
         self.conn.execute(
             "INSERT OR REPLACE INTO credentials
-             (name, channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
+             (name, channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)",
             params![
                 name,
                 channel,
@@ -223,6 +259,7 @@ impl CredentialStore {
                 expires_at.map(|t| t.to_rfc3339()),
                 rotation_due_at.map(|t| t.to_rfc3339()),
                 hosts_json,
+                kind.as_str(),
             ],
         )?;
 
@@ -234,7 +271,7 @@ impl CredentialStore {
     /// Returns VaultError::Expired if the credential has expired.
     pub fn retrieve(&self, name: &str) -> Result<(VaultSecret, CredentialMetadata), VaultError> {
         let mut stmt = self.conn.prepare(
-            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts
+            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts, kind
              FROM credentials WHERE name = ?1",
         )?;
 
@@ -248,6 +285,7 @@ impl CredentialStore {
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(|_| VaultError::NotFound(name.to_string()))?;
@@ -260,6 +298,7 @@ impl CredentialStore {
             last_used_at_str,
             rotation_due_at_str,
             allowed_hosts_json,
+            kind,
         ) = row;
 
         let meta = CredentialMetadata {
@@ -276,6 +315,7 @@ impl CredentialStore {
                 .map(parse_datetime)
                 .transpose()?,
             allowed_hosts: parse_hosts(&allowed_hosts_json)?,
+            kind: CredentialKind::from_column(kind.as_deref()),
         };
 
         if meta.is_expired() {
@@ -303,7 +343,7 @@ impl CredentialStore {
     /// operators rely on for rotation decisions.
     pub fn peek(&self, name: &str) -> Result<(VaultSecret, CredentialMetadata), VaultError> {
         let mut stmt = self.conn.prepare(
-            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts
+            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts, kind
              FROM credentials WHERE name = ?1",
         )?;
 
@@ -317,6 +357,7 @@ impl CredentialStore {
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(|_| VaultError::NotFound(name.to_string()))?;
@@ -329,6 +370,7 @@ impl CredentialStore {
             last_used_at_str,
             rotation_due_at_str,
             allowed_hosts_json,
+            kind,
         ) = row;
 
         let meta = CredentialMetadata {
@@ -345,6 +387,7 @@ impl CredentialStore {
                 .map(parse_datetime)
                 .transpose()?,
             allowed_hosts: parse_hosts(&allowed_hosts_json)?,
+            kind: CredentialKind::from_column(kind.as_deref()),
         };
 
         if meta.is_expired() {
@@ -381,7 +424,7 @@ impl CredentialStore {
     /// List all credential metadata (without decrypting values).
     pub fn list(&self) -> Result<Vec<CredentialMetadata>, VaultError> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, channel, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts
+            "SELECT name, channel, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts, kind
              FROM credentials ORDER BY name",
         )?;
 
@@ -394,6 +437,7 @@ impl CredentialStore {
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?;
 
@@ -407,6 +451,7 @@ impl CredentialStore {
                 last_used_at_str,
                 rotation_due_at_str,
                 allowed_hosts_json,
+                kind,
             ) = row?;
             result.push(CredentialMetadata {
                 name,
@@ -422,10 +467,57 @@ impl CredentialStore {
                     .as_deref()
                     .and_then(|s| parse_datetime(s).ok()),
                 allowed_hosts: parse_hosts(&allowed_hosts_json).unwrap_or_default(),
+                kind: CredentialKind::from_column(kind.as_deref()),
             });
         }
 
         Ok(result)
+    }
+
+    /// Every stored secret, decrypted, as leak detection matches it:
+    /// identifiers are left out, and each secret is split into the
+    /// parts it can appear as ([`matchable_parts`]). A part shorter than
+    /// [`MIN_MATCH_BYTES`] is dropped with a warning naming the
+    /// credential. Does not touch `last_used_at`; a row that will not
+    /// decrypt is skipped with a warning rather than failing the rest.
+    pub fn secrets_for_matching(&self) -> Result<Vec<MatchableSecret>, VaultError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, encrypted_value, kind FROM credentials ORDER BY name")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (name, encrypted, kind) = row?;
+            if CredentialKind::from_column(kind.as_deref()) == CredentialKind::Identifier {
+                continue;
+            }
+            let secret = match decrypt(&name, &encrypted, &self.device_key) {
+                Ok(secret) => secret,
+                Err(e) => {
+                    tracing::warn!(credential = %name, error = %e, "stored credential not decrypted for leak detection");
+                    continue;
+                }
+            };
+            let (parts, short): (Vec<_>, Vec<_>) = matchable_parts(secret.expose())
+                .into_iter()
+                .partition(|p| p.len() >= MIN_MATCH_BYTES);
+            if !short.is_empty() {
+                tracing::warn!(
+                    credential = %name,
+                    "stored credential is shorter than {MIN_MATCH_BYTES} bytes; leak detection does not match it"
+                );
+            }
+            if !parts.is_empty() {
+                out.push(MatchableSecret { name, parts });
+            }
+        }
+        Ok(out)
     }
 
     /// Rotate a credential: store a new value, preserve the name and channel.
@@ -512,6 +604,27 @@ fn migrate_allowed_hosts(conn: &Connection) -> Result<(), VaultError> {
     )?;
     if present == 0 {
         conn.execute_batch("ALTER TABLE credentials ADD COLUMN allowed_hosts TEXT;")?;
+    }
+    Ok(())
+}
+
+/// Backfill the `kind` column onto a `credentials` table created before
+/// it, marking the built-in adapter identifiers. Every other row, with
+/// no kind, is a secret. Idempotent like [`migrate_allowed_hosts`].
+fn migrate_kind(conn: &Connection) -> Result<(), VaultError> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('credentials') WHERE name = 'kind'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        conn.execute_batch("ALTER TABLE credentials ADD COLUMN kind TEXT;")?;
+        for name in BUILTIN_IDENTIFIERS {
+            conn.execute(
+                "UPDATE credentials SET kind = 'identifier' WHERE name = ?1",
+                params![name],
+            )?;
+        }
     }
     Ok(())
 }
