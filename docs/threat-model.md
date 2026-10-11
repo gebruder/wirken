@@ -158,9 +158,14 @@ proxy or a hook process, which all run as that user.
     (`crates/audit/src/signing.rs`), `wirken audit verify` and
     `wirken sessions verify` (`crates/cli/src/commands/audit.rs`,
     `session.rs`). Treat `audit.db` as edited by an attacker before a verifier
-    reads it offline. In scope: an edit, deletion, reorder or truncation that
+    reads it offline. In scope: an edit, deletion or reorder that
     verification passes, a head signature accepted from a key it should not
     accept, and a row that misattributes its actor, channel, agent or key id.
+    Truncation from the end of a session is a known limit: the rows that
+    remain still verify, signed heads included. Detection today is comparison
+    with the SIEM forwarder's copy, where a forwarded row the chain no longer
+    holds shows the cut. A signed session-close row or an exported head is the
+    planned closure.
     What the hash covers is in [audit-cli.md](audit-cli.md), "Hash chain
     construction": the leaf hash is over the row's canonical-JSON payload,
     chained per session.
@@ -280,8 +285,8 @@ inputs above.
   - A channel crossing without the Tier 3 prompt: a frame, session, memory
     entry or credential reaching another channel; an approval resolved by a
     user not on the allowlist.
-  - A modified, deleted, reordered or truncated chain that verification
-    passes; an action with no row; a forged chain head accepted.
+  - A modified, deleted or reordered chain that verification passes; an
+    action with no row; a forged chain head accepted.
   - `exec`, `http_request` or an MCP server reaching a host its grant or
     signed entry does not list.
   - A webhook accepted without a valid platform signature or JWT.
