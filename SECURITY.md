@@ -19,7 +19,7 @@ You should receive an initial response within 72 hours. If the vulnerability is 
 
 ## Release signing
 
-Release artifacts are signed offline with an Ed25519 SSH key. The public key is pinned in [KEYS](KEYS) at the repository root and embedded in `install.sh` so installer verification needs no network fetch of the key. The full procedure, including key rotation, is in [docs/release-signing.md](docs/release-signing.md).
+Release artifacts are signed offline with an Ed25519 SSH key. The public key is pinned in [KEYS](KEYS) at the repository root and embedded in `install.sh` so installer verification needs no network fetch of the key. The full procedure, including key rotation, is in [docs/signing.md](docs/signing.md#build-provenance).
 
 Current active key:
 
@@ -29,7 +29,7 @@ Current active key:
 - Issued: 2026-04-18
 - Signed file: `checksums.sha256` for every published release (verify with `ssh-keygen -Y verify`)
 
-In addition to the offline signature, releases tagged after build provenance landed publish `wirken.intoto.jsonl`, a SLSA Build L3 provenance attestation signed through the GitHub OIDC-rooted Sigstore chain. It is a second, independent trust root (build origin, recorded in a public transparency log) beside the offline maintainer key, and both are standalone release assets. Verify it with `slsa-verifier`; see [docs/release-signing.md](docs/release-signing.md#build-provenance-slsa).
+In addition to the offline signature, releases tagged after build provenance landed publish `wirken.intoto.jsonl`, a SLSA Build L3 provenance attestation signed through the GitHub OIDC-rooted Sigstore chain. It is a second, independent trust root (build origin, recorded in a public transparency log) beside the offline maintainer key, and both are standalone release assets. Verify it with `slsa-verifier`; see [docs/signing.md](docs/signing.md#build-provenance).
 
 ## Cryptography
 
