@@ -1973,11 +1973,12 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
 ///
 /// Privatemode's default points at the local proxy
 /// (`http://localhost:8080/v1`), matching the operator-side setup
-/// described in `docs/reference/privatemode.md`. Tinfoil's entry is
-/// kept for `LlmConfig.base_url` only: the tinfoil dispatch arm
-/// goes through the tinfoil-rs SDK and the SDK's discovery endpoint
-/// picks the host at construction time, so this URL is never used
-/// for routing on that path. See `docs/reference/tinfoil.md`.
+/// described in the Privatemode section of `docs/configuration.md`.
+/// Tinfoil's entry is kept for `LlmConfig.base_url` only: the tinfoil
+/// dispatch arm goes through the tinfoil-rs SDK and the SDK's
+/// discovery endpoint picks the host at construction time, so this
+/// URL is never used for routing on that path. See the Tinfoil
+/// section of `docs/configuration.md`.
 pub(crate) fn provider_default_base_url(provider: &str) -> Option<&'static str> {
     match provider {
         "openai" => Some("https://api.openai.com/v1"),
