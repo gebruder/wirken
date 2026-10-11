@@ -13831,4 +13831,119 @@ mod leak_detection {
         );
         assert!(client.refuse_leaked_request(&[], &[]).is_ok());
     }
+
+    /// A reply that carries a stored secret is withheld: the channel
+    /// gets the notice, the conversation and the row carry it, and the
+    /// refusal is recorded.
+    #[tokio::test]
+    async fn a_reply_carrying_a_stored_secret_is_withheld() {
+        let tmp = TempDir::new().unwrap();
+        let (base_url, server, _) = stub(vec![text(&format!("Here it is: {SECRET}"))]).await;
+        let (mut agent, log) = agent(&tmp, &base_url);
+
+        let result = agent
+            .process_message("what is the key", "m1".into())
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let notice = crate::runtime::reply_withheld(NAME);
+        assert_eq!(result.response, notice);
+        let events = events(&log, "leaky");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SessionEvent::AssistantMessage { content, .. } if *content == notice)),
+            "{events:?}"
+        );
+        assert_eq!(
+            refusals(&events),
+            [(NAME.to_string(), LeakSurface::Reply, None)]
+        );
+        assert_no_secret_recorded(&events);
+    }
+
+    /// Streamed, as web chat gets it: no part of the secret is sent, the
+    /// notice is, and a clean reply arrives whole.
+    #[tokio::test]
+    async fn a_streamed_reply_holds_back_the_secret_and_sends_the_notice() {
+        for (reply, leaks) in [
+            (format!("Here it is: {SECRET} enjoy"), true),
+            ("Nothing stored in this one at all.".to_string(), false),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let (base_url, server, _) = stub(vec![text(&reply)]).await;
+            let (mut agent, log) = agent(&tmp, &base_url);
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let collect = tokio::spawn(async move {
+                let mut shown = String::new();
+                while let Some(event) = rx.recv().await {
+                    if let crate::llm_stream::StreamEvent::TextDelta(piece) = event {
+                        shown.push_str(&piece);
+                    }
+                }
+                shown
+            });
+
+            agent
+                .process_message_stream("go", "m1".into(), tx)
+                .await
+                .unwrap();
+            server.await.unwrap();
+            let shown = collect.await.unwrap();
+
+            if leaks {
+                assert!(
+                    !shown.contains("sk-"),
+                    "part of the secret was sent: {shown}"
+                );
+                assert!(
+                    shown.contains(&crate::runtime::reply_withheld(NAME)),
+                    "{shown}"
+                );
+                let events = events(&log, "leaky");
+                assert_eq!(
+                    refusals(&events),
+                    [(NAME.to_string(), LeakSurface::Reply, None)]
+                );
+                assert_no_secret_recorded(&events);
+            } else {
+                assert_eq!(shown, reply);
+            }
+        }
+    }
+
+    /// What the model writes beside its tool calls is a reply too.
+    #[tokio::test]
+    async fn text_beside_tool_calls_carrying_a_stored_secret_is_withheld() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "plain").unwrap();
+        let (base_url, server, requests) = stub(vec![
+            Reply::Message(serde_json::json!({
+                "role": "assistant",
+                "content": format!("Using {SECRET} to look."),
+                "tool_calls": [{"id": "c1", "type": "function", "function": {
+                    "name": "read_file", "arguments": "{\"path\": \"a.txt\"}"}}],
+            })),
+            text("Done."),
+        ])
+        .await;
+        let (mut agent, log) = agent(&tmp, &base_url);
+
+        agent.process_message("go", "m1".into()).await.unwrap();
+        server.await.unwrap();
+
+        let events = events(&log, "leaky");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SessionEvent::AssistantToolCalls { text: Some(t), .. }
+                    if *t == crate::runtime::reply_withheld(NAME))),
+            "{events:?}"
+        );
+        assert_eq!(
+            refusals(&events),
+            [(NAME.to_string(), LeakSurface::Reply, None)]
+        );
+        assert_no_secret_recorded(&events);
+        assert!(!requests.lock().unwrap()[1].contains(SECRET));
+    }
 }

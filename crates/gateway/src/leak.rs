@@ -119,6 +119,79 @@ impl LeakMatcher {
     }
 }
 
+/// A reply streamed in pieces, sent on only once no stored secret can
+/// be in what is sent. It holds back the last `longest − 1` bytes of the
+/// text so far: the start of a secret that has not finished arriving is
+/// never sent, and a secret that has finished arriving is found before
+/// any of it goes. Once one is found, nothing more is sent.
+pub struct HeldStream {
+    matcher: std::sync::Arc<LeakMatcher>,
+    text: String,
+    sent: usize,
+    refused: bool,
+}
+
+impl HeldStream {
+    pub fn new(matcher: std::sync::Arc<LeakMatcher>) -> Self {
+        Self {
+            matcher,
+            text: String::new(),
+            sent: 0,
+            refused: false,
+        }
+    }
+
+    /// Add `piece`; returns what may be sent now, if anything.
+    pub fn push(&mut self, piece: &str) -> Option<String> {
+        if self.refused {
+            return None;
+        }
+        self.text.push_str(piece);
+        let longest = self.matcher.longest();
+        // A secret not seen before ends in the new piece, so it starts
+        // no earlier than `longest` bytes before what was sent.
+        let from = self
+            .text
+            .floor_char_boundary(self.sent.saturating_sub(longest));
+        if self
+            .text
+            .get(from..)
+            .and_then(|t| self.matcher.find(t))
+            .is_some()
+        {
+            self.refused = true;
+            return None;
+        }
+        let safe = self
+            .text
+            .floor_char_boundary(self.text.len().saturating_sub(longest.saturating_sub(1)));
+        self.release(safe)
+    }
+
+    /// The stream ended: the rest, if no secret is in the whole text.
+    pub fn finish(&mut self) -> Option<String> {
+        if self.refused || self.matcher.find(&self.text).is_some() {
+            self.refused = true;
+            return None;
+        }
+        self.release(self.text.len())
+    }
+
+    /// Whether a stored secret was found and the stream stopped.
+    pub fn refused(&self) -> bool {
+        self.refused
+    }
+
+    fn release(&mut self, upto: usize) -> Option<String> {
+        if upto <= self.sent {
+            return None;
+        }
+        let out = self.text.get(self.sent..upto)?.to_string();
+        self.sent = upto;
+        Some(out)
+    }
+}
+
 impl State {
     fn rebuild(&mut self) {
         self.longest = self
@@ -213,5 +286,57 @@ mod tests {
         let m = LeakMatcher::seeded([secret("a-key", &["value-aaaa-1111"])]);
         m.learn("a-key", "value-aaaa-1111", CredentialKind::Secret);
         assert_eq!(m.state.read().unwrap().patterns.len(), 1);
+    }
+
+    fn held(m: LeakMatcher, pieces: &[&str]) -> (String, bool) {
+        let mut h = HeldStream::new(std::sync::Arc::new(m));
+        let mut sent = String::new();
+        for p in pieces {
+            sent.extend(h.push(p));
+        }
+        sent.extend(h.finish());
+        (sent, h.refused())
+    }
+
+    #[test]
+    fn a_clean_stream_is_sent_whole() {
+        let m = LeakMatcher::seeded([secret("k", &["sk-0123456789"])]);
+        let (sent, refused) = held(m, &["Hello ", "there, ", "this is fine."]);
+        assert_eq!(sent, "Hello there, this is fine.");
+        assert!(!refused);
+    }
+
+    #[test]
+    fn no_part_of_a_secret_split_across_pieces_is_sent() {
+        let m = LeakMatcher::seeded([secret("k", &["sk-0123456789"])]);
+        let (sent, refused) = held(m, &["Here: s", "k-0123", "4567", "89 done"]);
+        assert!(refused);
+        assert!(sent.starts_with("Here"), "{sent}");
+        // Not even the first character of the secret went out.
+        assert!(!sent.contains('s'), "{sent}");
+    }
+
+    #[test]
+    fn a_secret_at_the_very_end_is_held_and_never_sent() {
+        let m = LeakMatcher::seeded([secret("k", &["sk-0123456789"])]);
+        let (sent, refused) = held(m, &["ok ", "sk-0123456789"]);
+        assert!(refused);
+        assert_eq!(sent, "");
+    }
+
+    #[test]
+    fn with_no_secret_known_every_piece_goes_at_once() {
+        let mut h = HeldStream::new(std::sync::Arc::new(LeakMatcher::new()));
+        assert_eq!(h.push("abc").as_deref(), Some("abc"));
+        assert_eq!(h.push("déf").as_deref(), Some("déf"));
+        assert_eq!(h.finish(), None);
+    }
+
+    #[test]
+    fn a_multibyte_text_is_cut_on_character_boundaries() {
+        let m = LeakMatcher::seeded([secret("k", &["sk-0123456789"])]);
+        let (sent, refused) = held(m, &["café ", "naïve ", "résumé"]);
+        assert_eq!(sent, "café naïve résumé");
+        assert!(!refused);
     }
 }

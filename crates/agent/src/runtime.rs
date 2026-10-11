@@ -423,6 +423,11 @@ pub struct Agent {
     approval_bypass: Option<wirken_gateway::permissions::Action>,
 }
 
+/// What a channel gets in place of a reply that carried a stored secret.
+pub(crate) fn reply_withheld(credential: &str) -> String {
+    format!("Reply withheld: it contained stored credential {credential}.")
+}
+
 /// The result a tool call whose arguments carried a stored secret gets
 /// in place of running.
 fn refused_tool_result(credential: &str) -> crate::tool::ToolResult {
@@ -2339,6 +2344,20 @@ impl Agent {
         }
     }
 
+    /// The agent's reply, or the text it wrote beside its tool calls,
+    /// before it is recorded or sent: one that carries a stored secret
+    /// is replaced by a notice naming the credential, and the refusal is
+    /// recorded. Returns the text to use and whether it was withheld.
+    fn withhold_leaked_reply(&self, text: String) -> (String, bool) {
+        match self.leak_matcher.find(&text) {
+            Some(credential) => {
+                self.record_leak(&credential, LeakSurface::Reply, None, None, None);
+                (reply_withheld(&credential), true)
+            }
+            None => (text, false),
+        }
+    }
+
     /// Tool calls as the model wrote them, before anything records or
     /// runs them. A call whose arguments carry a stored secret keeps its
     /// id and name and gets `{"refused": …}` in place of its arguments,
@@ -2818,6 +2837,7 @@ impl Agent {
 
             match response {
                 LlmResponse::Text(text) => {
+                    let (text, _) = self.withhold_leaked_reply(text);
                     self.conversation.add_assistant_message(&text);
                     self.log_event(
                         TrustLevel::System,
@@ -2837,6 +2857,7 @@ impl Agent {
                     // arguments carry a stored secret is recorded with
                     // the refusal in their place and does not run.
                     let (calls, refused) = self.refuse_leaked_arguments(calls).await;
+                    let text = text.map(|t| self.withhold_leaked_reply(t).0);
                     // What the model said alongside the calls, held
                     // for the row below and for any gate the calls
                     // reach: an operator asked to approve one of
@@ -3119,11 +3140,19 @@ impl Agent {
                 );
 
                 let forward_tx = tx.clone();
+                // Held back by the longest stored secret, less a byte,
+                // so no part of one is sent before it can be checked.
+                let mut held = wirken_gateway::leak::HeldStream::new(self.leak_matcher.clone());
                 let forward_handle = tokio::spawn(async move {
                     while let Some(event) = round_rx.recv().await {
-                        if let StreamEvent::TextDelta(_) = &event {
-                            let _ = forward_tx.send(event).await;
+                        if let StreamEvent::TextDelta(piece) = event
+                            && let Some(safe) = held.push(&piece)
+                        {
+                            let _ = forward_tx.send(StreamEvent::TextDelta(safe)).await;
                         }
+                    }
+                    if let Some(rest) = held.finish() {
+                        let _ = forward_tx.send(StreamEvent::TextDelta(rest)).await;
                     }
                 });
 
@@ -3163,6 +3192,12 @@ impl Agent {
 
             match response {
                 LlmResponse::Text(text) => {
+                    let (text, withheld) = self.withhold_leaked_reply(text);
+                    if withheld {
+                        // The stream stopped before the secret; what was
+                        // shown is followed by the notice.
+                        let _ = tx.send(StreamEvent::TextDelta(format!("\n\n{text}"))).await;
+                    }
                     self.conversation.add_assistant_message(&text);
                     self.log_event(
                         TrustLevel::System,
@@ -3182,6 +3217,16 @@ impl Agent {
                 }
                 LlmResponse::ToolCalls { calls, text } => {
                     let (calls, refused) = self.refuse_leaked_arguments(calls).await;
+                    let text = match text {
+                        Some(t) => {
+                            let (t, withheld) = self.withhold_leaked_reply(t);
+                            if withheld {
+                                let _ = tx.send(StreamEvent::TextDelta(format!("\n\n{t}"))).await;
+                            }
+                            Some(t)
+                        }
+                        None => None,
+                    };
                     self.current_assistant_text = text.clone();
                     self.conversation.add_assistant_tool_calls(calls.clone());
                     self.log_event(
