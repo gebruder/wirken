@@ -62,6 +62,11 @@ pub enum AgentError {
     #[error("llm error: {0}")]
     Llm(String),
 
+    /// The request to the model carried a stored secret and was not
+    /// sent. Names the credential, never the value.
+    #[error("Refused: the request to the model contained stored credential {credential}")]
+    LeakRefused { credential: String },
+
     #[error("tool error: {0}")]
     Tool(String),
 

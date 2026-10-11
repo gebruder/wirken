@@ -52,6 +52,7 @@ impl LlmClient {
         api_key: Option<&str>,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
+        self.refuse_leaked_request(messages, tools)?;
         match self.config().provider.as_str() {
             "openai" | "ollama" | "custom" | "infomaniak" | "hetzner" => {
                 self.stream_openai(messages, tools, api_key, &tx).await

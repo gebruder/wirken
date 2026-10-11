@@ -268,6 +268,9 @@ pub struct LlmClient {
     /// because the lock is held across the SDK's `await`s during
     /// initialization.
     tinfoil: tokio::sync::Mutex<Option<Arc<tinfoil::Client>>>,
+    /// The stored secrets a request to the model may not carry. Empty
+    /// until the agent attaches one.
+    leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
 }
 
 impl LlmClient {
@@ -296,7 +299,42 @@ impl LlmClient {
             http,
             observer: Mutex::new(None),
             tinfoil: tokio::sync::Mutex::new(None),
+            leak_matcher: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
         })
+    }
+
+    /// Refuse to send a request that carries a stored secret in `matcher`.
+    pub fn set_leak_matcher(&mut self, matcher: Arc<wirken_gateway::leak::LeakMatcher>) {
+        self.leak_matcher = matcher;
+    }
+
+    /// The backstop before any request leaves: every message, every
+    /// tool call's arguments and every tool definition. Content is
+    /// checked where it enters the conversation; this catches what got
+    /// past those checks, and refuses the whole request.
+    pub(crate) fn refuse_leaked_request(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<(), AgentError> {
+        let found = messages
+            .iter()
+            .flat_map(|m| {
+                std::iter::once(m.content.as_str())
+                    .chain(m.tool_calls.iter().flatten().map(|c| c.arguments.as_str()))
+            })
+            .find_map(|text| self.leak_matcher.find(text))
+            .or_else(|| {
+                tools.iter().find_map(|t| {
+                    self.leak_matcher
+                        .find(&t.description)
+                        .or_else(|| self.leak_matcher.find(&t.parameters.to_string()))
+                })
+            });
+        match found {
+            Some(credential) => Err(AgentError::LeakRefused { credential }),
+            None => Ok(()),
+        }
     }
 
     /// Register a recovery observer. Replaces any previously set
@@ -375,6 +413,7 @@ impl LlmClient {
         tools: &[ToolDef],
         api_key: Option<&str>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
+        self.refuse_leaked_request(messages, tools)?;
         match self.config.provider.as_str() {
             "anthropic" => self.complete_anthropic(messages, tools, api_key).await,
             "gemini" => self.complete_gemini(messages, tools, api_key).await,

@@ -1109,7 +1109,16 @@ impl Agent {
     /// Check model-authored content against `matcher`. Set before
     /// [`Self::attach_skills`], which checks each skill as it loads.
     pub fn set_leak_matcher(&mut self, matcher: Arc<wirken_gateway::leak::LeakMatcher>) {
+        self.llm.set_leak_matcher(matcher.clone());
         self.leak_matcher = matcher;
+    }
+
+    /// `e`, unchanged; a refused request to the model is recorded first.
+    fn note_provider_refusal(&self, e: AgentError) -> AgentError {
+        if let AgentError::LeakRefused { credential } = &e {
+            self.record_leak(credential, LeakSurface::ProviderRequest, None, None, None);
+        }
+        e
     }
 
     /// The stored secrets this agent refuses to let content carry.
@@ -2183,6 +2192,7 @@ impl Agent {
                 tracing::debug!("compaction summarizer returned non-text; keeping aggregate");
             }
             Err(e) => {
+                let e = self.note_provider_refusal(e);
                 // Summarization failed. Keep the deterministic
                 // aggregate. This is not fatal.
                 tracing::warn!(
@@ -2391,6 +2401,12 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn session_log_for_test(&self) -> &Arc<dyn SessionLog> {
         &self.session_log
+    }
+
+    /// The conversation, to put content in it past every check.
+    #[cfg(test)]
+    pub(crate) fn conversation_mut_for_test(&mut self) -> &mut Conversation {
+        &mut self.conversation
     }
 
     /// Whether this session was marked as carrying no binding row.
@@ -2768,7 +2784,8 @@ impl Agent {
                     &tool_defs,
                     self.api_key.as_deref(),
                 )
-                .await?;
+                .await
+                .map_err(|e| self.note_provider_refusal(e))?;
             let latency_ms = started.elapsed().as_millis() as u64;
             let LlmResponseAttribution {
                 input_tokens,
@@ -3112,7 +3129,7 @@ impl Agent {
 
                 let result = stream_future.await;
                 let _ = forward_handle.await;
-                result?
+                result.map_err(|e| self.note_provider_refusal(e))?
             };
             let latency_ms = started.elapsed().as_millis() as u64;
             let LlmResponseAttribution {

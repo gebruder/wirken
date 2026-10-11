@@ -13763,4 +13763,72 @@ mod leak_detection {
         assert_no_secret_recorded(&events);
         assert!(!requests.lock().unwrap()[1].contains(SECRET));
     }
+
+    /// Content that got into the conversation past the checks where it
+    /// enters (here put there directly) stops the request to the model
+    /// before anything is sent: the turn fails with the refusal, the
+    /// stub sees no request, and the refusal is recorded.
+    #[tokio::test]
+    async fn the_request_backstop_refuses_a_secret_that_got_past_the_other_checks() {
+        for streaming in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (base_url, server, requests) = stub(vec![text("never sent")]).await;
+            let (mut agent, log) = agent(&tmp, &base_url);
+            agent.conversation_mut_for_test().add_tool_result(
+                "c0",
+                "read_file",
+                &format!("bypassed: {SECRET}"),
+            );
+
+            let err = if streaming {
+                let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+                let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+                let r = agent.process_message_stream("hello", "m1".into(), tx).await;
+                drain.await.unwrap();
+                r.err().expect("the turn fails")
+            } else {
+                agent
+                    .process_message("hello", "m1".into())
+                    .await
+                    .err()
+                    .expect("the turn fails")
+            };
+            server.abort();
+
+            assert!(
+                matches!(&err, crate::error::AgentError::LeakRefused { credential } if credential == NAME),
+                "streaming={streaming}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!("Refused: the request to the model contained stored credential {NAME}")
+            );
+            assert!(requests.lock().unwrap().is_empty(), "a request was sent");
+            let events = events(&log, "leaky");
+            assert_eq!(
+                refusals(&events),
+                [(NAME.to_string(), LeakSurface::ProviderRequest, None)],
+                "streaming={streaming}"
+            );
+            assert_no_secret_recorded(&events);
+        }
+    }
+
+    /// A tool definition can carry a secret too (an MCP server's
+    /// description); the request with it is refused.
+    #[test]
+    fn a_secret_in_a_tool_definition_refuses_the_request() {
+        let mut client = crate::llm::LlmClient::new(llm("http://127.0.0.1:9/v1")).unwrap();
+        client.set_leak_matcher(matcher());
+        let tool = crate::tool::ToolDef {
+            name: "mcp_x_lookup".into(),
+            description: format!("[x] uses {SECRET}"),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let err = client.refuse_leaked_request(&[], &[tool]).unwrap_err();
+        assert!(
+            matches!(err, crate::error::AgentError::LeakRefused { credential } if credential == NAME)
+        );
+        assert!(client.refuse_leaked_request(&[], &[]).is_ok());
+    }
 }
