@@ -179,7 +179,7 @@ tagged.
   admitted and not started, rather than as refused, since its signature
   verified.
 - The README's architecture diagram no longer lists Wasm as a tool
-  sandbox. Wasm skills are not loaded on the default path.
+  sandbox.
 
 - An adapter's connection and restarts are typed audit events on the
   `gateway-adapters` lane: `adapter_connect`, `adapter_disconnect`
@@ -198,9 +198,9 @@ tagged.
   `adapter_connect` is `info`; `adapter_disconnect` is `info`, or `error`
   on a panic; `adapter_restart` is `info` for `connection_ended`, `warn` for
   `process_exited` and `error` for `connection_panicked` and
-  `spawn_failed`; `adapter_restart_abandoned` is `error`. Every other typed
-  event is `info`. `wirken channel list` and the webchat status read both
-  shapes, so an existing log keeps reading.
+  `spawn_failed`; `adapter_restart_abandoned` is `error`. `wirken channel
+  list` and the webchat status read both shapes, so an existing log keeps
+  reading.
 
 ### Deprecated
 
@@ -229,11 +229,6 @@ tagged.
   the deleted rows' numbers: a receiver deduplicating on that key dropped
   them, and a hook past them never read them. The delete and the marker
   are now one transaction, and the rewind count is rows, not numbers.
-- `wirken run` exits after its shutdown. Since connection tasks were
-  tracked for `connection.panic` rows (unreleased; not in 1.28.0), the
-  tracker held a handle on the audit writer to the end of the shutdown,
-  and the gateway waited for ever after "Shutting down" for the audit log
-  to flush.
 - `wirken run` takes SIGTERM the way it takes Ctrl-C and runs its
   shutdown. Before, SIGTERM ended the gateway at once: the MCP proxy kept
   running, and so did every container it had started.
