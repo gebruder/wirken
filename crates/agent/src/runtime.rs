@@ -423,6 +423,16 @@ pub struct Agent {
     approval_bypass: Option<wirken_gateway::permissions::Action>,
 }
 
+/// The result a tool call whose arguments carried a stored secret gets
+/// in place of running.
+fn refused_tool_result(credential: &str) -> crate::tool::ToolResult {
+    crate::tool::ToolResult {
+        output: leak_refusal(credential),
+        success: false,
+        sandbox: None,
+    }
+}
+
 /// What the model reads in place of content that carried a stored
 /// secret. Names the credential, never the value.
 pub(crate) fn leak_refusal(credential: &str) -> String {
@@ -2319,6 +2329,40 @@ impl Agent {
         }
     }
 
+    /// Tool calls as the model wrote them, before anything records or
+    /// runs them. A call whose arguments carry a stored secret keeps its
+    /// id and name and gets `{"refused": …}` in place of its arguments,
+    /// so neither the `AssistantToolCalls` row, the conversation nor the
+    /// next request to the model carries the secret; the refusal is
+    /// recorded. Returns the calls to record and, by call id, the
+    /// credential each refused call carried.
+    async fn refuse_leaked_arguments(
+        &self,
+        calls: Vec<ToolCallRequest>,
+    ) -> (Vec<ToolCallRequest>, HashMap<String, String>) {
+        let mut refused = HashMap::new();
+        let mut checked = Vec::with_capacity(calls.len());
+        for mut call in calls {
+            if let Some(credential) = self.leak_matcher.find(&call.arguments) {
+                let server = self.mcp_server_of(&call.name).await;
+                self.record_leak(
+                    &credential,
+                    LeakSurface::ToolArguments,
+                    Some(&call.name),
+                    server,
+                    None,
+                );
+                call.arguments = serde_json::json!({
+                    "refused": format!("contained stored credential {credential}"),
+                })
+                .to_string();
+                refused.insert(call.id.clone(), credential);
+            }
+            checked.push(call);
+        }
+        (checked, refused)
+    }
+
     /// A sub-agent's result, before the parent records it and hands it
     /// to its model: one that carries a stored secret becomes an error
     /// envelope with the refusal, and the refusal is recorded. Checked
@@ -2772,6 +2816,10 @@ impl Agent {
                     });
                 }
                 LlmResponse::ToolCalls { calls, text } => {
+                    // Before anything records them: a call whose
+                    // arguments carry a stored secret is recorded with
+                    // the refusal in their place and does not run.
+                    let (calls, refused) = self.refuse_leaked_arguments(calls).await;
                     // What the model said alongside the calls, held
                     // for the row below and for any gate the calls
                     // reach: an operator asked to approve one of
@@ -2796,12 +2844,24 @@ impl Agent {
                         },
                     )?;
 
+                    for call in calls.iter().filter(|c| refused.contains_key(&c.id)) {
+                        let result = refused_tool_result(&refused[&call.id]);
+                        self.conversation
+                            .add_tool_result(&call.id, &call.name, &result.output);
+                        self.log_event(
+                            TrustLevel::Tool,
+                            self.tool_result_row(&call.id, &call.name, &result),
+                        )?;
+                    }
+
                     // Partition into regular and spawn calls.
                     // Regular calls execute sequentially first
                     // (they may have ordering-dependent side effects).
                     // Spawn calls fan out in parallel via join_all.
-                    let (spawn_calls, regular_calls): (Vec<_>, Vec<_>) =
-                        calls.iter().partition(|c| c.name == SPAWN_SUBAGENT_TOOL);
+                    let (spawn_calls, regular_calls): (Vec<_>, Vec<_>) = calls
+                        .iter()
+                        .filter(|c| !refused.contains_key(&c.id))
+                        .partition(|c| c.name == SPAWN_SUBAGENT_TOOL);
 
                     // Phase 1: execute regular tool calls sequentially.
                     for call in &regular_calls {
@@ -3104,6 +3164,7 @@ impl Agent {
                     });
                 }
                 LlmResponse::ToolCalls { calls, text } => {
+                    let (calls, refused) = self.refuse_leaked_arguments(calls).await;
                     self.current_assistant_text = text.clone();
                     self.conversation.add_assistant_tool_calls(calls.clone());
                     self.log_event(
@@ -3126,7 +3187,10 @@ impl Agent {
                         // exactly one place. This site used to
                         // inline the catch, which is how the two
                         // surfaces drifted apart.
-                        let result = self.execute_and_record_tool(call, &mut denials).await?;
+                        let result = match refused.get(&call.id) {
+                            Some(credential) => refused_tool_result(credential),
+                            None => self.execute_and_record_tool(call, &mut denials).await?,
+                        };
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
