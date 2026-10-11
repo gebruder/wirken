@@ -1146,6 +1146,7 @@ impl Agent {
     /// loaded once at startup, then rebuild the system prompt to
     /// include them.
     pub fn attach_skills(&mut self, skills: Vec<Skill>) -> Result<(), AgentError> {
+        let skills = self.refuse_leaked_skills(skills);
         // Coherence checks:
         // - Skill names are unique among the loaded set, else `/<name>`
         //   slash invocation is ambiguous.
@@ -2352,6 +2353,33 @@ impl Agent {
             success: false,
             sandbox: result.sandbox,
         }
+    }
+
+    /// Skills as they load: one whose name, description or body carries
+    /// a stored secret is not loaded, so its text never reaches a system
+    /// prompt, and the refusal is recorded. The rest load as before.
+    fn refuse_leaked_skills(&self, skills: Vec<Skill>) -> Vec<Skill> {
+        skills
+            .into_iter()
+            .filter(|skill| {
+                let found = [&skill.name, &skill.description, &skill.body]
+                    .into_iter()
+                    .find_map(|text| self.leak_matcher.find(text));
+                match found {
+                    Some(credential) => {
+                        self.record_leak(
+                            &credential,
+                            LeakSurface::SkillLoad,
+                            None,
+                            None,
+                            Some(&skill.name),
+                        );
+                        false
+                    }
+                    None => true,
+                }
+            })
+            .collect()
     }
 
     /// A user's message, on arrival: one that carries a stored secret

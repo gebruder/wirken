@@ -14017,4 +14017,54 @@ mod leak_detection {
         assert!(requests.lock().unwrap()[0].contains(IDENTIFIER));
         assert!(refusals(&events(&log, "leaky")).is_empty());
     }
+
+    /// A skill that carries a stored secret is not loaded; the others
+    /// are, and the refusal names the skill.
+    #[tokio::test]
+    async fn a_skill_carrying_a_stored_secret_is_not_loaded() {
+        let tmp = TempDir::new().unwrap();
+        let (base_url, server, requests) = stub(vec![text("Hi.")]).await;
+        let (mut agent, log) = agent(&tmp, &base_url);
+        let skill = |name: &str, body: &str| crate::skill::Skill {
+            name: name.into(),
+            description: format!("{name} things"),
+            required_bins: vec![],
+            body: body.into(),
+            path: tmp.path().join(name).join("SKILL.md"),
+            available: true,
+            permissions: crate::skill_perms::parse_block(
+                "tools:\n  allow: [read_file]\ninference:\n  allow: [\"*\"]\n",
+                tmp.path(),
+                None,
+                None,
+            )
+            .unwrap(),
+            disable_model_invocation: false,
+        };
+        agent
+            .attach_skills(vec![
+                skill("notes", "Keep notes tidy."),
+                skill("deploy", &format!("Deploy with token {SECRET}.")),
+            ])
+            .unwrap();
+
+        agent.process_message("hello", "m1".into()).await.unwrap();
+        server.await.unwrap();
+
+        let events = events(&log, "leaky");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SessionEvent::LeakRefused { surface: LeakSurface::SkillLoad, skill_name: Some(n), credential, .. }
+                    if n == "deploy" && credential == NAME)),
+            "{events:?}"
+        );
+        assert_no_secret_recorded(&events);
+        let request = &requests.lock().unwrap()[0];
+        assert!(
+            request.contains("Keep notes tidy."),
+            "the clean skill was dropped"
+        );
+        assert!(!request.contains(SECRET));
+        assert!(!request.contains("Deploy with token"));
+    }
 }
