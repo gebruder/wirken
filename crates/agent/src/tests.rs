@@ -13248,3 +13248,349 @@ mod webchat_approval_reaches_the_page {
         server.await.unwrap();
     }
 }
+
+/// Exact-match leak detection: content carrying a stored secret is
+/// refused before it goes further, and the refusal is recorded.
+mod leak_detection {
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::{Arc, Mutex};
+
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use wirken_audit::{LeakSurface, SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+    use wirken_gateway::agent_config::SubagentCeiling;
+    use wirken_gateway::leak::{CredentialKind, LeakMatcher};
+    use wirken_gateway::permissions::PermissionTier;
+
+    use crate::factory::{AgentFactory, AgentStaticConfig};
+    use crate::llm::LlmConfig;
+    use crate::runtime::Agent;
+
+    pub(super) const SECRET: &str = "sk-planted-0123456789";
+    pub(super) const NAME: &str = "planted-key";
+    pub(super) const IDENTIFIER: &str = "+15551234567";
+
+    /// A stub answer: a chat-completion message, or an HTTP error with
+    /// a body.
+    pub(super) enum Reply {
+        Message(serde_json::Value),
+        Error(u16, String),
+    }
+
+    /// Answers each chat completion with the next reply in order, and
+    /// keeps each request body it read.
+    pub(super) async fn stub(
+        replies: Vec<Reply>,
+    ) -> (String, tokio::task::JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let task = tokio::spawn(async move {
+            for reply in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = vec![0u8; 16384];
+                let body_start = loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break end + 4;
+                        }
+                    }
+                    if n == 0 {
+                        break request.len();
+                    }
+                };
+                seen.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request[body_start..]).into_owned());
+                let (status, body) = match reply {
+                    Reply::Message(message) => {
+                        let finish = if message.get("tool_calls").is_some() {
+                            "tool_calls"
+                        } else {
+                            "stop"
+                        };
+                        let body = serde_json::json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion",
+                            "created": 0,
+                            "model": "stub",
+                            "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                        })
+                        .to_string();
+                        ("200 OK".to_string(), body)
+                    }
+                    Reply::Error(code, body) => (format!("{code} Error"), body),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+        (format!("http://{addr}/v1"), task, requests)
+    }
+
+    pub(super) fn llm(base_url: &str) -> LlmConfig {
+        LlmConfig {
+            provider: "custom".into(),
+            model: "stub".into(),
+            base_url: base_url.to_string(),
+            max_tokens: 256,
+            temperature: 0.0,
+            region: None,
+            tools_enabled: true,
+            context_window: 32_000,
+        }
+    }
+
+    /// A matcher that knows [`SECRET`] under [`NAME`], and [`IDENTIFIER`]
+    /// as an identifier.
+    pub(super) fn matcher() -> Arc<LeakMatcher> {
+        let m = LeakMatcher::new();
+        m.learn(NAME, SECRET, CredentialKind::Secret);
+        m.learn(
+            "signal-phone-number",
+            IDENTIFIER,
+            CredentialKind::Identifier,
+        );
+        Arc::new(m)
+    }
+
+    pub(super) fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> Reply {
+        Reply::Message(serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments.to_string()},
+            }],
+        }))
+    }
+
+    pub(super) fn text(content: &str) -> Reply {
+        Reply::Message(serde_json::json!({"role": "assistant", "content": content}))
+    }
+
+    /// An agent on the stub at `base_url`, its workspace and log in
+    /// `tmp`, checking content against [`matcher`].
+    pub(super) fn agent(tmp: &TempDir, base_url: &str) -> (Agent, Arc<SqliteSessionLog>) {
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let mut agent = Agent::new(
+            "leaky".to_string(),
+            tmp.path().to_path_buf(),
+            llm(base_url),
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        agent.set_leak_matcher(matcher());
+        (agent, log)
+    }
+
+    pub(super) fn events(log: &SqliteSessionLog, session: &str) -> Vec<SessionEvent> {
+        log.get_since(&log.handle_for(SessionId::new(session)), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect()
+    }
+
+    /// The `LeakRefused` rows: credential, surface and tool.
+    pub(super) fn refusals(events: &[SessionEvent]) -> Vec<(String, LeakSurface, Option<String>)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::LeakRefused {
+                    credential,
+                    surface,
+                    tool_name,
+                    ..
+                } => Some((credential.clone(), *surface, tool_name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Nothing recorded carries the secret's bytes.
+    pub(super) fn assert_no_secret_recorded(events: &[SessionEvent]) {
+        let json = serde_json::to_string(events).unwrap();
+        assert!(!json.contains(SECRET), "the secret is on the chain: {json}");
+    }
+
+    /// A tool's output that carries a stored secret is replaced by the
+    /// refusal before it enters the conversation: the model's next
+    /// request, the tool result row and every other row carry the
+    /// refusal, and a `LeakRefused` row names the credential and tool.
+    #[tokio::test]
+    async fn a_tool_output_carrying_a_stored_secret_is_refused_and_recorded() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), format!("key: {SECRET}\n")).unwrap();
+        let (base_url, server, requests) = stub(vec![
+            tool_call("c1", "read_file", serde_json::json!({"path": "notes.txt"})),
+            text("Done."),
+        ])
+        .await;
+        let (mut agent, log) = agent(&tmp, &base_url);
+
+        agent
+            .process_message("read my notes", "m1".into())
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let refusal = crate::runtime::leak_refusal(NAME);
+        let events = events(&log, "leaky");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SessionEvent::ToolResult { tool_name, output, success: false, .. }
+                    if tool_name == "read_file" && *output == refusal)),
+            "{events:?}"
+        );
+        assert_eq!(
+            refusals(&events),
+            [(
+                NAME.to_string(),
+                LeakSurface::ToolOutput,
+                Some("read_file".to_string())
+            )]
+        );
+        assert_no_secret_recorded(&events);
+        let requests = requests.lock().unwrap();
+        assert!(!requests[1].contains(SECRET), "the model saw the secret");
+        assert!(requests[1].contains(&refusal), "the model was told");
+    }
+
+    /// An identifier stored in the vault, and ordinary text, pass.
+    #[tokio::test]
+    async fn an_identifier_in_a_tool_output_passes() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("contact.txt"),
+            format!("call {IDENTIFIER} tomorrow\n"),
+        )
+        .unwrap();
+        let (base_url, server, requests) = stub(vec![
+            tool_call(
+                "c1",
+                "read_file",
+                serde_json::json!({"path": "contact.txt"}),
+            ),
+            text("Noted."),
+        ])
+        .await;
+        let (mut agent, log) = agent(&tmp, &base_url);
+
+        agent
+            .process_message("who do I call", "m1".into())
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let events = events(&log, "leaky");
+        assert!(refusals(&events).is_empty(), "{events:?}");
+        assert!(requests.lock().unwrap()[1].contains(IDENTIFIER));
+    }
+
+    /// A sub-agent's result that carries a stored secret (here a provider
+    /// error echoing it) is refused before the parent records it or
+    /// hands it to its model.
+    #[tokio::test]
+    async fn a_sub_agent_result_carrying_a_stored_secret_is_refused_before_it_is_recorded() {
+        let tmp = TempDir::new().unwrap();
+        let (base_url, server, requests) = stub(vec![
+            tool_call(
+                "s1",
+                crate::runtime::SPAWN_SUBAGENT_TOOL,
+                serde_json::json!({"agent_id": "child", "prompt": "look it up"}),
+            ),
+            Reply::Error(500, format!("upstream said: {SECRET}")),
+            text("Done."),
+        ])
+        .await;
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let config = |id: &str, children: BTreeMap<String, SubagentCeiling>| AgentStaticConfig {
+            agent_id: id.to_string(),
+            workspace: tmp.path().to_path_buf(),
+            llm_config: llm(&base_url),
+            channel_overrides: HashMap::new(),
+            api_key: Some("unused".into()),
+            api_key_credential: None,
+            skills: Vec::new(),
+            mcp_client: None,
+            identity: None,
+            allowed_subagents: children,
+            sandbox: Default::default(),
+            extra_interceptors: vec![],
+            zirkel_db_path: None,
+            channel_egress: Default::default(),
+        };
+        let ceiling = SubagentCeiling {
+            tool_allowlist: vec![],
+            max_permission_tier: PermissionTier::Tier1,
+            max_rounds: 1,
+            max_runtime_secs: 30,
+        };
+        let factory = AgentFactory::new(
+            HashMap::from([
+                (
+                    "parent".to_string(),
+                    config("parent", BTreeMap::from([("child".to_string(), ceiling)])),
+                ),
+                ("child".to_string(), config("child", BTreeMap::new())),
+            ]),
+            log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
+        );
+        factory.attach_leak_matcher(matcher());
+        let parent = factory.wake("parent", "parent/test/c1").unwrap();
+        parent
+            .lock()
+            .await
+            .process_message("ask the child", "m1".into())
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let events = events(&log, "parent/test/c1");
+        assert_eq!(
+            refusals(&events),
+            [(
+                NAME.to_string(),
+                LeakSurface::ToolOutput,
+                Some(crate::runtime::SPAWN_SUBAGENT_TOOL.to_string())
+            )]
+        );
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SessionEvent::SubagentResult { output, .. }
+                    if output.contains(&crate::runtime::leak_refusal(NAME)))),
+            "{events:?}"
+        );
+        assert_no_secret_recorded(&events);
+        assert!(
+            !requests.lock().unwrap()[2].contains(SECRET),
+            "the parent's model saw it"
+        );
+    }
+}

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use wirken_audit::{
-    BudgetAction, OwnSession, PhaseExitReason, SessionEvent, SessionHandle, SessionId, SessionLog,
-    SkillDeniedReason, ToolCallRecord, TrustLevel,
+    BudgetAction, LeakSurface, OwnSession, PhaseExitReason, SessionEvent, SessionHandle, SessionId,
+    SessionLog, SkillDeniedReason, ToolCallRecord, TrustLevel,
 };
 
 use crate::context::ContextEngine;
@@ -421,6 +421,12 @@ pub struct Agent {
     /// execute_tool invocation, and the next call to the same tool
     /// prompts the gate fresh.
     approval_bypass: Option<wirken_gateway::permissions::Action>,
+}
+
+/// What the model reads in place of content that carried a stored
+/// secret. Names the credential, never the value.
+pub(crate) fn leak_refusal(credential: &str) -> String {
+    format!("Refused: content contained stored credential {credential}")
 }
 
 /// The tool list for one turn.
@@ -2242,6 +2248,100 @@ impl Agent {
         Ok(())
     }
 
+    /// Record that content carrying the stored secret `credential` was
+    /// refused at `surface`. Names the credential, never the value.
+    pub(crate) fn record_leak(
+        &self,
+        credential: &str,
+        surface: LeakSurface,
+        tool_name: Option<&str>,
+        server_name: Option<String>,
+        skill_name: Option<&str>,
+    ) {
+        tracing::warn!(
+            agent = %self.audited_agent_id(),
+            credential,
+            surface = surface.as_str(),
+            "content carrying a stored credential refused"
+        );
+        let event = SessionEvent::LeakRefused {
+            credential: credential.to_string(),
+            surface,
+            agent_id: self.audited_agent_id(),
+            channel: self.current_inbound.channel.clone(),
+            adapter_id: self.current_inbound.adapter_id.clone(),
+            sender_id: self.current_inbound.sender_id.clone(),
+            tool_name: tool_name.map(str::to_string),
+            server_name,
+            skill_name: skill_name.map(str::to_string),
+        };
+        if let Err(e) = self.log_event(TrustLevel::System, event) {
+            tracing::warn!("could not record a refused leak of '{credential}': {e}");
+        }
+    }
+
+    /// The MCP server behind `tool`, from the description the proxy
+    /// prefixes with `[server]`. `None` for every other tool.
+    async fn mcp_server_of(&self, tool: &str) -> Option<String> {
+        if !tool.starts_with("mcp_") {
+            return None;
+        }
+        let defs = self.mcp.as_ref()?.lock().await.definitions();
+        let def = defs.into_iter().find(|d| d.name == tool)?;
+        let (server, _) = def.description.strip_prefix('[')?.split_once(']')?;
+        Some(server.to_string())
+    }
+
+    /// A tool's output, or a sub-agent's result, before it enters the
+    /// conversation: one that carries a stored secret is replaced by a
+    /// refusal the model reads, and the refusal is recorded. The
+    /// `ToolResult` row then carries the refusal, not the secret.
+    async fn refuse_leaked_output(
+        &self,
+        tool: &str,
+        result: crate::tool::ToolResult,
+    ) -> crate::tool::ToolResult {
+        let Some(credential) = self.leak_matcher.find(&result.output) else {
+            return result;
+        };
+        let server = self.mcp_server_of(tool).await;
+        self.record_leak(
+            &credential,
+            LeakSurface::ToolOutput,
+            Some(tool),
+            server,
+            None,
+        );
+        crate::tool::ToolResult {
+            output: leak_refusal(&credential),
+            success: false,
+            sandbox: result.sandbox,
+        }
+    }
+
+    /// A sub-agent's result, before the parent records it and hands it
+    /// to its model: one that carries a stored secret becomes an error
+    /// envelope with the refusal, and the refusal is recorded. Checked
+    /// here, ahead of the `SubagentResult` row, so the secret reaches
+    /// neither the parent's chain nor its conversation.
+    fn refuse_leaked_subagent(
+        &self,
+        envelope: crate::tool::ToolResult,
+        child_session_id: &str,
+    ) -> crate::tool::ToolResult {
+        let Some(credential) = self.leak_matcher.find(&envelope.output) else {
+            return envelope;
+        };
+        self.record_leak(
+            &credential,
+            LeakSurface::ToolOutput,
+            Some(SPAWN_SUBAGENT_TOOL),
+            None,
+            None,
+        );
+        envelope_result(child_session_id, "error", &leak_refusal(&credential))
+    }
+
     /// Borrow this agent's session log. Crate-private; used by tests
     /// to read back what `log_event` wrote.
     #[cfg(test)]
@@ -3723,6 +3823,7 @@ impl Agent {
             Err(e) => return Err(e),
         };
         let result = self.mediate_tool_output(call, result).await?;
+        let result = self.refuse_leaked_output(&call.name, result).await;
         tracing::debug!(
             "Tool {} result (success={}): {}",
             call.name,
@@ -4404,6 +4505,7 @@ impl Agent {
                 ),
             };
 
+            let envelope = self.refuse_leaked_subagent(envelope, &p.child_session_id);
             let status = envelope_status(&envelope.output);
             self.log_event(
                 TrustLevel::System,
@@ -4814,6 +4916,7 @@ impl Agent {
         // guards across an await point.
         drop(child);
 
+        let envelope = self.refuse_leaked_subagent(envelope, &child_session_id);
         let status = envelope_status(&envelope.output);
         self.log_event(
             TrustLevel::System,
