@@ -12,7 +12,9 @@ tagged.
 
 ## [2.0.0] - 2026-10-11
 
-Open dependency updates (#283, four Cargo crates; #280, two GitHub Actions) are deferred to 2.0.1.
+The GitHub Actions update #280 (upload-artifact 7.0.2 and download-artifact
+8.0.2, in the release and Scorecard workflows) is deferred to 2.0.1: the release
+workflow runs only on a tag, so this release would be its first test.
 
 ### Security
 
@@ -380,6 +382,11 @@ Open dependency updates (#283, four Cargo crates; #280, two GitHub Actions) are 
   latest rows behind a marker, that any other edit, deletion or
   reordering breaks the chain, and that rows cut from the end of a session
   leave a shorter chain that still verifies.
+
+### Dependencies
+
+- Four patch bumps taken as a group (#283): zeroize 1.9.1, aho-corasick
+  1.1.5, toml 1.1.7 and tokio-util 0.7.19.
 
 ## [1.28.0] - 2026-10-08
 
