@@ -221,6 +221,14 @@ tagged.
 
 ### Fixed
 
+- A rewind no longer hands out a session's sequence numbers again. Its
+  `rewind` marker takes the number after the highest one the session
+  issued and later rows carry on from it, so `(session_id, seq)` names
+  one row for the life of a session, as the SIEM dedup key and a hook's
+  `sinceSeq` cursor assume. Before, the marker and the rows after it took
+  the deleted rows' numbers: a receiver deduplicating on that key dropped
+  them, and a hook past them never read them. The delete and the marker
+  are now one transaction, and the rewind count is rows, not numbers.
 - `wirken run` exits after its shutdown. Since connection tasks were
   tracked for `connection.panic` rows (unreleased; not in 1.28.0), the
   tracker held a handle on the audit writer to the end of the shutdown,

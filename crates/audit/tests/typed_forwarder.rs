@@ -293,6 +293,89 @@ impl TypedSink for StubSink {
     }
 }
 
+/// A receiver that keeps what the wire carries under `(session_id,
+/// seq)`, the dedup key siem-forwarder.md gives, and ignores a key it
+/// already holds.
+struct DedupSink {
+    config: SiemConfig,
+    rows: Mutex<std::collections::BTreeMap<(String, u64), Value>>,
+}
+
+#[async_trait::async_trait]
+impl TypedSink for DedupSink {
+    async fn forward(&self, events: &[wirken_audit::StoredSessionEvent]) -> Result<(), String> {
+        let refs: Vec<&wirken_audit::StoredSessionEvent> = events.iter().collect();
+        let (body, _) = build_webhook_typed_request(&refs, &self.config)?;
+        let entries: Vec<Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+        let mut rows = self.rows.lock().unwrap();
+        for entry in entries {
+            let key = (
+                entry["session_id"].as_str().unwrap().to_string(),
+                entry["seq"].as_u64().unwrap(),
+            );
+            rows.entry(key).or_insert(entry);
+        }
+        Ok(())
+    }
+}
+
+/// Rows forwarded before a rewind and rows written after it both reach
+/// a receiver that dedups on `(session_id, seq)`: the rows written
+/// after the rewind do not take the numbers the rewound rows had.
+#[tokio::test]
+async fn a_dedup_receiver_keeps_the_rewound_rows_and_the_rows_after_the_rewind() {
+    let tmp = TempDir::new().unwrap();
+    let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+    let handle = log.handle_for(SessionId::new("sess-rewind"));
+    let result = |output: &str| SessionEvent::ToolResult {
+        call_id: "c1".into(),
+        tool_name: "exec".into(),
+        output: output.into(),
+        success: true,
+        agent_id: "default".into(),
+        adapter_id: None,
+        sender_id: None,
+        sandbox: None,
+    };
+
+    let cfg = base_config(SiemTarget::Webhook);
+    let sink = DedupSink {
+        config: cfg.clone(),
+        rows: Mutex::default(),
+    };
+    let mut cursor: i64 = 0;
+
+    for n in 0..5 {
+        log.append(&handle, TrustLevel::Tool, result(&format!("before {n}")))
+            .unwrap();
+    }
+    siem_typed::run_one_pass(&log, &sink, &cfg, &mut cursor)
+        .await
+        .unwrap();
+
+    assert_eq!(log.rewind(&handle, 2, "user_undo").unwrap(), 2);
+    for n in 0..2 {
+        log.append(&handle, TrustLevel::Tool, result(&format!("after {n}")))
+            .unwrap();
+    }
+    siem_typed::run_one_pass(&log, &sink, &cfg, &mut cursor)
+        .await
+        .unwrap();
+
+    let rows = sink.rows.lock().unwrap();
+    let outputs: Vec<&str> = rows
+        .values()
+        .map(|entry| entry["event"]["output"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        outputs,
+        [
+            "before 0", "before 1", "before 2", "before 3", "before 4", "after 0", "after 1"
+        ],
+        "{rows:?}"
+    );
+}
+
 #[tokio::test]
 async fn d2_worker_delivers_in_seq_order_exactly_once() {
     let tmp = TempDir::new().unwrap();

@@ -1551,9 +1551,11 @@ pub enum SessionEvent {
         #[serde(default)]
         agent_id: String,
     },
-    /// Record of a [`SessionLog::rewind`] call. Appended immediately
-    /// after the DELETE so the chain picks up cleanly from whatever
-    /// row survived the cut. The event is the new chain head, which
+    /// Record of a [`SessionLog::rewind`] call. Written in the same
+    /// transaction as the DELETE so the chain picks up cleanly from
+    /// whatever row survived the cut, and numbered `old_last_seq + 1`
+    /// so no sequence number is issued twice: the deleted rows'
+    /// numbers stay unused. The event is the new chain head, which
     /// means an attestation written after the rewind cryptographically
     /// covers it. An attacker with raw SQLite access can still DELETE
     /// rows without inserting this marker — but an *honest* caller
@@ -1561,7 +1563,8 @@ pub enum SessionEvent {
     /// history.
     ///
     /// - `old_last_seq` is the sequence number that was at the head
-    ///   of the session immediately before the rewind.
+    ///   of the session immediately before the rewind, the highest
+    ///   the session had issued.
     /// - `deleted_count` is how many rows the DELETE actually removed.
     /// - `reason` is the caller-supplied justification, stored
     ///   verbatim so a reviewer can search for e.g. "crash recovery".
@@ -2600,6 +2603,12 @@ pub trait SessionLog: Send + Sync {
     /// operation is not a silent delete. Returns the count of rows
     /// actually deleted by the DELETE — the Rewind marker itself is
     /// appended afterwards and is not included in the count.
+    ///
+    /// Sequence numbers are never reused: the marker takes the number
+    /// after the highest one the session issued and later rows carry
+    /// on from it, so `(session_id, seq)` names one row for the life of
+    /// the session and the deleted rows leave a gap. `n_before` counts
+    /// rows, not numbers.
     ///
     /// `reason` is stored verbatim in the Rewind event payload.
     /// Callers should use a short, stable string ("crash_recovery",
@@ -3723,25 +3732,37 @@ impl SqliteSessionLog {
 
         let next_seq = append_inner(&conn, handle, trust, event, ts_override)?;
         if !is_chain_head {
-            self.bump_appends_since_head(&session_id);
+            self.cadence_after_append(&conn, handle, fresh)?;
         }
+
+        Ok(next_seq)
+    }
+
+    /// The chain-head cadence after a row that is not itself a head:
+    /// a `SessionStart` head when the row opened a `fresh` session, a
+    /// `Checkpoint` head when the per-session cadence trips.
+    fn cadence_after_append(
+        &self,
+        conn: &Connection,
+        handle: &SessionHandle<OwnSession>,
+        fresh: bool,
+    ) -> Result<(), AuditError> {
+        let session_id = handle.id.as_str();
+        self.bump_appends_since_head(session_id);
 
         if let Some(signer) = self.signer.clone() {
             if fresh {
                 self.append_chain_head_locked(
-                    &conn,
+                    conn,
                     handle,
                     ChainHeadReason::SessionStart,
                     &signer,
                 )?;
-            } else if !is_chain_head
-                && let Some(reason) = self.checkpoint_due(&session_id, Utc::now())
-            {
-                self.append_chain_head_locked(&conn, handle, reason, &signer)?;
+            } else if let Some(reason) = self.checkpoint_due(session_id, Utc::now()) {
+                self.append_chain_head_locked(conn, handle, reason, &signer)?;
             }
         }
-
-        Ok(next_seq)
+        Ok(())
     }
 
     fn init_schema(conn: &Connection) -> Result<(), AuditError> {
@@ -3859,38 +3880,51 @@ impl SessionLog for SqliteSessionLog {
             return Ok(0);
         }
 
-        // Phase 1: look up the current chain head and DELETE the
-        // tail under a single connection lock. We release it before
-        // calling `append` so the Rewind event reuses the same
-        // per-session lock via the public append path.
-        let (old_last_seq, deleted) = {
-            let conn = self.conn.lock().expect("session log mutex");
-            let last: Option<i64> = conn
-                .query_row(
-                    "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
-                    params![handle.id.as_str()],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            let last = match last {
-                Some(n) => n as u64,
-                None => return Ok(0),
-            };
-            let cutoff = last.saturating_sub(n_before - 1);
-            let deleted = conn.execute(
-                "DELETE FROM session_events WHERE session_id = ?1 AND seq >= ?2",
-                params![handle.id.as_str(), cutoff as i64],
-            )? as u64;
-            (last, deleted)
-        };
+        let session_id = handle.id.as_str();
+        let conn = self.conn.lock().expect("session log mutex");
 
-        // Phase 2: append the Rewind audit marker. The marker's
-        // `prev_hash` picks up cleanly from whichever row survived
-        // the delete (or from the empty string if everything was
-        // removed), so `verify()` stays green while still recording
-        // that a rewind happened.
-        self.append(
+        // The DELETE and the marker are one transaction: a crash
+        // between them would leave a silent delete, and the next row
+        // would take a number a deleted row had.
+        let tx =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        let last: Option<i64> = tx
+            .query_row(
+                "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        let Some(old_last_seq) = last.map(|n| n as u64) else {
+            return Ok(0);
+        };
+        // The oldest of the `n_before` newest rows, counted by row and
+        // not by number: an earlier rewind leaves a gap in the
+        // numbers. Fewer rows than that means all of them.
+        let cutoff: u64 = tx
+            .query_row(
+                "SELECT seq FROM session_events WHERE session_id = ?1
+                 ORDER BY seq DESC LIMIT 1 OFFSET ?2",
+                params![session_id, i64::try_from(n_before - 1).unwrap_or(i64::MAX)],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n as u64)
+            .unwrap_or(0);
+        let deleted = tx.execute(
+            "DELETE FROM session_events WHERE session_id = ?1 AND seq >= ?2",
+            params![session_id, cutoff as i64],
+        )? as u64;
+        let fresh = self.signer.is_some() && self.is_session_start(&tx, session_id);
+
+        // The marker takes the number after the highest one issued, so
+        // no number is handed out twice: a reader that keeps its place
+        // by number gets the marker and every row after it. Its
+        // `prev_hash` picks up from whichever row survived the delete
+        // (or the empty string if none did), so `verify()` stays green
+        // while still recording that a rewind happened.
+        insert_row(
+            &tx,
             handle,
             TrustLevel::System,
             SessionEvent::Rewind {
@@ -3898,7 +3932,19 @@ impl SessionLog for SqliteSessionLog {
                 deleted_count: deleted,
                 reason: reason.to_string(),
             },
+            None,
+            Some(old_last_seq + 1),
         )?;
+        tx.commit()?;
+
+        // A head the DELETE removed cannot anchor the next head's
+        // range; start that range after the last row that survived.
+        if let SeqRangeStart::AtSeq(head) = self.read_checkpoint_state(session_id).last_head_seq
+            && head >= cutoff
+        {
+            self.reset_checkpoint_before(session_id, cutoff);
+        }
+        self.cadence_after_append(&conn, handle, fresh)?;
 
         Ok(deleted)
     }
@@ -4087,22 +4133,39 @@ fn append_inner(
     // serialize instead of erroring. Session-log appends are small so
     // holding the write lock for the full SELECT+INSERT is fine.
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let next_seq = insert_row(&tx, handle, trust, event, ts_override, None)?;
+    tx.commit()?;
+    Ok(next_seq)
+}
 
+/// Insert one row inside the caller's transaction, numbered `seq`, or
+/// the number after the session's highest when `None`.
+fn insert_row(
+    tx: &Connection,
+    handle: &SessionHandle<OwnSession>,
+    trust: TrustLevel,
+    event: SessionEvent,
+    ts_override: Option<DateTime<Utc>>,
+    seq: Option<u64>,
+) -> Result<u64, AuditError> {
     // Compute next seq atomically inside the transaction. SQLite
     // serializes writers in WAL mode so the read-then-insert is
     // safe against concurrent appenders to the same session.
-    let next_seq: u64 = {
-        let max: Option<i64> = tx
-            .query_row(
-                "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
-                params![handle.id.as_str()],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-        match max {
-            Some(n) => (n as u64) + 1,
-            None => 0,
+    let next_seq: u64 = match seq {
+        Some(seq) => seq,
+        None => {
+            let max: Option<i64> = tx
+                .query_row(
+                    "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
+                    params![handle.id.as_str()],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            match max {
+                Some(n) => (n as u64) + 1,
+                None => 0,
+            }
         }
     };
 
@@ -4143,7 +4206,6 @@ fn append_inner(
         ],
     )?;
 
-    tx.commit()?;
     Ok(next_seq)
 }
 

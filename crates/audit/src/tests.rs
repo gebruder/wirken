@@ -822,16 +822,16 @@ mod session {
         assert_eq!(log.rewind(&h, 0, "test").unwrap(), 0);
         assert_eq!(log.last_index(&h).unwrap(), Some(4));
 
-        // rewind(2) drops seqs 3 and 4, leaving max=2, then appends
-        // a Rewind marker which `append` slots in at seq=3 (max+1).
-        // The returned count is the delete count, not including the
-        // appended marker.
+        // rewind(2) drops seqs 3 and 4, then appends a Rewind marker
+        // at seq=5, after the highest number issued, so 3 and 4 are
+        // never handed out again. The returned count is the delete
+        // count, not including the appended marker.
         let deleted = log.rewind(&h, 2, "crash_recovery").unwrap();
         assert_eq!(deleted, 2);
-        assert_eq!(log.last_index(&h).unwrap(), Some(3));
+        assert_eq!(log.last_index(&h).unwrap(), Some(5));
 
         // The marker records what happened.
-        let rows = log.get_range(&h, 3..4).unwrap();
+        let rows = log.get_range(&h, 5..6).unwrap();
         match &rows[0].event {
             SessionEvent::Rewind {
                 old_last_seq,
@@ -848,19 +848,19 @@ mod session {
         // The chain is still intact after the delete + marker.
         match log.verify(&h).unwrap() {
             SessionVerifyResult::Ok { rows_verified, .. } => {
-                // seqs 0, 1, 2 survive + the Rewind marker at 3 = 4 rows
+                // seqs 0, 1, 2 survive + the Rewind marker at 5 = 4 rows
                 assert_eq!(rows_verified, 4);
             }
             other => panic!("expected Ok, got {other:?}"),
         }
 
         // rewind(big_n) deletes everything still there (seqs 0, 1,
-        // 2, 3 = 4 rows), then appends a fresh Rewind marker as the
-        // new chain head at seq 0 (since the session is now empty
-        // after the DELETE).
+        // 2, 5 = 4 rows), then appends a fresh Rewind marker as the
+        // new chain head at seq 6, still after the highest number
+        // issued although the session is now empty after the DELETE.
         let deleted = log.rewind(&h, 1000, "wipe").unwrap();
         assert_eq!(deleted, 4);
-        assert_eq!(log.last_index(&h).unwrap(), Some(0));
+        assert_eq!(log.last_index(&h).unwrap(), Some(6));
     }
 
     #[test]
@@ -1955,6 +1955,115 @@ mod chain_head_signing {
             .map(|r| r.event)
             .filter(|e| matches!(e, SessionEvent::ChainHead { .. }))
             .collect()
+    }
+
+    /// A rewind never hands out a sequence number twice. Its marker
+    /// takes the number after the highest one issued and the rows after
+    /// it carry on from there, so a reader that keeps its place by
+    /// number, as a hook does (siem-forwarder.md), gets the marker and
+    /// every row after it. A second rewind counts rows, not numbers,
+    /// across the first one's gap; the chain and its signed heads still
+    /// verify, and a head the rewind removed no longer anchors the next
+    /// one.
+    #[test]
+    fn a_rewind_never_reuses_a_sequence_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = Arc::new(AuditSigningKey::generate());
+        let audit = AuditLog::open_with_signer(&tmp.path().join("audit.db"), signer).unwrap();
+        let log = audit.session_log();
+        let h = log.handle_for(SessionId::new("rewound"));
+
+        // Every number the session has issued, with the leaf hash of
+        // the row that had it.
+        let mut issued: std::collections::BTreeMap<u64, String> = Default::default();
+        let mut record = |log: &SqliteSessionLog| {
+            for row in log.get_since(&h, 0).unwrap() {
+                let leaf = row.leaf_hash.0.clone();
+                let had = issued.entry(row.seq).or_insert_with(|| leaf.clone());
+                assert_eq!(*had, leaf, "seq {} was issued twice", row.seq);
+            }
+        };
+
+        // seq 0, its SessionStart head at 1, rows 2..=6, a head at 7,
+        // a row at 8.
+        for n in 0..6 {
+            log.append(&h, TrustLevel::User, user_msg(&format!("before {n}")))
+                .unwrap();
+        }
+        log.emit_chain_head(&h, ChainHeadReason::Checkpoint)
+            .unwrap()
+            .expect("a signed head");
+        log.append(&h, TrustLevel::User, user_msg("after the head"))
+            .unwrap();
+        assert_eq!(log.last_index(&h).unwrap(), Some(8));
+        record(&log);
+        // A hook that has read all of it.
+        let cursor = 9;
+
+        // Rows 6, 7 (the head) and 8 go; the marker is 9, not 6.
+        assert_eq!(log.rewind(&h, 3, "user_undo").unwrap(), 3);
+        log.append(&h, TrustLevel::User, user_msg("after 0"))
+            .unwrap();
+        log.append(&h, TrustLevel::User, user_msg("after 1"))
+            .unwrap();
+        let pulled = log.get_since(&h, cursor).unwrap();
+        let pulled: Vec<_> = pulled.iter().map(|r| (r.seq, &r.event)).collect();
+        assert!(
+            matches!(
+                pulled.as_slice(),
+                [
+                    (
+                        9,
+                        SessionEvent::Rewind {
+                            old_last_seq: 8,
+                            deleted_count: 3,
+                            ..
+                        }
+                    ),
+                    (10, SessionEvent::UserMessage { .. }),
+                    (11, SessionEvent::UserMessage { .. }),
+                ]
+            ),
+            "the hook's next pull: {pulled:?}"
+        );
+        record(&log);
+
+        // The newest two rows, 10 and 11, go; the marker is 12.
+        assert_eq!(log.rewind(&h, 2, "user_undo").unwrap(), 2);
+        log.append(&h, TrustLevel::User, user_msg("last")).unwrap();
+        log.emit_chain_head(&h, ChainHeadReason::Checkpoint)
+            .unwrap()
+            .expect("a signed head");
+        record(&log);
+        let rows = log.get_since(&h, 0).unwrap();
+        let seqs: Vec<u64> = rows.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, [0, 1, 2, 3, 4, 5, 9, 12, 13, 14]);
+        assert!(matches!(
+            rows[7].event,
+            SessionEvent::Rewind {
+                old_last_seq: 11,
+                deleted_count: 2,
+                ..
+            }
+        ));
+
+        // The last head starts after the last row the first rewind
+        // left, not after the head it removed.
+        let SessionEvent::ChainHead {
+            sequence_range_start,
+            prev_chain_hash,
+            ..
+        } = &rows[9].event
+        else {
+            panic!("expected a head at 14, got {:?}", rows[9].event);
+        };
+        assert_eq!(*sequence_range_start, 6);
+        assert_eq!(prev_chain_hash.0, rows[5].hash.0);
+
+        match audit.verify_require_signed().unwrap() {
+            VerifyResult::Ok { .. } => {}
+            other => panic!("the rewound chain does not verify: {other:?}"),
+        }
     }
 
     /// Ten rows, a sealed head, then row 4 rewritten in place.
