@@ -36,9 +36,4 @@ pub enum VaultError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-
-    /// A scoped store was asked for a name outside its set. See
-    /// [`crate::ScopedCredentialStore`].
-    #[error("credential '{name}' is outside the '{scope}' scope")]
-    OutOfScope { scope: String, name: String },
 }

@@ -274,7 +274,7 @@ impl RefreshService {
             let store = store
                 .lock()
                 .map_err(|_| "vault mutex poisoned".to_string())?;
-            load_oauth(&*store, name).map_err(|e| e.to_string())?
+            load_oauth(&store, name).map_err(|e| e.to_string())?
         };
         let now = chrono::Utc::now().timestamp() as u64;
         if cred.expires_at > now + 60 {
@@ -289,7 +289,7 @@ impl RefreshService {
             let store = store
                 .lock()
                 .map_err(|_| "vault mutex poisoned".to_string())?;
-            store_oauth(&*store, name, &refreshed).map_err(|e| e.to_string())?;
+            store_oauth(&store, name, &refreshed).map_err(|e| e.to_string())?;
         }
         if let Some(leak) = &self.leak {
             let json =
@@ -474,7 +474,7 @@ mod tests {
             .unwrap();
         assert_eq!(header.to_str().unwrap(), "Bearer AT-2");
 
-        let stored = load_oauth(&*gateway.store.lock().unwrap(), "linear-oauth").unwrap();
+        let stored = load_oauth(&gateway.store.lock().unwrap(), "linear-oauth").unwrap();
         assert_eq!(stored.access_token, "AT-2");
         assert_eq!(stored.refresh_token, "RT-2");
         let held = credentials.get("linear-oauth").unwrap();
@@ -496,7 +496,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("wrong refresh token"), "{err}");
-        let stored = load_oauth(&*gateway.store.lock().unwrap(), "linear-oauth").unwrap();
+        let stored = load_oauth(&gateway.store.lock().unwrap(), "linear-oauth").unwrap();
         assert_eq!(stored.access_token, "AT-1");
     }
 

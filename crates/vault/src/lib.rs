@@ -6,7 +6,6 @@ mod crypto;
 mod error;
 mod keychain;
 mod kind;
-mod scoped;
 mod secret;
 mod store;
 
@@ -20,7 +19,6 @@ pub use kind::{
     BUILTIN_IDENTIFIERS, CredentialKind, MIN_MATCH_BYTES, MatchableSecret, default_kind,
     matchable_parts, matchable_secret,
 };
-pub use scoped::{CredentialAccess, ScopedCredentialStore};
 pub use secret::VaultSecret;
 pub use store::{CredentialMetadata, CredentialStore, ResetPlan, reset, reset_plan};
 

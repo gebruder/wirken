@@ -772,8 +772,8 @@ pub(crate) fn resolve_env(
 
 /// Every vault name `config` reads: the `vault:` env values of its
 /// stdio servers and the bearer and OAuth credentials of its HTTP
-/// servers. The proxy opens the vault limited to the union of these
-/// over every agent's config.
+/// servers. The gateway hands the proxy the union of these over every
+/// agent's config.
 pub fn vault_names(config: &McpConfig) -> std::collections::BTreeSet<String> {
     let mut names = std::collections::BTreeSet::new();
     for server in config.servers.values() {

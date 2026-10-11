@@ -47,7 +47,7 @@ use oauth2::{
     PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
-use wirken_vault::CredentialAccess;
+use wirken_vault::CredentialStore;
 
 use crate::error::ProxyError;
 
@@ -434,7 +434,7 @@ pub fn parse_public_view(json: &str) -> Result<PublicOAuthCredential, ProxyError
 /// bearer tokens) is constructed inside this function and dropped
 /// before returning so the caller never sees the secret fields.
 pub fn load_oauth_public(
-    store: &impl CredentialAccess,
+    store: &CredentialStore,
     name: &str,
 ) -> Result<PublicOAuthCredential, ProxyError> {
     let (secret, _meta) = store
@@ -450,7 +450,7 @@ pub fn load_oauth_public(
 /// string `"oauth"` so operators can `wirken credentials list` and
 /// see at a glance which entries belong to OAuth-managed servers.
 pub fn store_oauth(
-    store: &impl CredentialAccess,
+    store: &CredentialStore,
     name: &str,
     cred: &OAuthCredential,
 ) -> Result<(), ProxyError> {
@@ -464,10 +464,7 @@ pub fn store_oauth(
 }
 
 /// Read and parse an [`OAuthCredential`] from the vault.
-pub fn load_oauth(
-    store: &impl CredentialAccess,
-    name: &str,
-) -> Result<OAuthCredential, ProxyError> {
+pub fn load_oauth(store: &CredentialStore, name: &str) -> Result<OAuthCredential, ProxyError> {
     let (secret, _meta) = store
         .retrieve(name)
         .map_err(|e| ProxyError::Vault(format!("load oauth credential '{name}': {e}")))?;
