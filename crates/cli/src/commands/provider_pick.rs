@@ -279,7 +279,7 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
             println!("  Wirken dispatches through the tinfoil-rs SDK: each session gates on a");
             println!("  hardware attestation (AMD SEV-SNP) plus Sigstore code-provenance check");
             println!("  against the published enclave repo, then pins TLS to the attested cert.");
-            println!("  See docs/reference/tinfoil.md for the trust model and model list.");
+            println!("  See the Tinfoil section of docs/configuration.md for the trust model.");
             println!("  Get an API key at https://dash.tinfoil.sh");
             let key = api_key_for(cfg, "tinfoil", "  API key: ")?;
             let models =
