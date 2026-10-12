@@ -146,3 +146,8 @@ anyhow = "1"
 
 # OpenSSL (vendored for static musl builds — pulled by serenity/teloxide via reqwest 0.12)
 openssl = { version = "0.10", features = ["vendored"] }
+
+# Line tables keep file and line in panics and backtraces. Variables and
+# types are not available to a debugger.
+[profile.dev]
+debug = "line-tables-only"
