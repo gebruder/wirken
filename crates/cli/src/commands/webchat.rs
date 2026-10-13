@@ -3391,6 +3391,9 @@ pub struct StatusInputs {
     pub alarm_log: Arc<AlarmLog>,
     pub alarm_key_loaded: bool,
     pub siem: Option<SiemSummary>,
+    /// The default agent's provider config when `wirken run` flags
+    /// replaced the one in provider.json for this run.
+    pub provider_override: Option<serde_json::Value>,
 }
 
 /// First 8 bytes of an Ed25519 public key as 16 hex characters. The
@@ -3480,10 +3483,15 @@ pub async fn status_snapshot(
             )
         }
         None => {
-            let provider_json: Option<Value> =
-                std::fs::read_to_string(cfg.data_dir.join("provider.json"))
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok());
+            let (provider_json, source): (Option<Value>, &str) = match &inputs.provider_override {
+                Some(pj) => (Some(pj.clone()), "run flags"),
+                None => (
+                    std::fs::read_to_string(cfg.data_dir.join("provider.json"))
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                    "provider.json",
+                ),
+            };
             match provider_json {
                 Some(pj) => {
                     let provider = pj["provider"].as_str().unwrap_or("ollama").to_string();
@@ -3500,7 +3508,7 @@ pub async fn status_snapshot(
                             "context_window": llm.context_window,
                             "effective_context_budget": wirken_agent::context::effective_budget(llm.context_window),
                             "tools_enabled": Value::Null,
-                            "source": "provider.json",
+                            "source": source,
                         }),
                         // The implicit default agent carries no egress
                         // policy: sandboxed exec runs with no network.
@@ -5612,6 +5620,7 @@ mod tests {
             alarm_log: Arc::new(AlarmLog::new(dir)),
             alarm_key_loaded: false,
             siem,
+            provider_override: None,
         }
     }
 
@@ -5699,6 +5708,28 @@ mod tests {
             "no alarm records on a fresh directory: {alarms}"
         );
         assert!(snap["hooks"].is_null(), "hook counts are not plumbed yet");
+    }
+
+    /// `wirken run --model` replaces provider.json's agent for the
+    /// run, and the panel names the one the run is serving.
+    #[tokio::test]
+    async fn status_snapshot_reports_the_run_flag_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("provider.json"),
+            r#"{"provider":"ollama","model":"qwen3.5:9b","base_url":"http://localhost:11434/v1"}"#,
+        )
+        .unwrap();
+        let mut inputs = status_inputs_for(dir.path(), None);
+        inputs.provider_override = Some(serde_json::json!({
+            "provider": "ollama",
+            "model": "glm-5.3:cloud",
+            "base_url": "http://localhost:11434/v1",
+        }));
+        let cfg = cfg_at(dir.path());
+        let snap = status_snapshot(&cfg, 18790, &inputs, false).await;
+        assert_eq!(snap["agent"]["model"], "glm-5.3:cloud");
+        assert_eq!(snap["agent"]["source"], "run flags");
     }
 
     /// The snapshot never carries key material, provider endpoints,

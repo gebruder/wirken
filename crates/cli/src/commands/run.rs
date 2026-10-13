@@ -136,7 +136,7 @@ fn prompt_vault_passphrase(cache: &mut Option<String>) -> String {
 }
 
 /// Run the gateway daemon.
-pub async fn run(port: Option<u16>) -> Result<()> {
+pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let cfg = config();
     cfg.ensure_dirs()?;
 
@@ -404,6 +404,25 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
     let provider_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&provider_path)?)?;
+    let provider_override = if over.is_empty() {
+        None
+    } else {
+        // A registered `default` row takes the default agent over from
+        // provider.json, so an override merged into provider.json would
+        // never reach it.
+        let agent_config_path = cfg.agent_config_db_path();
+        if agent_config_path.exists()
+            && let Ok(store) = AgentConfigStore::open(&agent_config_path)
+            && store.get("default").is_ok()
+        {
+            anyhow::bail!(
+                "agent 'default' is registered in the agent store, so --provider, --model \
+                 and --base-url do not apply to it. Use `wirken agents set default --model ...`."
+            );
+        }
+        Some(apply_provider_override(provider_json.clone(), &over)?)
+    };
+    let provider_json = provider_override.clone().unwrap_or(provider_json);
     let provider = provider_json["provider"].as_str().unwrap_or("ollama");
     let model = provider_json["model"].as_str().unwrap_or("llama3");
     let base_url = provider_json["base_url"]
@@ -1582,6 +1601,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         alarm_log: webchat_alarm_log,
         alarm_key_loaded: webchat_alarm_key_loaded,
         siem: webchat_siem,
+        provider_override: provider_override.clone(),
     };
     let webchat_audit = audit.clone();
     let webchat_sessions = sessions.clone();
@@ -5364,6 +5384,86 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
     })
 }
 
+/// `wirken run --provider/--model/--base-url`: the default agent's
+/// provider for one run, with provider.json left as it is on disk.
+#[derive(Debug, Default)]
+pub struct ProviderOverride {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+}
+
+impl ProviderOverride {
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_none() && self.model.is_none() && self.base_url.is_none()
+    }
+}
+
+/// provider.json with the run flags laid over it. Channel overrides and
+/// any other keys carry through. Moving to another provider needs a
+/// model for it, takes that provider's own endpoint unless one is
+/// given, and drops the stored region, which belonged to the old one.
+fn apply_provider_override(
+    mut provider_json: serde_json::Value,
+    over: &ProviderOverride,
+) -> Result<serde_json::Value> {
+    let stored = provider_json["provider"]
+        .as_str()
+        .unwrap_or("ollama")
+        .to_string();
+    let switching = over.provider.as_deref().is_some_and(|p| p != stored);
+
+    if let Some(provider) = over.provider.as_deref() {
+        if !super::provider_pick::IDS.contains(&provider) {
+            anyhow::bail!(
+                "unknown --provider '{provider}'; expected one of {}",
+                super::provider_pick::IDS.join(", ")
+            );
+        }
+        if switching && over.model.is_none() {
+            anyhow::bail!(
+                "--model is required with --provider '{provider}': the stored model belongs \
+                 to '{stored}'"
+            );
+        }
+    }
+
+    let base_url = match over.base_url.as_deref() {
+        Some(url) => Some(url.to_string()),
+        None if switching => {
+            let provider = over.provider.as_deref().unwrap_or_default();
+            Some(
+                super::provider_pick::default_base_url(provider)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--base-url is required for provider '{provider}', which has no \
+                             fixed endpoint"
+                        )
+                    })?
+                    .to_string(),
+            )
+        }
+        None => None,
+    };
+
+    let obj = provider_json
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("provider.json is not a JSON object"))?;
+    if let Some(provider) = &over.provider {
+        obj.insert("provider".into(), provider.clone().into());
+    }
+    if switching {
+        obj.remove("region");
+    }
+    if let Some(model) = &over.model {
+        obj.insert("model".into(), model.clone().into());
+    }
+    if let Some(url) = base_url {
+        obj.insert("base_url".into(), url.into());
+    }
+    Ok(provider_json)
+}
+
 /// Parse the `channel_overrides` map from provider.json and resolve
 /// each override's declared vault slot into a raw api_key.
 ///
@@ -5594,6 +5694,93 @@ mod channel_overrides_tests {
             msg.contains("provider"),
             "error must name the missing field: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod provider_override_tests {
+    use super::{ProviderOverride, apply_provider_override};
+    use serde_json::json;
+
+    fn stored() -> serde_json::Value {
+        json!({
+            "provider": "bedrock",
+            "model": "anthropic.claude-v2",
+            "base_url": "https://bedrock-runtime.eu-west-1.amazonaws.com",
+            "region": "eu-west-1",
+            "channel_overrides": { "signal": { "provider": "ollama", "model": "m" } },
+        })
+    }
+
+    #[test]
+    fn model_alone_keeps_the_stored_provider_and_endpoint() {
+        let over = ProviderOverride {
+            model: Some("anthropic.claude-v3".into()),
+            ..Default::default()
+        };
+        let out = apply_provider_override(stored(), &over).unwrap();
+        assert_eq!(out["provider"], "bedrock");
+        assert_eq!(out["model"], "anthropic.claude-v3");
+        assert_eq!(out["base_url"], stored()["base_url"]);
+        assert_eq!(out["region"], "eu-west-1");
+    }
+
+    #[test]
+    fn switching_provider_takes_its_endpoint_and_drops_the_region() {
+        let over = ProviderOverride {
+            provider: Some("ollama".into()),
+            model: Some("glm-5.3:cloud".into()),
+            base_url: None,
+        };
+        let out = apply_provider_override(stored(), &over).unwrap();
+        assert_eq!(out["provider"], "ollama");
+        assert_eq!(out["model"], "glm-5.3:cloud");
+        assert_eq!(out["base_url"], "http://localhost:11434/v1");
+        assert!(out.get("region").is_none());
+        assert_eq!(out["channel_overrides"], stored()["channel_overrides"]);
+    }
+
+    #[test]
+    fn a_given_base_url_wins_over_the_provider_default() {
+        let over = ProviderOverride {
+            provider: Some("ollama".into()),
+            model: Some("qwen3.5:9b".into()),
+            base_url: Some("http://127.0.0.1:11500/v1".into()),
+        };
+        let out = apply_provider_override(stored(), &over).unwrap();
+        assert_eq!(out["base_url"], "http://127.0.0.1:11500/v1");
+    }
+
+    #[test]
+    fn switching_provider_without_a_model_is_refused() {
+        let over = ProviderOverride {
+            provider: Some("ollama".into()),
+            ..Default::default()
+        };
+        let err = apply_provider_override(stored(), &over).unwrap_err();
+        assert!(err.to_string().contains("--model is required"), "{err}");
+    }
+
+    #[test]
+    fn a_provider_without_a_fixed_endpoint_needs_a_base_url() {
+        let over = ProviderOverride {
+            provider: Some("custom".into()),
+            model: Some("m".into()),
+            base_url: None,
+        };
+        let err = apply_provider_override(stored(), &over).unwrap_err();
+        assert!(err.to_string().contains("--base-url is required"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_provider_is_refused() {
+        let over = ProviderOverride {
+            provider: Some("nope".into()),
+            model: Some("m".into()),
+            base_url: None,
+        };
+        let err = apply_provider_override(stored(), &over).unwrap_err();
+        assert!(err.to_string().contains("unknown --provider"), "{err}");
     }
 }
 

@@ -39,6 +39,18 @@ enum Commands {
         /// WebChat port
         #[arg(short, long)]
         port: Option<u16>,
+        /// Run the default agent against this provider for this run
+        /// only. provider.json is left as it is. Changing the provider
+        /// needs --model too.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Run the default agent against this model for this run only
+        #[arg(long)]
+        model: Option<String>,
+        /// API base URL for this run. Defaults to the provider's own;
+        /// required for bedrock, infomaniak and custom.
+        #[arg(long)]
+        base_url: Option<String>,
     },
 
     /// Run an adapter process (called by wirken)
@@ -1181,7 +1193,19 @@ async fn main() -> Result<()> {
             }
             commands::setup::run(install_service, org).await
         }
-        Commands::Run { port } => commands::run::run(port).await,
+        Commands::Run {
+            port,
+            provider,
+            model,
+            base_url,
+        } => {
+            let over = commands::run::ProviderOverride {
+                provider,
+                model,
+                base_url,
+            };
+            commands::run::run(port, over).await
+        }
         Commands::Adapter { channel } => commands::adapter::run(&channel).await,
         Commands::McpProxy => commands::mcp_proxy::run().await,
         Commands::EgressSidecar { socket, listen } => {

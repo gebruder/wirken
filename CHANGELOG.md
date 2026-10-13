@@ -10,6 +10,16 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `wirken run --provider`, `--model` and `--base-url` run the default
+  agent against another provider or model for that run only, with
+  provider.json left as it is. Changing the provider needs `--model`, and
+  takes the provider's own endpoint unless `--base-url` is given. The
+  WebChat status panel names the run's model, from `run flags`. A
+  registered `default` agent is refused, with a pointer to `wirken agents
+  set`.
+
 ## [2.0.0] - 2026-10-11
 
 The GitHub Actions update #280 (upload-artifact 7.0.2 and download-artifact
