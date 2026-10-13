@@ -431,7 +431,7 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             // The provider.json fallback has no AgentConfig row, so
             // it has no ceilings to carry.
             Default::default(),
-            super::skills_for_default_agent(&cfg),
+            super::skills_for_default_agent(&cfg)?,
         )
     };
 

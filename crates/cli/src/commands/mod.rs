@@ -119,8 +119,9 @@ pub fn llm_config_for_agent(
 /// directory, the shared one, then its persona's preset. `wirken run`,
 /// `wirken ask` and `wirken sessions verify` all build from this, so
 /// the permissions a session ran under are the ones verify rebuilds.
-/// A skills directory that fails to load contributes nothing; a
-/// dangling preset reference is an error.
+/// A skills directory that cannot be read contributes nothing; a
+/// registry root that does not parse, and a dangling preset reference,
+/// are errors (see [`skills_from_dir`]).
 pub fn skills_for_agent(
     cfg: &GatewayConfig,
     agent_cfg: &wirken_gateway::agent_config::AgentConfig,
@@ -130,11 +131,7 @@ pub fn skills_for_agent(
         cfg.agent_skills_dir(&agent_cfg.id),
         cfg.data_dir.join("skills"),
     ] {
-        if dir.is_dir()
-            && let Ok(s) = wirken_agent::SkillLoader::load_dir(&dir)
-        {
-            skills.extend(s.loaded);
-        }
+        skills.extend(skills_from_dir(&dir)?);
     }
     let presets_dir = cfg.data_dir.join("presets");
     skills.extend(persona::resolve_for_construction(agent_cfg, &presets_dir)?);
@@ -143,14 +140,25 @@ pub fn skills_for_agent(
 
 /// The skills the `provider.json` default agent is built with: the
 /// shared skills directory.
-pub fn skills_for_default_agent(cfg: &GatewayConfig) -> Vec<wirken_agent::skill::Skill> {
-    let dir = cfg.data_dir.join("skills");
-    if dir.is_dir() {
-        wirken_agent::SkillLoader::load_dir(&dir)
-            .map(|d| d.loaded)
-            .unwrap_or_default()
-    } else {
-        Vec::new()
+pub fn skills_for_default_agent(
+    cfg: &GatewayConfig,
+) -> anyhow::Result<Vec<wirken_agent::skill::Skill>> {
+    skills_from_dir(&cfg.data_dir.join("skills"))
+}
+
+/// The skills in `dir` that load. A directory that is absent or cannot
+/// be read contributes nothing. A registry root that is present but does
+/// not parse is an error, not an empty set: the gate refuses every skill
+/// under it, and an agent built anyway would run with none while strict
+/// mode is broken, with nothing but a log line to say so.
+fn skills_from_dir(dir: &std::path::Path) -> anyhow::Result<Vec<wirken_agent::skill::Skill>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    match wirken_agent::SkillLoader::load_dir(dir) {
+        Ok(found) => Ok(found.loaded),
+        Err(e @ wirken_agent::AgentError::RegistryRootUnusable(_)) => Err(e.into()),
+        Err(_) => Ok(Vec::new()),
     }
 }
 

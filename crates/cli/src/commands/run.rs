@@ -780,7 +780,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         let workspace = cfg.data_dir.join("workspace");
         std::fs::create_dir_all(&workspace)?;
 
-        let skills = super::skills_for_default_agent(&cfg);
+        let skills = super::skills_for_default_agent(&cfg)?;
 
         // Bind any channels not already routed
         for adapter in registry.lock().await.list() {

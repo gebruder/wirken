@@ -194,7 +194,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         },
     )));
     agent
-        .attach_skills(super::skills_for_default_agent(&cfg))
+        .attach_skills(super::skills_for_default_agent(&cfg)?)
         .context("attach skills")?;
 
     println!();

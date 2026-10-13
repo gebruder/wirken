@@ -12,6 +12,12 @@ tagged.
 
 ### Security
 
+- A registry root that is present but does not parse stops `wirken run`,
+  `wirken ask` and `wirken sessions verify` with an error naming it. They
+  built their agents with no skills from the skills directory instead, since
+  the load gate refuses every skill under an unusable root, so the gateway
+  started and answered with strict mode broken and only a log line to say
+  so.
 - `wirken skills trust-root` lists the installed skills that load now and
   would not load under the new root, marking the unmodified bundled copies
   `wirken skills restore-bundled` would fix, and installs the root only once
