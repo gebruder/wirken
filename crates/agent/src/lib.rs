@@ -38,6 +38,7 @@ pub mod slash;
 pub mod sse_approval_gate;
 pub mod telegram_approval_gate;
 pub mod tool;
+pub mod yaml;
 
 pub use context::ContextEngine;
 pub use error::{AgentError, PermissionDenialContext};

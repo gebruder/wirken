@@ -366,7 +366,7 @@ pub fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), Ag
     )]
     let body = rest[end + 3..].trim().to_string();
 
-    let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_str)
+    let frontmatter: SkillFrontmatter = crate::yaml::from_str(yaml_str)
         .map_err(|e| AgentError::SkillLoad(format!("invalid frontmatter YAML: {e}")))?;
 
     Ok((frontmatter, body))

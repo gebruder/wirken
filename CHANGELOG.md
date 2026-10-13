@@ -10,6 +10,17 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- Skill frontmatter is parsed with serde-saphyr, a safe-Rust YAML parser,
+  in place of serde_yaml and its unmaintained unsafe-libyaml backend
+  (RUSTSEC-2024-0449). Booleans are `true` and `false` only, and a
+  duplicate mapping key is an error at every depth, including inside
+  `metadata`, where a later key used to replace an earlier one.
+  `wirken skills migrate` keeps keys in file order, renames
+  `metadata.openclaw` in place, and quotes strings a YAML 1.1 reader
+  would take for a bool.
+
 ### Added
 
 - `wirken run --provider`, `--model` and `--base-url` run the default

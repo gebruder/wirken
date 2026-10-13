@@ -280,7 +280,7 @@ pub fn parse_block(
     data_dir: Option<&Path>,
 ) -> Result<PermissionProfile, PermissionsError> {
     let block: PermissionsBlock =
-        serde_yaml::from_str(yaml).map_err(|e| PermissionsError::Yaml(e.to_string()))?;
+        crate::yaml::from_str(yaml).map_err(|e| PermissionsError::Yaml(e.to_string()))?;
     resolve_block(block, skill_root, home, data_dir)
 }
 

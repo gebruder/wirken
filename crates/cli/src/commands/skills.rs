@@ -531,8 +531,8 @@ fn truncate(s: &str, max: usize) -> String {
 ///
 /// Each rewritten file is copied to
 /// `SKILL.md.pre-migrate-<UTC-iso8601>` first; the rewrite is a
-/// `serde_yaml` round-trip so YAML comments in the original
-/// frontmatter are not preserved (rare in practice).
+/// YAML round-trip that keeps key order, so YAML comments in the
+/// original frontmatter are not preserved (rare in practice).
 ///
 /// `dry_run = true` reports what would change and writes nothing.
 pub async fn migrate(path: Option<&str>, dry_run: bool) -> Result<()> {
@@ -635,7 +635,7 @@ fn migrate_one(skill_file: &std::path::Path, dry_run: bool) -> Result<MigrationO
         .with_context(|| format!("read {}", skill_file.display()))?;
 
     let (yaml_str, body, leading_separator) = split_frontmatter(&content)?;
-    let mut value: serde_yaml::Value = serde_yaml::from_str(yaml_str)
+    let mut value: Yaml = wirken_agent::yaml::from_str(yaml_str)
         .with_context(|| format!("parse YAML in {}", skill_file.display()))?;
 
     let changes = apply_migrations(&mut value);
@@ -657,7 +657,7 @@ fn migrate_one(skill_file: &std::path::Path, dry_run: bool) -> Result<MigrationO
     std::fs::copy(skill_file, &backup)
         .with_context(|| format!("backup to {}", backup.display()))?;
 
-    let new_yaml = serde_yaml::to_string(&value).context("serialize migrated frontmatter")?;
+    let new_yaml = serde_saphyr::to_string(&value).context("serialize migrated frontmatter")?;
     let mut new_content = String::new();
     if leading_separator {
         new_content.push_str("---\n");
@@ -705,32 +705,42 @@ fn split_frontmatter(content: &str) -> Result<(&str, String, bool)> {
     Ok((yaml, body, true))
 }
 
+/// Untyped YAML for `skills migrate`. Mappings keep their keys in file
+/// order, so a migrated file differs from the original only where a
+/// migration changed it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum Yaml {
+    Null,
+    Bool(bool),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    Str(String),
+    Seq(Vec<Yaml>),
+    Map(indexmap::IndexMap<String, Yaml>),
+}
+
 /// Apply the two known migrations to a parsed YAML mapping. Returns
 /// the list of change tags applied. Pure: no I/O. Tested directly.
-fn apply_migrations(value: &mut serde_yaml::Value) -> Vec<&'static str> {
+fn apply_migrations(value: &mut Yaml) -> Vec<&'static str> {
     let mut changes: Vec<&'static str> = Vec::new();
+    let Yaml::Map(root) = value else {
+        return changes;
+    };
 
-    // (1) metadata.openclaw -> metadata.wirken
-    if let Some(metadata) = value.get_mut("metadata").and_then(|v| v.as_mapping_mut()) {
-        let openclaw_key = serde_yaml::Value::String("openclaw".to_string());
-        let wirken_key = serde_yaml::Value::String("wirken".to_string());
-        if metadata.contains_key(&openclaw_key)
-            && !metadata.contains_key(&wirken_key)
-            && let Some(v) = metadata.remove(&openclaw_key)
-        {
-            metadata.insert(wirken_key, v);
-            changes.push("openclaw->wirken");
-        }
+    // (1) metadata.openclaw -> metadata.wirken, in the same position
+    if let Some(Yaml::Map(metadata)) = root.get_mut("metadata")
+        && !metadata.contains_key("wirken")
+        && let Some((index, _, v)) = metadata.shift_remove_full("openclaw")
+    {
+        metadata.shift_insert(index, "wirken".to_string(), v);
+        changes.push("openclaw->wirken");
     }
 
     // (2) Append empty `permissions:` block when absent.
-    let permissions_key = serde_yaml::Value::String("permissions".to_string());
-    let needs_permissions = match value.as_mapping() {
-        Some(m) => !m.contains_key(permissions_key.clone()),
-        None => false,
-    };
-    if needs_permissions && let Some(map) = value.as_mapping_mut() {
-        map.insert(permissions_key, empty_permissions_stub());
+    if !root.contains_key("permissions") {
+        root.insert("permissions".to_string(), empty_permissions_stub());
         changes.push("permissions stub added");
     }
 
@@ -741,8 +751,8 @@ fn apply_migrations(value: &mut serde_yaml::Value) -> Vec<&'static str> {
 /// cleanly through `resolve_block` (every list is empty, allowlist
 /// mode is the strictest egress posture). Migrated skills load but
 /// can do nothing until the operator edits.
-fn empty_permissions_stub() -> serde_yaml::Value {
-    serde_yaml::from_str::<serde_yaml::Value>(
+fn empty_permissions_stub() -> Yaml {
+    wirken_agent::yaml::from_str::<Yaml>(
         "tools:\n  allow: []\negress:\n  mode: allowlist\n  domains: []\nfilesystem:\n  write_paths: []\n  read_paths: []\ninference:\n  allow: []\n",
     )
     .expect("static permissions stub parses as YAML")
@@ -825,11 +835,23 @@ mod verify_outcome_tests {
 
 #[cfg(test)]
 mod migrate_tests {
-    use super::{apply_migrations, split_frontmatter};
-    use serde_yaml::Value;
+    use super::{Yaml, apply_migrations, split_frontmatter};
 
-    fn parse(s: &str) -> Value {
-        serde_yaml::from_str(s).unwrap()
+    fn parse(s: &str) -> Yaml {
+        wirken_agent::yaml::from_str(s).unwrap()
+    }
+
+    fn map(v: &Yaml) -> &indexmap::IndexMap<String, Yaml> {
+        match v {
+            Yaml::Map(m) => m,
+            other => panic!("expected a mapping, got {other:?}"),
+        }
+    }
+
+    fn get<'a>(v: &'a Yaml, key: &str) -> &'a Yaml {
+        map(v)
+            .get(key)
+            .unwrap_or_else(|| panic!("no `{key}` in {v:?}"))
     }
 
     #[test]
@@ -839,9 +861,9 @@ mod migrate_tests {
         );
         let changes = apply_migrations(&mut v);
         assert_eq!(changes, vec!["openclaw->wirken"]);
-        let metadata = v.get("metadata").unwrap().as_mapping().unwrap();
-        assert!(metadata.contains_key(Value::String("wirken".into())));
-        assert!(!metadata.contains_key(Value::String("openclaw".into())));
+        let metadata = map(get(&v, "metadata"));
+        assert!(metadata.contains_key("wirken"));
+        assert!(!metadata.contains_key("openclaw"));
     }
 
     #[test]
@@ -854,9 +876,9 @@ mod migrate_tests {
             changes.is_empty(),
             "should not touch when both keys present"
         );
-        let metadata = v.get("metadata").unwrap().as_mapping().unwrap();
-        assert!(metadata.contains_key(Value::String("openclaw".into())));
-        assert!(metadata.contains_key(Value::String("wirken".into())));
+        let metadata = map(get(&v, "metadata"));
+        assert!(metadata.contains_key("openclaw"));
+        assert!(metadata.contains_key("wirken"));
     }
 
     #[test]
@@ -864,17 +886,11 @@ mod migrate_tests {
         let mut v = parse("name: x\ndescription: y\n");
         let changes = apply_migrations(&mut v);
         assert_eq!(changes, vec!["permissions stub added"]);
-        let permissions = v.get("permissions").unwrap();
-        let map = permissions.as_mapping().unwrap();
-        assert!(map.contains_key(Value::String("tools".into())));
-        assert!(map.contains_key(Value::String("egress".into())));
-        assert!(map.contains_key(Value::String("filesystem".into())));
-        assert!(map.contains_key(Value::String("inference".into())));
-        let egress = permissions.get("egress").unwrap();
-        assert_eq!(
-            egress.get("mode").unwrap(),
-            &Value::String("allowlist".into())
-        );
+        let permissions = get(&v, "permissions");
+        let keys: Vec<&str> = map(permissions).keys().map(String::as_str).collect();
+        assert_eq!(keys, ["tools", "egress", "filesystem", "inference"]);
+        let egress = get(permissions, "egress");
+        assert_eq!(get(egress, "mode"), &Yaml::Str("allowlist".into()));
     }
 
     #[test]
@@ -883,9 +899,9 @@ mod migrate_tests {
             parse("name: x\nmetadata:\n  openclaw:\n    requires:\n      bins:\n      - docker\n");
         let changes = apply_migrations(&mut v);
         assert_eq!(changes, vec!["openclaw->wirken", "permissions stub added"]);
-        let metadata = v.get("metadata").unwrap().as_mapping().unwrap();
-        assert!(metadata.contains_key(Value::String("wirken".into())));
-        assert!(v.get("permissions").is_some());
+        let metadata = map(get(&v, "metadata"));
+        assert!(metadata.contains_key("wirken"));
+        assert!(map(&v).contains_key("permissions"));
     }
 
     #[test]
@@ -898,6 +914,72 @@ mod migrate_tests {
             changes.is_empty(),
             "no-change when already current, got {changes:?}"
         );
+    }
+
+    #[test]
+    fn a_migrated_file_keeps_its_key_order() {
+        let mut v = parse(
+            "name: x\ndescription: y\nmetadata:\n  homepage: h\n  openclaw:\n    requires:\n      bins:\n      - docker\n  emoji: e\nversion: 2\n",
+        );
+        apply_migrations(&mut v);
+        let top: Vec<&str> = map(&v).keys().map(String::as_str).collect();
+        assert_eq!(
+            top,
+            ["name", "description", "metadata", "version", "permissions"]
+        );
+        let meta: Vec<&str> = map(get(&v, "metadata"))
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(meta, ["homepage", "wirken", "emoji"]);
+
+        let text = serde_saphyr::to_string(&v).unwrap();
+        assert_eq!(parse(&text), v, "round trip changed the value:\n{text}");
+        let name_at = text.find("name:").unwrap();
+        let version_at = text.find("version:").unwrap();
+        let permissions_at = text.find("permissions:").unwrap();
+        assert!(
+            name_at < version_at && version_at < permissions_at,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn scalars_survive_the_round_trip() {
+        let v = parse(
+            "s: plain\nyes_word: yes\nquoted_true: \"true\"\nnum_str: \"42\"\nb: false\ni: -7\nu: 18446744073709551615\nf: 1.5\nn: null\nempty: []\nlist: [a, 1, true]\n",
+        );
+        assert_eq!(get(&v, "yes_word"), &Yaml::Str("yes".into()));
+        assert_eq!(get(&v, "quoted_true"), &Yaml::Str("true".into()));
+        assert_eq!(get(&v, "num_str"), &Yaml::Str("42".into()));
+        assert_eq!(get(&v, "b"), &Yaml::Bool(false));
+        assert_eq!(get(&v, "i"), &Yaml::Int(-7));
+        assert_eq!(get(&v, "u"), &Yaml::UInt(u64::MAX));
+        assert_eq!(get(&v, "f"), &Yaml::Float(1.5));
+        assert_eq!(get(&v, "n"), &Yaml::Null);
+        assert_eq!(get(&v, "empty"), &Yaml::Seq(vec![]));
+
+        let text = serde_saphyr::to_string(&v).unwrap();
+        assert_eq!(parse(&text), v, "round trip changed the value:\n{text}");
+        // A YAML 1.1 reader takes a bare `yes` for a bool.
+        assert!(!text.contains("yes_word: yes\n"), "{text}");
+    }
+
+    #[test]
+    fn the_permissions_stub_round_trips_and_loads() {
+        let mut v = parse("name: x\n");
+        apply_migrations(&mut v);
+        let text = serde_saphyr::to_string(&v).unwrap();
+        assert_eq!(parse(&text), v, "{text}");
+        let fm: wirken_agent::skill::SkillFrontmatter =
+            wirken_agent::yaml::from_str(&text).unwrap();
+        assert!(fm.permissions.is_some(), "{text}");
+    }
+
+    #[test]
+    fn a_duplicate_key_is_refused() {
+        let yaml = "name: x\nmetadata:\n  openclaw: {}\n  openclaw: {}\n";
+        assert!(wirken_agent::yaml::from_str::<Yaml>(yaml).is_err());
     }
 
     #[test]
