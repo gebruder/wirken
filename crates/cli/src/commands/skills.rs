@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 
-use wirken_agent::skill::SkillLoader;
+use wirken_agent::skill::{LoadedSignature, SkillLoader};
 use wirken_gateway::skill_registry::{self, SkillIndex, VerifyResult, generate_signing_keypair};
 
 use super::config;
@@ -172,6 +172,17 @@ pub async fn install(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The SIGNED column for a loaded skill, from the check its load made
+/// on the bytes it parsed. A bundle that failed the check did not load
+/// and has no row.
+fn signed_word(signature: &LoadedSignature) -> &'static str {
+    match signature {
+        LoadedSignature::SelfSigned { .. } => "self-signed",
+        LoadedSignature::Delegated { .. } => "delegated",
+        LoadedSignature::Unsigned => "no",
+    }
+}
+
 pub async fn list() -> Result<()> {
     let cfg = config();
     let skills_dir = cfg.data_dir.join("skills");
@@ -200,14 +211,7 @@ pub async fn list() -> Result<()> {
 
     for skill in &skills {
         let available = if skill.available { "yes" } else { "no" };
-        let skill_dir = skill.path.parent().unwrap_or(&skills_dir);
-        let signed = match skill_registry::read_skill_md(&skill.path)
-            .and_then(|md| skill_registry::verify_skill_self_signed(skill_dir, &md))
-        {
-            Ok(VerifyResult::Valid { .. }) => "self-signed",
-            Ok(VerifyResult::Invalid) => "INVALID",
-            _ => "no",
-        };
+        let signed = signed_word(&skill.signature);
         println!(
             "  {:20}  {:40}  {:8}  {}",
             skill.name,
@@ -837,6 +841,28 @@ mod verify_outcome_tests {
             decide_verify_outcome(&VerifyResult::Unsigned, true),
             VerifyOutcome::Fail
         );
+    }
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::signed_word;
+    use wirken_agent::skill::LoadedSignature;
+
+    #[test]
+    fn the_signed_column_names_the_check_the_load_passed() {
+        let signer = "ab".repeat(32);
+        assert_eq!(
+            signed_word(&LoadedSignature::SelfSigned {
+                signer: signer.clone()
+            }),
+            "self-signed"
+        );
+        assert_eq!(
+            signed_word(&LoadedSignature::Delegated { signer }),
+            "delegated"
+        );
+        assert_eq!(signed_word(&LoadedSignature::Unsigned), "no");
     }
 }
 

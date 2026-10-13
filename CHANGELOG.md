@@ -19,6 +19,10 @@ tagged.
   the file. `wirken skills install` verifies the downloaded bytes rather than
   reading back the file it wrote. A `SKILL.md` over 1 MiB is refused wherever
   it is read, never truncated.
+- `wirken skills list` and the WebChat capabilities panel report a skill's
+  signature from the check its load made on the bytes it parsed, without
+  reading `SKILL.md` again. Under a registry root, `list` shows a delegated
+  bundle as `delegated`, where it showed `self-signed`.
 
 - Skill frontmatter is parsed with serde-saphyr, a safe-Rust YAML parser,
   in place of serde_yaml and its unmaintained unsafe-libyaml backend

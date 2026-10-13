@@ -6,6 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+use wirken_agent::skill::LoadedSignature;
 use wirken_agent::sse_approval_gate::resolve_webchat_timeout;
 use wirken_agent::{AgentFactory, session_id_for};
 use wirken_audit::{
@@ -17,9 +18,6 @@ use wirken_gateway::injection_detect::InjectionDetector;
 use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingDecision, ResolveResult};
 use wirken_gateway::rate_limit::ControlPlaneRateLimiter;
 use wirken_gateway::session::SessionStore;
-use wirken_gateway::skill_registry::{
-    VerifyResult as SkillSignature, read_skill_md, verify_skill_self_signed,
-};
 use wirken_gateway::sse_approval_registry::{AckResult, SseApprovalRegistry, SseEvent};
 use wirken_mcp_proxy::mcp_config::{McpAuth, McpConfig, McpServerConfig};
 use wirken_vault::CredentialStore;
@@ -4481,17 +4479,17 @@ fn tool_tier_entry(name: &str, description: &str) -> serde_json::Value {
     }
 }
 
-/// A skill's signature status in one of three words. "signed" carries
-/// the signer; "unsigned" means no signature file; "unverified" means
-/// a signature is present that could not be verified, or the check
-/// itself failed. Never a tick on its own.
-fn skill_signature_word(
-    check: Result<SkillSignature, wirken_gateway::error::GatewayError>,
-) -> (&'static str, Option<String>) {
-    match check {
-        Ok(SkillSignature::Valid { signer }) => ("signed", Some(signer)),
-        Ok(SkillSignature::Unsigned) => ("unsigned", None),
-        Ok(SkillSignature::Invalid) | Err(_) => ("unverified", None),
+/// A loaded skill's signature status in one word, from the check its
+/// load made on the bytes it parsed. "signed" carries the signer;
+/// "unsigned" means it loaded without a signature under the opt-in. A
+/// bundle that failed the check did not load, so it has no entry.
+/// Never a tick on its own.
+fn skill_signature_word(signature: &LoadedSignature) -> (&'static str, Option<String>) {
+    match signature {
+        LoadedSignature::SelfSigned { signer } | LoadedSignature::Delegated { signer } => {
+            ("signed", Some(signer.clone()))
+        }
+        LoadedSignature::Unsigned => ("unsigned", None),
     }
 }
 
@@ -4584,10 +4582,7 @@ pub async fn capabilities_snapshot(
         .skills()
         .iter()
         .map(|sk| {
-            let dir = sk.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-            let (signature, signer) = skill_signature_word(
-                read_skill_md(&sk.path).and_then(|md| verify_skill_self_signed(&dir, &md)),
-            );
+            let (signature, signer) = skill_signature_word(&sk.signature);
             let p = &sk.permissions;
             json!({
                 "name": sk.name,
@@ -5188,8 +5183,8 @@ mod tests {
 
     use super::{
         DECISION_WRONG_CONVERSATION, HTML, ImportedRoute, OpenTurns, Request, Response,
-        STREAM_DONE, Shared, SiemSummary, SkillSignature, StatusInputs, TURN_OPEN_ERROR,
-        VERIFY_CAVEAT, VerifyClaim, WEBCHAT_CONVERSATION, WEBCHAT_MAX_POSTS_PER_MIN, api_preflight,
+        STREAM_DONE, Shared, SiemSummary, StatusInputs, TURN_OPEN_ERROR, VERIFY_CAVEAT,
+        VerifyClaim, WEBCHAT_CONVERSATION, WEBCHAT_MAX_POSTS_PER_MIN, api_preflight,
         approval_belongs_to_conversation, approval_belongs_to_webchat, approvals_snapshot_for,
         capabilities_snapshot, conversation_rows, credentials_snapshot, events_route_allowed,
         is_webchat_host, is_webchat_origin, json_conflict, parse_approval_path,
@@ -7069,28 +7064,26 @@ mod tests {
         );
     }
 
-    /// A skill's signature is one of three words. "signed" carries the
-    /// signer, a failed check reads "unverified", and the page never
-    /// draws a tick for any of them.
+    /// A loaded skill's signature is one word, taken from its load.
+    /// "signed" carries the signer, and the page never draws a tick.
     #[test]
-    fn a_skill_signature_is_one_of_three_words_never_a_tick() {
+    fn a_skill_signature_is_one_word_from_its_load_never_a_tick() {
+        use wirken_agent::skill::LoadedSignature;
         assert_eq!(
-            skill_signature_word(Ok(SkillSignature::Valid {
+            skill_signature_word(&LoadedSignature::SelfSigned {
                 signer: "abc".into()
-            })),
+            }),
             ("signed", Some("abc".to_string()))
         );
         assert_eq!(
-            skill_signature_word(Ok(SkillSignature::Unsigned)),
+            skill_signature_word(&LoadedSignature::Delegated {
+                signer: "def".into()
+            }),
+            ("signed", Some("def".to_string()))
+        );
+        assert_eq!(
+            skill_signature_word(&LoadedSignature::Unsigned),
             ("unsigned", None)
-        );
-        assert_eq!(
-            skill_signature_word(Ok(SkillSignature::Invalid)),
-            ("unverified", None)
-        );
-        assert_eq!(
-            skill_signature_word(Err(wirken_gateway::error::GatewayError::Config("x".into()))),
-            ("unverified", None)
         );
         let script = page_script();
         let skills = script

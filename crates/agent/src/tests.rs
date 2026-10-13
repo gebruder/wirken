@@ -640,6 +640,7 @@ fn skill_prompt_generation() {
             available: true,
             permissions: crate::skill_perms::PermissionProfile::default(),
             disable_model_invocation: false,
+            signature: crate::skill::LoadedSignature::Unsigned,
         },
         Skill {
             name: "unavailable".into(),
@@ -650,6 +651,7 @@ fn skill_prompt_generation() {
             available: false,
             permissions: crate::skill_perms::PermissionProfile::default(),
             disable_model_invocation: false,
+            signature: crate::skill::LoadedSignature::Unsigned,
         },
         Skill {
             name: "explicit-only".into(),
@@ -660,6 +662,7 @@ fn skill_prompt_generation() {
             available: true,
             permissions: crate::skill_perms::PermissionProfile::default(),
             disable_model_invocation: true,
+            signature: crate::skill::LoadedSignature::Unsigned,
         },
     ];
 
@@ -720,6 +723,7 @@ fn build_prompt_generates_distinct_nonces_across_calls() {
         available: true,
         permissions: crate::skill_perms::PermissionProfile::default(),
         disable_model_invocation: false,
+        signature: crate::skill::LoadedSignature::Unsigned,
     }];
     let p1 = SkillLoader::build_prompt(&skills);
     let p2 = SkillLoader::build_prompt(&skills);
@@ -12779,6 +12783,7 @@ mod http_request_after_a_restricting_read {
                 available: true,
                 permissions: profile,
                 disable_model_invocation: false,
+                signature: crate::skill::LoadedSignature::Unsigned,
             }])
             .unwrap();
         let scripted = gate.map(|o| Arc::new(ScriptedGate::new(vec![o])));
@@ -14042,6 +14047,7 @@ mod leak_detection {
             )
             .unwrap(),
             disable_model_invocation: false,
+            signature: crate::skill::LoadedSignature::Unsigned,
         };
         agent
             .attach_skills(vec![

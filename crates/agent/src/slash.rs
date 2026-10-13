@@ -133,6 +133,7 @@ mod tests {
             available: true,
             permissions: PermissionProfile::default(),
             disable_model_invocation: true,
+            signature: crate::skill::LoadedSignature::Unsigned,
         }
     }
 
