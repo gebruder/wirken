@@ -678,6 +678,11 @@ enum SkillCommands {
         #[arg(long)]
         yes: bool,
     },
+    /// Give each installed bundled skill whose SKILL.md is unmodified
+    /// the SKILL.sig, SKILL.pub and SKILL.deleg shipped with it. An
+    /// edited SKILL.md is left for you to re-sign. Installs nothing
+    /// else and does not touch the registry root.
+    RestoreBundled,
     /// Verify a skill's signature
     Verify {
         /// Path to skill directory
@@ -1444,6 +1449,7 @@ async fn main() -> Result<()> {
             SkillCommands::TrustRoot { pubkey, yes } => {
                 commands::skills::trust_root(&pubkey, yes).await
             }
+            SkillCommands::RestoreBundled => commands::skills::restore_bundled(),
             SkillCommands::Verify { dir, strict } => commands::skills::verify(&dir, strict).await,
             SkillCommands::Migrate { path, dry_run } => {
                 commands::skills::migrate(path.as_deref(), dry_run).await

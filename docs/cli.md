@@ -144,6 +144,7 @@ wirken skills sign <DIR> [--root-key <OFFLINE_ROOT_SEED>]
 wirken skills sign-index <INDEX> --root-key <OFFLINE_ROOT_SEED> --skills-dir <CHECKOUT> [--url-prefix <URL>]
 wirken skills verify <DIR> [--strict]
 wirken skills trust-root <PUBKEY_HEX> [--yes]
+wirken skills restore-bundled
 wirken skills migrate [PATH] [--dry-run]
 ```
 
@@ -154,7 +155,10 @@ returns 404, and both commands stop with an error naming it.
 `--strict` on `verify` treats a self-signed bundle as a failure and exits 1.
 `trust-root` installs an operator root so the loader requires delegation. It
 first lists the installed skills that would stop loading under that root and
-asks for confirmation; `--yes` skips the question.
+asks for confirmation; `--yes` skips the question. `restore-bundled` gives
+each installed bundled skill whose `SKILL.md` is unmodified the signature files
+shipped with it, which is what makes those copies load under the project root.
+It installs nothing else and leaves the root alone.
 `migrate` rewrites deprecated `metadata.openclaw.*` keys, backing each file up
 first. See [signing.md](signing.md#skill-signing) and [skills.md](skills.md).
 

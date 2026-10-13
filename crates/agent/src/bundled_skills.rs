@@ -191,7 +191,7 @@ pub fn install_bundled_skills(skills_dir: &Path) -> std::io::Result<BundledInsta
         let path = dir.join("SKILL.md");
 
         if path.exists() {
-            if restore_shipped_signature(&dir, skill)? {
+            if restore_shipped_signature(&dir, skill)? == Restore::Restored {
                 out.restored.push(skill.name);
             }
             continue;
@@ -219,15 +219,60 @@ fn write_shipped_signature(dir: &Path, skill: &BundledSkill) -> std::io::Result<
     std::fs::write(dir.join("SKILL.deleg"), skill.delegation)
 }
 
+/// What [`restore_bundled_signatures`] did across the installed
+/// bundled skills.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BundledRestore {
+    /// Copies that now carry the shipped signature files.
+    pub restored: Vec<&'static str>,
+    /// Copies that already carried them.
+    pub current: Vec<&'static str>,
+    /// Copies left as they are, with the reason.
+    pub left: Vec<(&'static str, &'static str)>,
+}
+
+/// Give every unmodified bundled copy under `skills_dir` the signature
+/// files shipped with it, and nothing else: a bundled skill that is not
+/// installed stays absent, and no registry root is read or written.
+///
+/// It goes by the files on disk, not by what loads, so it reaches a
+/// copy that already stopped loading under a registry root. A copy
+/// whose `SKILL.md` is not the bundled one byte for byte, or for which
+/// the shipped signature does not verify, is left alone and reported.
+pub fn restore_bundled_signatures(skills_dir: &Path) -> std::io::Result<BundledRestore> {
+    let mut out = BundledRestore::default();
+    for skill in SKILLS {
+        let dir = skills_dir.join(skill.name);
+        if !dir.join("SKILL.md").exists() {
+            continue;
+        }
+        match restore_shipped_signature(&dir, skill)? {
+            Restore::Restored => out.restored.push(skill.name),
+            Restore::Current => out.current.push(skill.name),
+            Restore::Left(reason) => out.left.push((skill.name, reason)),
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Restore {
+    Restored,
+    Current,
+    Left(&'static str),
+}
+
 /// Give an installed copy the shipped signature when its `SKILL.md` is
 /// the bundled one and its signature files are not already the shipped
-/// ones. Returns whether it wrote them.
-fn restore_shipped_signature(dir: &Path, skill: &BundledSkill) -> std::io::Result<bool> {
+/// ones.
+fn restore_shipped_signature(dir: &Path, skill: &BundledSkill) -> std::io::Result<Restore> {
     let Ok(skill_md) = wirken_gateway::skill_registry::read_skill_md(&dir.join("SKILL.md")) else {
-        return Ok(false);
+        return Ok(Restore::Left("SKILL.md could not be read"));
     };
     if skill_md != skill.content.as_bytes() {
-        return Ok(false);
+        return Ok(Restore::Left(
+            "SKILL.md differs from the bundled one; re-sign it",
+        ));
     }
     let same = |file: &str, shipped: &str| {
         std::fs::read(dir.join(file)).is_ok_and(|b| b == shipped.as_bytes())
@@ -236,7 +281,7 @@ fn restore_shipped_signature(dir: &Path, skill: &BundledSkill) -> std::io::Resul
         && same("SKILL.pub", skill.signer_pubkey)
         && same("SKILL.deleg", skill.delegation)
     {
-        return Ok(false);
+        return Ok(Restore::Current);
     }
     // The shipped signature covers SKILL.md alone. A skill.wasm beside
     // it changes what the bundle hashes to, and writing a signature
@@ -253,14 +298,16 @@ fn restore_shipped_signature(dir: &Path, skill: &BundledSkill) -> std::io::Resul
         Ok(wirken_gateway::skill_registry::VerifyResult::Valid { .. })
     );
     if !verifies {
-        return Ok(false);
+        return Ok(Restore::Left(
+            "the shipped signature does not verify for this directory",
+        ));
     }
     write_shipped_signature(dir, skill)?;
-    Ok(true)
+    Ok(Restore::Restored)
 }
 
 /// Whether the copy of bundled skill `name` in `dir` would load under
-/// `root` once [`install_bundled_skills`] has run: its `SKILL.md`
+/// `root` once [`restore_bundled_signatures`] has run: its `SKILL.md`
 /// (`skill_md`) is the bundled one byte for byte, and the signature
 /// shipped with it verifies for `dir` with its delegation under `root`.
 pub fn shipped_signature_verifies(
@@ -301,7 +348,10 @@ pub fn bundled_skill_content(name: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SKILLS, install_bundled_skills, self_sign_skill_dir, shipped_signature_verifies};
+    use super::{
+        SKILLS, install_bundled_skills, restore_bundled_signatures, self_sign_skill_dir,
+        shipped_signature_verifies,
+    };
     use std::path::Path;
 
     fn project_root() -> ed25519_dalek::VerifyingKey {
@@ -348,6 +398,46 @@ mod tests {
         let again = install_bundled_skills(tmp.path()).unwrap();
         assert_eq!(again.installed, 0);
         assert!(again.restored.is_empty(), "already shipped: {again:?}");
+    }
+
+    /// The standalone restore replaces signature files and does
+    /// nothing else: it installs no missing bundled skill, and it goes
+    /// by the files on disk, so a copy that does not load is reached.
+    #[test]
+    fn restore_touches_only_signature_files_of_unmodified_copies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let weather = host_signed_copy(tmp.path(), "weather");
+        let git = host_signed_copy(tmp.path(), "git");
+        std::fs::write(git.join("SKILL.md"), "---\nname: git\n---\nedited\n").unwrap();
+        let git_before = files(&git);
+        let notes = tmp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let shipped_notes = SKILLS.iter().find(|s| s.name == "notes").unwrap();
+        std::fs::write(notes.join("SKILL.md"), shipped_notes.content).unwrap();
+        for (f, v) in [
+            ("SKILL.sig", shipped_notes.signature),
+            ("SKILL.pub", shipped_notes.signer_pubkey),
+            ("SKILL.deleg", shipped_notes.delegation),
+        ] {
+            std::fs::write(notes.join(f), v).unwrap();
+        }
+
+        let done = restore_bundled_signatures(tmp.path()).unwrap();
+        assert_eq!(done.restored, vec!["weather"]);
+        assert_eq!(done.current, vec!["notes"]);
+        assert_eq!(
+            done.left,
+            vec![("git", "SKILL.md differs from the bundled one; re-sign it")]
+        );
+        assert_eq!(files(&weather), shipped("weather"));
+        assert_eq!(files(&git), git_before);
+
+        let mut dirs: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        dirs.sort();
+        assert_eq!(dirs, ["git", "notes", "weather"], "nothing was installed");
     }
 
     #[test]

@@ -14,16 +14,19 @@ tagged.
 
 - `wirken skills trust-root` lists the installed skills that load now and
   would not load under the new root, marking the unmodified bundled copies
-  `wirken setup` would fix, and installs the root only once that is
-  confirmed. `--yes` confirms without asking; without a terminal and without
-  `--yes` it refuses and exits 1.
-- `wirken setup` gives an installed bundled skill the shipped `SKILL.sig`,
-  `SKILL.pub` and `SKILL.deleg` when its `SKILL.md` is the bundled one byte for
-  byte and the shipped signature verifies for its directory. A copy installed
-  before the bundle shipped signed carried a signature minted on the host and
-  no `SKILL.deleg`, so it did not load under the project root. An edited
-  `SKILL.md` keeps its own signature.
-
+  `wirken skills restore-bundled` would fix, and installs the root only once
+  that is confirmed. `--yes` confirms without asking; without a terminal and
+  without `--yes` it refuses and exits 1.
+- `wirken skills restore-bundled` gives each installed bundled skill the
+  shipped `SKILL.sig`, `SKILL.pub` and `SKILL.deleg` when its `SKILL.md` is the
+  bundled one byte for byte and the shipped signature verifies for its
+  directory, and reports the copies it left alone. It installs nothing else
+  and does not touch the registry root. It goes by the files on disk, so it
+  reaches copies that already stopped loading under a root. `wirken setup`
+  does the same for the copies it finds. A copy installed before the bundle
+  shipped signed carried a signature minted on the host and no `SKILL.deleg`,
+  so it did not load under the project root. An edited `SKILL.md` keeps its
+  own signature.
 - Skill loading reads `SKILL.md` once and verifies the signature over the
   bytes it parses. Before, the signature check and the parser each read the
   file, so a `SKILL.md` replaced between the two reads loaded unverified. The
@@ -35,7 +38,6 @@ tagged.
   signature from the check its load made on the bytes it parsed, without
   reading `SKILL.md` again. Under a registry root, `list` shows a delegated
   bundle as `delegated`, where it showed `self-signed`.
-
 - Skill frontmatter is parsed with serde-saphyr, a safe-Rust YAML parser,
   in place of serde_yaml and its unmaintained unsafe-libyaml backend
   (RUSTSEC-2024-0449). Booleans are `true` and `false` only, and a

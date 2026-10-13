@@ -58,13 +58,15 @@ the bundle you run carries the same signature the project published rather
 than one your machine minted for itself.
 
 A skill already on disk keeps its files unless its `SKILL.md` is the bundled
-one byte for byte. Then `wirken setup` replaces the signature files beside it
-with the shipped ones, which gives a copy installed before the bundle shipped
-signed, carrying a signature minted on the host and no `SKILL.deleg`, the
-signature that loads under the project root. They are replaced only when the
-shipped signature verifies for that directory. An edited `SKILL.md` is left
-alone for you to re-sign, since writing a fresh signature over it would make
-an edited bundle look authentic.
+one byte for byte. Then `wirken skills restore-bundled` replaces the signature
+files beside it with the shipped ones, and `wirken setup` does the same for the
+copies it finds. A copy installed before the bundle shipped signed needs this:
+it carries a signature minted on the host and no `SKILL.deleg`, so it does not
+load under the project root. The restore goes by the files on disk, so it
+reaches a copy that has already stopped loading. Signature files are replaced
+only when the shipped signature verifies for that directory. An edited
+`SKILL.md` is left alone for you to re-sign, since writing a fresh signature
+over it would make an edited bundle look authentic.
 
 **To run the bundled set in strict mode**, install the project root:
 
@@ -81,9 +83,10 @@ own root re-sign the bundled set as delegates of it, which is what the
 
 Before it installs a root, `trust-root` lists every installed skill that loads
 now and would not load under that root, and marks the unmodified bundled
-copies that `wirken setup` would fix. It installs the root only once you
-confirm, or with `--yes`; run without a terminal and without `--yes`, it
-refuses and exits 1.
+copies that `wirken skills restore-bundled` would fix. It installs the root
+only once you confirm, or with `--yes`; run without a terminal and without
+`--yes`, it refuses and exits 1. It installs the root and nothing else: the
+signature files stay as they are until you run the restore.
 
 Editing a bundled `SKILL.md` invalidates its committed signature until a
 maintainer re-signs it offline. A test in the repo fails when that happens, so

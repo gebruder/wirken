@@ -236,8 +236,9 @@ struct RefusedUnderRoot {
     /// Why the root refuses it.
     reason: String,
     /// Its `SKILL.md` is the bundled one and the shipped signature
-    /// verifies under the root, so `wirken setup` makes it load.
-    restored_by_setup: bool,
+    /// verifies under the root, so `wirken skills restore-bundled`
+    /// makes it load.
+    restorable: bool,
 }
 
 /// The skills in `loaded` that the load gate would refuse under `root`.
@@ -265,7 +266,7 @@ fn refused_under_root(
         out.push(RefusedUnderRoot {
             name: skill.name.clone(),
             reason,
-            restored_by_setup: wirken_agent::bundled_skills::shipped_signature_verifies(
+            restorable: wirken_agent::bundled_skills::shipped_signature_verifies(
                 dir, dir_name, &md, root,
             ),
         });
@@ -290,13 +291,14 @@ pub async fn trust_root(pubkey_hex: &str, yes: bool) -> Result<()> {
         }
         let restorable: Vec<&str> = refused
             .iter()
-            .filter(|r| r.restored_by_setup)
+            .filter(|r| r.restorable)
             .map(|r| r.name.as_str())
             .collect();
         if !restorable.is_empty() {
             println!();
             println!(
-                "  Unmodified bundled copies, which `wirken setup` gives the shipped signature: {}",
+                "  Unmodified bundled copies, which `wirken skills restore-bundled` gives the \
+                 shipped signature: {}",
                 restorable.join(", ")
             );
         }
@@ -330,8 +332,41 @@ pub async fn trust_root(pubkey_hex: &str, yes: bool) -> Result<()> {
     println!("  Re-sign skills as delegates of this root, using the root private");
     println!("  key in your offline signing environment:");
     println!("    wirken skills sign --root-key <offline-root-seed> <dir>");
-    println!("  Under the project root, `wirken setup` instead restores the shipped");
-    println!("  signature on unmodified bundled skills.");
+    println!("  Under the project root, unmodified bundled skills need no re-signing:");
+    println!("    wirken skills restore-bundled");
+    Ok(())
+}
+
+/// `wirken skills restore-bundled`: give unmodified bundled copies the
+/// shipped signature files, and report what was left alone.
+pub fn restore_bundled() -> Result<()> {
+    let skills_dir = config().data_dir.join("skills");
+    let done = wirken_agent::bundled_skills::restore_bundled_signatures(&skills_dir)
+        .with_context(|| format!("restore bundled signatures in {}", skills_dir.display()))?;
+
+    if done.restored.is_empty() && done.current.is_empty() && done.left.is_empty() {
+        println!("  No bundled skills installed in {}.", skills_dir.display());
+        return Ok(());
+    }
+    if !done.restored.is_empty() {
+        println!(
+            "  Restored the shipped signature on {} bundled skill(s): {}.",
+            done.restored.len(),
+            done.restored.join(", ")
+        );
+    }
+    if !done.current.is_empty() {
+        println!(
+            "  {} bundled skill(s) already carry the shipped signature.",
+            done.current.len()
+        );
+    }
+    if !done.left.is_empty() {
+        println!("  Left as they are:");
+        for (name, reason) in &done.left {
+            println!("    {name:20}  {reason}");
+        }
+    }
     Ok(())
 }
 
@@ -957,7 +992,7 @@ mod trust_root_tests {
     }
 
     #[test]
-    fn the_skills_a_root_would_refuse_are_listed_with_what_setup_restores() {
+    fn the_skills_a_root_would_refuse_are_listed_with_what_restore_fixes() {
         let tmp = tempfile::tempdir().unwrap();
         let skills = tmp.path();
         wirken_agent::bundled_skills::install_bundled_skills(skills).unwrap();
@@ -996,27 +1031,27 @@ mod trust_root_tests {
                 RefusedUnderRoot {
                     name: "weather".into(),
                     reason: "signer not delegated by this root".into(),
-                    restored_by_setup: true,
+                    restorable: true,
                 },
                 RefusedUnderRoot {
                     name: "mine".into(),
                     reason: "signer not delegated by this root".into(),
-                    restored_by_setup: false,
+                    restorable: false,
                 },
                 RefusedUnderRoot {
                     name: "loose".into(),
                     reason: "unsigned".into(),
-                    restored_by_setup: false,
+                    restorable: false,
                 },
             ]
         );
 
         // Under a root nothing here is delegated by, the fresh bundled
-        // copies are refused too, and setup restores none of them.
+        // copies are refused too, and restoring fixes none of them.
         let other = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
         let refused = refused_under_root(&all, &other);
         assert_eq!(refused.len(), 4);
-        assert!(refused.iter().all(|r| !r.restored_by_setup), "{refused:?}");
+        assert!(refused.iter().all(|r| !r.restorable), "{refused:?}");
     }
 }
 
