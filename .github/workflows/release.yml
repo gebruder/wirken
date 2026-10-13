@@ -253,29 +253,16 @@ jobs:
       # checksums.sha256 from the draft, signs it offline with the
       # Ed25519 release signing key (see docs/signing.md), and
       # uploads checksums.sha256.sig to the draft before publishing.
-      # CI does not hold the signing key.
+      # CI does not hold the signing key. Those steps live in
+      # docs/release-process.md, not in the release body: the body is
+      # the generated notes only, so publishing the draft publishes
+      # nothing that describes it as a draft.
       - name: Create draft GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: release/*
           generate_release_notes: true
           draft: true
-          body: |
-            **This release is a draft until `checksums.sha256.sig` is attached.**
-
-            The installer verifies `checksums.sha256.sig` against the
-            embedded release signing key. Publishing a release without
-            the signature will break `install.sh` for all users who do
-            not set `WIRKEN_ALLOW_UNVERIFIED=1`.
-
-            Maintainer steps before publishing:
-
-            1. Download `checksums.sha256` from this draft.
-            2. `WIRKEN_SIGNING_KEY=/secure/path scripts/sign-release.sh <tag>`
-            3. Upload `checksums.sha256.sig` to this draft.
-            4. Publish the release.
-
-            See `docs/signing.md` for the full procedure.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
