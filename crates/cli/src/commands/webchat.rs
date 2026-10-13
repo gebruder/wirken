@@ -2112,15 +2112,19 @@ function hatchBanner(name, copy) {
   b.appendChild(text);
   return b;
 }
+function skillRootState(p) {
+  return (p.skill_registry_root || {}).state;
+}
 function renderBanners() {
   clear(banners);
   const h = status.escape_hatches || {};
   const p = status.posture || {};
   for (const name of Object.keys(HATCH_COPY)) {
     if (!h[name]) continue;
-    // With a skill registry root pinned the loader is strict and the
-    // flag does nothing; a banner would announce a hatch that is shut.
-    if (name === 'WIRKEN_ALLOW_UNSIGNED_SKILLS' && p.skill_registry_root_pinned) continue;
+    // The flag lets an unsigned skill load only when there is no root
+    // file. Under a pinned root, and under one that does not parse, it
+    // does nothing; a banner would announce a hatch that is shut.
+    if (name === 'WIRKEN_ALLOW_UNSIGNED_SKILLS' && skillRootState(p) !== 'absent') continue;
     banners.appendChild(hatchBanner(name, HATCH_COPY[name] + HATCH_CLEARS));
   }
   if (p.sandbox_mode_off) {
@@ -2282,6 +2286,19 @@ function renderAbout() {
     kvRow(grid, 'SIEM', v);
   } else {
     kvRow(grid, 'SIEM', el('span', null, 'not configured'));
+  }
+  const root = (status.posture || {}).skill_registry_root || {};
+  if (root.state === 'pinned') {
+    kvRow(grid, 'skill root', el('span', null, 'pinned · skills load only under a signer it delegated'));
+  } else if (root.state === 'absent') {
+    kvRow(grid, 'skill root', el('span', null, 'none · skills load on their own signature'));
+  } else if (root.state === 'unusable') {
+    const v = el('span', null, 'unusable · ');
+    v.appendChild(el('code', null, root.file || ''));
+    v.appendChild(document.createTextNode(' ' + (root.error || '') + ' · every skill is refused'));
+    kvRow(grid, 'skill root', v);
+  } else {
+    kvRow(grid, 'skill root', unknownNode());
   }
   const org = status.org || {};
   if (org.configured) {
@@ -3587,10 +3604,28 @@ pub async fn status_snapshot(
     // reports; none of them has, or wants, that copy. Keeping them
     // here made "every hatch has copy" a question nobody could answer
     // from the object.
+    // The skill registry root in one of three states. An unusable one
+    // names the file relative to the data directory and what is wrong
+    // with it, never the host path.
+    let skill_root = {
+        use wirken_gateway::skill_registry::{REGISTRY_ROOT_FILE, RegistryRootState};
+        match wirken_gateway::skill_registry::registry_root_state(&cfg.data_dir) {
+            RegistryRootState::Absent => json!({ "state": "absent" }),
+            RegistryRootState::Pinned(_) => json!({ "state": "pinned" }),
+            RegistryRootState::Unusable { reason } => json!({
+                "state": "unusable",
+                "file": REGISTRY_ROOT_FILE,
+                "error": reason,
+            }),
+        }
+    };
     let posture = json!({
         "audit_verify_every_flushes": std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES").ok(),
         "sandbox_mode_off": sb.mode == SandboxMode::Off,
-        "skill_registry_root_pinned": wirken_gateway::skill_registry::load_registry_root(&cfg.data_dir).ok().flatten().is_some(),
+        // True only for a usable root; `skill_registry_root` carries the
+        // three states.
+        "skill_registry_root_pinned": skill_root["state"] == "pinned",
+        "skill_registry_root": skill_root,
     });
 
     // --- org config: what is on disk; applied once per gateway start ---
@@ -5709,6 +5744,47 @@ mod tests {
         assert!(snap["hooks"].is_null(), "hook counts are not plumbed yet");
     }
 
+    /// The skill registry root is reported in one of three states, and
+    /// an unusable one names its file and what is wrong without the host
+    /// path.
+    #[tokio::test]
+    async fn status_snapshot_reports_the_skill_root_in_three_states() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let root = |snap: &serde_json::Value| snap["posture"]["skill_registry_root"].clone();
+
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        assert_eq!(root(&snap), serde_json::json!({ "state": "absent" }));
+        assert_eq!(snap["posture"]["skill_registry_root_pinned"], false);
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]).verifying_key();
+        wirken_gateway::skill_registry::save_registry_root(
+            dir.path(),
+            &wirken_gateway::skill_registry::hex_encode_public(&key.to_bytes()),
+        )
+        .unwrap();
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        assert_eq!(root(&snap), serde_json::json!({ "state": "pinned" }));
+        assert_eq!(snap["posture"]["skill_registry_root_pinned"], true);
+
+        std::fs::write(dir.path().join("registry-root.pub"), "not a key\n").unwrap();
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        assert_eq!(
+            root(&snap),
+            serde_json::json!({
+                "state": "unusable",
+                "file": "registry-root.pub",
+                "error": "does not parse as a 32-byte Ed25519 public key",
+            })
+        );
+        assert_eq!(snap["posture"]["skill_registry_root_pinned"], false);
+        let text = serde_json::to_string(&snap).unwrap();
+        assert!(
+            !text.contains(dir.path().to_str().unwrap()),
+            "no host path in the snapshot: {text}"
+        );
+    }
+
     /// `wirken run --model` replaces provider.json's agent for the
     /// run, and the panel names the one the run is serving.
     #[tokio::test]
@@ -5925,9 +6001,21 @@ mod tests {
             "the sandbox-off posture has its own banner"
         );
         assert!(
-            script.contains("skill_registry_root_pinned"),
-            "the unsigned-skills banner is suppressed under a pinned root"
+            script.contains(
+                "name === 'WIRKEN_ALLOW_UNSIGNED_SKILLS' && skillRootState(p) !== 'absent'"
+            ),
+            "the unsigned-skills banner shows only with no root file"
         );
+        let about = script
+            .split_once("function renderAbout() {")
+            .expect("about renderer")
+            .1;
+        for state in ["'pinned'", "'absent'", "'unusable'"] {
+            assert!(
+                about.contains(&format!("root.state === {state}")),
+                "the About panel renders the {state} skill root"
+            );
+        }
         assert!(script.contains("Clears when the gateway restarts without it."));
     }
 

@@ -127,6 +127,42 @@ pub fn save_registry_root(data_dir: &Path, pubkey_hex: &str) -> Result<(), Gatew
     Ok(())
 }
 
+/// The operator registry root as it stands under `data_dir`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryRootState {
+    /// No root file: skills load at the self-signed floor.
+    Absent,
+    /// A root file holding a usable key: skills need a signer it
+    /// delegated.
+    Pinned(VerifyingKey),
+    /// A root file that cannot be read or does not parse. The loader
+    /// refuses every skill under it. `reason` says what is wrong and
+    /// does not carry the file's path, so it can be reported without
+    /// naming a host path.
+    Unusable { reason: String },
+}
+
+/// Read the operator registry root under `data_dir`. The one place its
+/// file is read and parsed; [`load_registry_root`] and the status
+/// report both go through it.
+pub fn registry_root_state(data_dir: &Path) -> RegistryRootState {
+    let raw = match std::fs::read_to_string(registry_root_path(data_dir)) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RegistryRootState::Absent,
+        Err(e) => {
+            return RegistryRootState::Unusable {
+                reason: format!("unreadable: {e}"),
+            };
+        }
+    };
+    match parse_pubkey_hex(&raw) {
+        Some(key) => RegistryRootState::Pinned(key),
+        None => RegistryRootState::Unusable {
+            reason: "does not parse as a 32-byte Ed25519 public key".into(),
+        },
+    }
+}
+
 /// Resolve the operator-set registry root, if one is installed under
 /// `data_dir`.
 ///
@@ -139,23 +175,13 @@ pub fn save_registry_root(data_dir: &Path, pubkey_hex: &str) -> Result<(), Gatew
 ///   silently downgrading to the floor), so a corrupted or truncated
 ///   anchor cannot disable strict mode unnoticed.
 pub fn load_registry_root(data_dir: &Path) -> Result<Option<VerifyingKey>, GatewayError> {
-    let path = registry_root_path(data_dir);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(GatewayError::Config(format!(
-                "registry root {} is present but unreadable: {e}",
-                path.display()
-            )));
-        }
-    };
-    match parse_pubkey_hex(&raw) {
-        Some(key) => Ok(Some(key)),
-        None => Err(GatewayError::Config(format!(
-            "registry root {} is present but does not parse as a 32-byte Ed25519 \
-             public key; refusing to load skills with an unusable anchor",
-            path.display()
+    match registry_root_state(data_dir) {
+        RegistryRootState::Absent => Ok(None),
+        RegistryRootState::Pinned(key) => Ok(Some(key)),
+        RegistryRootState::Unusable { reason } => Err(GatewayError::Config(format!(
+            "registry root {} is present but {reason}; refusing to load skills with an \
+             unusable anchor",
+            registry_root_path(data_dir).display()
         ))),
     }
 }

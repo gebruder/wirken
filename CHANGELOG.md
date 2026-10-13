@@ -12,6 +12,14 @@ tagged.
 
 ### Security
 
+- `GET /api/status` reports the skill registry root in
+  `posture.skill_registry_root` as `pinned`, `absent` or `unusable`, and an
+  unusable one with its file, relative to the data directory, and what is
+  wrong with it, where it read only as not pinned. `skill_registry_root_pinned`
+  stays as it was, true only for a usable root. The WebChat About panel shows
+  all three, and the `WIRKEN_ALLOW_UNSIGNED_SKILLS` banner
+  appears only when there is no root file, since the opt-in has no effect
+  under one.
 - A registry root that is present but does not parse stops `wirken run`,
   `wirken ask` and `wirken sessions verify` with an error naming it. They
   built their agents with no skills from the skills directory instead, since
