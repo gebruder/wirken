@@ -152,7 +152,7 @@ Use `curl wttr.in/{city}` to get current weather.
     .unwrap();
     sign_test_skill(&skill_dir);
 
-    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap().loaded;
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "weather");
     assert_eq!(skills[0].description, "Get current weather via wttr.in");
@@ -177,7 +177,7 @@ fn load_skill_no_frontmatter_fails_post_flip() {
     )
     .unwrap();
 
-    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap().loaded;
     assert!(skills.is_empty(), "no-frontmatter skill should be skipped");
 }
 
@@ -200,7 +200,7 @@ Summarize the given text concisely.
     .unwrap();
     sign_test_skill(&skill_dir);
 
-    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap().loaded;
     assert_eq!(skills.len(), 1);
     assert!(skills[0].required_bins.is_empty());
     assert!(skills[0].available); // No bins required = always available
@@ -226,7 +226,7 @@ This skill requires a binary that doesn't exist.
     .unwrap();
     sign_test_skill(&skill_dir);
 
-    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap().loaded;
     assert_eq!(skills.len(), 1);
     assert!(!skills[0].available);
 }
@@ -257,7 +257,7 @@ Body.
     .unwrap();
     sign_test_skill(&skill_dir);
 
-    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap().loaded;
     assert_eq!(skills.len(), 1);
     assert!(
         skills[0].required_bins.is_empty(),
@@ -284,7 +284,7 @@ fn load_multiple_skills() {
         sign_test_skill(&dir);
     }
 
-    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap().loaded;
     assert_eq!(skills.len(), 3);
     // Sorted by name
     assert_eq!(skills[0].name, "alpha");
@@ -295,13 +295,15 @@ fn load_multiple_skills() {
 #[test]
 fn load_empty_dir() {
     let tmp = TempDir::new().unwrap();
-    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap().loaded;
     assert!(skills.is_empty());
 }
 
 #[test]
 fn load_nonexistent_dir() {
-    let skills = SkillLoader::load_dir(&PathBuf::from("/nonexistent/path")).unwrap();
+    let skills = SkillLoader::load_dir(&PathBuf::from("/nonexistent/path"))
+        .unwrap()
+        .loaded;
     assert!(skills.is_empty());
 }
 
@@ -609,7 +611,7 @@ fn c5_ansi_strip_at_print_boundary_defangs_fake_sudo() {
 fn bundled_skills_merge_into_a_resolved_effective_profile() {
     let tmp = TempDir::new().unwrap();
     crate::bundled_skills::install_bundled_skills(tmp.path()).unwrap();
-    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap().loaded;
     let profiles: Vec<_> = skills.iter().map(|s| s.permissions.clone()).collect();
     let eff = crate::skill_perms::effective_for_skills(&profiles)
         .expect("bundled skills should merge cleanly");
@@ -8294,7 +8296,7 @@ You are the Zirkel librarian. Use sqlite_query with one of: kept_recent, kept_by
 
         let skills_dir = tmp.path().join("skills");
         write_librarian_skill(&skills_dir);
-        let skills = SkillLoader::load_dir(&skills_dir).unwrap();
+        let skills = SkillLoader::load_dir(&skills_dir).unwrap().loaded;
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "librarian");
         assert!(

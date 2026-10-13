@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 
-use wirken_agent::skill::{LoadedSignature, SkillLoader};
+use wirken_agent::skill::{LoadedSignature, Refusal, RefusedSkill, SkillLoader};
 use wirken_gateway::skill_registry::{self, SkillIndex, VerifyResult, generate_signing_keypair};
 
 use super::config;
@@ -187,9 +187,10 @@ pub async fn list() -> Result<()> {
     let cfg = config();
     let skills_dir = cfg.data_dir.join("skills");
 
-    let skills = SkillLoader::load_dir(&skills_dir).unwrap_or_default();
+    let found = SkillLoader::load_dir(&skills_dir)
+        .with_context(|| format!("load skills from {}", skills_dir.display()))?;
 
-    if skills.is_empty() {
+    if found.loaded.is_empty() && found.refused.is_empty() {
         println!("  No skills installed.");
         println!(
             "  `wirken setup` installs the bundled skills; sign your own with `wirken skills sign <dir>`."
@@ -209,7 +210,7 @@ pub async fn list() -> Result<()> {
         "─".repeat(8)
     );
 
-    for skill in &skills {
+    for skill in &found.loaded {
         let available = if skill.available { "yes" } else { "no" };
         let signed = signed_word(&skill.signature);
         println!(
@@ -220,34 +221,46 @@ pub async fn list() -> Result<()> {
             signed,
         );
     }
+    for refused in &found.refused {
+        println!(
+            "  {:20}  {:40}  {:8}  {}",
+            refused.name,
+            "",
+            "-",
+            refused_word(refused)
+        );
+    }
     println!();
-    println!("  {} skills installed.", skills.len());
+    if found.refused.is_empty() {
+        println!("  {} skills installed.", found.loaded.len());
+    } else {
+        println!(
+            "  {} skills installed, {} refused.",
+            found.loaded.len() + found.refused.len(),
+            found.refused.len()
+        );
+    }
     Ok(())
 }
 
-/// Install an operator-set registry root public key, opting this
-/// install into strict identity anchoring. The matching private key
-/// never ships and signs delegations offline.
-/// An installed skill that loads now and would not load under a
-/// proposed registry root.
-#[derive(Debug, PartialEq, Eq)]
-struct RefusedUnderRoot {
-    name: String,
-    /// Why the root refuses it.
-    reason: String,
-    /// Its `SKILL.md` is the bundled one and the shipped signature
-    /// verifies under the root, so `wirken skills restore-bundled`
-    /// makes it load.
-    restorable: bool,
+/// The SIGNED column for a skill that did not load: the reason its load
+/// gave, and the command that fixes a bundled copy restoring would fix.
+fn refused_word(refused: &RefusedSkill) -> String {
+    let mut word = format!("refused: {}", refused.refusal.reason());
+    if refused.restorable {
+        word.push_str("; run `wirken skills restore-bundled`");
+    }
+    word
 }
 
 /// The skills in `loaded` that the load gate would refuse under `root`.
 /// `loaded` is what loads now, so each entry is a skill the root would
-/// take away.
+/// take away. Reasons and the restore pointer are the ones `skills list`
+/// shows for a refused row.
 fn refused_under_root(
     loaded: &[wirken_agent::skill::Skill],
     root: &ed25519_dalek::VerifyingKey,
-) -> Vec<RefusedUnderRoot> {
+) -> Vec<RefusedSkill> {
     let mut out = Vec::new();
     for skill in loaded {
         let dir = skill.path.parent().unwrap_or(std::path::Path::new("."));
@@ -255,31 +268,38 @@ fn refused_under_root(
         let checked = skill_registry::read_skill_md(&skill.path).and_then(|md| {
             skill_registry::verify_skill_delegated(dir, &md, root).map(|result| (md, result))
         });
-        let (reason, md) = match checked {
+        let (refusal, md) = match checked {
             Ok((_, VerifyResult::Valid { .. })) => continue,
-            Ok((md, VerifyResult::Invalid)) => {
-                ("signer not delegated by this root".to_string(), md)
-            }
-            Ok((md, VerifyResult::Unsigned)) => ("unsigned".to_string(), md),
-            Err(e) => (format!("could not be checked: {e}"), Vec::new()),
+            Ok((md, VerifyResult::Invalid)) => (Refusal::NotDelegated, md),
+            Ok((md, VerifyResult::Unsigned)) => (Refusal::Unsigned, md),
+            Err(e) => (Refusal::CouldNotCheck(e.to_string()), Vec::new()),
         };
-        out.push(RefusedUnderRoot {
-            name: skill.name.clone(),
-            reason,
+        out.push(RefusedSkill {
+            name: dir_name.to_string(),
+            path: skill.path.clone(),
+            refusal,
             restorable: wirken_agent::bundled_skills::shipped_signature_verifies(
-                dir, dir_name, &md, root,
+                dir,
+                dir_name,
+                &md,
+                Some(root),
             ),
         });
     }
     out
 }
 
+/// Install an operator-set registry root public key, opting this
+/// install into strict identity anchoring. The matching private key
+/// never ships and signs delegations offline.
 pub async fn trust_root(pubkey_hex: &str, yes: bool) -> Result<()> {
     let cfg = config();
     cfg.ensure_dirs().ok();
     let root = skill_registry::parse_registry_root(pubkey_hex)?;
 
-    let loaded = SkillLoader::load_dir(&cfg.data_dir.join("skills")).unwrap_or_default();
+    let loaded = SkillLoader::load_dir(&cfg.data_dir.join("skills"))
+        .map(|d| d.loaded)
+        .unwrap_or_default();
     let refused = refused_under_root(&loaded, &root);
     if !refused.is_empty() {
         println!(
@@ -287,7 +307,7 @@ pub async fn trust_root(pubkey_hex: &str, yes: bool) -> Result<()> {
             refused.len()
         );
         for r in &refused {
-            println!("    {:20}  {}", r.name, r.reason);
+            println!("    {:20}  {}", r.name, r.refusal.reason());
         }
         let restorable: Vec<&str> = refused
             .iter()
@@ -972,9 +992,9 @@ mod verify_outcome_tests {
 
 #[cfg(test)]
 mod trust_root_tests {
-    use super::{RefusedUnderRoot, refused_under_root};
+    use super::refused_under_root;
     use std::path::Path;
-    use wirken_agent::skill::{LoadedSignature, Skill};
+    use wirken_agent::skill::{LoadedSignature, Refusal, RefusedSkill, Skill};
 
     fn loaded(dir: &Path) -> Skill {
         let name = dir.file_name().unwrap().to_str().unwrap().to_string();
@@ -1028,19 +1048,22 @@ mod trust_root_tests {
         assert_eq!(
             refused_under_root(&all, &root),
             vec![
-                RefusedUnderRoot {
+                RefusedSkill {
                     name: "weather".into(),
-                    reason: "signer not delegated by this root".into(),
+                    path: weather.join("SKILL.md"),
+                    refusal: Refusal::NotDelegated,
                     restorable: true,
                 },
-                RefusedUnderRoot {
+                RefusedSkill {
                     name: "mine".into(),
-                    reason: "signer not delegated by this root".into(),
+                    path: mine.join("SKILL.md"),
+                    refusal: Refusal::NotDelegated,
                     restorable: false,
                 },
-                RefusedUnderRoot {
+                RefusedSkill {
                     name: "loose".into(),
-                    reason: "unsigned".into(),
+                    path: loose.join("SKILL.md"),
+                    refusal: Refusal::Unsigned,
                     restorable: false,
                 },
             ]
@@ -1057,8 +1080,8 @@ mod trust_root_tests {
 
 #[cfg(test)]
 mod list_tests {
-    use super::signed_word;
-    use wirken_agent::skill::LoadedSignature;
+    use super::{refused_word, signed_word};
+    use wirken_agent::skill::{LoadedSignature, Refusal, RefusedSkill};
 
     #[test]
     fn the_signed_column_names_the_check_the_load_passed() {
@@ -1074,6 +1097,24 @@ mod list_tests {
             "delegated"
         );
         assert_eq!(signed_word(&LoadedSignature::Unsigned), "no");
+    }
+
+    #[test]
+    fn a_refused_row_gives_the_reason_and_points_a_restorable_copy_at_restore() {
+        let row = |refusal, restorable| RefusedSkill {
+            name: "weather".into(),
+            path: "weather/SKILL.md".into(),
+            refusal,
+            restorable,
+        };
+        assert_eq!(
+            refused_word(&row(Refusal::NotDelegated, true)),
+            "refused: signer not delegated by this root; run `wirken skills restore-bundled`"
+        );
+        assert_eq!(
+            refused_word(&row(Refusal::SignatureMismatch, false)),
+            "refused: signature does not match SKILL.md"
+        );
     }
 }
 

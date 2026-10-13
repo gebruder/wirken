@@ -38,6 +38,14 @@ tagged.
   signature from the check its load made on the bytes it parsed, without
   reading `SKILL.md` again. Under a registry root, `list` shows a delegated
   bundle as `delegated`, where it showed `self-signed`.
+- `wirken skills list` shows a row for a skill that did not load, with the
+  reason its load gave (the reasons `trust-root` reports), and points a
+  bundled copy `restore-bundled` would fix at it. Before, a refused skill was
+  missing from the listing, and with every skill refused it printed "No
+  skills installed". It prints that only for a directory with no skills. A
+  registry root that does not parse is an error naming it, where `list`
+  printed "No skills installed". `SkillLoader::load_dir` returns the refused
+  skills alongside the loaded ones.
 - Skill frontmatter is parsed with serde-saphyr, a safe-Rust YAML parser,
   in place of serde_yaml and its unmaintained unsafe-libyaml backend
   (RUSTSEC-2024-0449). Booleans are `true` and `false` only, and a

@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use wirken_agent::skill::SkillLoader;
+use wirken_agent::skill::{Refusal, SkillLoader};
 
 /// Fresh data dir with the project registry root installed: all sixteen
 /// bundled skills load, because each ships a signature by the project
@@ -91,4 +91,36 @@ fn bundled_skills_load_under_the_project_root_and_refuse_when_edited() {
             panic!("editing one bundle must not affect {}: {e}", dir.display())
         });
     }
+
+    // A bundled copy from before the bundle shipped signed: the bundled
+    // SKILL.md under a signature minted on the host, no SKILL.deleg.
+    // The listing reports both refusals from the read that refused
+    // them, and only the unedited copy points at the restore.
+    let git = skills_dir.join("git");
+    for f in ["SKILL.sig", "SKILL.pub", "SKILL.deleg"] {
+        std::fs::remove_file(git.join(f)).unwrap();
+    }
+    wirken_agent::bundled_skills::self_sign_skill_dir(&git).unwrap();
+
+    let found = SkillLoader::load_dir(&skills_dir).unwrap();
+    assert_eq!(found.loaded.len(), 14);
+    let refused: Vec<_> = found
+        .refused
+        .iter()
+        .map(|r| (r.name.as_str(), r.refusal.clone(), r.restorable))
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            ("git", Refusal::NotDelegated, true),
+            ("weather", Refusal::NotDelegated, false),
+        ]
+    );
+
+    let restored = wirken_agent::bundled_skills::restore_bundled_signatures(&skills_dir).unwrap();
+    assert_eq!(restored.restored, ["git"]);
+    let found = SkillLoader::load_dir(&skills_dir).unwrap();
+    assert_eq!(found.loaded.len(), 15);
+    assert_eq!(found.refused.len(), 1);
+    assert_eq!(found.refused[0].name, "weather");
 }

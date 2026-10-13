@@ -133,7 +133,7 @@ pub fn skills_for_agent(
         if dir.is_dir()
             && let Ok(s) = wirken_agent::SkillLoader::load_dir(&dir)
         {
-            skills.extend(s);
+            skills.extend(s.loaded);
         }
     }
     let presets_dir = cfg.data_dir.join("presets");
@@ -146,7 +146,9 @@ pub fn skills_for_agent(
 pub fn skills_for_default_agent(cfg: &GatewayConfig) -> Vec<wirken_agent::skill::Skill> {
     let dir = cfg.data_dir.join("skills");
     if dir.is_dir() {
-        wirken_agent::SkillLoader::load_dir(&dir).unwrap_or_default()
+        wirken_agent::SkillLoader::load_dir(&dir)
+            .map(|d| d.loaded)
+            .unwrap_or_default()
     } else {
         Vec::new()
     }

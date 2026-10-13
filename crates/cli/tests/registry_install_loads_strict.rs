@@ -87,16 +87,27 @@ fn an_installed_skill_loads_under_the_root_only_with_its_delegation() {
     assert!(skills.join("delegated-skill/SKILL.deleg").is_file());
     assert!(!skills.join("plain-skill/SKILL.deleg").exists());
 
-    // `skills list` prints one row per skill the load gate accepted; the
-    // refused one appears only in the warning naming what failed to load.
+    // `skills list` prints a row for every installed skill: the one the
+    // load gate accepted as delegated, the refused one with its reason.
+    // It is not a bundled copy, so its row does not point at the restore.
     let listed = run(&["skills", "list"]);
     let row = |name: &str| {
         listed
             .lines()
-            .any(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("no row for {name}:\n{listed}"))
+            .to_string()
     };
-    assert!(row("delegated-skill"), "{listed}");
-    assert!(!row("plain-skill"), "{listed}");
+    assert!(row("delegated-skill").ends_with("delegated"), "{listed}");
+    let plain = row("plain-skill");
+    assert!(
+        plain.ends_with("refused: signer not delegated by this root"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("2 skills installed, 1 refused."),
+        "{listed}"
+    );
 }
 
 /// With no index at the URL, `install` and `search` stop with an error

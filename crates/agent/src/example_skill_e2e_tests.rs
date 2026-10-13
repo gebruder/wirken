@@ -47,7 +47,9 @@ fn load_signed_skill(tmp: &Path) -> Vec<Skill> {
     std::fs::write(dir.join("SKILL.md"), md).unwrap();
     sign_skill(&dir, &signing_key()).expect("sign_skill");
     assert!(dir.join("SKILL.sig").is_file() && dir.join("SKILL.pub").is_file());
-    SkillLoader::load_dir(tmp).expect("load the signed skill")
+    SkillLoader::load_dir(tmp)
+        .expect("load the signed skill")
+        .loaded
 }
 
 #[test]

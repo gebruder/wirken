@@ -152,6 +152,10 @@ wirken skills migrate [PATH] [--dry-run]
 `https://raw.githubusercontent.com/gebruder/wirken-skills/main/index.json`, or
 `WIRKEN_SKILLS_INDEX` when set. No public index is published yet: that URL
 returns 404, and both commands stop with an error naming it.
+`list` prints a row for every installed skill. One that loaded shows how its
+signature passed: `self-signed`, `delegated`, or `no` under the unsigned
+opt-in. One that did not load shows `refused:` and the reason, and a bundled
+copy that `restore-bundled` would fix says so.
 `--strict` on `verify` treats a self-signed bundle as a failure and exits 1.
 `trust-root` installs an operator root so the loader requires delegation. It
 first lists the installed skills that would stop loading under that root and

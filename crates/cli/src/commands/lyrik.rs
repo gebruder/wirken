@@ -94,11 +94,13 @@ fn lyrik_run_skills(
     walks_staged_dir: Option<&Path>,
 ) -> Result<Vec<wirken_agent::skill::Skill>> {
     let mut skills = wirken_agent::SkillLoader::load_dir(lyrik_staged_dir)
-        .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?;
+        .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?
+        .loaded;
     if let Some(dir) = walks_staged_dir {
         skills.extend(
             wirken_agent::SkillLoader::load_dir(dir)
-                .with_context(|| format!("load staged skills from {}", dir.display()))?,
+                .with_context(|| format!("load staged skills from {}", dir.display()))?
+                .loaded,
         );
     }
     Ok(skills)
@@ -574,6 +576,7 @@ async fn dispatch_via_agent_runtime(
     let lyrik_staged_dir = stage_lyrik_skill(&run_dir).context("stage Lyrik skill")?;
     let lyrik_staged_loaded = wirken_agent::SkillLoader::load_dir(&lyrik_staged_dir)
         .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?
+        .loaded
         .len();
     audit.emit(
         "lyrik.skill.staged",

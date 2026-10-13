@@ -62,6 +62,69 @@ pub enum LoadedSignature {
     Unsigned,
 }
 
+/// What [`SkillLoader::load_dir`] found in a skills directory: every
+/// subdirectory with a `SKILL.md` is in exactly one of the two lists.
+#[derive(Debug, Default)]
+pub struct SkillDir {
+    pub loaded: Vec<Skill>,
+    pub refused: Vec<RefusedSkill>,
+}
+
+/// A skill in a skills directory that did not load, with the reason
+/// taken from the read of `SKILL.md` that turned it away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedSkill {
+    /// The skill directory's name.
+    pub name: String,
+    pub path: PathBuf,
+    pub refusal: Refusal,
+    /// The refused bytes are a bundled `SKILL.md`, byte for byte, and
+    /// the signature shipped with it verifies there under the gate in
+    /// force, so `wirken skills restore-bundled` makes it load.
+    pub restorable: bool,
+}
+
+/// Why a skill did not load. [`Refusal::reason`] is the wording every
+/// report of it uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// Under a registry root: the signer is not delegated by the root,
+    /// or the signature does not verify under the signer.
+    NotDelegated,
+    /// With no root: `SKILL.sig` does not verify `SKILL.md` under
+    /// `SKILL.pub`.
+    SignatureMismatch,
+    /// No `SKILL.sig` / `SKILL.pub`, and the unsigned opt-in does not
+    /// apply.
+    Unsigned,
+    /// `SKILL.md` or the registry root could not be read, or the check
+    /// itself failed.
+    CouldNotCheck(String),
+    /// Passed the signature gate, then turned away by the loader:
+    /// frontmatter, name, permissions.
+    Rejected(String),
+}
+
+impl Refusal {
+    pub fn reason(&self) -> String {
+        match self {
+            Refusal::NotDelegated => "signer not delegated by this root".into(),
+            Refusal::SignatureMismatch => "signature does not match SKILL.md".into(),
+            Refusal::Unsigned => "unsigned".into(),
+            Refusal::CouldNotCheck(e) => format!("could not be checked: {e}"),
+            Refusal::Rejected(e) => e.clone(),
+        }
+    }
+}
+
+/// A load that did not produce a skill: the refusal as reported, and
+/// the error `load_file` returns for it.
+struct Refused {
+    refusal: Refusal,
+    restorable: bool,
+    error: AgentError,
+}
+
 /// YAML frontmatter parsed from SKILL.md files.
 /// Matches OpenClaw's format for compatibility.
 ///
@@ -93,13 +156,12 @@ pub struct SkillLoader;
 impl SkillLoader {
     /// Load all skills from a directory.
     /// Each subdirectory containing a SKILL.md is loaded as a skill.
-    pub fn load_dir(dir: &Path) -> Result<Vec<Skill>, AgentError> {
+    pub fn load_dir(dir: &Path) -> Result<SkillDir, AgentError> {
         if !dir.is_dir() {
-            return Ok(Vec::new());
+            return Ok(SkillDir::default());
         }
 
-        let mut skills = Vec::new();
-        let mut failures: Vec<String> = Vec::new();
+        let mut out = SkillDir::default();
         let entries = std::fs::read_dir(dir)
             .map_err(|e| AgentError::SkillLoad(format!("read dir {}: {e}", dir.display())))?;
 
@@ -116,8 +178,8 @@ impl SkillLoader {
                 continue;
             }
 
-            match Self::load_file(&skill_file) {
-                Ok(skill) => skills.push(skill),
+            match Self::load_file_checked(&skill_file) {
+                Ok(skill) => out.loaded.push(skill),
                 // A configured-but-unusable registry root is not a
                 // per-skill problem: it fails every skill identically and
                 // means the operator's strict anchor is corrupt, not that
@@ -125,44 +187,63 @@ impl SkillLoader {
                 // stop, distinct from the debug+aggregate path below, so a
                 // fat-fingered `trust-root` reads as "root is corrupt"
                 // rather than "N skills failed to load".
-                Err(e @ AgentError::RegistryRootUnusable(_)) => {
+                Err(Refused {
+                    error: e @ AgentError::RegistryRootUnusable(_),
+                    ..
+                }) => {
                     tracing::error!("{e}");
                     return Err(e);
                 }
-                Err(e) => {
+                Err(refused) => {
                     // Per-skill load failures are usually operator-state
                     // (stale frontmatter from a previous migration window,
                     // missing `permissions:` block, etc.), not unexpected
                     // runtime errors. They do not need to surface on every
                     // user-facing CLI invocation. Detail goes to debug;
                     // an aggregate summary fires once below if any failed.
-                    tracing::debug!("Failed to load skill at {}: {e}", skill_file.display());
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("?")
-                        .to_string();
-                    failures.push(name);
+                    tracing::debug!(
+                        "Failed to load skill at {}: {}",
+                        skill_file.display(),
+                        refused.error
+                    );
+                    out.refused.push(RefusedSkill {
+                        name: path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        path: skill_file,
+                        refusal: refused.refusal,
+                        restorable: refused.restorable,
+                    });
                 }
             }
         }
 
-        if !failures.is_empty() {
+        if !out.refused.is_empty() {
+            let names: Vec<&str> = out.refused.iter().map(|r| r.name.as_str()).collect();
             tracing::warn!(
                 "{n} skill(s) failed to load from {dir}: [{names}]. Run with \
                  RUST_LOG=wirken_agent::skill=debug for per-skill detail.",
-                n = failures.len(),
+                n = names.len(),
                 dir = dir.display(),
-                names = failures.join(", ")
+                names = names.join(", ")
             );
         }
 
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(skills)
+        out.loaded.sort_by(|a, b| a.name.cmp(&b.name));
+        out.refused.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
     }
 
     /// Load a single SKILL.md file.
     pub fn load_file(path: &Path) -> Result<Skill, AgentError> {
+        Self::load_file_checked(path).map_err(|r| r.error)
+    }
+
+    /// [`Self::load_file`], keeping why a skill that did not load was
+    /// refused.
+    fn load_file_checked(path: &Path) -> Result<Skill, Refused> {
         // SKILL.md is read once, under the size limit, and the
         // signature gate runs over those bytes. Nothing below this
         // point parses frontmatter, expands path templating, or probes
@@ -171,10 +252,26 @@ impl SkillLoader {
         // the read never loads. Default-deny on Invalid / Unsigned is
         // unchanged (see `verify_skill_signature`).
         let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
-        let bytes = wirken_gateway::skill_registry::read_skill_md(path)
-            .map_err(|e| AgentError::SkillLoad(e.to_string()))?;
+        let bytes = wirken_gateway::skill_registry::read_skill_md(path).map_err(|e| Refused {
+            refusal: Refusal::CouldNotCheck(e.to_string()),
+            restorable: false,
+            error: AgentError::SkillLoad(e.to_string()),
+        })?;
         let signature = verify_skill_signature(skill_root, path, &bytes)?;
 
+        Self::build(path, bytes, signature).map_err(|error| Refused {
+            refusal: Refusal::Rejected(match &error {
+                AgentError::SkillLoad(msg) => msg.clone(),
+                other => other.to_string(),
+            }),
+            restorable: false,
+            error,
+        })
+    }
+
+    /// Parse verified `SKILL.md` bytes into a [`Skill`].
+    fn build(path: &Path, bytes: Vec<u8>, signature: LoadedSignature) -> Result<Skill, AgentError> {
+        let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
         let content = String::from_utf8(bytes).map_err(|e| {
             AgentError::SkillLoad(format!("read {}: not UTF-8: {e}", path.display()))
         })?;
@@ -576,7 +673,7 @@ fn verify_skill_signature(
     skill_dir: &Path,
     skill_md_path: &Path,
     skill_md: &[u8],
-) -> Result<LoadedSignature, AgentError> {
+) -> Result<LoadedSignature, Refused> {
     let data_dir = wirken_gateway::config::default_data_dir();
     let operator_root =
         wirken_gateway::skill_registry::load_registry_root(&data_dir).map_err(|e| {
@@ -586,12 +683,31 @@ fn verify_skill_signature(
             // surface this loudly: an absent root is the intended floor,
             // but an unparseable one is a misconfigured strict anchor
             // that must not read as a generic per-skill failure.
-            AgentError::RegistryRootUnusable(format!(
+            let error = AgentError::RegistryRootUnusable(format!(
                 "{e}; refusing to load {} (fail-closed)",
                 skill_md_path.display()
-            ))
+            ));
+            Refused {
+                refusal: Refusal::CouldNotCheck(error.to_string()),
+                restorable: false,
+                error,
+            }
         })?;
     verify_skill_signature_with_root(skill_dir, skill_md_path, skill_md, operator_root.as_ref())
+        .map_err(|(refusal, error)| Refused {
+            refusal,
+            // From the bytes that were just refused, not a fresh read.
+            restorable: crate::bundled_skills::shipped_signature_verifies(
+                skill_dir,
+                skill_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default(),
+                skill_md,
+                operator_root.as_ref(),
+            ),
+            error,
+        })
 }
 
 /// Branch logic for [`verify_skill_signature`], split out so the
@@ -603,7 +719,7 @@ fn verify_skill_signature_with_root(
     skill_md_path: &Path,
     skill_md: &[u8],
     operator_root: Option<&ed25519_dalek::VerifyingKey>,
-) -> Result<LoadedSignature, AgentError> {
+) -> Result<LoadedSignature, (Refusal, AgentError)> {
     use wirken_gateway::skill_registry::{
         VerifyResult, verify_skill_delegated, verify_skill_self_signed,
     };
@@ -614,44 +730,59 @@ fn verify_skill_signature_with_root(
         // unsigned bypass on this path.
         Some(root) => {
             let result = verify_skill_delegated(skill_dir, skill_md, root).map_err(|e| {
-                AgentError::SkillLoad(format!(
-                    "delegation verification at {} failed: {e}",
-                    skill_md_path.display()
-                ))
+                (
+                    Refusal::CouldNotCheck(e.to_string()),
+                    AgentError::SkillLoad(format!(
+                        "delegation verification at {} failed: {e}",
+                        skill_md_path.display()
+                    )),
+                )
             })?;
             match result {
                 VerifyResult::Valid { signer } => Ok(LoadedSignature::Delegated { signer }),
-                VerifyResult::Invalid => Err(AgentError::SkillLoad(format!(
-                    "signature verification at {} failed: the bundle's signer is not \
-                     delegated by the configured registry root (or the signature does \
-                     not verify). A self-signed-only bundle does not load once a root \
-                     is configured; re-sign it as a delegate of the root.",
-                    skill_md_path.display()
-                ))),
-                VerifyResult::Unsigned => Err(AgentError::SkillLoad(format!(
-                    "skill at {} is unsigned (no SKILL.sig / SKILL.pub). A configured \
-                     registry root requires a delegated signature; the \
-                     {ALLOW_UNSIGNED_ENV} bypass does not apply when a root is set.",
-                    skill_md_path.display()
-                ))),
+                VerifyResult::Invalid => Err((
+                    Refusal::NotDelegated,
+                    AgentError::SkillLoad(format!(
+                        "signature verification at {} failed: the bundle's signer is not \
+                         delegated by the configured registry root (or the signature does \
+                         not verify). A self-signed-only bundle does not load once a root \
+                         is configured; re-sign it as a delegate of the root.",
+                        skill_md_path.display()
+                    )),
+                )),
+                VerifyResult::Unsigned => Err((
+                    Refusal::Unsigned,
+                    AgentError::SkillLoad(format!(
+                        "skill at {} is unsigned (no SKILL.sig / SKILL.pub). A configured \
+                         registry root requires a delegated signature; the \
+                         {ALLOW_UNSIGNED_ENV} bypass does not apply when a root is set.",
+                        skill_md_path.display()
+                    )),
+                )),
             }
         }
         // Floor: self-signed verification, unchanged.
         None => {
             let result = verify_skill_self_signed(skill_dir, skill_md).map_err(|e| {
-                AgentError::SkillLoad(format!(
-                    "signature verification at {} failed: {e}",
-                    skill_md_path.display()
-                ))
+                (
+                    Refusal::CouldNotCheck(e.to_string()),
+                    AgentError::SkillLoad(format!(
+                        "signature verification at {} failed: {e}",
+                        skill_md_path.display()
+                    )),
+                )
             })?;
             match result {
                 VerifyResult::Valid { signer } => Ok(LoadedSignature::SelfSigned { signer }),
-                VerifyResult::Invalid => Err(AgentError::SkillLoad(format!(
-                    "signature verification at {} failed: SKILL.sig does not match SKILL.md \
-                     under SKILL.pub. If the bundle was modified after install, restore from \
-                     the source or re-sign before loading.",
-                    skill_md_path.display()
-                ))),
+                VerifyResult::Invalid => Err((
+                    Refusal::SignatureMismatch,
+                    AgentError::SkillLoad(format!(
+                        "signature verification at {} failed: SKILL.sig does not match \
+                         SKILL.md under SKILL.pub. If the bundle was modified after install, \
+                         restore from the source or re-sign before loading.",
+                        skill_md_path.display()
+                    )),
+                )),
                 VerifyResult::Unsigned => {
                     if wirken_gateway::org::parse_boolean_escape(ALLOW_UNSIGNED_ENV) {
                         tracing::warn!(
@@ -660,11 +791,15 @@ fn verify_skill_signature_with_root(
                         );
                         Ok(LoadedSignature::Unsigned)
                     } else {
-                        Err(AgentError::SkillLoad(format!(
-                            "skill at {} is unsigned (no SKILL.sig / SKILL.pub). Sign with \
-                             `wirken skills sign <dir>` or set {ALLOW_UNSIGNED_ENV}=1 to opt in.",
-                            skill_md_path.display()
-                        )))
+                        Err((
+                            Refusal::Unsigned,
+                            AgentError::SkillLoad(format!(
+                                "skill at {} is unsigned (no SKILL.sig / SKILL.pub). Sign with \
+                                 `wirken skills sign <dir>` or set {ALLOW_UNSIGNED_ENV}=1 to \
+                                 opt in.",
+                                skill_md_path.display()
+                            )),
+                        ))
                     }
                 }
             }
@@ -736,13 +871,14 @@ mod root_branch_tests {
         write_min_skill(&dir);
         sign_skill(&dir, &rand_key()).unwrap();
         let root = rand_key();
-        let err = verify_skill_signature_with_root(
+        let (refusal, err) = verify_skill_signature_with_root(
             &dir,
             &dir.join("SKILL.md"),
             &md(&dir),
             Some(&root.verifying_key()),
         )
         .expect_err("strict rejects self-signed-only");
+        assert_eq!(refusal, Refusal::NotDelegated);
         assert!(format!("{err}").contains("delegated"), "got {err}");
     }
 
@@ -782,13 +918,109 @@ mod root_branch_tests {
         let root = rand_key();
         let other_root = rand_key();
         write_delegation(&dir, &signer, &other_root);
-        verify_skill_signature_with_root(
+        let (refusal, _) = verify_skill_signature_with_root(
             &dir,
             &dir.join("SKILL.md"),
             &md(&dir),
             Some(&root.verifying_key()),
         )
         .expect_err("strict rejects a delegation signed by a different root");
+        assert_eq!(refusal, Refusal::NotDelegated);
+    }
+}
+
+#[cfg(test)]
+mod load_dir_tests {
+    use super::{Refusal, SkillLoader};
+    use std::path::Path;
+    use wirken_gateway::skill_registry::{MAX_SKILL_MD_BYTES, sign_skill};
+
+    fn key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[3u8; 32])
+    }
+
+    fn skill(root: &Path, name: &str, md: &[u8], signed: bool) -> std::path::PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), md).unwrap();
+        if signed {
+            sign_skill(&dir, &key()).unwrap();
+        }
+        dir
+    }
+
+    /// Every directory with a SKILL.md is either loaded or refused with
+    /// the reason its load gave; a directory without one is neither.
+    /// No registry root here, so this is the floor.
+    #[test]
+    fn a_skill_that_does_not_load_is_reported_with_its_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        skill(
+            root,
+            "ok",
+            b"---\nname: ok\ndescription: d\n---\nbody\n",
+            true,
+        );
+        let tampered = skill(
+            root,
+            "tampered",
+            b"---\nname: tampered\ndescription: d\n---\nbody\n",
+            true,
+        );
+        std::fs::write(
+            tampered.join("SKILL.md"),
+            "---\nname: tampered\ndescription: d\n---\nedited\n",
+        )
+        .unwrap();
+        skill(
+            root,
+            "loose",
+            b"---\nname: loose\ndescription: d\n---\n",
+            false,
+        );
+        skill(root, "badyaml", b"---\nname: [\n---\nbody\n", true);
+        let mut big = b"---\nname: big\n---\n".to_vec();
+        big.resize(usize::try_from(MAX_SKILL_MD_BYTES).unwrap() + 1, b'a');
+        skill(root, "big", &big, false);
+        // A bundled copy whose signature files are gone: restoring
+        // gives it the shipped ones, which verify at the floor.
+        let weather_md = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/weather/SKILL.md"),
+        )
+        .unwrap();
+        skill(root, "weather", &weather_md, false);
+        std::fs::create_dir_all(root.join("stray-folder")).unwrap();
+
+        let found = SkillLoader::load_dir(root).unwrap();
+        let loaded: Vec<&str> = found.loaded.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(loaded, ["ok"]);
+
+        let refused: Vec<(&str, &Refusal, bool)> = found
+            .refused
+            .iter()
+            .map(|r| (r.name.as_str(), &r.refusal, r.restorable))
+            .collect();
+        assert_eq!(refused.len(), 5, "{refused:?}");
+        assert_eq!(refused[0].0, "badyaml");
+        assert!(
+            matches!(refused[0].1, Refusal::Rejected(e) if e.contains("invalid frontmatter YAML")),
+            "{refused:?}"
+        );
+        assert_eq!(refused[1].0, "big");
+        assert!(
+            refused[1].1.reason().starts_with("could not be checked: ")
+                && refused[1].1.reason().contains("SKILL.md limit"),
+            "{refused:?}"
+        );
+        assert_eq!(refused[2], ("loose", &Refusal::Unsigned, false));
+        assert_eq!(refused[3], ("tampered", &Refusal::SignatureMismatch, false));
+        assert_eq!(refused[4], ("weather", &Refusal::Unsigned, true));
+        assert_eq!(
+            found.refused[3].path,
+            tampered.join("SKILL.md"),
+            "the row names the file"
+        );
     }
 }
 

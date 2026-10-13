@@ -2132,7 +2132,7 @@ impl Agent {
 
     /// Load skills from a directory and rebuild the system prompt.
     pub fn load_skills(&mut self, dir: &std::path::Path) -> Result<usize, AgentError> {
-        self.skills = SkillLoader::load_dir(dir)?;
+        self.skills = SkillLoader::load_dir(dir)?.loaded;
         self.rebuild_system_prompt();
         Ok(self.skills.len())
     }
@@ -2145,7 +2145,7 @@ impl Agent {
     /// existing skill body). The system prompt is rebuilt at the
     /// end. Returns the total skill count after the merge.
     pub fn extend_skills(&mut self, dir: &std::path::Path) -> Result<usize, AgentError> {
-        let added = SkillLoader::load_dir(dir)?;
+        let added = SkillLoader::load_dir(dir)?.loaded;
         self.extend_with_skills(added)
     }
 

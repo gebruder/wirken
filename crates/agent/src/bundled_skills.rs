@@ -306,15 +306,16 @@ fn restore_shipped_signature(dir: &Path, skill: &BundledSkill) -> std::io::Resul
     Ok(Restore::Restored)
 }
 
-/// Whether the copy of bundled skill `name` in `dir` would load under
-/// `root` once [`restore_bundled_signatures`] has run: its `SKILL.md`
-/// (`skill_md`) is the bundled one byte for byte, and the signature
-/// shipped with it verifies for `dir` with its delegation under `root`.
+/// Whether the copy of bundled skill `name` in `dir` would load once
+/// [`restore_bundled_signatures`] has run: its `SKILL.md` (`skill_md`)
+/// is the bundled one byte for byte, and the signature shipped with it
+/// verifies for `dir`, with its delegation under `root` when one is
+/// given, or under its own key at the floor when `root` is `None`.
 pub fn shipped_signature_verifies(
     dir: &Path,
     name: &str,
     skill_md: &[u8],
-    root: &ed25519_dalek::VerifyingKey,
+    root: Option<&ed25519_dalek::VerifyingKey>,
 ) -> bool {
     let Some(skill) = SKILLS.iter().find(|s| s.name == name) else {
         return false;
@@ -327,7 +328,7 @@ pub fn shipped_signature_verifies(
                 skill.signature,
                 skill.signer_pubkey,
                 Some(skill.delegation),
-                Some(root),
+                root,
             ),
             Ok(wirken_gateway::skill_registry::VerifyResult::Valid { .. })
         )
@@ -478,7 +479,7 @@ mod tests {
             &dir,
             "weather",
             &md,
-            &project_root()
+            Some(&project_root())
         ));
     }
 
@@ -491,22 +492,22 @@ mod tests {
             &dir,
             "git",
             &md,
-            &project_root()
+            Some(&project_root())
         ));
 
         let other = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key();
-        assert!(!shipped_signature_verifies(&dir, "git", &md, &other));
+        assert!(!shipped_signature_verifies(&dir, "git", &md, Some(&other)));
         assert!(!shipped_signature_verifies(
             &dir,
             "git",
             b"edited",
-            &project_root()
+            Some(&project_root())
         ));
         assert!(!shipped_signature_verifies(
             &dir,
             "not-bundled",
             &md,
-            &project_root()
+            Some(&project_root())
         ));
     }
 }
