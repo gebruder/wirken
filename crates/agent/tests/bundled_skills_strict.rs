@@ -38,7 +38,9 @@ fn bundled_skills_load_under_the_project_root_and_refuse_when_edited() {
     }
 
     let skills_dir = data_dir.path().join("skills");
-    let installed = wirken_agent::bundled_skills::install_bundled_skills(&skills_dir).unwrap();
+    let installed = wirken_agent::bundled_skills::install_bundled_skills(&skills_dir)
+        .unwrap()
+        .installed;
     assert_eq!(
         installed,
         wirken_agent::bundled_skills::bundled_count(),

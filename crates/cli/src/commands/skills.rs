@@ -228,9 +228,98 @@ pub async fn list() -> Result<()> {
 /// Install an operator-set registry root public key, opting this
 /// install into strict identity anchoring. The matching private key
 /// never ships and signs delegations offline.
-pub async fn trust_root(pubkey_hex: &str) -> Result<()> {
+/// An installed skill that loads now and would not load under a
+/// proposed registry root.
+#[derive(Debug, PartialEq, Eq)]
+struct RefusedUnderRoot {
+    name: String,
+    /// Why the root refuses it.
+    reason: String,
+    /// Its `SKILL.md` is the bundled one and the shipped signature
+    /// verifies under the root, so `wirken setup` makes it load.
+    restored_by_setup: bool,
+}
+
+/// The skills in `loaded` that the load gate would refuse under `root`.
+/// `loaded` is what loads now, so each entry is a skill the root would
+/// take away.
+fn refused_under_root(
+    loaded: &[wirken_agent::skill::Skill],
+    root: &ed25519_dalek::VerifyingKey,
+) -> Vec<RefusedUnderRoot> {
+    let mut out = Vec::new();
+    for skill in loaded {
+        let dir = skill.path.parent().unwrap_or(std::path::Path::new("."));
+        let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let checked = skill_registry::read_skill_md(&skill.path).and_then(|md| {
+            skill_registry::verify_skill_delegated(dir, &md, root).map(|result| (md, result))
+        });
+        let (reason, md) = match checked {
+            Ok((_, VerifyResult::Valid { .. })) => continue,
+            Ok((md, VerifyResult::Invalid)) => {
+                ("signer not delegated by this root".to_string(), md)
+            }
+            Ok((md, VerifyResult::Unsigned)) => ("unsigned".to_string(), md),
+            Err(e) => (format!("could not be checked: {e}"), Vec::new()),
+        };
+        out.push(RefusedUnderRoot {
+            name: skill.name.clone(),
+            reason,
+            restored_by_setup: wirken_agent::bundled_skills::shipped_signature_verifies(
+                dir, dir_name, &md, root,
+            ),
+        });
+    }
+    out
+}
+
+pub async fn trust_root(pubkey_hex: &str, yes: bool) -> Result<()> {
     let cfg = config();
     cfg.ensure_dirs().ok();
+    let root = skill_registry::parse_registry_root(pubkey_hex)?;
+
+    let loaded = SkillLoader::load_dir(&cfg.data_dir.join("skills")).unwrap_or_default();
+    let refused = refused_under_root(&loaded, &root);
+    if !refused.is_empty() {
+        println!(
+            "  {} installed skill(s) load now and would not load under this root:",
+            refused.len()
+        );
+        for r in &refused {
+            println!("    {:20}  {}", r.name, r.reason);
+        }
+        let restorable: Vec<&str> = refused
+            .iter()
+            .filter(|r| r.restored_by_setup)
+            .map(|r| r.name.as_str())
+            .collect();
+        if !restorable.is_empty() {
+            println!();
+            println!(
+                "  Unmodified bundled copies, which `wirken setup` gives the shipped signature: {}",
+                restorable.join(", ")
+            );
+        }
+        println!();
+        let confirmed = if yes {
+            true
+        } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            dialoguer::Confirm::new()
+                .with_prompt("  Install the root anyway")
+                .default(false)
+                .interact()?
+        } else {
+            false
+        };
+        if !confirmed {
+            anyhow::bail!(
+                "registry root not installed: {} installed skill(s) would stop loading. \
+                 Re-run with --yes to install it anyway.",
+                refused.len()
+            );
+        }
+    }
+
     skill_registry::save_registry_root(&cfg.data_dir, pubkey_hex)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let path = skill_registry::registry_root_path(&cfg.data_dir);
@@ -238,9 +327,11 @@ pub async fn trust_root(pubkey_hex: &str) -> Result<()> {
     println!("  Skill loading now requires delegation by this root (strict mode);");
     println!("  self-signed-only bundles will no longer load.");
     println!();
-    println!("  Re-sign bundled and local skills as delegates of this root, using");
-    println!("  the root private key in your offline signing environment:");
+    println!("  Re-sign skills as delegates of this root, using the root private");
+    println!("  key in your offline signing environment:");
     println!("    wirken skills sign --root-key <offline-root-seed> <dir>");
+    println!("  Under the project root, `wirken setup` instead restores the shipped");
+    println!("  signature on unmodified bundled skills.");
     Ok(())
 }
 
@@ -841,6 +932,91 @@ mod verify_outcome_tests {
             decide_verify_outcome(&VerifyResult::Unsigned, true),
             VerifyOutcome::Fail
         );
+    }
+}
+
+#[cfg(test)]
+mod trust_root_tests {
+    use super::{RefusedUnderRoot, refused_under_root};
+    use std::path::Path;
+    use wirken_agent::skill::{LoadedSignature, Skill};
+
+    fn loaded(dir: &Path) -> Skill {
+        let name = dir.file_name().unwrap().to_str().unwrap().to_string();
+        Skill {
+            name,
+            description: String::new(),
+            required_bins: vec![],
+            body: String::new(),
+            path: dir.join("SKILL.md"),
+            available: true,
+            permissions: Default::default(),
+            disable_model_invocation: true,
+            signature: LoadedSignature::Unsigned,
+        }
+    }
+
+    #[test]
+    fn the_skills_a_root_would_refuse_are_listed_with_what_setup_restores() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path();
+        wirken_agent::bundled_skills::install_bundled_skills(skills).unwrap();
+
+        // A bundled copy from before the bundle shipped signed.
+        let weather = skills.join("weather");
+        for f in ["SKILL.sig", "SKILL.pub", "SKILL.deleg"] {
+            std::fs::remove_file(weather.join(f)).unwrap();
+        }
+        wirken_agent::bundled_skills::self_sign_skill_dir(&weather).unwrap();
+
+        // An operator's own skill, self-signed.
+        let mine = skills.join("mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("SKILL.md"), "---\nname: mine\n---\nbody\n").unwrap();
+        wirken_agent::bundled_skills::self_sign_skill_dir(&mine).unwrap();
+
+        // Loaded under the unsigned opt-in.
+        let loose = skills.join("loose");
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::write(loose.join("SKILL.md"), "---\nname: loose\n---\nbody\n").unwrap();
+
+        let root = wirken_gateway::skill_registry::parse_registry_root(include_str!(
+            "../../../../skills/REGISTRY-ROOT.pub"
+        ))
+        .unwrap();
+        let all = [
+            loaded(&weather),
+            loaded(&skills.join("git")),
+            loaded(&mine),
+            loaded(&loose),
+        ];
+        assert_eq!(
+            refused_under_root(&all, &root),
+            vec![
+                RefusedUnderRoot {
+                    name: "weather".into(),
+                    reason: "signer not delegated by this root".into(),
+                    restored_by_setup: true,
+                },
+                RefusedUnderRoot {
+                    name: "mine".into(),
+                    reason: "signer not delegated by this root".into(),
+                    restored_by_setup: false,
+                },
+                RefusedUnderRoot {
+                    name: "loose".into(),
+                    reason: "unsigned".into(),
+                    restored_by_setup: false,
+                },
+            ]
+        );
+
+        // Under a root nothing here is delegated by, the fresh bundled
+        // copies are refused too, and setup restores none of them.
+        let other = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+        let refused = refused_under_root(&all, &other);
+        assert_eq!(refused.len(), 4);
+        assert!(refused.iter().all(|r| !r.restored_by_setup), "{refused:?}");
     }
 }
 

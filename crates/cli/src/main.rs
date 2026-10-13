@@ -666,9 +666,17 @@ enum SkillCommands {
     /// longer load. The matching root private key never ships and
     /// signs delegations offline. Without a root set, loading keeps the
     /// self-signed floor unchanged.
+    ///
+    /// Installed skills that load now and would not under this root are
+    /// listed first, and the root is installed only once that is
+    /// confirmed.
     TrustRoot {
         /// Hex-encoded 32-byte Ed25519 root public key.
         pubkey: String,
+        /// Install the root even though the listed skills will stop
+        /// loading, without asking. Needed when not run interactively.
+        #[arg(long)]
+        yes: bool,
     },
     /// Verify a skill's signature
     Verify {
@@ -1433,7 +1441,9 @@ async fn main() -> Result<()> {
                 skills_dir,
                 url_prefix,
             } => commands::skills::sign_index(&index, &root_key, &skills_dir, &url_prefix),
-            SkillCommands::TrustRoot { pubkey } => commands::skills::trust_root(&pubkey).await,
+            SkillCommands::TrustRoot { pubkey, yes } => {
+                commands::skills::trust_root(&pubkey, yes).await
+            }
             SkillCommands::Verify { dir, strict } => commands::skills::verify(&dir, strict).await,
             SkillCommands::Migrate { path, dry_run } => {
                 commands::skills::migrate(path.as_deref(), dry_run).await

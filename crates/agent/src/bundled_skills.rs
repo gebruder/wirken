@@ -154,25 +154,46 @@ pub fn self_sign_skill_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Install bundled skills to a directory. Skips skills that already exist.
-/// Returns the number of skills installed.
+/// What [`install_bundled_skills`] changed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BundledInstall {
+    /// Skills newly written, with their shipped signature files.
+    pub installed: usize,
+    /// Skills already on disk whose `SKILL.md` is the bundled one byte
+    /// for byte, which had other signature files and now carry the
+    /// shipped ones.
+    pub restored: Vec<&'static str>,
+}
+
+/// Install bundled skills to a directory, and give each unmodified
+/// bundled copy already there the signature shipped with it.
 ///
 /// Each freshly installed skill lands with the `SKILL.sig`,
 /// `SKILL.pub` and `SKILL.deleg` shipped in this binary, produced
 /// offline by the project skill-signing key and delegated under the
 /// project registry root. Nothing is signed at install time, so no
-/// signing key is needed on the gateway host. Skills that already
-/// exist on disk are left untouched, so an operator's edits are never
-/// masked by a fresh signature that would make an edited bundle look
-/// authentic.
-pub fn install_bundled_skills(skills_dir: &Path) -> std::io::Result<usize> {
-    let mut installed = 0;
+/// signing key is needed on the gateway host.
+///
+/// A skill already on disk keeps its files unless its `SKILL.md` is
+/// the bundled one byte for byte. Then the shipped signature files
+/// replace whatever is beside it, which for a copy installed before the
+/// bundle shipped signed is a self-signature minted on this host with
+/// no `SKILL.deleg`, so it would not load under the project root. They
+/// are replaced only when the shipped signature verifies for that
+/// directory. An edited `SKILL.md` is left alone for the operator to
+/// re-sign, so an edit is never covered by a signature that would make
+/// it look authentic.
+pub fn install_bundled_skills(skills_dir: &Path) -> std::io::Result<BundledInstall> {
+    let mut out = BundledInstall::default();
 
     for skill in SKILLS {
         let dir = skills_dir.join(skill.name);
         let path = dir.join("SKILL.md");
 
         if path.exists() {
+            if restore_shipped_signature(&dir, skill)? {
+                out.restored.push(skill.name);
+            }
             continue;
         }
 
@@ -184,14 +205,85 @@ pub fn install_bundled_skills(skills_dir: &Path) -> std::io::Result<usize> {
         // shipped one carries the project signer's identity and its
         // delegation, so the same bundle verifies at the floor and
         // under the project registry root in strict mode.
-        std::fs::write(dir.join("SKILL.sig"), skill.signature)?;
-        std::fs::write(dir.join("SKILL.pub"), skill.signer_pubkey)?;
-        std::fs::write(dir.join("SKILL.deleg"), skill.delegation)?;
+        write_shipped_signature(&dir, skill)?;
 
-        installed += 1;
+        out.installed += 1;
     }
 
-    Ok(installed)
+    Ok(out)
+}
+
+fn write_shipped_signature(dir: &Path, skill: &BundledSkill) -> std::io::Result<()> {
+    std::fs::write(dir.join("SKILL.sig"), skill.signature)?;
+    std::fs::write(dir.join("SKILL.pub"), skill.signer_pubkey)?;
+    std::fs::write(dir.join("SKILL.deleg"), skill.delegation)
+}
+
+/// Give an installed copy the shipped signature when its `SKILL.md` is
+/// the bundled one and its signature files are not already the shipped
+/// ones. Returns whether it wrote them.
+fn restore_shipped_signature(dir: &Path, skill: &BundledSkill) -> std::io::Result<bool> {
+    let Ok(skill_md) = wirken_gateway::skill_registry::read_skill_md(&dir.join("SKILL.md")) else {
+        return Ok(false);
+    };
+    if skill_md != skill.content.as_bytes() {
+        return Ok(false);
+    }
+    let same = |file: &str, shipped: &str| {
+        std::fs::read(dir.join(file)).is_ok_and(|b| b == shipped.as_bytes())
+    };
+    if same("SKILL.sig", skill.signature)
+        && same("SKILL.pub", skill.signer_pubkey)
+        && same("SKILL.deleg", skill.delegation)
+    {
+        return Ok(false);
+    }
+    // The shipped signature covers SKILL.md alone. A skill.wasm beside
+    // it changes what the bundle hashes to, and writing a signature
+    // that does not verify would stop a loading skill from loading.
+    let verifies = matches!(
+        wirken_gateway::skill_registry::verify_skill_with_expected_key_and_delegation(
+            dir,
+            &skill_md,
+            skill.signature,
+            skill.signer_pubkey,
+            None,
+            None,
+        ),
+        Ok(wirken_gateway::skill_registry::VerifyResult::Valid { .. })
+    );
+    if !verifies {
+        return Ok(false);
+    }
+    write_shipped_signature(dir, skill)?;
+    Ok(true)
+}
+
+/// Whether the copy of bundled skill `name` in `dir` would load under
+/// `root` once [`install_bundled_skills`] has run: its `SKILL.md`
+/// (`skill_md`) is the bundled one byte for byte, and the signature
+/// shipped with it verifies for `dir` with its delegation under `root`.
+pub fn shipped_signature_verifies(
+    dir: &Path,
+    name: &str,
+    skill_md: &[u8],
+    root: &ed25519_dalek::VerifyingKey,
+) -> bool {
+    let Some(skill) = SKILLS.iter().find(|s| s.name == name) else {
+        return false;
+    };
+    skill_md == skill.content.as_bytes()
+        && matches!(
+            wirken_gateway::skill_registry::verify_skill_with_expected_key_and_delegation(
+                dir,
+                skill_md,
+                skill.signature,
+                skill.signer_pubkey,
+                Some(skill.delegation),
+                Some(root),
+            ),
+            Ok(wirken_gateway::skill_registry::VerifyResult::Valid { .. })
+        )
 }
 
 /// Number of bundled skills.
@@ -205,4 +297,126 @@ pub fn bundled_count() -> usize {
 /// regardless of operator state under `~/.wirken/skills/`.
 pub fn bundled_skill_content(name: &str) -> Option<&'static str> {
     SKILLS.iter().find(|s| s.name == name).map(|s| s.content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SKILLS, install_bundled_skills, self_sign_skill_dir, shipped_signature_verifies};
+    use std::path::Path;
+
+    fn project_root() -> ed25519_dalek::VerifyingKey {
+        wirken_gateway::skill_registry::parse_registry_root(include_str!(
+            "../../../skills/REGISTRY-ROOT.pub"
+        ))
+        .unwrap()
+    }
+
+    fn files(dir: &Path) -> [Option<Vec<u8>>; 3] {
+        ["SKILL.sig", "SKILL.pub", "SKILL.deleg"].map(|f| std::fs::read(dir.join(f)).ok())
+    }
+
+    fn shipped(name: &str) -> [Option<Vec<u8>>; 3] {
+        let s = SKILLS.iter().find(|s| s.name == name).unwrap();
+        [s.signature, s.signer_pubkey, s.delegation].map(|v| Some(v.as_bytes().to_vec()))
+    }
+
+    /// A bundled copy installed before the bundle shipped signed: the
+    /// bundled SKILL.md under a signature minted on the host, no
+    /// SKILL.deleg.
+    fn host_signed_copy(skills_dir: &Path, name: &str) -> std::path::PathBuf {
+        let dir = skills_dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = SKILLS.iter().find(|s| s.name == name).unwrap().content;
+        std::fs::write(dir.join("SKILL.md"), content).unwrap();
+        self_sign_skill_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_unmodified_host_signed_copy_gets_the_shipped_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = host_signed_copy(tmp.path(), "weather");
+        let md = std::fs::read(dir.join("SKILL.md")).unwrap();
+        assert_ne!(files(&dir), shipped("weather"), "host-minted to start");
+
+        let done = install_bundled_skills(tmp.path()).unwrap();
+        assert_eq!(done.installed, SKILLS.len() - 1);
+        assert_eq!(done.restored, vec!["weather"]);
+        assert_eq!(files(&dir), shipped("weather"));
+        assert_eq!(std::fs::read(dir.join("SKILL.md")).unwrap(), md);
+
+        let again = install_bundled_skills(tmp.path()).unwrap();
+        assert_eq!(again.installed, 0);
+        assert!(again.restored.is_empty(), "already shipped: {again:?}");
+    }
+
+    #[test]
+    fn an_edited_copy_keeps_its_own_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = host_signed_copy(tmp.path(), "weather");
+        let mut md = std::fs::read(dir.join("SKILL.md")).unwrap();
+        md.extend_from_slice(b"\nlocal note\n");
+        std::fs::write(dir.join("SKILL.md"), &md).unwrap();
+        self_sign_skill_dir(&dir).unwrap();
+        let before = files(&dir);
+
+        let done = install_bundled_skills(tmp.path()).unwrap();
+        assert!(done.restored.is_empty(), "{done:?}");
+        assert_eq!(files(&dir), before);
+        assert_eq!(std::fs::read(dir.join("SKILL.md")).unwrap(), md);
+    }
+
+    /// The shipped signature covers SKILL.md alone. With a skill.wasm
+    /// beside it, writing it would leave a bundle that does not verify,
+    /// so the host signature stays.
+    #[test]
+    fn a_copy_with_a_skill_wasm_keeps_its_own_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("weather");
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = SKILLS.iter().find(|s| s.name == "weather").unwrap().content;
+        std::fs::write(dir.join("SKILL.md"), content).unwrap();
+        std::fs::write(dir.join("skill.wasm"), b"\0asm").unwrap();
+        self_sign_skill_dir(&dir).unwrap();
+        let before = files(&dir);
+
+        let done = install_bundled_skills(tmp.path()).unwrap();
+        assert!(done.restored.is_empty(), "{done:?}");
+        assert_eq!(files(&dir), before);
+        let md = std::fs::read(dir.join("SKILL.md")).unwrap();
+        assert!(!shipped_signature_verifies(
+            &dir,
+            "weather",
+            &md,
+            &project_root()
+        ));
+    }
+
+    #[test]
+    fn the_shipped_signature_verifies_under_the_project_root_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = host_signed_copy(tmp.path(), "git");
+        let md = std::fs::read(dir.join("SKILL.md")).unwrap();
+        assert!(shipped_signature_verifies(
+            &dir,
+            "git",
+            &md,
+            &project_root()
+        ));
+
+        let other = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        assert!(!shipped_signature_verifies(&dir, "git", &md, &other));
+        assert!(!shipped_signature_verifies(
+            &dir,
+            "git",
+            b"edited",
+            &project_root()
+        ));
+        assert!(!shipped_signature_verifies(
+            &dir,
+            "not-bundled",
+            &md,
+            &project_root()
+        ));
+    }
 }

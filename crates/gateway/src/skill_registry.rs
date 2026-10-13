@@ -84,6 +84,16 @@ fn parse_pubkey_hex(hex: &str) -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(&arr).ok()
 }
 
+/// Parse a registry root public key given as 64 hex characters, as
+/// `wirken skills trust-root` takes it, without installing it.
+pub fn parse_registry_root(pubkey_hex: &str) -> Result<VerifyingKey, GatewayError> {
+    parse_pubkey_hex(pubkey_hex).ok_or_else(|| {
+        GatewayError::Config(
+            "registry root must be a 64-char hex (32-byte) Ed25519 public key".into(),
+        )
+    })
+}
+
 /// Install an operator-set registry root public key under `data_dir`.
 /// `pubkey_hex` must be a 64-char hex (32-byte) Ed25519 public key;
 /// anything else is rejected so a malformed anchor never lands on

@@ -152,8 +152,18 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     // Install bundled skills (always, regardless of org config)
     let skills_dir = data.join("skills");
     match wirken_agent::bundled_skills::install_bundled_skills(&skills_dir) {
-        Ok(n) if n > 0 => println!("  Installed {n} bundled skills."),
-        Ok(_) => {}
+        Ok(done) => {
+            if done.installed > 0 {
+                println!("  Installed {} bundled skills.", done.installed);
+            }
+            if !done.restored.is_empty() {
+                println!(
+                    "  Restored the shipped signature on {} unmodified bundled skill(s): {}.",
+                    done.restored.len(),
+                    done.restored.join(", ")
+                );
+            }
+        }
         Err(e) => println!("  Warning: could not install bundled skills: {e}"),
     }
 

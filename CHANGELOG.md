@@ -12,6 +12,18 @@ tagged.
 
 ### Security
 
+- `wirken skills trust-root` lists the installed skills that load now and
+  would not load under the new root, marking the unmodified bundled copies
+  `wirken setup` would fix, and installs the root only once that is
+  confirmed. `--yes` confirms without asking; without a terminal and without
+  `--yes` it refuses and exits 1.
+- `wirken setup` gives an installed bundled skill the shipped `SKILL.sig`,
+  `SKILL.pub` and `SKILL.deleg` when its `SKILL.md` is the bundled one byte for
+  byte and the shipped signature verifies for its directory. A copy installed
+  before the bundle shipped signed carried a signature minted on the host and
+  no `SKILL.deleg`, so it did not load under the project root. An edited
+  `SKILL.md` keeps its own signature.
+
 - Skill loading reads `SKILL.md` once and verifies the signature over the
   bytes it parses. Before, the signature check and the parser each read the
   file, so a `SKILL.md` replaced between the two reads loaded unverified. The

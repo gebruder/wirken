@@ -143,7 +143,7 @@ wirken skills list
 wirken skills sign <DIR> [--root-key <OFFLINE_ROOT_SEED>]
 wirken skills sign-index <INDEX> --root-key <OFFLINE_ROOT_SEED> --skills-dir <CHECKOUT> [--url-prefix <URL>]
 wirken skills verify <DIR> [--strict]
-wirken skills trust-root <PUBKEY_HEX>
+wirken skills trust-root <PUBKEY_HEX> [--yes]
 wirken skills migrate [PATH] [--dry-run]
 ```
 
@@ -152,7 +152,9 @@ wirken skills migrate [PATH] [--dry-run]
 `WIRKEN_SKILLS_INDEX` when set. No public index is published yet: that URL
 returns 404, and both commands stop with an error naming it.
 `--strict` on `verify` treats a self-signed bundle as a failure and exits 1.
-`trust-root` installs an operator root so the loader requires delegation.
+`trust-root` installs an operator root so the loader requires delegation. It
+first lists the installed skills that would stop loading under that root and
+asks for confirmation; `--yes` skips the question.
 `migrate` rewrites deprecated `metadata.openclaw.*` keys, backing each file up
 first. See [signing.md](signing.md#skill-signing) and [skills.md](skills.md).
 

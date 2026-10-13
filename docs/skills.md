@@ -57,8 +57,14 @@ signed at install time, so no signing key is needed on the gateway host, and
 the bundle you run carries the same signature the project published rather
 than one your machine minted for itself.
 
-Skills already on disk are left untouched, since writing a fresh signature
-over them would make an edited bundle look authentic.
+A skill already on disk keeps its files unless its `SKILL.md` is the bundled
+one byte for byte. Then `wirken setup` replaces the signature files beside it
+with the shipped ones, which gives a copy installed before the bundle shipped
+signed, carrying a signature minted on the host and no `SKILL.deleg`, the
+signature that loads under the project root. They are replaced only when the
+shipped signature verifies for that directory. An edited `SKILL.md` is left
+alone for you to re-sign, since writing a fresh signature over it would make
+an edited bundle look authentic.
 
 **To run the bundled set in strict mode**, install the project root:
 
@@ -72,6 +78,12 @@ for every skill you load, bundled or not: a root is singular, so this is not a
 way to add the project alongside a root of your own. Operators who run their
 own root re-sign the bundled set as delegates of it, which is what the
 `trust-root` output tells you to do.
+
+Before it installs a root, `trust-root` lists every installed skill that loads
+now and would not load under that root, and marks the unmodified bundled
+copies that `wirken setup` would fix. It installs the root only once you
+confirm, or with `--yes`; run without a terminal and without `--yes`, it
+refuses and exits 1.
 
 Editing a bundled `SKILL.md` invalidates its committed signature until a
 maintainer re-signs it offline. A test in the repo fails when that happens, so

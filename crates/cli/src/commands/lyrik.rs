@@ -567,10 +567,10 @@ async fn dispatch_via_agent_runtime(
     // installed copy is unsigned (pre-signature-gate setup) or absent,
     // the run still has a known-good Lyrik skill loaded.
     //
-    // Self-sign with a one-shot keypair, mirroring
-    // [`wirken_agent::bundled_skills::install_bundled_skills`]: the
-    // pair gives tamper detection across the run and discards the key
-    // after sign.
+    // Self-sign with a one-shot keypair through
+    // [`wirken_agent::bundled_skills::self_sign_skill_dir`]: the pair
+    // gives tamper detection across the run and discards the key after
+    // sign.
     let lyrik_staged_dir = stage_lyrik_skill(&run_dir).context("stage Lyrik skill")?;
     let lyrik_staged_loaded = wirken_agent::SkillLoader::load_dir(&lyrik_staged_dir)
         .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?
@@ -921,8 +921,8 @@ async fn dispatch_via_agent_runtime(
 /// passed to [`wirken_agent::Agent::extend_skills`] which expects a
 /// directory of skill subdirectories.
 ///
-/// One-shot keypair, discarded after the signature is written. Same
-/// pattern as [`wirken_agent::bundled_skills::install_bundled_skills`].
+/// One-shot keypair, discarded after the signature is written, through
+/// [`wirken_agent::bundled_skills::self_sign_skill_dir`].
 fn stage_lyrik_skill(run_dir: &Path) -> Result<PathBuf> {
     let body = wirken_agent::bundled_skills::bundled_skill_content("lyrik")
         .ok_or_else(|| anyhow::anyhow!("bundled Lyrik skill content missing from binary"))?;
