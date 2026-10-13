@@ -87,6 +87,7 @@ pub async fn install(name: &str) -> Result<()> {
     }
 
     let content = resp.text().await.context("Failed to read skill content")?;
+    skill_registry::check_skill_md_size(content.len(), format!("'{}' SKILL.md", entry.name))?;
 
     // Install to skills directory
     let skills_dir = cfg.data_dir.join("skills");
@@ -103,8 +104,11 @@ pub async fn install(name: &str) -> Result<()> {
     // `signer_key_delegation` field; otherwise the install is refused.
     if let (Some(sig_hex), Some(key_hex)) = (&entry.signature, &entry.signer_key) {
         let delegation = entry.signer_key_delegation.as_deref();
+        // The downloaded bytes are what is checked, not a read back
+        // of the file just written.
         let result = wirken_gateway::skill_registry::verify_skill_with_expected_key_and_delegation(
             &skill_dir,
+            content.as_bytes(),
             sig_hex,
             key_hex,
             delegation,
@@ -197,7 +201,9 @@ pub async fn list() -> Result<()> {
     for skill in &skills {
         let available = if skill.available { "yes" } else { "no" };
         let skill_dir = skill.path.parent().unwrap_or(&skills_dir);
-        let signed = match skill_registry::verify_skill_self_signed(skill_dir) {
+        let signed = match skill_registry::read_skill_md(&skill.path)
+            .and_then(|md| skill_registry::verify_skill_self_signed(skill_dir, &md))
+        {
             Ok(VerifyResult::Valid { .. }) => "self-signed",
             Ok(VerifyResult::Invalid) => "INVALID",
             _ => "no",
@@ -414,7 +420,8 @@ pub(crate) fn decide_verify_outcome(result: &VerifyResult, strict: bool) -> Veri
 
 pub async fn verify(dir: &str, strict: bool) -> Result<()> {
     let skill_dir = std::path::Path::new(dir);
-    let result = skill_registry::verify_skill_self_signed(skill_dir)?;
+    let skill_md = skill_registry::read_skill_md(&skill_dir.join("SKILL.md"))?;
+    let result = skill_registry::verify_skill_self_signed(skill_dir, &skill_md)?;
     let outcome = decide_verify_outcome(&result, strict);
 
     match &result {

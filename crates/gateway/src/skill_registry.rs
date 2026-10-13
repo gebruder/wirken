@@ -203,6 +203,38 @@ impl SkillIndex {
     }
 }
 
+/// The largest `SKILL.md` that is read, verified, or installed. A
+/// larger file is refused, never truncated.
+pub const MAX_SKILL_MD_BYTES: u64 = 1024 * 1024;
+
+/// Read a `SKILL.md` once, refusing one over [`MAX_SKILL_MD_BYTES`].
+///
+/// The signature is verified over these bytes and the loader parses
+/// the same bytes, so a file replaced on disk after the read is never
+/// what loads.
+pub fn read_skill_md(path: &Path) -> Result<Vec<u8>, GatewayError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .map_err(|e| GatewayError::Config(format!("read {}: {e}", path.display())))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SKILL_MD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| GatewayError::Config(format!("read {}: {e}", path.display())))?;
+    check_skill_md_size(bytes.len(), path.display())?;
+    Ok(bytes)
+}
+
+/// Refuse a `SKILL.md` of `len` bytes when it is over
+/// [`MAX_SKILL_MD_BYTES`]. `what` names it in the error.
+pub fn check_skill_md_size(len: usize, what: impl std::fmt::Display) -> Result<(), GatewayError> {
+    if len as u64 > MAX_SKILL_MD_BYTES {
+        return Err(GatewayError::Config(format!(
+            "{what} is over the {MAX_SKILL_MD_BYTES}-byte SKILL.md limit; refusing it"
+        )));
+    }
+    Ok(())
+}
+
 /// Compute the SHA-256 hash of a file's contents.
 pub fn hash_skill_file(path: &Path) -> Result<Vec<u8>, GatewayError> {
     let content = std::fs::read(path)
@@ -213,8 +245,8 @@ pub fn hash_skill_file(path: &Path) -> Result<Vec<u8>, GatewayError> {
 }
 
 /// Compute the SHA-256 hash that covers the full signable surface of
-/// a skill bundle: the SKILL.md content, and the skill.wasm content
-/// when present.
+/// a skill bundle: the SKILL.md content, given as `skill_md`, and the
+/// skill.wasm content in `skill_dir` when present.
 ///
 /// **Composite layout:** `sha256(SKILL.md_bytes || 0x00 || skill.wasm_bytes)`
 /// when skill.wasm exists; plain `sha256(SKILL.md_bytes)` when it does
@@ -228,12 +260,9 @@ pub fn hash_skill_file(path: &Path) -> Result<Vec<u8>, GatewayError> {
 /// Adding a skill.wasm post-sign or removing one post-sign both
 /// shift the composite and produce `VerifyResult::Invalid` on
 /// verification, which is the intent of the wider scope.
-pub fn hash_skill_bundle(skill_dir: &Path) -> Result<Vec<u8>, GatewayError> {
-    let skill_md = skill_dir.join("SKILL.md");
-    let md_bytes = std::fs::read(&skill_md)
-        .map_err(|e| GatewayError::Config(format!("read {}: {e}", skill_md.display())))?;
+pub fn hash_skill_bundle(skill_dir: &Path, skill_md: &[u8]) -> Result<Vec<u8>, GatewayError> {
     let mut hasher = Sha256::new();
-    hasher.update(&md_bytes);
+    hasher.update(skill_md);
 
     let wasm_path = skill_dir.join("skill.wasm");
     if wasm_path.exists() {
@@ -259,7 +288,7 @@ pub fn sign_skill(skill_dir: &Path, signing_key: &SigningKey) -> Result<String, 
         )));
     }
 
-    let hash = hash_skill_bundle(skill_dir)?;
+    let hash = hash_skill_bundle(skill_dir, &read_skill_md(&skill_md)?)?;
     let signature = signing_key.sign(&hash);
     let sig_hex = hex_encode(&signature.to_bytes());
 
@@ -278,7 +307,8 @@ pub fn sign_skill(skill_dir: &Path, signing_key: &SigningKey) -> Result<String, 
 }
 
 /// Verify a skill's signature against `SKILL.pub` bundled in the skill
-/// directory itself.
+/// directory itself. `skill_md` is the `SKILL.md` content to check, as
+/// read once by [`read_skill_md`]; the file on disk is not read again.
 ///
 /// **Trust model:** this is *self-signed* verification — the public key
 /// comes from the same directory whose contents it is verifying. Anyone
@@ -292,7 +322,10 @@ pub fn sign_skill(skill_dir: &Path, signing_key: &SigningKey) -> Result<String, 
 /// "self-signed" rather than "valid" — `VerifyResult::Valid` here means
 /// "the bundle's signature checks against the bundle's own key", not
 /// "the bundle came from a trusted publisher".
-pub fn verify_skill_self_signed(skill_dir: &Path) -> Result<VerifyResult, GatewayError> {
+pub fn verify_skill_self_signed(
+    skill_dir: &Path,
+    skill_md: &[u8],
+) -> Result<VerifyResult, GatewayError> {
     let sig_path = skill_dir.join("SKILL.sig");
     let key_path = skill_dir.join("SKILL.pub");
 
@@ -300,7 +333,7 @@ pub fn verify_skill_self_signed(skill_dir: &Path) -> Result<VerifyResult, Gatewa
         return Ok(VerifyResult::Unsigned);
     }
 
-    let hash = hash_skill_bundle(skill_dir)?;
+    let hash = hash_skill_bundle(skill_dir, skill_md)?;
 
     let sig_hex = std::fs::read_to_string(&sig_path)
         .map_err(|e| GatewayError::Config(format!("read sig: {e}")))?;
@@ -390,13 +423,18 @@ pub fn generate_signing_keypair() -> (String, String) {
 /// the registry index's `signer_key` field is no longer the
 /// trust-anchor on its own. When the bundled root is empty, the
 /// delegation field is ignored and the legacy trust path applies.
+///
+/// `skill_md` is the `SKILL.md` content to check; the file on disk is
+/// not read.
 pub fn verify_skill_with_expected_key(
     skill_dir: &Path,
+    skill_md: &[u8],
     expected_sig_hex: &str,
     expected_key_hex: &str,
 ) -> Result<VerifyResult, GatewayError> {
     verify_skill_with_expected_key_and_delegation(
         skill_dir,
+        skill_md,
         expected_sig_hex,
         expected_key_hex,
         None,
@@ -410,12 +448,13 @@ pub fn verify_skill_with_expected_key(
 /// rebuilding the binary.
 pub fn verify_skill_with_expected_key_and_delegation(
     skill_dir: &Path,
+    skill_md: &[u8],
     expected_sig_hex: &str,
     expected_key_hex: &str,
     delegation_sig_hex: Option<&str>,
     bundled_root: Option<&VerifyingKey>,
 ) -> Result<VerifyResult, GatewayError> {
-    let hash = hash_skill_bundle(skill_dir)?;
+    let hash = hash_skill_bundle(skill_dir, skill_md)?;
 
     let sig_bytes = hex_decode(expected_sig_hex.trim())
         .map_err(|e| GatewayError::Config(format!("decode sig: {e}")))?;
@@ -486,8 +525,12 @@ pub fn verify_skill_with_expected_key_and_delegation(
 ///   signer key to be delegated.
 /// - `Valid`: the signer is delegated by `root` and the bundle
 ///   signature verifies under the signer key.
+///
+/// `skill_md` is the `SKILL.md` content to check, as read once by
+/// [`read_skill_md`]; the file on disk is not read again.
 pub fn verify_skill_delegated(
     skill_dir: &Path,
+    skill_md: &[u8],
     root: &VerifyingKey,
 ) -> Result<VerifyResult, GatewayError> {
     let sig_path = skill_dir.join("SKILL.sig");
@@ -507,6 +550,7 @@ pub fn verify_skill_delegated(
     };
     verify_skill_with_expected_key_and_delegation(
         skill_dir,
+        skill_md,
         sig_hex.trim(),
         key_hex.trim(),
         deleg_hex.as_deref().map(str::trim),
@@ -608,6 +652,11 @@ mod tests {
     use rand::Rng;
     use tempfile::TempDir;
 
+    /// The bundle's `SKILL.md` as the loader reads it.
+    fn md(skill_dir: &Path) -> Vec<u8> {
+        read_skill_md(&skill_dir.join("SKILL.md")).unwrap()
+    }
+
     fn random_signing_key() -> SigningKey {
         let mut secret = [0u8; 32];
         rand::rng().fill_bytes(&mut secret);
@@ -631,10 +680,48 @@ mod tests {
         assert!(skill_dir.join("SKILL.sig").exists());
         assert!(skill_dir.join("SKILL.pub").exists());
 
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Valid { .. } => {}
             other => panic!("expected Valid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn verification_covers_the_bytes_given_not_the_file_on_disk() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("swap");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: swap\n---\nsigned").unwrap();
+        sign_skill(&skill_dir, &random_signing_key()).unwrap();
+
+        // Read once, then the file is replaced: the bytes read still verify.
+        let read = md(&skill_dir);
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: swap\n---\nswapped").unwrap();
+        assert!(matches!(
+            verify_skill_self_signed(&skill_dir, &read).unwrap(),
+            VerifyResult::Valid { .. }
+        ));
+
+        // Bytes that differ from the signed content do not, whatever is on disk.
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: swap\n---\nsigned").unwrap();
+        assert_eq!(
+            verify_skill_self_signed(&skill_dir, b"---\nname: swap\n---\nswapped").unwrap(),
+            VerifyResult::Invalid
+        );
+    }
+
+    #[test]
+    fn a_skill_md_over_the_limit_is_refused_and_one_at_it_is_read_whole() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("SKILL.md");
+        let limit = usize::try_from(MAX_SKILL_MD_BYTES).unwrap();
+
+        std::fs::write(&path, vec![b'a'; limit]).unwrap();
+        assert_eq!(read_skill_md(&path).unwrap().len(), limit);
+
+        std::fs::write(&path, vec![b'a'; limit + 1]).unwrap();
+        let err = read_skill_md(&path).unwrap_err();
+        assert!(err.to_string().contains("SKILL.md limit"), "{err}");
     }
 
     #[test]
@@ -644,7 +731,7 @@ mod tests {
         std::fs::create_dir(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "---\nname: test\n---\nbody").unwrap();
 
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Unsigned => {}
             other => panic!("expected Unsigned, got {other:?}"),
         }
@@ -663,7 +750,7 @@ mod tests {
         // Tamper with the content
         std::fs::write(skill_dir.join("SKILL.md"), "TAMPERED content").unwrap();
 
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
@@ -684,7 +771,7 @@ mod tests {
         let pub_hex = hex_encode(&key2.verifying_key().to_bytes());
         std::fs::write(skill_dir.join("SKILL.pub"), &pub_hex).unwrap();
 
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
@@ -729,6 +816,7 @@ mod tests {
         // Happy path: delegation valid, skill signature valid.
         let result = verify_skill_with_expected_key_and_delegation(
             &skill_dir,
+            &md(&skill_dir),
             &skill_sig_hex,
             &signer_pub_hex,
             Some(&delegation_hex),
@@ -740,6 +828,7 @@ mod tests {
         // Missing delegation when root is present → Invalid.
         let result = verify_skill_with_expected_key_and_delegation(
             &skill_dir,
+            &md(&skill_dir),
             &skill_sig_hex,
             &signer_pub_hex,
             None,
@@ -752,6 +841,7 @@ mod tests {
         let other_root = random_signing_key().verifying_key();
         let result = verify_skill_with_expected_key_and_delegation(
             &skill_dir,
+            &md(&skill_dir),
             &skill_sig_hex,
             &signer_pub_hex,
             Some(&delegation_hex),
@@ -763,6 +853,7 @@ mod tests {
         // No root configured → legacy path; delegation field ignored.
         let result = verify_skill_with_expected_key_and_delegation(
             &skill_dir,
+            &md(&skill_dir),
             &skill_sig_hex,
             &signer_pub_hex,
             None,
@@ -797,7 +888,7 @@ mod tests {
         sig_bytes[63] = 0xff;
         std::fs::write(&sig_path, hex_encode(&sig_bytes)).unwrap();
 
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
@@ -817,7 +908,8 @@ mod tests {
         sign_skill(&skill_dir, &random_signing_key()).unwrap();
         std::fs::write(skill_dir.join("SKILL.sig"), NON_ASCII_HEX).unwrap();
 
-        let err = verify_skill_self_signed(&skill_dir).expect_err("non-ASCII SKILL.sig");
+        let err =
+            verify_skill_self_signed(&skill_dir, &md(&skill_dir)).expect_err("non-ASCII SKILL.sig");
         assert!(format!("{err}").contains("non-ASCII hex string"), "{err}");
     }
 
@@ -831,8 +923,14 @@ mod tests {
         let sig_hex = sign_skill(&skill_dir, &signing_key).unwrap();
         let key_hex = hex_encode(&signing_key.verifying_key().to_bytes());
 
-        assert!(verify_skill_with_expected_key(&skill_dir, NON_ASCII_HEX, &key_hex).is_err());
-        assert!(verify_skill_with_expected_key(&skill_dir, &sig_hex, NON_ASCII_HEX).is_err());
+        assert!(
+            verify_skill_with_expected_key(&skill_dir, &md(&skill_dir), NON_ASCII_HEX, &key_hex)
+                .is_err()
+        );
+        assert!(
+            verify_skill_with_expected_key(&skill_dir, &md(&skill_dir), &sig_hex, NON_ASCII_HEX)
+                .is_err()
+        );
     }
 
     #[test]
@@ -861,13 +959,13 @@ mod tests {
         delegate_sign_skill(&dir, &signer, &root).unwrap();
         assert!(dir.join("SKILL.deleg").exists());
 
-        match verify_skill_delegated(&dir, &root.verifying_key()).unwrap() {
+        match verify_skill_delegated(&dir, &md(&dir), &root.verifying_key()).unwrap() {
             VerifyResult::Valid { .. } => {}
             other => panic!("expected Valid under matching root, got {other:?}"),
         }
         let other = random_signing_key();
         assert_eq!(
-            verify_skill_delegated(&dir, &other.verifying_key()).unwrap(),
+            verify_skill_delegated(&dir, &md(&dir), &other.verifying_key()).unwrap(),
             VerifyResult::Invalid,
             "a delegation by a different root must not verify"
         );
@@ -961,7 +1059,7 @@ mod tests {
 
         sign_skill(&skill_dir, &signing_key).unwrap();
 
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Valid { signer } => {
                 assert_eq!(signer.len(), 64);
             }
@@ -979,7 +1077,9 @@ mod tests {
         sign_skill(&skill_dir, &signing).unwrap();
         let sig_hex = std::fs::read_to_string(skill_dir.join("SKILL.sig")).unwrap();
         let key_hex = hex_encode(&signing.verifying_key().to_bytes());
-        match verify_skill_with_expected_key(&skill_dir, sig_hex.trim(), &key_hex).unwrap() {
+        match verify_skill_with_expected_key(&skill_dir, &md(&skill_dir), sig_hex.trim(), &key_hex)
+            .unwrap()
+        {
             VerifyResult::Valid { .. } => {}
             other => panic!("expected Valid, got {other:?}"),
         }
@@ -996,7 +1096,14 @@ mod tests {
         let sig_hex = std::fs::read_to_string(skill_dir.join("SKILL.sig")).unwrap();
         let signing_b = random_signing_key();
         let other_key_hex = hex_encode(&signing_b.verifying_key().to_bytes());
-        match verify_skill_with_expected_key(&skill_dir, sig_hex.trim(), &other_key_hex).unwrap() {
+        match verify_skill_with_expected_key(
+            &skill_dir,
+            &md(&skill_dir),
+            sig_hex.trim(),
+            &other_key_hex,
+        )
+        .unwrap()
+        {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
@@ -1015,7 +1122,7 @@ mod tests {
         std::fs::create_dir(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), b"---\nname: x\n---\nbody").unwrap();
 
-        let composite = hash_skill_bundle(&skill_dir).unwrap();
+        let composite = hash_skill_bundle(&skill_dir, &md(&skill_dir)).unwrap();
         let md_only = hash_skill_file(&skill_dir.join("SKILL.md")).unwrap();
         assert_eq!(
             composite, md_only,
@@ -1035,7 +1142,7 @@ mod tests {
 
         let signing = random_signing_key();
         sign_skill(&skill_dir, &signing).unwrap();
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Valid { .. } => {}
             other => panic!("expected Valid, got {other:?}"),
         }
@@ -1058,7 +1165,7 @@ mod tests {
         // Tamper: swap the wasm bytes without re-signing.
         std::fs::write(skill_dir.join("skill.wasm"), b"tampered-wasm").unwrap();
 
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid after wasm swap, got {other:?}"),
         }
@@ -1080,7 +1187,7 @@ mod tests {
         // Drop a wasm into the directory without re-signing.
         std::fs::write(skill_dir.join("skill.wasm"), b"injected").unwrap();
 
-        match verify_skill_self_signed(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir, &md(&skill_dir)).unwrap() {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid after wasm injection, got {other:?}"),
         }
@@ -1104,7 +1211,7 @@ mod tests {
         }
     }
 
-    fn read_skill_md(dir: &Path) -> impl Fn(&SkillEntry) -> Result<Vec<u8>, GatewayError> + '_ {
+    fn index_skill_md(dir: &Path) -> impl Fn(&SkillEntry) -> Result<Vec<u8>, GatewayError> + '_ {
         move |_| {
             std::fs::read(dir.join("SKILL.md")).map_err(|e| GatewayError::Config(e.to_string()))
         }
@@ -1117,7 +1224,7 @@ mod tests {
         let mut index = SkillIndex {
             skills: vec![published_entry(tmp.path(), &random_signing_key())],
         };
-        sign_index(&mut index, &root, read_skill_md(tmp.path())).unwrap();
+        sign_index(&mut index, &root, index_skill_md(tmp.path())).unwrap();
 
         let entry = &index.skills[0];
         let digest = hex_encode(&Sha256::digest(
@@ -1129,6 +1236,7 @@ mod tests {
         let verify = |bundled: &VerifyingKey| {
             verify_skill_with_expected_key_and_delegation(
                 tmp.path(),
+                &md(tmp.path()),
                 entry.signature.as_deref().unwrap(),
                 entry.signer_key.as_deref().unwrap(),
                 entry.signer_key_delegation.as_deref(),
@@ -1156,14 +1264,14 @@ mod tests {
         let mut index = SkillIndex {
             skills: vec![unsigned],
         };
-        assert!(sign_index(&mut index, &root, read_skill_md(tmp.path())).is_err());
+        assert!(sign_index(&mut index, &root, index_skill_md(tmp.path())).is_err());
 
         let tmp = TempDir::new().unwrap();
         let mut index = SkillIndex {
             skills: vec![published_entry(tmp.path(), &random_signing_key())],
         };
         std::fs::write(tmp.path().join("SKILL.md"), "tampered").unwrap();
-        assert!(sign_index(&mut index, &root, read_skill_md(tmp.path())).is_err());
+        assert!(sign_index(&mut index, &root, index_skill_md(tmp.path())).is_err());
         assert!(index.skills[0].signer_key_delegation.is_none());
 
         let tmp = TempDir::new().unwrap();
@@ -1172,7 +1280,7 @@ mod tests {
         let mut index = SkillIndex {
             skills: vec![stale],
         };
-        assert!(sign_index(&mut index, &root, read_skill_md(tmp.path())).is_err());
+        assert!(sign_index(&mut index, &root, index_skill_md(tmp.path())).is_err());
     }
 
     #[test]

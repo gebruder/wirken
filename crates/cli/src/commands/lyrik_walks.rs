@@ -550,7 +550,9 @@ mod tests {
                 walk_dir.join("SKILL.pub").exists(),
                 "{walk}: SKILL.pub missing"
             );
-            let result = verify_skill_self_signed(&walk_dir).unwrap();
+            let skill_md =
+                wirken_gateway::skill_registry::read_skill_md(&walk_dir.join("SKILL.md")).unwrap();
+            let result = verify_skill_self_signed(&walk_dir, &skill_md).unwrap();
             assert!(
                 matches!(result, SkillVerifyResult::Valid { .. }),
                 "{walk}: signature did not verify: {result:?}"

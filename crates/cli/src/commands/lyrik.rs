@@ -2451,7 +2451,9 @@ mod tests {
         assert!(lyrik_dir.join("SKILL.sig").exists(), "SKILL.sig missing");
         assert!(lyrik_dir.join("SKILL.pub").exists(), "SKILL.pub missing");
 
-        let result = verify_skill_self_signed(&lyrik_dir).unwrap();
+        let skill_md =
+            wirken_gateway::skill_registry::read_skill_md(&lyrik_dir.join("SKILL.md")).unwrap();
+        let result = verify_skill_self_signed(&lyrik_dir, &skill_md).unwrap();
         assert!(
             matches!(result, SkillVerifyResult::Valid { .. }),
             "signature did not verify under skill_registry::verify_skill_self_signed: {result:?}"

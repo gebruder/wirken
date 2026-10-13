@@ -131,6 +131,7 @@ fn the_script_signs_an_index_that_install_accepts_under_its_root_only() {
         let bundled = parse_bundled_registry_pubkey(bundled_pub_file).unwrap();
         verify_skill_with_expected_key_and_delegation(
             &install_dir,
+            &skill_md,
             entry.signature.as_deref().unwrap(),
             entry.signer_key.as_deref().unwrap(),
             entry.signer_key_delegation.as_deref(),

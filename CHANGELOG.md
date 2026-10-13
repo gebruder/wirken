@@ -12,6 +12,14 @@ tagged.
 
 ### Security
 
+- Skill loading reads `SKILL.md` once and verifies the signature over the
+  bytes it parses. Before, the signature check and the parser each read the
+  file, so a `SKILL.md` replaced between the two reads loaded unverified. The
+  verifiers in `skill_registry` take the `SKILL.md` bytes in place of reading
+  the file. `wirken skills install` verifies the downloaded bytes rather than
+  reading back the file it wrote. A `SKILL.md` over 1 MiB is refused wherever
+  it is read, never truncated.
+
 - Skill frontmatter is parsed with serde-saphyr, a safe-Rust YAML parser,
   in place of serde_yaml and its unmaintained unsafe-libyaml backend
   (RUSTSEC-2024-0449). Booleans are `true` and `false` only, and a

@@ -146,17 +146,21 @@ impl SkillLoader {
 
     /// Load a single SKILL.md file.
     pub fn load_file(path: &Path) -> Result<Skill, AgentError> {
-        // Signature gate runs first, on the raw on-disk bytes. Nothing
-        // below this point parses frontmatter, expands path templating,
-        // or probes required binaries until the bundle's signature has
-        // verified, so unverified content never reaches a parser, a
-        // templating step, or a subprocess spawn. Default-deny on
-        // Invalid / Unsigned is unchanged (see `verify_skill_signature`).
+        // SKILL.md is read once, under the size limit, and the
+        // signature gate runs over those bytes. Nothing below this
+        // point parses frontmatter, expands path templating, or probes
+        // required binaries until they have verified, and what is
+        // parsed is the same bytes, so a file replaced on disk after
+        // the read never loads. Default-deny on Invalid / Unsigned is
+        // unchanged (see `verify_skill_signature`).
         let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
-        verify_skill_signature(skill_root, path)?;
+        let bytes = wirken_gateway::skill_registry::read_skill_md(path)
+            .map_err(|e| AgentError::SkillLoad(e.to_string()))?;
+        verify_skill_signature(skill_root, path, &bytes)?;
 
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| AgentError::SkillLoad(format!("read {}: {e}", path.display())))?;
+        let content = String::from_utf8(bytes).map_err(|e| {
+            AgentError::SkillLoad(format!("read {}: not UTF-8: {e}", path.display()))
+        })?;
 
         let (frontmatter, body) = parse_frontmatter(&content)?;
 
@@ -547,7 +551,14 @@ pub fn envelope_collision_check(
 ///   bundle are both rejected; the unsigned bypass does not apply once
 ///   a root is set, because the operator has opted into requiring
 ///   identity.
-fn verify_skill_signature(skill_dir: &Path, skill_md_path: &Path) -> Result<(), AgentError> {
+///
+/// `skill_md` is the `SKILL.md` content the caller read and will parse;
+/// `skill_md_path` only names it in errors.
+fn verify_skill_signature(
+    skill_dir: &Path,
+    skill_md_path: &Path,
+    skill_md: &[u8],
+) -> Result<(), AgentError> {
     let data_dir = wirken_gateway::config::default_data_dir();
     let operator_root =
         wirken_gateway::skill_registry::load_registry_root(&data_dir).map_err(|e| {
@@ -562,7 +573,7 @@ fn verify_skill_signature(skill_dir: &Path, skill_md_path: &Path) -> Result<(), 
                 skill_md_path.display()
             ))
         })?;
-    verify_skill_signature_with_root(skill_dir, skill_md_path, operator_root.as_ref())
+    verify_skill_signature_with_root(skill_dir, skill_md_path, skill_md, operator_root.as_ref())
 }
 
 /// Branch logic for [`verify_skill_signature`], split out so the
@@ -572,6 +583,7 @@ fn verify_skill_signature(skill_dir: &Path, skill_md_path: &Path) -> Result<(), 
 fn verify_skill_signature_with_root(
     skill_dir: &Path,
     skill_md_path: &Path,
+    skill_md: &[u8],
     operator_root: Option<&ed25519_dalek::VerifyingKey>,
 ) -> Result<(), AgentError> {
     use wirken_gateway::skill_registry::{
@@ -583,7 +595,7 @@ fn verify_skill_signature_with_root(
         // delegated by it. Default-deny on Invalid and Unsigned; no
         // unsigned bypass on this path.
         Some(root) => {
-            let result = verify_skill_delegated(skill_dir, root).map_err(|e| {
+            let result = verify_skill_delegated(skill_dir, skill_md, root).map_err(|e| {
                 AgentError::SkillLoad(format!(
                     "delegation verification at {} failed: {e}",
                     skill_md_path.display()
@@ -608,7 +620,7 @@ fn verify_skill_signature_with_root(
         }
         // Floor: self-signed verification, unchanged.
         None => {
-            let result = verify_skill_self_signed(skill_dir).map_err(|e| {
+            let result = verify_skill_self_signed(skill_dir, skill_md).map_err(|e| {
                 AgentError::SkillLoad(format!(
                     "signature verification at {} failed: {e}",
                     skill_md_path.display()
@@ -654,6 +666,11 @@ mod root_branch_tests {
         SigningKey::from_bytes(&secret)
     }
 
+    /// The bundle's `SKILL.md` as the loader reads it.
+    fn md(dir: &Path) -> Vec<u8> {
+        wirken_gateway::skill_registry::read_skill_md(&dir.join("SKILL.md")).unwrap()
+    }
+
     fn write_min_skill(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
@@ -680,7 +697,7 @@ mod root_branch_tests {
         let dir = tmp.path().join("s");
         write_min_skill(&dir);
         sign_skill(&dir, &rand_key()).unwrap();
-        verify_skill_signature_with_root(&dir, &dir.join("SKILL.md"), None)
+        verify_skill_signature_with_root(&dir, &dir.join("SKILL.md"), &md(&dir), None)
             .expect("floor accepts self-signed");
     }
 
@@ -696,6 +713,7 @@ mod root_branch_tests {
         let err = verify_skill_signature_with_root(
             &dir,
             &dir.join("SKILL.md"),
+            &md(&dir),
             Some(&root.verifying_key()),
         )
         .expect_err("strict rejects self-signed-only");
@@ -712,8 +730,13 @@ mod root_branch_tests {
         sign_skill(&dir, &signer).unwrap();
         let root = rand_key();
         write_delegation(&dir, &signer, &root);
-        verify_skill_signature_with_root(&dir, &dir.join("SKILL.md"), Some(&root.verifying_key()))
-            .expect("strict accepts a signer delegated by the root");
+        verify_skill_signature_with_root(
+            &dir,
+            &dir.join("SKILL.md"),
+            &md(&dir),
+            Some(&root.verifying_key()),
+        )
+        .expect("strict accepts a signer delegated by the root");
     }
 
     /// Root configured: a delegation by a different root is rejected.
@@ -727,8 +750,34 @@ mod root_branch_tests {
         let root = rand_key();
         let other_root = rand_key();
         write_delegation(&dir, &signer, &other_root);
-        verify_skill_signature_with_root(&dir, &dir.join("SKILL.md"), Some(&root.verifying_key()))
-            .expect_err("strict rejects a delegation signed by a different root");
+        verify_skill_signature_with_root(
+            &dir,
+            &dir.join("SKILL.md"),
+            &md(&dir),
+            Some(&root.verifying_key()),
+        )
+        .expect_err("strict rejects a delegation signed by a different root");
+    }
+}
+
+#[cfg(test)]
+mod size_limit_tests {
+    use super::SkillLoader;
+    use wirken_gateway::skill_registry::MAX_SKILL_MD_BYTES;
+
+    /// An oversized SKILL.md is refused at the read, before the
+    /// signature gate or the parser sees any of it.
+    #[test]
+    fn a_skill_md_over_the_limit_does_not_load() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("big");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut content = b"---\nname: big\n---\n".to_vec();
+        content.resize(usize::try_from(MAX_SKILL_MD_BYTES).unwrap() + 1, b'a');
+        std::fs::write(dir.join("SKILL.md"), content).unwrap();
+
+        let err = SkillLoader::load_file(&dir.join("SKILL.md")).expect_err("over the limit");
+        assert!(err.to_string().contains("SKILL.md limit"), "{err}");
     }
 }
 

@@ -335,7 +335,9 @@ fn every_bundled_skill_ships_a_valid_delegated_signature() {
             continue;
         }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
-        match verify_skill_delegated(&dir, &root).unwrap() {
+        let skill_md =
+            wirken_gateway::skill_registry::read_skill_md(&dir.join("SKILL.md")).unwrap();
+        match verify_skill_delegated(&dir, &skill_md, &root).unwrap() {
             VerifyResult::Valid { .. } => checked += 1,
             other => panic!(
                 "bundled skill '{name}' does not carry a valid signature delegated by the \

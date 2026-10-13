@@ -17,7 +17,9 @@ use wirken_gateway::injection_detect::InjectionDetector;
 use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingDecision, ResolveResult};
 use wirken_gateway::rate_limit::ControlPlaneRateLimiter;
 use wirken_gateway::session::SessionStore;
-use wirken_gateway::skill_registry::{VerifyResult as SkillSignature, verify_skill_self_signed};
+use wirken_gateway::skill_registry::{
+    VerifyResult as SkillSignature, read_skill_md, verify_skill_self_signed,
+};
 use wirken_gateway::sse_approval_registry::{AckResult, SseApprovalRegistry, SseEvent};
 use wirken_mcp_proxy::mcp_config::{McpAuth, McpConfig, McpServerConfig};
 use wirken_vault::CredentialStore;
@@ -4583,7 +4585,9 @@ pub async fn capabilities_snapshot(
         .iter()
         .map(|sk| {
             let dir = sk.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-            let (signature, signer) = skill_signature_word(verify_skill_self_signed(&dir));
+            let (signature, signer) = skill_signature_word(
+                read_skill_md(&sk.path).and_then(|md| verify_skill_self_signed(&dir, &md)),
+            );
             let p = &sk.permissions;
             json!({
                 "name": sk.name,

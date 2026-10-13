@@ -33,7 +33,7 @@ not run `skill.wasm`. Other sibling files in the directory (`README.md`,
 a trailing null in `SKILL.md` cannot be confused with a preceding empty wasm.
 Adding or removing a `skill.wasm` post-sign shifts the composite and produces
 `VerifyResult::Invalid` on the next load. `hash_skill_bundle`,
-`crates/gateway/src/skill_registry.rs:218-233`.
+`crates/gateway/src/skill_registry.rs:247-275`.
 
 **Signing.** `wirken skills sign <dir>` signs the composite hash and writes
 the signature as hex to `SKILL.sig` plus the public key to `SKILL.pub`. The
@@ -52,10 +52,11 @@ like the release key, and the installer writes those files rather than minting
 a signature on the host. See [skills.md](skills.md) for the operator side.
 
 **Verification at install.** `wirken skills install` calls
-`verify_skill_with_expected_key_and_delegation` against the registry-supplied
-`signer_key`. When the binary embeds a non-empty `wirken-registry-pubkey.pub`
-at build time, that key must also carry a `signer_key_delegation` signature by
-the bundled root. `skill_registry.rs:398-458`.
+`verify_skill_with_expected_key_and_delegation` on the downloaded bytes against
+the registry-supplied `signer_key`. When the binary embeds a non-empty
+`wirken-registry-pubkey.pub` at build time, that key must also carry a
+`signer_key_delegation` signature by the bundled root. A download over the
+`SKILL.md` size limit (below) is refused. `skill_registry.rs:415-510`.
 
 **Signing the registry index.** `scripts/sign-skills-index.sh`, which runs
 `wirken skills sign-index`, signs the index offline under the registry root.
@@ -66,9 +67,12 @@ whole index. `wirken-registry-pubkey.pub` and `wirken-mcp-pubkey.pub` ship
 empty, so a build carries no bundled anchor until a root public key is
 committed there.
 
-**Verification at load.** Every `SkillLoader::load_file` runs the gate first,
-on the raw on-disk bytes, before any frontmatter parse, path templating or
-binary probe. It branches on whether an operator registry root is installed:
+**Verification at load.** Every `SkillLoader::load_file` reads `SKILL.md`
+once, refusing a file over 1 MiB (`MAX_SKILL_MD_BYTES`) rather than
+truncating it. The gate runs over those bytes before any frontmatter parse,
+path templating or binary probe, and the parser reads the same bytes, so a
+`SKILL.md` replaced on disk after the read never loads. The gate branches on
+whether an operator registry root is installed:
 
 - **No root (the floor).** `verify_skill_self_signed` against the on-disk
   `SKILL.sig` and `SKILL.pub`. A bundle with no signature is refused unless
@@ -83,8 +87,8 @@ binary probe. It branches on whether an operator registry root is installed:
   apply once a root is set.
 
 Source: `crates/agent/src/skill.rs` (`verify_skill_signature`,
-`verify_skill_signature_with_root`), `skill_registry.rs`
-(`verify_skill_self_signed`, `verify_skill_delegated`, `load_registry_root`).
+`verify_skill_signature_with_root`), `skill_registry.rs` (`read_skill_md`,
+`verify_skill_self_signed`, `verify_skill_delegated`, `load_registry_root`).
 
 **Operator registry root.** `wirken skills trust-root <pubkey-hex>` installs an
 operator-controlled Ed25519 root public key at `<data_dir>/registry-root.pub`.
