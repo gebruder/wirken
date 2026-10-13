@@ -10,6 +10,12 @@ tagged.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-13
+
+The GitHub Actions update #280 (upload-artifact 7.0.2 and download-artifact
+8.0.2, in the release and Scorecard workflows) is deferred again: the release
+workflow runs only on a tag, so this release would be its first test.
+
 ### Security
 
 - `GET /api/status` reports the skill registry root in
@@ -79,11 +85,20 @@ tagged.
   registered `default` agent is refused, with a pointer to `wirken agents
   set`.
 
+### Changed
+
+- `wirken skills trust-root` run without a terminal now needs `--yes` when
+  any installed skill would stop loading under the new root. Without it,
+  the command lists those skills, refuses, and exits 1, where it installed
+  the root and exited 0. A script that installs a root non-interactively
+  passes `--yes` to keep the old result.
+
 ## [2.0.0] - 2026-10-11
 
 The GitHub Actions update #280 (upload-artifact 7.0.2 and download-artifact
-8.0.2, in the release and Scorecard workflows) is deferred to 2.0.1: the release
-workflow runs only on a tag, so this release would be its first test.
+8.0.2, in the release and Scorecard workflows) is deferred to a later release:
+the release workflow runs only on a tag, so this release would be its first
+test.
 
 ### Security
 
