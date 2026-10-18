@@ -10,6 +10,82 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- A Lyrik run's agents may write only under the run's own directory,
+  `.lyrik/state/runs/<run-id>/`. They could write anywhere under `.lyrik/`,
+  including the team's `.lyrik/rubric.md`, `.lyrik/context.md` and
+  `.lyrik/config.json`. The runner hashes those three files at run start and
+  end and fails the run, with a `lyrik.locked_file.changed` row, if one
+  changed. Rubric and context sections a run stages are written to the run's
+  `proposed/` directory; the runner used to join them over the committed
+  files.
+- `wirken lyrik run --run` accepts only `/`-separated components of ASCII
+  letters, digits, `.`, `_` and `-`, none empty, `.` or `..`. The run id names
+  the run's directory and write scope, and a `..` component reached outside
+  it.
+- A Lyrik run refuses to attach a staged skill that grants a tool other than
+  `exec`, `read_file`, `write_file` and `list_files`, any egress, or a
+  credential, so `http_request`, `web_search`, `generate_image` and MCP tools
+  stay unreachable from a run. Semgrep runs with metrics and its update check
+  off.
+- With sandbox `mode: off`, a Lyrik run's agents get no `exec`: an approved
+  command such as `cargo test` would run the target's build scripts on the host
+  with the host's network. A call is refused at the tool gate and recorded,
+  and the step is skipped.
+- The calls an agent makes to summarise messages trimmed from its context were
+  not on the audit chain, for every agent, though each sent up to 2000
+  characters of every trimmed message to the provider. They are now
+  `llm_request` rows with `purpose: compaction_summary`, paired with their
+  response or failure, and their cost is charged to the budget. The Lyrik
+  tool-call probe is on the run's chain too, as `purpose: tool_call_probe`.
+  `wirken sessions verify` counts such rows as unverifiable rather than
+  replaying them.
+- Lyrik reads the target's git state without running anything the
+  repository configures: only `rev-parse`, `ls-tree`, `config --get` and
+  `check-attr`, with fsmonitor off and fetching disabled, and the work tree is
+  compared with HEAD in-process.
+
+### Added
+
+- Lyrik scores against the team's rubric: `--rubric <path>` outside the
+  target, else a committed and unmodified `.lyrik/rubric.md`, else the inline
+  rubric, in single-call and walk mode, with project context in the same order
+  through `--context` and `.lyrik/context.md`. A finding the rubric does not
+  cover is marked `rubric_silent: true`. `findings.json` records `rubric` and
+  `context` as `{source, path, sha256}`.
+- Outside `bench_mode`, `wirken lyrik run` at a terminal shows what the run
+  will do (target state, rubric and context, provider and model, walks and
+  their `exec` commands) and starts only on a yes, recorded on the signed chain
+  as a one-shot approval bound to the sha256 of the summary. Previously a run
+  outside `bench_mode` always stopped; without a terminal it still does.
+- `findings.json` gains, outside the 1.1 contract: `target_sha`,
+  `target_dirty` and `audit_log_ref`; `funnel`, which accounts for every staged
+  finding per walk and merged, and is checked before it is written; and
+  `inference`, the provider, model, number of calls and bytes sent, read back
+  from the run's chain rows. The SARIF report carries the provenance fields and
+  the funnel, and the run prints the funnel and inference.
+- `llm_request` audit rows carry `request_bytes`, the size of the messages and
+  tool definitions the call sent, and `purpose` for calls that are not a turn.
+  Both are optional, and rows written before them read as turns of unknown
+  size.
+
+### Fixed
+
+- The Lyrik runner caps `grade` at 0.5 and holds `framing` to the 1.1 enum
+  before dedup, recording each correction, strip and refusal in the per-run
+  log, so `findings.json` passes `wirken lyrik validate` whatever a walk emits.
+  A stable ID keyed on a stripped framing moves to the first framing kept.
+- `target_dirty` is null, with the reason, where git would convert content,
+  instead of comparing bytes that are not the committed ones; a team rubric or
+  context file under a conversion falls back the same way.
+- `docs/lyrik.example.json` pins the one phase the runner reads,
+  `phases.framing`, to Privatemode, where it pinned scoring to Privatemode and
+  framing to Anthropic, which sent every call to Anthropic.
+- `docs/lyrik.md` describes the runner as built: one model pin per run, no
+  `gates` routing, no exploit phase, the framings it assesses, and the
+  protections a run has on code you don't trust, each with its test.
+
 ## [2.1.0] - 2026-10-13
 
 The GitHub Actions update #280 (upload-artifact 7.0.2 and download-artifact

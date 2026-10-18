@@ -82,7 +82,10 @@ scorers into a consensus, and does not send findings to any delivery channel.
   the configured model through the same dispatch path, with one tool defined
   and a prompt asking the model to call it. Pass emits
   `lyrik.model.tool_calls_supported`; fail aborts before scanner dispatch with
-  the case named.
+  the case named. The probe is on the run's signed chain like every other
+  model call.
+- **Operator sign-off.** Outside `bench_mode` a run starts only on a yes at
+  the terminal, recorded on the signed chain. See [Setup](#setup).
 - **Bundled skill staged per run**, self-signed with a one-shot keypair so the
   loader's signature gate accepts it, which is why `/lyrik` resolves to the
   staged copy regardless of operator state under `<data_dir>/skills/`.
@@ -100,7 +103,7 @@ scorers into a consensus, and does not send findings to any delivery channel.
 - **Audit logs.** A per-run NDJSON `<run>/audit.log` for every dispatch
   decision, plus the signed hash-chained gateway chain for cross-session
   integrity. See [audit-cli.md](audit-cli.md).
-- **Provenance and funnel** on every `findings.json`. See
+- **Provenance, funnel and inference** on every `findings.json`. See
   [Reports and audit](#reports-and-audit).
 - **JSON findings schema** with a reference validator and a SARIF emitter.
 
@@ -108,17 +111,26 @@ scorers into a consensus, and does not send findings to any delivery channel.
 
 1. Install Wirken and configure the provider that `phases.framing` names.
    See [getting-started.md](getting-started.md).
-2. Write `.lyrik/config.json` in the assessed repo with `bench_mode: true`. A
-   run without it exits before dispatch; no sign-off is routed to a channel.
+2. Write `.lyrik/config.json` in the assessed repo. Leave `bench_mode` false;
+   it is for benchmark targets only.
 3. Commit the team's rubric as `.lyrik/rubric.md`, and project context as
    `.lyrik/context.md` if you have one, or pass files outside the repo with
    `--rubric` and `--context`. See
    [Writing the scoring guide](#writing-the-scoring-guide).
-4. Run `wirken lyrik run --target <repo> --run <run-id>`. The run id is one or
-   more `/`-separated components of ASCII letters, digits, `.`, `_` and `-`.
-   The run writes `findings.json` and `audit.log` under
-   `<repo>/.lyrik/state/runs/<run-id>/` and prints the funnel.
-5. The bundled skill does not run Phase 0. When a walk stages context or
+4. Run `wirken lyrik run --target <repo> --run <run-id>` from a terminal. The
+   run id is one or more `/`-separated components of ASCII letters, digits,
+   `.`, `_` and `-`. Before any model call the run shows what it is about to
+   do: the target's HEAD and whether tracked files changed, the rubric and
+   context with their source and sha256, the provider and model, the walks and
+   the commands each may ask to run through `exec`. It then asks
+   `Sign off this run? [y/N]`. A yes is recorded on the signed chain as a
+   one-shot `permission_approved` row whose action key carries the sha256 of
+   the summary shown; anything else, or end of input, is recorded as a
+   `permission_denied` row and the run stops. Without a terminal the run is
+   refused.
+5. The run writes `findings.json` and `audit.log` under
+   `<repo>/.lyrik/state/runs/<run-id>/` and prints the funnel and inference.
+6. The bundled skill does not run Phase 0. When a walk stages context or
    rubric sections, the runner joins them into
    `.lyrik/state/runs/<run-id>/proposed/context.md` and `proposed/rubric.md`
    and prints their paths; it never writes over the committed files.
@@ -218,7 +230,12 @@ walk. An approved command runs in the `exec` sandbox, so the sandbox image
 needs `git` or `cargo` for these walks; the default image has neither. Before
 the first prompt the run asks the sandbox which of the binaries its walks need
 are missing, and names them, so no one approves a command that can only fail.
-With `mode: off` it checks the host `PATH` instead.
+
+With sandbox `mode: off`, `exec` is not available in a run: an approved
+command such as `cargo test` would run the target's build scripts on the host
+with the host's network. The run's skills do not grant it, so a call is
+refused by the tool gate and recorded on the chain, and the step is skipped.
+The sign-off summary, each staged walk and the run's output say so.
 
 Dedup on the merged output: findings sharing `(location.file,
 location.line_start)` collapse to one; `framing` becomes the sorted unique
@@ -237,12 +254,13 @@ Either way a `findings.json` is produced. Two more conditions exit non-zero
 after writing it: a funnel that does not reconcile, and a team-owned file that
 changed during the run.
 
-**`bench_mode`**: defaults false, and a run requires it: without it the
-runner writes a `lyrik.phase_0.signoff` row with `decision:
-"pending_adapter_route"` and exits non-zero before dispatch. When true, the
-runner writes `lyrik.phase_0.signoff` and `lyrik.high_severity_review.signoff`
-rows with `decision: "auto_bench"`, so bench runs are distinguishable after
-the fact. `scoring_disagreement` has no bench handling and no routing; a
+**`bench_mode`**: defaults false. Set it only on benchmark or
+batch-evaluation targets: when true, the run does not ask for a sign-off and
+writes `lyrik.phase_0.signoff` and `lyrik.high_severity_review.signoff` rows
+with `decision: "auto_bench"`, so bench runs are distinguishable after the
+fact. When false, the run asks at the terminal (see [Setup](#setup)); without
+a terminal it writes a `lyrik.phase_0.signoff` row with `decision:
+"pending_adapter_route"` and exits non-zero before dispatch. `scoring_disagreement` has no bench handling and no routing; a
 disagreement is recorded on the finding as `scoring_disagreement: true`.
 
 ## Writing the scoring guide
@@ -267,7 +285,9 @@ The run picks its rubric in this order:
 1. `--rubric <path>`, a file outside the target. A path inside the target is
    refused, since it would skip the check below.
 2. `.lyrik/rubric.md`, when it is committed and its bytes match HEAD. An
-   untracked or modified file is not used; the run prints why and records it.
+   untracked or modified file is not used, nor one git would convert (a
+   filter, LFS, line-ending or encoding conversion), whose bytes cannot be
+   compared with HEAD; the run prints why and records it.
 3. The inline rubric in the bundled `SKILL.md`.
 
 Project context follows the same order with `--context` and
@@ -406,9 +426,11 @@ NDJSON only and are not signed.
 - `target_sha`: HEAD of the repository the target sits in.
 - `target_dirty`: whether any tracked file differs from HEAD in content,
   executable bit or kind, or a checked-out submodule sits at a different
-  commit. Untracked files do not count. Files are compared byte for byte with
-  no filters applied, so a repository that relies on clean filters or
-  line-ending conversion reports dirty.
+  commit. Untracked files do not count. Files are compared byte for byte.
+  Where git would convert content (a clean filter, LFS, line-ending, `ident`
+  or encoding conversion, or `core.autocrlf`), the work-tree bytes are not the
+  committed ones, so no comparison is made: `target_dirty` is null and a
+  `lyrik.provenance.unavailable` row gives the reason.
 - `audit_log_ref`: the run's `audit.log`, relative to the target.
 
 The SARIF report carries all three in its invocation properties. A target
@@ -418,10 +440,78 @@ is recorded.
 
 No program the target repository configures runs on the host. The runner asks
 git only `rev-parse` and `ls-tree`, which read refs, config and objects and
-neither refresh the index nor convert content, with `core.fsmonitor=false`,
-`protocol.allow=never`, no pager and inherited `GIT_*` variables removed, and
-compares the work tree against HEAD in-process. It does not use `git status`
-or `git diff`, which can run a repository's clean filters.
+neither refresh the index nor convert content, and `config --get` and
+`check-attr`, which read config and attribute files, each with
+`core.fsmonitor=false`, `protocol.allow=never`, no pager and inherited `GIT_*`
+variables removed, and compares the work tree against HEAD in-process. It does
+not use `git status` or `git diff`, which can run a repository's clean
+filters.
+
+**Inference.** `findings.json` carries `inference`, and the run prints it at
+the end: `provider`, `model`, `calls` and `request_bytes`, read back from the
+run's own rows on the signed chain, the tool-call probe and any compaction
+summaries included. Each model call is an `llm_request` row naming the
+provider, the model and the size of the messages and tool definitions it sent
+(see [audit-cli.md](audit-cli.md)). `calls` counts distinct requests on the
+chain; a rate-limit retry resends the same request to the same provider and
+appears in the per-run log as `lyrik.dispatch.rate_limited`, not as another
+call.
+
+## Running on code you don't trust
+
+A target is input, and its source, comments, config and git metadata can all
+be written to steer the model or the host. Each protection below is enforced
+by the runner or the gateway, and each has a test that drives the `wirken`
+binary with a scripted model doing what a steered model would.
+
+- **Writes confined to the run's directory.** A run's agents may write only
+  under `.lyrik/state/runs/<run-id>/`; a write to `.lyrik/rubric.md`,
+  `.lyrik/context.md`, `.lyrik/config.json`, another run's directory or the
+  source tree is refused. The runner hashes the three team files at start and
+  end and fails the run if one changed. `lyrik_team_files_stay_locked.rs`.
+- **No network but the model provider.** `http_request`, `web_search`,
+  `generate_image` and MCP tools are not offered to a run's agents; a call to
+  one is refused at the tool gate, recorded on the chain, and the turn carries
+  on. The runner refuses to attach a staged skill that grants any other tool,
+  any egress or a credential, and runs Semgrep with metrics and its update
+  check off. `lyrik_run_reaches_no_network.rs`.
+- **No program the repository configures runs.** Provenance and the team-file
+  check use only the git commands above; an fsmonitor hook and a clean filter
+  set in the target's `.git/config` stay unrun.
+  `lyrik_provenance_runs_nothing_the_repo_configures.rs`.
+- **`exec` only in the sandbox.** With sandbox `mode: off` a run's agents get
+  no `exec`. With the sandbox on, each command goes to the operator first.
+  `lyrik_exec_sandbox_only.rs`.
+- **Operator sign-off on the chain.** Outside `bench_mode` nothing reaches the
+  model until the operator signs off at a terminal; the answer is on the
+  signed chain, bound to the summary shown. `lyrik_signoff.rs`.
+- **Every model call on the chain.** The probe, every turn and every
+  compaction summary is an `llm_request` row with provider, model and size, and
+  `inference` is read back from those rows. `lyrik_inference_matches_the_chain.rs`.
+
+All six run with:
+
+```bash
+cargo test -p wirken-cli \
+  --test lyrik_team_files_stay_locked \
+  --test lyrik_run_reaches_no_network \
+  --test lyrik_provenance_runs_nothing_the_repo_configures \
+  --test lyrik_exec_sandbox_only \
+  --test lyrik_signoff \
+  --test lyrik_inference_matches_the_chain
+```
+
+They need `git` on `PATH`, and the sign-off tests need util-linux `script`
+to give the run a terminal, so they run on Linux. None needs Docker or a
+network.
+
+What none of this prevents is a model that reports the wrong thing. Findings
+are model output: a model steered by text in the target, or simply wrong, can
+leave out a real bug or report one that is not there. The citation gate checks
+that a cited file and line exist and the funnel accounts for every finding the
+model staged, but nothing checks for a finding the model did not stage. An
+approved `exec` command also still runs the target's code, inside the
+sandbox.
 
 ## When markdown is not enough
 
