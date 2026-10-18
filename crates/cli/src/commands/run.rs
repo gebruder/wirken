@@ -6294,9 +6294,26 @@ mod proxy_handoff_tests {
         );
         assert_eq!(entries[GATEWAY_TOKEN_ENTRY].expose(), "real-token");
         assert_eq!(entries["linear-token"].expose(), "lin_abc");
+        // The value is a credential, fixture or not, so these messages
+        // never format it.
         let oauth = entries.remove("notion-oauth").unwrap();
-        assert!(oauth.expose().contains("\"access_token\":\"AT\""));
-        assert!(!oauth.expose().contains("RT-secret"), "{}", oauth.expose());
+        let value: serde_json::Value =
+            serde_json::from_str(oauth.expose()).expect("the handed OAuth value is JSON");
+        assert!(
+            value["access_token"] == "AT",
+            "the access token reaches the proxy"
+        );
+        assert!(
+            value
+                .get("refresh_token")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty),
+            "the refresh token stays in the gateway"
+        );
+        assert!(
+            !oauth.expose().contains("RT-secret"),
+            "the refresh token appears nowhere in the handed value"
+        );
     }
 }
 
