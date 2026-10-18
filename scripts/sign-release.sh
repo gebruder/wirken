@@ -1,5 +1,6 @@
 #!/bin/sh
-# Sign a Wirken release's checksums.sha256 with the offline Ed25519 key.
+# Sign a Wirken release's checksums.sha256 and releases.json with the
+# offline Ed25519 key.
 #
 # Usage:
 #   WIRKEN_SIGNING_KEY=/secure/path/wirken-release-signing \
@@ -8,10 +9,18 @@
 # Input:
 #   - ./checksums.sha256 in the current directory (downloaded from the
 #     draft release produced by the release workflow).
+#   - ./releases.json in the current directory, built by
+#     scripts/build-releases-json.py and reviewed.
 #   - WIRKEN_SIGNING_KEY env var pointing at the private key file.
 #
 # Output:
-#   - ./checksums.sha256.sig next to the input. Upload to the release.
+#   - ./checksums.sha256.sig, signed under namespace `file`, which
+#     install.sh verifies.
+#   - ./releases.json.sig, signed under namespace
+#     `wirken-release-manifest`, which `wirken update` verifies. The
+#     namespaces differ so neither signature can stand in for the
+#     other.
+#   Upload all three to the release.
 #
 # Never commits the private key.
 
@@ -63,6 +72,17 @@ if [ ! -f checksums.sha256 ]; then
     exit 1
 fi
 
+if [ ! -f releases.json ]; then
+    echo "Error: ./releases.json not found." >&2
+    echo "Build it with scripts/build-releases-json.py and review it first." >&2
+    exit 1
+fi
+
+if ! grep -q "\"version\": \"${VERSION#v}\"" releases.json; then
+    echo "Error: releases.json has no entry for ${VERSION#v}." >&2
+    exit 1
+fi
+
 if ! command -v ssh-keygen >/dev/null 2>&1; then
     echo "Error: ssh-keygen not found. OpenSSH 8.1+ is required." >&2
     exit 1
@@ -80,4 +100,18 @@ if [ ! -f checksums.sha256.sig ]; then
 fi
 
 echo "Wrote checksums.sha256.sig"
-echo "Next: upload checksums.sha256.sig to the draft release for ${VERSION}, then publish."
+
+echo "Signing releases.json for ${VERSION}"
+ssh-keygen -Y sign \
+    -n wirken-release-manifest \
+    -f "$WIRKEN_SIGNING_KEY" \
+    releases.json
+
+if [ ! -f releases.json.sig ]; then
+    echo "Error: ssh-keygen did not produce releases.json.sig" >&2
+    exit 1
+fi
+
+echo "Wrote releases.json.sig"
+echo "Next: verify both against KEYS, upload checksums.sha256.sig, releases.json and"
+echo "releases.json.sig to the draft release for ${VERSION}, then publish."
