@@ -50,6 +50,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "sshsig_verify"
+path = "fuzz_targets/sshsig_verify.rs"
+test = false
+doc = false
+bench = false
+
 # Fuzzers are built with debug assertions so an overflow or a violated
 # `debug_assert!` in the code under test is a crash rather than a
 # silent wrap, and with symbols so a crash names a frame.
