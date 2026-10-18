@@ -45,6 +45,20 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "A permitted-subtree DNS name constraint was accepted for a certificate asserting a wildcard name. Same precondition as RUSTSEC-2026-0098: reachable only after signature verification and only against a name-constrained certificate a trusted CA misissued. Revisit on serenity with rustls 0.23." },
     { id = "RUSTSEC-2026-0104", reason = "Panic in BorrowedCertRevocationList::from_der / OwnedCertRevocationList::from_der on an empty BIT STRING in onlySomeReasons, reachable before the CRL signature is verified. The advisory states applications that do not use CRLs are unaffected, and nothing on this path parses one: `CertRevocationList` and `from_der` are never called through serenity, tokio-tungstenite, tungstenite or tokio-rustls. Revisit if serenity configures revocation checking, or on serenity with rustls 0.23." },
 
+    # rustls 0.22.4, on the same path as the rustls-webpki entries above:
+    #   rustls 0.22.4 -> tokio-rustls 0.25.0 / tungstenite 0.21.0
+    #     -> tokio-tungstenite 0.21.0 -> serenity 0.12.5
+    #     -> wirken-adapter-discord -> wirken-cli
+    # Added 2026-10-18. The rustls 0.23 instance is on 0.23.46, past both
+    # patched ranges. rustls 0.22.4 is in the v2.1.0 Cargo.lock, so this
+    # exposure predates 2.2.0. The Discord adapter runs in its own OS
+    # process, `wirken adapter discord`, spawned by the gateway.
+    # serenity 0.12.5 (2025-12-20) is the latest release and
+    # tokio-tungstenite 0.21 has no compatible update off rustls 0.22, so
+    # both are revisitable on a serenity release off rustls 0.22.
+    { id = "RUSTSEC-2026-0346", reason = "Derived Debug impls on Tls12ClientSessionValue and Tls13ClientSessionValue print the TLS 1.2 master secret or TLS 1.3 resumption PSK, which leaks only through a custom ClientSessionStore that formats session values with Debug; the built-in session cache is redacted and unaffected. Not reachable on this path: tungstenite 0.21.0 and tokio-tungstenite 0.21.0 build their client config with ClientConfig::builder().with_root_certificates(..).with_no_client_auth(), which keeps the built-in cache, and ClientSessionStore appears in zero files across serenity 0.12.5, tokio-tungstenite 0.21.0, tungstenite 0.21.0 and tokio-rustls 0.25.0. Revisit on a serenity release off rustls 0.22." },
+    { id = "RUSTSEC-2026-0349", reason = "The client records the key-exchange group from an unauthenticated ServerHello and predicts it on later connections to that name, so an attacker can steer it off a post-quantum hybrid group (X25519MLKEM768) to classical X25519, losing post-quantum confidentiality. Not reachable on this path: rustls 0.22.4 is built here with the ring provider only, whose groups are X25519, secp256r1 and secp384r1, and the 0.22.4 source has no ML-KEM or Kyber group, so every connection on this path is classical already and there is no hybrid group to lose. Revisit on a serenity release off rustls 0.22." },
+
     # rsa 0.9.10, reached only by:
     #   wirken-agent -> tinfoil v0.1.1 (git) -> sev 7.1.0 -> rsa
     #   wirken-agent -> tinfoil v0.1.1 (git) -> rsa
@@ -56,6 +70,30 @@ ignore = [
     #   aquamarine 0.6.0 (proc-macro) -> teloxide 0.17.0
     #     -> wirken-adapter-telegram -> wirken-cli
     { id = "RUSTSEC-2026-0173", reason = "Unmaintained advisory, informational rather than a vulnerability. proc-macro-error2 is a proc-macro crate, so it runs in the compiler and contributes no code to the shipped binary. teloxide 0.17 is the current release and there is no version of it without aquamarine. Revisit when teloxide or aquamarine drops the dependency." },
+
+    # zip 8.6.0, used only by wirken-gateway (`cargo tree -i zip` with all
+    # features shows no other dependent), in
+    # crates/gateway/src/imported_archive.rs. Added 2026-10-18. That file
+    # opens archives with ZipArchive::new and hands members to callers
+    # through a capped reader over by_index_raw and by_name; ZipWriter
+    # appears only in its tests. It calls neither ZipArchive::extract nor
+    # ZipStreamReader::extract, the functions all three advisories concern,
+    # and writes no file or link from an archive entry. All three are
+    # revisitable when zip 9.0.0 is adopted through #287.
+    { id = "RUSTSEC-2026-0367", reason = "SUID, SGID and sticky bits from external_attributes are kept when ZipArchive::extract or the stream extraction API writes files. Wirken calls neither; crates/gateway/src/imported_archive.rs reads members through a reader and creates no file from them. Revisit when zip 9.0.0 is adopted (#287)." },
+    { id = "RUSTSEC-2026-0368", reason = "ZipArchive::extract creates symbolic links whose targets point outside the destination directory. Wirken never calls extract and creates no link from an archive entry; crates/gateway/src/imported_archive.rs reads member contents through a reader. Revisit when zip 9.0.0 is adopted (#287)." },
+    { id = "RUSTSEC-2026-0369", reason = "ZipStreamReader::extract and ZipArchive::extract apply Unix permissions through extracted symlinks without confining the target. Wirken uses no ZipStreamReader and calls no extract; crates/gateway/src/imported_archive.rs sets no permission from an archive. Revisit when zip 9.0.0 is adopted (#287)." },
+
+    # zbus_names 4.3.1, zvariant 5.10.0 and zvariant_derive 5.10.0, reached
+    # only by:
+    #   zbus 5.14.0 -> secret-service 5.2.0 -> wirken-vault (keychain-linux)
+    # Added 2026-10-18. keychain-linux is optional and off in default and
+    # release builds. secret-service 5.2.0 is its latest release. Each
+    # crate was merged into zbus 6.0.0, so all three are revisitable when
+    # secret-service releases on zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "Unmaintained advisory, not a known vulnerability: zvariant was merged into zbus 6.0.0 as its wire module. Reached only through zbus 5.14.0 under secret-service 5.2.0, behind wirken-vault's optional keychain-linux feature. Revisit when secret-service releases on zbus 6." },
+    { id = "RUSTSEC-2026-0371", reason = "Unmaintained advisory, not a known vulnerability: zbus_names was merged into zbus 6.0.0 as its names module. Reached only through zbus 5.14.0 under secret-service 5.2.0, behind wirken-vault's optional keychain-linux feature. Revisit when secret-service releases on zbus 6." },
+    { id = "RUSTSEC-2026-0372", reason = "Unmaintained advisory, not a known vulnerability: zvariant_derive's macros moved into zbus 6.0.0. A proc-macro crate, so it contributes no code to a binary, reached only through zvariant 5.10.0 and zbus 5.14.0 under secret-service 5.2.0, behind wirken-vault's optional keychain-linux feature. Revisit when secret-service releases on zbus 6." },
 ]
 
 [licenses]
