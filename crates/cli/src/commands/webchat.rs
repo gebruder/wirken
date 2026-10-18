@@ -6293,6 +6293,8 @@ mod tests {
                     agent_id: agent(),
                     credential_id: Some("provider-key".into()),
                     sender_id: Some("webchat-user".into()),
+                    request_bytes: None,
+                    purpose: Default::default(),
                 },
             ),
             (

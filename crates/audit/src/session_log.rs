@@ -318,6 +318,31 @@ pub enum ToolsHashVersion {
     V2,
 }
 
+/// What a model call on [`SessionEvent::LlmRequest`] was for.
+///
+/// `Turn` is a turn of the conversation the session records, the
+/// call the verifier replays. The others are calls made alongside the
+/// conversation, recorded so every call a session makes is on its
+/// chain, and not replayed. `Default` is `Turn`, which is what every
+/// row written before this field existed was.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmCallPurpose {
+    #[default]
+    Turn,
+    /// Summarising messages the context engine trimmed.
+    CompactionSummary,
+    /// A one-tool probe that the model emits structured tool calls,
+    /// made before a run touches its target.
+    ToolCallProbe,
+}
+
+impl LlmCallPurpose {
+    pub fn is_turn(&self) -> bool {
+        matches!(self, LlmCallPurpose::Turn)
+    }
+}
+
 /// What noticed that a stored grant had lapsed, on
 /// [`SessionEvent::PermissionGrantExpired`].
 ///
@@ -755,6 +780,16 @@ pub enum SessionEvent {
         /// deserialize so pre-1.12.0 rows read cleanly.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
+        /// Bytes of the JSON-serialized messages plus tool definitions
+        /// the call sends: exactly what `messages_hash` and
+        /// `tools_hash` cover. The provider's wire body wraps them in
+        /// its own envelope. `None` on rows written before the field
+        /// existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_bytes: Option<u64>,
+        /// What the call was for. Omitted for a turn.
+        #[serde(default, skip_serializing_if = "LlmCallPurpose::is_turn")]
+        purpose: LlmCallPurpose,
     },
     /// LLM response metadata.
     ///

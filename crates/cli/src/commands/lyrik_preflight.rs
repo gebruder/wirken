@@ -63,12 +63,26 @@ impl FailCase {
 
 const PROBE_TOOL_NAME: &str = "probe_ping";
 
+/// Where the probe's request and its outcome go: the run's signed
+/// chain, so the probe is on it like every other model call the run
+/// makes.
+pub struct ProbeRecord<'a> {
+    pub log: &'a dyn wirken_audit::SessionLog,
+    pub handle: &'a wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    pub agent_id: String,
+    pub credential_id: Option<String>,
+    pub leak_matcher: &'a wirken_gateway::leak::LeakMatcher,
+}
+
 /// Run the probe and classify the response. Errors that are not a
 /// classification verdict (network failure, malformed response,
-/// non-4xx provider error) propagate as `Err`.
+/// non-4xx provider error) propagate as `Err`. With `record`, the
+/// request and its response or failure are appended to the chain as
+/// a `tool_call_probe` call.
 pub async fn probe_tool_calling(
     llm_config: &LlmConfig,
     api_key: Option<&str>,
+    record: Option<&ProbeRecord<'_>>,
 ) -> Result<ProbeOutcome> {
     let client = LlmClient::new(llm_config.clone())
         .map_err(|e| anyhow::anyhow!("preflight: build llm client: {e}"))?;
@@ -91,7 +105,54 @@ pub async fn probe_tool_calling(
         }),
     }];
 
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    if let Some(r) = record {
+        r.log.append(
+            r.handle,
+            wirken_audit::TrustLevel::System,
+            wirken_agent::runtime::side_call_request(
+                llm_config,
+                &request_id,
+                &messages,
+                &tools,
+                wirken_audit::LlmCallPurpose::ToolCallProbe,
+                r.agent_id.clone(),
+                r.credential_id.clone(),
+                None,
+            ),
+        )?;
+    }
+    let started = std::time::Instant::now();
     let result = client.complete(&messages, &tools, api_key).await;
+    if let Some(r) = record {
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let row = match &result {
+            Ok((response, usage)) => {
+                wirken_agent::runtime::side_call_response(
+                    llm_config,
+                    &request_id,
+                    response,
+                    *usage,
+                    latency_ms,
+                    r.agent_id.clone(),
+                    r.credential_id.clone(),
+                    None,
+                )
+                .0
+            }
+            Err(e) => wirken_agent::runtime::failed_call_row(
+                &request_id,
+                e,
+                latency_ms,
+                r.leak_matcher,
+                r.agent_id.clone(),
+                r.credential_id.clone(),
+                None,
+            ),
+        };
+        r.log
+            .append(r.handle, wirken_audit::TrustLevel::System, row)?;
+    }
     classify(result)
 }
 

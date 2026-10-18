@@ -377,6 +377,13 @@ pub async fn run(
     if let Some(funnel) = &funnel {
         println!("funnel: {}", serde_json::to_string_pretty(funnel)?);
     }
+    let inference = std::fs::read_to_string(&findings_dest)
+        .ok()
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+        .and_then(|b| b.get("inference").cloned());
+    if let Some(inference) = inference {
+        println!("inference: {}", serde_json::to_string_pretty(&inference)?);
+    }
     for name in PROPOSED_FILES {
         let proposed = run_dir.join("proposed").join(name);
         if proposed.is_file() {
@@ -729,9 +736,9 @@ impl RecoveryObserver for LyrikRecoveryObserver {
 
 /// Top-level findings.json fields outside the 1.1 contract that the
 /// runner records for the whole run: provenance (`target_sha`,
-/// `target_dirty`, `audit_log_ref`) and what it scored against
-/// (`rubric`, `context`). The schema allows extra fields at both
-/// levels.
+/// `target_dirty`, `audit_log_ref`), what it scored against
+/// (`rubric`, `context`) and where its code went (`inference`). The
+/// schema allows extra fields at both levels.
 type Extras = serde_json::Map<String, serde_json::Value>;
 
 /// The provenance fields: HEAD and tracked-file state of the target
@@ -745,6 +752,63 @@ fn provenance_extras(provenance: &super::lyrik_git::Provenance, run_id: &str) ->
         serde_json::json!(format!(".lyrik/state/runs/{run_id}/audit.log")),
     );
     extras
+}
+
+/// `extras` plus `inference`, read back from the run's chain: every
+/// `LlmRequest` row after `mark`, the tool-call probe and any
+/// compaction summaries included.
+fn with_inference(
+    extras: &Extras,
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    mark: Option<u64>,
+) -> Result<Extras> {
+    let mut out = extras.clone();
+    out.insert("inference".into(), inference_from_chain(log, handle, mark)?);
+    Ok(out)
+}
+
+/// Where the run's code went, from its chain rows: the provider and
+/// model each call named (a list if they ever differ), how many
+/// calls, and the bytes they sent (`null` if any row predates the
+/// field).
+fn inference_from_chain(
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    mark: Option<u64>,
+) -> Result<serde_json::Value> {
+    let rows = log
+        .get_since(handle, mark.map_or(0, |m| m + 1))
+        .context("read the run's chain rows")?;
+    let mut providers = std::collections::BTreeSet::new();
+    let mut models = std::collections::BTreeSet::new();
+    let mut calls = 0u64;
+    let mut bytes = Some(0u64);
+    for row in rows {
+        if let wirken_audit::SessionEvent::LlmRequest {
+            provider,
+            model,
+            request_bytes,
+            ..
+        } = row.event
+        {
+            calls += 1;
+            providers.insert(provider);
+            models.insert(model);
+            bytes = bytes.zip(request_bytes).map(|(a, b)| a + b);
+        }
+    }
+    let one_or_all = |set: std::collections::BTreeSet<String>| match set.len() {
+        0 => serde_json::Value::Null,
+        1 => serde_json::json!(set.into_iter().next()),
+        _ => serde_json::json!(set),
+    };
+    Ok(serde_json::json!({
+        "provider": one_or_all(providers),
+        "model": one_or_all(models),
+        "calls": calls,
+        "request_bytes": bytes,
+    }))
 }
 
 /// Add `extras` to a findings.json body.
@@ -846,12 +910,48 @@ async fn dispatch_via_agent_runtime(
         None
     };
 
+    // The run's chain, open before the first model call so the probe
+    // lands on it with every later one. `inference` on findings.json
+    // is read back from the rows after this mark, so a run id used
+    // before does not count the earlier run's calls.
+    let chain = match chain {
+        Some(chain) => chain,
+        None => open_run_chain(run_id)?,
+    };
+    let session_log_concrete = chain.concrete.clone();
+    let session_log = chain.log.clone();
+    let agent_id = chain.agent_id.clone();
+    let run_handle = session_log.handle_for(wirken_audit::SessionId::new(agent_id.clone()));
+    let chain_mark = session_log
+        .last_index(&run_handle)
+        .context("read the run chain's last row")?;
+    // Every stored secret, for the probe's failure row and the run's
+    // agents.
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            super::cached_vault_passphrase().unwrap_or_default()
+        })
+    }));
+
     // Preflight tool-call probe. Mirrors the dispatch path the real
     // run uses (LlmClient::complete) with one tool defined and a
     // prompt asking the model to call it. Fail-closed: a model that
     // cannot return a structured tool_call here would produce zero
     // staged findings, so bail before any audit work begins.
-    match super::lyrik_preflight::probe_tool_calling(&llm_config, api_key.as_deref()).await {
+    let probe_record = super::lyrik_preflight::ProbeRecord {
+        log: &*session_log,
+        handle: &run_handle,
+        agent_id: agent_id.clone(),
+        credential_id: api_key_credential.clone(),
+        leak_matcher: &leak_matcher,
+    };
+    match super::lyrik_preflight::probe_tool_calling(
+        &llm_config,
+        api_key.as_deref(),
+        Some(&probe_record),
+    )
+    .await
+    {
         Ok(super::lyrik_preflight::ProbeOutcome::Pass) => {
             audit.emit(
                 "lyrik.model.tool_calls_supported",
@@ -951,22 +1051,13 @@ async fn dispatch_via_agent_runtime(
     // explicit SessionEnd head after every walk turn returns. All
     // walk turns share the same session_id (the per-run agent id)
     // so they land in one signed chain.
-    let chain = match chain {
-        Some(chain) => chain,
-        None => open_run_chain(run_id)?,
-    };
-    let session_log_concrete = chain.concrete.clone();
-    let session_log = chain.log.clone();
-    let agent_id = chain.agent_id.clone();
-
     // Record the Semgrep-seed set as external-tool output entering the
     // run, at ExternalTool trust, so the elevation of operator-installed
     // analyzer output into the assessment turns is represented in the
     // evidence log rather than only implied by the seed files the model
     // later reads (those reads log at Tool trust, which labels by the
     // side). One event per run on the run-level session; both dispatch
-    // paths below consume the same seed set. It is the first append to a
-    // fresh session, so it auto-emits the SessionStart chain head.
+    // paths below consume the same seed set.
     if !seeds.is_empty() {
         let handle = session_log.handle_for(wirken_audit::SessionId::new(agent_id.clone()));
         let items = serde_json::to_value(&seeds).unwrap_or(serde_json::Value::Null);
@@ -994,12 +1085,6 @@ async fn dispatch_via_agent_runtime(
     // `.lyrik/state/runs/<run-id>/` per the Lyrik skill instructions.
     let perms = open_permission_store(&cfg)?;
     let perms_arc = Arc::new(Mutex::new(perms));
-    // Every stored secret, for the run's agent and each walk's.
-    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
-        probe_keychain(&cfg.data_dir, || {
-            super::cached_vault_passphrase().unwrap_or_default()
-        })
-    }));
     let mut agent = Agent::new_with_sandbox(
         agent_id.clone(),
         target.to_path_buf(),
@@ -1216,7 +1301,11 @@ async fn dispatch_via_agent_runtime(
                         "rate limit exhausted after {attempts} attempts; \
                          writing empty findings.json"
                     );
-                    write_empty_findings(expected_findings, run_id, extras)?;
+                    write_empty_findings(
+                        expected_findings,
+                        run_id,
+                        &with_inference(extras, &*session_log, &run_handle, chain_mark)?,
+                    )?;
                     return Ok(None);
                 }
                 Err(AgentError::ContextOverflow {
@@ -1240,7 +1329,11 @@ async fn dispatch_via_agent_runtime(
                         "lyrik dispatch did not converge within the effective context \
                          budget; writing empty findings.json"
                     );
-                    write_empty_findings(expected_findings, run_id, extras)?;
+                    write_empty_findings(
+                        expected_findings,
+                        run_id,
+                        &with_inference(extras, &*session_log, &run_handle, chain_mark)?,
+                    )?;
                     return Ok(None);
                 }
                 Err(e) => {
@@ -1343,7 +1436,7 @@ async fn dispatch_via_agent_runtime(
         dedup_active,
         &seed_locations,
         target,
-        extras,
+        &with_inference(extras, &*session_log, &run_handle, chain_mark)?,
         &skipped,
         scanner_ran.then_some(scanner_counts),
         audit,

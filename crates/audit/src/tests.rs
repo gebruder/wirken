@@ -1106,6 +1106,8 @@ mod session {
                     agent_id: "test-agent".into(),
                     credential_id: None,
                     sender_id: None,
+                    request_bytes: None,
+                    purpose: Default::default(),
                 },
             ),
             (
@@ -3322,6 +3324,8 @@ fn every_session_event() -> Vec<SessionEvent> {
             agent_id: String::new(),
             credential_id: None,
             sender_id: None,
+            request_bytes: None,
+            purpose: Default::default(),
         },
         SessionEvent::LlmResponse {
             request_id: String::new(),

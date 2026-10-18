@@ -1154,24 +1154,15 @@ impl Agent {
         e: AgentError,
     ) -> AgentError {
         let e = self.note_provider_refusal(e);
-        let mut text = e.to_string();
-        let error = match self.leak_matcher.find(&text) {
-            Some(credential) => {
-                format!("error withheld: it contained stored credential {credential}")
-            }
-            None => {
-                text.truncate(text.floor_char_boundary(LLM_ERROR_MAX_BYTES));
-                text
-            }
-        };
-        let event = SessionEvent::LlmRequestFailed {
-            request_id: request_id.to_string(),
-            error,
-            latency_ms: started.elapsed().as_millis() as u64,
-            agent_id: self.audited_agent_id(),
-            credential_id: self.api_key_credential.clone(),
-            sender_id: self.current_inbound.sender_id.clone(),
-        };
+        let event = failed_call_row(
+            request_id,
+            &e,
+            started.elapsed().as_millis() as u64,
+            &self.leak_matcher,
+            self.audited_agent_id(),
+            self.api_key_credential.clone(),
+            self.current_inbound.sender_id.clone(),
+        );
         if let Err(log_err) = self.log_event(TrustLevel::System, event) {
             tracing::error!(error = %log_err, request_id, "the failed model call was not recorded");
         }
@@ -2183,7 +2174,7 @@ impl Agent {
     /// primary LLM client; there is no separate compaction-model
     /// config, so summarization is billed against the same model
     /// the turn is using.
-    async fn maybe_summarize_trimmed(
+    pub(crate) async fn maybe_summarize_trimmed(
         &mut self,
         trimmed: &[crate::context::TrimmedMessage],
     ) -> Result<(), AgentError> {
@@ -2221,11 +2212,47 @@ impl Agent {
         }];
 
         self.check_inference_or_deny()?;
-        match self
+        // On the chain like any other call, so every byte of the
+        // session that reaches the provider is accounted for there.
+        // Not a turn, so the verifier does not replay it.
+        let request_id = format!("req-{}", uuid::Uuid::new_v4());
+        self.log_event(
+            TrustLevel::System,
+            side_call_request(
+                self.llm.config(),
+                &request_id,
+                &messages,
+                &[],
+                wirken_audit::LlmCallPurpose::CompactionSummary,
+                self.audited_agent_id(),
+                self.api_key_credential.clone(),
+                self.current_inbound.sender_id.clone(),
+            ),
+        )?;
+        let started = std::time::Instant::now();
+        let result = self
             .llm
             .complete(&messages, &[], self.api_key.as_deref())
-            .await
-        {
+            .await;
+        let result = match result {
+            Ok((response, usage)) => {
+                let (row, total_cost_usd_micros) = side_call_response(
+                    self.llm.config(),
+                    &request_id,
+                    &response,
+                    usage,
+                    started.elapsed().as_millis() as u64,
+                    self.audited_agent_id(),
+                    self.api_key_credential.clone(),
+                    self.current_inbound.sender_id.clone(),
+                );
+                self.log_event(TrustLevel::System, row)?;
+                self.charge_budget(total_cost_usd_micros);
+                Ok((response, usage))
+            }
+            Err(e) => Err(self.fail_llm_request(&request_id, started, e)),
+        };
+        match result {
             Ok((LlmResponse::Text(summary), _usage)) => {
                 // Replace the Compaction message content with the
                 // model summary + a note that it was model-generated.
@@ -2250,9 +2277,9 @@ impl Agent {
                 tracing::debug!("compaction summarizer returned non-text; keeping aggregate");
             }
             Err(e) => {
-                let e = self.note_provider_refusal(e);
-                // Summarization failed. Keep the deterministic
-                // aggregate. This is not fatal.
+                // Summarization failed, and the failure is on the
+                // chain. Keep the deterministic aggregate. This is not
+                // fatal.
                 tracing::warn!(
                     "compaction summarizer failed: {e}; keeping deterministic aggregate"
                 );
@@ -2889,6 +2916,8 @@ impl Agent {
                     agent_id: self.audited_agent_id(),
                     credential_id: self.api_key_credential.clone(),
                     sender_id: self.current_inbound.sender_id.clone(),
+                    request_bytes: Some(request_bytes(self.conversation.messages(), &tool_defs)),
+                    purpose: wirken_audit::LlmCallPurpose::Turn,
                 },
             )?;
 
@@ -3232,6 +3261,8 @@ impl Agent {
                     agent_id: self.audited_agent_id(),
                     credential_id: self.api_key_credential.clone(),
                     sender_id: self.current_inbound.sender_id.clone(),
+                    request_bytes: Some(request_bytes(self.conversation.messages(), &tool_defs)),
+                    purpose: wirken_audit::LlmCallPurpose::Turn,
                 },
             )?;
 
@@ -5412,6 +5443,12 @@ impl Agent {
                         events_unverifiable += 1;
                     }
                 }
+                wirken_audit::SessionEvent::LlmRequest { purpose, .. } if !purpose.is_turn() => {
+                    // A call made alongside the conversation, not a
+                    // turn of it: there is no conversation state to
+                    // replay it against.
+                    events_unverifiable += 1;
+                }
                 wirken_audit::SessionEvent::LlmRequest {
                     tools_hash,
                     tools_hash_version,
@@ -5934,6 +5971,120 @@ pub(crate) fn compute_messages_hash(
 pub(crate) fn compute_tools_hash(tools: &[crate::tool::ToolDef]) -> wirken_audit::HashHex {
     let bytes = serde_json::to_vec(tools).unwrap_or_default();
     sha256_hex(&bytes)
+}
+
+/// The `LlmRequestFailed` row pairing with a call that failed: the
+/// error truncated, or withheld whole when it carries a stored
+/// credential.
+pub fn failed_call_row(
+    request_id: &str,
+    error: &AgentError,
+    latency_ms: u64,
+    leak_matcher: &wirken_gateway::leak::LeakMatcher,
+    agent_id: String,
+    credential_id: Option<String>,
+    sender_id: Option<String>,
+) -> SessionEvent {
+    let mut text = error.to_string();
+    let error = match leak_matcher.find(&text) {
+        Some(credential) => format!("error withheld: it contained stored credential {credential}"),
+        None => {
+            text.truncate(text.floor_char_boundary(LLM_ERROR_MAX_BYTES));
+            text
+        }
+    };
+    SessionEvent::LlmRequestFailed {
+        request_id: request_id.to_string(),
+        error,
+        latency_ms,
+        agent_id,
+        credential_id,
+        sender_id,
+    }
+}
+
+/// Bytes a call sends, as `LlmRequest.request_bytes` records them:
+/// the JSON of its messages plus its tool definitions, the same bytes
+/// `messages_hash` and `tools_hash` cover.
+pub fn request_bytes(
+    messages: &[crate::conversation::Message],
+    tools: &[crate::tool::ToolDef],
+) -> u64 {
+    let messages = serde_json::to_vec(messages).map_or(0, |b| b.len());
+    let tools = serde_json::to_vec(tools).map_or(0, |b| b.len());
+    (messages + tools) as u64
+}
+
+/// The `LlmRequest` row for a model call made alongside a session's
+/// turns, `purpose` saying what for: hashed and sized as a turn's row
+/// is.
+#[allow(clippy::too_many_arguments)]
+pub fn side_call_request(
+    config: &crate::llm::LlmConfig,
+    request_id: &str,
+    messages: &[crate::conversation::Message],
+    tools: &[crate::tool::ToolDef],
+    purpose: wirken_audit::LlmCallPurpose,
+    agent_id: String,
+    credential_id: Option<String>,
+    sender_id: Option<String>,
+) -> SessionEvent {
+    SessionEvent::LlmRequest {
+        provider: config.provider.clone(),
+        model: config.model.clone(),
+        request_id: request_id.to_string(),
+        tools_hash: compute_tools_hash(tools),
+        tools_hash_version: wirken_audit::ToolsHashVersion::V2,
+        messages_hash: compute_messages_hash(messages),
+        agent_id,
+        credential_id,
+        sender_id,
+        request_bytes: Some(request_bytes(messages, tools)),
+        purpose,
+    }
+}
+
+/// The `LlmResponse` row pairing with [`side_call_request`], usage
+/// attributed and priced as a turn's is. Also returns the total cost,
+/// for the caller to charge.
+#[allow(clippy::too_many_arguments)]
+pub fn side_call_response(
+    config: &crate::llm::LlmConfig,
+    request_id: &str,
+    response: &LlmResponse,
+    usage: Option<crate::llm::Usage>,
+    latency_ms: u64,
+    agent_id: String,
+    credential_id: Option<String>,
+    sender_id: Option<String>,
+) -> (SessionEvent, Option<u64>) {
+    let LlmResponseAttribution {
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+        input_cost_usd_micros,
+        output_cost_usd_micros,
+        total_cost_usd_micros,
+    } = attribute_llm_usage(&config.provider, &config.model, usage);
+    (
+        SessionEvent::LlmResponse {
+            request_id: request_id.to_string(),
+            finish_reason: finish_reason_for(response).to_string(),
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            latency_ms,
+            agent_id,
+            credential_id,
+            input_cost_usd_micros,
+            output_cost_usd_micros,
+            total_cost_usd_micros,
+            sender_id,
+        },
+        total_cost_usd_micros,
+    )
 }
 
 fn sha256_hex(bytes: &[u8]) -> wirken_audit::HashHex {

@@ -2512,6 +2512,66 @@ mod wake {
         assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    /// Summarising trimmed messages is a model call like any other: on
+    /// the chain as a sized `compaction_summary` request paired with
+    /// its response, beside the sized turn, and not replayed by the
+    /// verifier.
+    #[tokio::test]
+    async fn a_compaction_summary_call_is_on_the_chain() {
+        use wirken_audit::{LlmCallPurpose, SessionEvent, SessionId};
+        let (base_url, served) = counting_ollama().await;
+        let log = make_log();
+        let llm = LlmConfig {
+            base_url,
+            ..LlmConfig::ollama("counting")
+        };
+        let session = "agent-summary/test/conv-1";
+        let (factory, _tmp) = make_factory_with_llm("agent-summary", log.clone(), llm);
+        let agent_arc = factory.wake("agent-summary", session).unwrap();
+        let mut agent = agent_arc.lock().await;
+        agent.process_message("first", String::new()).await.unwrap();
+        agent
+            .maybe_summarize_trimmed(&[crate::context::TrimmedMessage {
+                role: crate::conversation::Role::User,
+                content: "an older message".into(),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let rows = log
+            .get_since(&log.handle_for(SessionId::new(session.to_string())), 0)
+            .unwrap();
+        let requests: Vec<(LlmCallPurpose, Option<u64>, String)> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::LlmRequest {
+                    purpose,
+                    request_bytes,
+                    request_id,
+                    ..
+                } => Some((*purpose, *request_bytes, request_id.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(requests[0].0, LlmCallPurpose::Turn);
+        assert_eq!(requests[1].0, LlmCallPurpose::CompactionSummary);
+        assert!(requests.iter().all(|r| r.1.is_some_and(|b| b > 0)));
+        let summary_id = &requests[1].2;
+        assert!(rows.iter().any(|r| matches!(
+            &r.event,
+            SessionEvent::LlmResponse { request_id, .. } if request_id == summary_id
+        )));
+
+        let report = agent.verify().await.unwrap();
+        assert!(
+            report.events_divergent.is_empty(),
+            "{:?}",
+            report.events_divergent
+        );
+    }
+
     // ---- WIRKEN_CACHE_MODE=drop ------------------------------------
 
     #[tokio::test]
@@ -6426,6 +6486,8 @@ mod verify {
                 agent_id: "test-agent".into(),
                 credential_id: None,
                 sender_id: None,
+                request_bytes: None,
+                purpose: Default::default(),
             },
         )
         .unwrap();
@@ -7391,6 +7453,8 @@ mod per_channel_llm_override {
                     agent_id: "test-agent".into(),
                     credential_id: None,
                     sender_id: None,
+                    request_bytes: None,
+                    purpose: Default::default(),
                 },
             )
             .unwrap();
@@ -7448,6 +7512,8 @@ mod per_channel_llm_override {
                     agent_id: "test-agent".into(),
                     credential_id: None,
                     sender_id: None,
+                    request_bytes: None,
+                    purpose: Default::default(),
                 },
             )
             .unwrap();
@@ -7547,6 +7613,8 @@ mod per_channel_llm_override {
                     agent_id: "a1".into(),
                     credential_id: a.api_key_credential_for_test().map(String::from),
                     sender_id: None,
+                    request_bytes: None,
+                    purpose: Default::default(),
                 },
             )
             .unwrap();

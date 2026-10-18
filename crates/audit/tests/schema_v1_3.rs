@@ -252,6 +252,61 @@ fn pre_1_2_0_llm_request_deserializes_with_empty_agent_id() {
     }
 }
 
+/// A row written before `request_bytes` and `purpose` existed reads
+/// back as a turn of unknown size.
+#[test]
+fn pre_request_bytes_llm_request_reads_as_a_turn_of_unknown_size() {
+    let legacy = r#"{"kind":"llm_request","provider":"anthropic","model":"claude","request_id":"r1","tools_hash":"a","messages_hash":"b","agent_id":"default"}"#;
+    match serde_json::from_str::<SessionEvent>(legacy).unwrap() {
+        SessionEvent::LlmRequest {
+            request_bytes,
+            purpose,
+            ..
+        } => {
+            assert_eq!(request_bytes, None);
+            assert_eq!(purpose, wirken_audit::LlmCallPurpose::Turn);
+        }
+        other => panic!("expected LlmRequest, got {other:?}"),
+    }
+}
+
+/// `request_bytes` is on the wire when known; `purpose` only when the
+/// call is not a turn, so a turn's row keeps the shape it had.
+#[test]
+fn snapshot_llm_request_size_and_purpose() {
+    let row = |purpose| SessionEvent::LlmRequest {
+        provider: "ollama".into(),
+        model: "m".into(),
+        request_id: "req-1".into(),
+        tools_hash_version: wirken_audit::ToolsHashVersion::V2,
+        tools_hash: HashHex("aa".repeat(32)),
+        messages_hash: HashHex("bb".repeat(32)),
+        agent_id: "lyrik-r1".into(),
+        credential_id: None,
+        sender_id: None,
+        request_bytes: Some(1234),
+        purpose,
+    };
+    let turn: Value = serde_json::to_value(row(wirken_audit::LlmCallPurpose::Turn)).unwrap();
+    assert_eq!(turn["request_bytes"], 1234);
+    assert!(turn.get("purpose").is_none(), "{turn}");
+    for (purpose, label) in [
+        (
+            wirken_audit::LlmCallPurpose::CompactionSummary,
+            "compaction_summary",
+        ),
+        (
+            wirken_audit::LlmCallPurpose::ToolCallProbe,
+            "tool_call_probe",
+        ),
+    ] {
+        let v: Value = serde_json::to_value(row(purpose)).unwrap();
+        assert_eq!(v["purpose"], label);
+        let back: SessionEvent = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, SessionEvent::LlmRequest { purpose: p, .. } if p == purpose));
+    }
+}
+
 #[test]
 fn llm_request_with_credential_id_round_trips() {
     // The 1.3.x wire shape carries credential_id when the gateway
@@ -267,6 +322,8 @@ fn llm_request_with_credential_id_round_trips() {
         agent_id: "default".into(),
         credential_id: Some("anthropic-api-key".into()),
         sender_id: None,
+        request_bytes: None,
+        purpose: Default::default(),
     };
     let json = serde_json::to_string(&original).unwrap();
     assert!(
@@ -297,6 +354,8 @@ fn llm_request_with_credential_id_none_omits_field_on_wire() {
         agent_id: "default".into(),
         credential_id: None,
         sender_id: None,
+        request_bytes: None,
+        purpose: Default::default(),
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(

@@ -1890,6 +1890,8 @@ mod identity_tests {
                     agent_id: agent(),
                     credential_id: None,
                     sender_id: sender(),
+                    request_bytes: None,
+                    purpose: Default::default(),
                 },
                 None,
                 Some("U123"),

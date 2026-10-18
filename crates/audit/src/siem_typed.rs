@@ -841,6 +841,8 @@ mod tests {
             agent_id: "work".into(),
             credential_id: Some("work-openai-key".into()),
             sender_id: Some("U123".into()),
+            request_bytes: None,
+            purpose: Default::default(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"sender_id\":\"U123\""));
@@ -914,6 +916,8 @@ mod tests {
             agent_id: "default".into(),
             credential_id: None,
             sender_id: None,
+            request_bytes: None,
+            purpose: Default::default(),
         };
         assert!(!should_forward(&req, &cfg));
     }
