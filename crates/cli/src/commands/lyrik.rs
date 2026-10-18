@@ -212,24 +212,75 @@ pub async fn run(
     audit.emit("lyrik.rubric.loaded", scoring.row())?;
     extras.extend(scoring.record());
 
-    // Phase 0 sign-off. Bench mode auto-approves; production routes to
-    // the configured channel adapter (not yet wired in this slice).
-    if bench_mode {
+    // Sign-off before dispatch. A benchmark target auto-approves; any
+    // other run is put to the operator at the terminal, with what it
+    // is about to do, and does not start without a yes.
+    let chain = if bench_mode {
         audit.emit(
             "lyrik.phase_0.signoff",
             serde_json::json!({"decision": "auto_bench"}),
         )?;
-    } else {
+        None
+    } else if !super::oauth_scope::stdin_is_tty() {
         audit.emit(
             "lyrik.phase_0.signoff",
             serde_json::json!({"decision": "pending_adapter_route"}),
         )?;
         anyhow::bail!(
-            "non-bench mode gate routing not yet wired in the runner; \
-             set `bench_mode: true` in {} for now",
+            "a run is signed off at a terminal and stdin is not one; run it from a \
+             terminal, or set `bench_mode: true` in {} on a benchmark target",
             config_path.display()
         );
-    }
+    } else {
+        let pin = resolve_phase_pin(&config)?;
+        let walks = parse_walks_config(&config, &default_walks_source_dir())
+            .context("parse walks config")?
+            .map(|c| c.walks);
+        let summary = signoff_summary(
+            run_id,
+            target,
+            &provenance,
+            &scoring,
+            &pin,
+            walks.as_deref(),
+        );
+        let shown = summary.clone();
+        let answer = tokio::task::spawn_blocking(move || {
+            ask_signoff(&shown, std::io::stdin().lock(), std::io::stderr())
+        })
+        .await
+        .context("sign-off prompt")?;
+        let chain = open_run_chain(run_id)?;
+        let seq = record_signoff(&chain, &summary, &answer)?;
+        let summary_sha256 = sha256_hex(summary.as_bytes());
+        match answer {
+            Signoff::Approved => {
+                audit.emit(
+                    "lyrik.phase_0.signoff",
+                    serde_json::json!({
+                        "decision": "operator",
+                        "summary": summary,
+                        "summary_sha256": summary_sha256,
+                        "chain_seq": seq,
+                    }),
+                )?;
+                Some(chain)
+            }
+            Signoff::Declined(reason) => {
+                audit.emit(
+                    "lyrik.phase_0.signoff",
+                    serde_json::json!({
+                        "decision": "declined",
+                        "reason": reason,
+                        "summary": summary,
+                        "summary_sha256": summary_sha256,
+                        "chain_seq": seq,
+                    }),
+                )?;
+                anyhow::bail!("run not signed off ({reason}); nothing was dispatched");
+            }
+        }
+    };
 
     // Skill dispatch. Default path: invoke the wirken Agent runtime
     // against the model pin in the target's .lyrik/config.json and
@@ -267,6 +318,7 @@ pub async fn run(
                     &findings_dest,
                     &extras,
                     &scoring,
+                    chain,
                 )
                 .await;
             }
@@ -335,6 +387,199 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// The run's signed audit chain: the session every model call, tool
+/// call and the sign-off land on.
+#[derive(Clone)]
+struct RunChain {
+    concrete: Arc<wirken_audit::SqliteSessionLog>,
+    log: Arc<dyn wirken_audit::SessionLog>,
+    /// Whether the gateway signing key loaded, so the run can close
+    /// the chain with a signed head.
+    signed: bool,
+    /// Session and agent id, `lyrik-<run-id>` with `/` as `-`.
+    agent_id: String,
+}
+
+/// Open the gateway's audit chain for this run, signed when the
+/// gateway signing key can be loaded or made.
+fn open_run_chain(run_id: &str) -> Result<RunChain> {
+    let cfg = super::config();
+    let audit_signer = match wirken_audit::AuditSigningKey::load_or_create(&cfg.data_dir) {
+        Ok(k) => Some(Arc::new(k)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "lyrik run will use an unsigned audit chain: could not load or generate \
+                 the gateway audit signing key"
+            );
+            None
+        }
+    };
+    let signed = audit_signer.is_some();
+    let concrete: Arc<wirken_audit::SqliteSessionLog> = Arc::new(match audit_signer {
+        Some(s) => wirken_audit::SqliteSessionLog::open_with_signer(&cfg.audit_db_path(), s)
+            .context("open session log with signer")?,
+        None => wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+            .context("open session log")?,
+    });
+    Ok(RunChain {
+        log: concrete.clone(),
+        concrete,
+        signed,
+        agent_id: format!("lyrik-{}", run_id.replace('/', "-")),
+    })
+}
+
+/// The operator's answer to the sign-off prompt.
+#[derive(Debug, Clone, PartialEq)]
+enum Signoff {
+    Approved,
+    Declined(String),
+}
+
+/// Text from the target or its repository, on one printable line:
+/// escape sequences out, line breaks folded, so nothing a repository
+/// names can repaint or add a line to the prompt.
+fn one_line(s: &str) -> String {
+    wirken_agent::ansi::strip_control_sequences(s)
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// What the operator is asked to sign off: where the run points,
+/// what it scores against, where the code goes, and what it may ask
+/// to run.
+fn signoff_summary(
+    run_id: &str,
+    target: &Path,
+    provenance: &super::lyrik_git::Provenance,
+    scoring: &Scoring,
+    pin: &PhasePin,
+    walks: Option<&[String]>,
+) -> String {
+    let head = match (&provenance.sha, provenance.dirty) {
+        (Some(sha), Some(false)) => format!("HEAD {sha}, tracked files unchanged"),
+        (Some(sha), Some(true)) => format!("HEAD {sha}, tracked files changed"),
+        (Some(sha), None) => format!(
+            "HEAD {sha}, tracked-file state unknown: {}",
+            provenance.unavailable.as_deref().unwrap_or("not compared")
+        ),
+        (None, _) => format!(
+            "no git HEAD: {}",
+            provenance.unavailable.as_deref().unwrap_or("unknown")
+        ),
+    };
+    let doc = |d: &ScoringDoc| format!("{} {} sha256 {}", d.source, d.path, d.sha256);
+    let context = scoring
+        .context
+        .as_ref()
+        .map_or_else(|| "none".to_string(), doc);
+    let (walk_line, exec_line) = match walks {
+        Some(walks) => (
+            walks.join(", "),
+            walks
+                .iter()
+                .map(|w| {
+                    let commands = super::lyrik_walks::walk_exec_commands(w);
+                    if commands.is_empty() {
+                        format!("{w}: none listed")
+                    } else {
+                        format!("{w}: {}", commands.join(", "))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        None => (
+            "none, single call".to_string(),
+            "lyrik: none listed".to_string(),
+        ),
+    };
+    let mut lines = vec![format!(
+        "Lyrik run {} on {}",
+        one_line(run_id),
+        one_line(&target.display().to_string())
+    )];
+    for (label, value) in [
+        ("target", head),
+        ("rubric", doc(&scoring.rubric)),
+        ("context", context),
+        ("model", format!("{} {}", pin.provider, pin.model)),
+        ("walks", walk_line),
+        ("exec", exec_line),
+    ] {
+        lines.push(format!("  {label:<8} {}", one_line(&value)));
+    }
+    lines.push(
+        "  Each exec command is asked again before it runs; nothing else leaves \
+         this host but calls to the model."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+/// Print the summary and read one line. `y` or `yes` approves;
+/// anything else, an empty line or end of input declines.
+fn ask_signoff(summary: &str, mut input: impl std::io::BufRead, mut out: impl Write) -> Signoff {
+    let _ = write!(out, "{summary}\nSign off this run? [y/N]: ");
+    let _ = out.flush();
+    let mut line = String::new();
+    match input.read_line(&mut line) {
+        Ok(0) => Signoff::Declined("eof on stdin".to_string()),
+        Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => Signoff::Approved,
+            "" => Signoff::Declined("no answer".to_string()),
+            other => Signoff::Declined(format!("answered {:?}", one_line(other))),
+        },
+        Err(e) => Signoff::Declined(format!("read stdin: {e}")),
+    }
+}
+
+/// Put the operator's answer on the run's signed chain, bound to the
+/// summary they were shown by its sha256 in the action key. An
+/// approval is one-shot: it covers this run and is never stored as a
+/// grant. Returns the row's sequence number.
+fn record_signoff(chain: &RunChain, summary: &str, answer: &Signoff) -> Result<u64> {
+    use wirken_audit::{ApprovalScopeKind, ApprovalSource, DenialSource, SessionEvent};
+    let action_key = format!("lyrik:signoff:{}", sha256_hex(summary.as_bytes()));
+    let event = match answer {
+        Signoff::Approved => SessionEvent::PermissionApproved {
+            action_key,
+            agent_id: chain.agent_id.clone(),
+            approved_by: "operator".to_string(),
+            scope: ApprovalScopeKind::OneShot,
+            session_id: None,
+            approved_via: Some(ApprovalSource::Stdin),
+            adapter_id: None,
+            sender_id: None,
+            tier: None,
+            expires_at: None,
+            exec_location: None,
+        },
+        Signoff::Declined(reason) => SessionEvent::PermissionDenied {
+            tool: "lyrik".to_string(),
+            action_key,
+            denial_source: DenialSource::Tier,
+            tier: None,
+            agent_id: chain.agent_id.clone(),
+            trigger: None,
+            denied_via: Some(ApprovalSource::Stdin),
+            denial_reason: Some(reason.clone()),
+            adapter_id: None,
+            sender_id: None,
+            exec_location: None,
+        },
+    };
+    let handle = chain
+        .log
+        .handle_for(wirken_audit::SessionId::new(chain.agent_id.clone()));
+    chain
+        .log
+        .append(&handle, wirken_audit::TrustLevel::User, event)
+        .context("record the sign-off on the audit chain")
 }
 
 /// Team-owned files under `.lyrik/` that a run leaves as it found
@@ -539,6 +784,7 @@ fn write_empty_findings(path: &Path, run_id: &str, extras: &Extras) -> Result<()
 /// `phases.framing`, falling back to `phases.score`/`phases.recon`),
 /// builds an Agent with workspace = target, loads bundled skills
 /// from `<data_dir>/skills/`, and sends the assessment prompt.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_via_agent_runtime(
     target: &Path,
     run_id: &str,
@@ -547,6 +793,7 @@ async fn dispatch_via_agent_runtime(
     expected_findings: &Path,
     extras: &Extras,
     scoring: &Scoring,
+    chain: Option<RunChain>,
 ) -> Result<Option<Funnel>> {
     // Per-walk parallelism opt-in. Parsed and validated here so a
     // misconfigured walks list fails before any LLM call. The
@@ -704,27 +951,13 @@ async fn dispatch_via_agent_runtime(
     // explicit SessionEnd head after every walk turn returns. All
     // walk turns share the same session_id (the per-run agent id)
     // so they land in one signed chain.
-    let audit_signer = match wirken_audit::AuditSigningKey::load_or_create(&cfg.data_dir) {
-        Ok(k) => Some(Arc::new(k)),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "lyrik run will use an unsigned audit chain: could not load or generate \
-                 the gateway audit signing key"
-            );
-            None
-        }
+    let chain = match chain {
+        Some(chain) => chain,
+        None => open_run_chain(run_id)?,
     };
-    let session_log_concrete: Arc<wirken_audit::SqliteSessionLog> =
-        Arc::new(match audit_signer.clone() {
-            Some(s) => wirken_audit::SqliteSessionLog::open_with_signer(&cfg.audit_db_path(), s)
-                .context("open session log with signer")?,
-            None => wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
-                .context("open session log")?,
-        });
-    let session_log: Arc<dyn wirken_audit::SessionLog> = session_log_concrete.clone();
-
-    let agent_id = format!("lyrik-{}", run_id.replace('/', "-"));
+    let session_log_concrete = chain.concrete.clone();
+    let session_log = chain.log.clone();
+    let agent_id = chain.agent_id.clone();
 
     // Record the Semgrep-seed set as external-tool output entering the
     // run, at ExternalTool trust, so the elevation of operator-installed
@@ -1127,7 +1360,7 @@ async fn dispatch_via_agent_runtime(
     // ends on a signature, not an unsigned tail. Loud non-fatal:
     // failure here records an audit row and the verifier surfaces
     // the abnormal close under --require-signed.
-    if audit_signer.is_some() {
+    if chain.signed {
         let handle = session_log.handle_for(wirken_audit::SessionId::new(agent_id.clone()));
         let session_log_close = session_log_concrete.clone();
         let close_result = tokio::task::spawn_blocking(move || {
@@ -3614,6 +3847,83 @@ mod tests {
                 "{tool}/{mode}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn ask_signoff_approves_only_on_yes() {
+        let ask = |input: &str| {
+            let mut out = Vec::new();
+            let answer = super::ask_signoff("SUMMARY", std::io::Cursor::new(input), &mut out);
+            let shown = String::from_utf8(out).unwrap();
+            assert!(
+                shown.starts_with("SUMMARY\nSign off this run? [y/N]: "),
+                "{shown}"
+            );
+            answer
+        };
+        assert_eq!(ask("y\n"), super::Signoff::Approved);
+        assert_eq!(ask("YES\n"), super::Signoff::Approved);
+        assert_eq!(
+            ask("n\n"),
+            super::Signoff::Declined("answered \"n\"".into())
+        );
+        assert_eq!(ask("\n"), super::Signoff::Declined("no answer".into()));
+        assert_eq!(ask(""), super::Signoff::Declined("eof on stdin".into()));
+        assert_eq!(
+            ask("yes please\n"),
+            super::Signoff::Declined("answered \"yes please\"".into())
+        );
+    }
+
+    /// The summary names the target state, rubric and context, model,
+    /// walks and their exec commands, one value per line, with nothing
+    /// a repository supplies able to add a line or an escape.
+    #[test]
+    fn signoff_summary_shows_what_the_run_will_do_on_clean_lines() {
+        let provenance = super::super::lyrik_git::Provenance {
+            sha: Some("abc123".into()),
+            dirty: None,
+            unavailable: Some(
+                "content conversion declared (filter=x on a\x1b[2Jb\nSign off this run? [y/N]: y)"
+                    .into(),
+            ),
+        };
+        let scoring = team_scoring("rubric\n", None);
+        let pin = super::PhasePin {
+            provider: "privatemode".into(),
+            model: "m1".into(),
+            base_url: "http://localhost:8080/v1".into(),
+            context_window: None,
+        };
+        let walks = vec!["sink-walk".to_string(), "chain-walk".to_string()];
+        let summary = super::signoff_summary(
+            "r1",
+            std::path::Path::new("/t"),
+            &provenance,
+            &scoring,
+            &pin,
+            Some(&walks),
+        );
+        let lines: Vec<&str> = summary.lines().collect();
+        assert_eq!(lines.len(), 8, "{summary}");
+        assert_eq!(lines[0], "Lyrik run r1 on /t");
+        assert!(lines[1].starts_with("  target   HEAD abc123, tracked-file state unknown: "));
+        assert!(!summary.contains('\x1b'), "{summary}");
+        assert!(lines[1].contains("\\nSign off"), "{summary}");
+        assert_eq!(
+            lines[2],
+            format!(
+                "  rubric   team .lyrik/rubric.md sha256 {}",
+                super::sha256_hex(b"rubric\n")
+            )
+        );
+        assert_eq!(lines[3], "  context  none");
+        assert_eq!(lines[4], "  model    privatemode m1");
+        assert_eq!(lines[5], "  walks    sink-walk, chain-walk");
+        assert_eq!(
+            lines[6],
+            "  exec     sink-walk: git log, git blame; chain-walk: none listed"
+        );
     }
 
     #[test]
