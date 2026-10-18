@@ -177,7 +177,7 @@ fn a_walk_cannot_write_the_committed_context() {
         tmp.path().join("data"),
         tmp.path().join("target"),
     );
-    let walk = home.join(".claude/skills/sink-walk");
+    let walk = data.join("lyrik/walks/sink-walk");
     std::fs::create_dir_all(&walk).unwrap();
     std::fs::write(
         walk.join("SKILL.md"),

@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 
 /// Maximum concurrent walks when not specified in config. Tuned to
 /// the conservative end of common provider rate limits; operators
@@ -19,9 +20,8 @@ use anyhow::{Context, Result};
 pub const DEFAULT_MAX_CONCURRENT_WALKS: u32 = 4;
 
 /// Canonical list of walk skill names. Adding a walk: extend the
-/// list and ship a SKILL.md in the operator's `~/.claude/skills/`
-/// tree (or any directory the validator points at). Names are the
-/// directory name under that tree.
+/// list and ship a SKILL.md for it in the walks directory
+/// ([`resolve_walks_dir`]). Names are the directory name under it.
 pub const KNOWN_WALKS: &[&str] = &[
     "chain-walk",
     "crypto-walk",
@@ -46,14 +46,99 @@ pub struct WalksConfig {
     pub max_concurrent_walks: u32,
 }
 
-/// Source directory that holds operator-installed walk skills.
-/// `~/.claude/skills/<walk-name>/SKILL.md`. Resolved at runtime so
-/// tests can substitute a fixture tree.
-pub fn default_walks_source_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".claude").join("skills")
+/// `<data_dir>/lyrik.json`, the operator's Lyrik settings.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorSettings {
+    /// The walks directory for every target that does not set its own.
+    pub walks_dir: Option<String>,
+}
+
+pub fn operator_settings_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("lyrik.json")
+}
+
+pub fn load_operator_settings(data_dir: &Path) -> Result<OperatorSettings> {
+    let path = operator_settings_path(data_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(OperatorSettings::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// The walks directory when nothing sets one: `<data_dir>/lyrik/walks`.
+pub fn default_walks_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("lyrik").join("walks")
+}
+
+/// The walks directory: where operator-installed walk skills live, one
+/// `<walks_dir>/<walk-name>/SKILL.md` each. The runner reads them and
+/// never writes them; a run stages its own wrapped copy.
+///
+/// The first of:
+///
+/// - `walks_dir` in the target's `.lyrik/config.json`, a relative path
+///   resolved against the target;
+/// - `walks_dir` in the operator's `<data_dir>/lyrik.json`, a relative
+///   path resolved against the data directory;
+/// - [`default_walks_dir`].
+///
+/// A leading `~/` in either setting is the home directory.
+pub fn resolve_walks_dir(
+    config: &serde_json::Value,
+    target: &Path,
+    data_dir: &Path,
+) -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    resolve_walks_dir_with_home(config, target, data_dir, home.as_deref())
+}
+
+fn resolve_walks_dir_with_home(
+    config: &serde_json::Value,
+    target: &Path,
+    data_dir: &Path,
+    home: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(v) = config.get("walks_dir") {
+        let raw = v
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("config.walks_dir must be a non-empty string"))?;
+        return expand_walks_dir(raw, target, home).context("config.walks_dir");
+    }
+    if let Some(raw) = load_operator_settings(data_dir)?.walks_dir {
+        let path = operator_settings_path(data_dir);
+        if raw.trim().is_empty() {
+            anyhow::bail!("walks_dir in {} is empty", path.display());
+        }
+        return expand_walks_dir(&raw, data_dir, home)
+            .with_context(|| format!("walks_dir in {}", path.display()));
+    }
+    Ok(default_walks_dir(data_dir))
+}
+
+fn expand_walks_dir(raw: &str, base: &Path, home: Option<&Path>) -> Result<PathBuf> {
+    let rest = if raw == "~" {
+        Some("")
+    } else {
+        raw.strip_prefix("~/")
+    };
+    if let Some(rest) = rest {
+        let home = home
+            .ok_or_else(|| anyhow::anyhow!("{raw} starts with ~ and no home directory is set"))?;
+        return Ok(home.join(rest));
+    }
+    let path = Path::new(raw);
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    })
 }
 
 /// Parse and validate the `walks:` block.
@@ -64,7 +149,8 @@ pub fn default_walks_source_dir() -> PathBuf {
 /// - empty `walks: []` array (likely-typo guard; the way to skip
 ///   Lyrik is don't run it),
 /// - unknown walk name,
-/// - missing `<walks_source_dir>/<walk-name>/SKILL.md`.
+/// - missing `<walks_source_dir>/<walk-name>/SKILL.md`, where
+///   `walks_source_dir` is the walks directory ([`resolve_walks_dir`]).
 ///
 /// `max_concurrent_walks` defaults to
 /// [`DEFAULT_MAX_CONCURRENT_WALKS`] when absent. Values of 0 are
@@ -104,9 +190,10 @@ pub fn parse_walks_config(
         let skill_md = walks_source_dir.join(name).join("SKILL.md");
         if !skill_md.is_file() {
             anyhow::bail!(
-                "walk `{name}` is not installed at {} \
-                 (install via the operator's skill tree, then rerun)",
-                skill_md.display()
+                "walk `{name}` is not installed in the walks directory {}: there is no \
+                 {name}/SKILL.md in it. Install the walk there, or set `walks_dir` to the \
+                 directory that holds it",
+                walks_source_dir.display()
             );
         }
         walks.push(name.to_string());
@@ -432,11 +519,101 @@ mod tests {
     fn parse_walks_config_rejects_missing_skill_file() {
         let cfg = serde_json::json!({"walks": ["sink-walk"]});
         let tmp = tempdir().unwrap();
-        let err = parse_walks_config(&cfg, tmp.path()).unwrap_err();
+        let walks_dir = tmp.path().join("configured-walks");
+        let err = parse_walks_config(&cfg, &walks_dir)
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.to_string().contains("not installed"),
-            "expected 'not installed' in: {err}"
+            err.contains(&format!(
+                "walk `sink-walk` is not installed in the walks directory {}",
+                walks_dir.display()
+            )),
+            "the error names the configured directory: {err}"
         );
+        assert!(err.contains("sink-walk/SKILL.md"), "{err}");
+        assert!(!err.contains("~/"), "no hard-coded path: {err}");
+    }
+
+    #[test]
+    fn the_walks_directory_defaults_under_the_data_dir() {
+        let tmp = tempdir().unwrap();
+        let (target, data) = (tmp.path().join("target"), tmp.path().join("data"));
+        let got =
+            resolve_walks_dir_with_home(&serde_json::json!({}), &target, &data, None).unwrap();
+        assert_eq!(got, data.join("lyrik").join("walks"));
+        assert_eq!(got, default_walks_dir(&data));
+    }
+
+    #[test]
+    fn the_operator_setting_overrides_the_default() {
+        let tmp = tempdir().unwrap();
+        let (target, data, home) = (
+            tmp.path().join("target"),
+            tmp.path().join("data"),
+            tmp.path().join("home"),
+        );
+        std::fs::create_dir_all(&data).unwrap();
+        let cfg = serde_json::json!({});
+        for (setting, want) in [
+            ("/srv/walks", PathBuf::from("/srv/walks")),
+            ("~/walks", home.join("walks")),
+            ("walks", data.join("walks")),
+        ] {
+            std::fs::write(
+                operator_settings_path(&data),
+                serde_json::json!({ "walks_dir": setting }).to_string(),
+            )
+            .unwrap();
+            let got = resolve_walks_dir_with_home(&cfg, &target, &data, Some(&home)).unwrap();
+            assert_eq!(got, want, "{setting}");
+        }
+
+        std::fs::write(operator_settings_path(&data), r#"{"walk_dir": "/x"}"#).unwrap();
+        let err = resolve_walks_dir_with_home(&cfg, &target, &data, Some(&home)).unwrap_err();
+        assert!(format!("{err:#}").contains("lyrik.json"), "{err:#}");
+    }
+
+    #[test]
+    fn the_target_config_overrides_the_operator_setting() {
+        let tmp = tempdir().unwrap();
+        let (target, data, home) = (
+            tmp.path().join("target"),
+            tmp.path().join("data"),
+            tmp.path().join("home"),
+        );
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            operator_settings_path(&data),
+            r#"{"walks_dir": "/srv/walks"}"#,
+        )
+        .unwrap();
+        for (setting, want) in [
+            ("/opt/walks", PathBuf::from("/opt/walks")),
+            ("~/team-walks", home.join("team-walks")),
+            (".lyrik/walks", target.join(".lyrik/walks")),
+        ] {
+            let cfg = serde_json::json!({ "walks_dir": setting });
+            let got = resolve_walks_dir_with_home(&cfg, &target, &data, Some(&home)).unwrap();
+            assert_eq!(got, want, "{setting}");
+        }
+        for bad in [serde_json::json!(""), serde_json::json!(3)] {
+            let cfg = serde_json::json!({ "walks_dir": bad });
+            assert!(resolve_walks_dir_with_home(&cfg, &target, &data, Some(&home)).is_err());
+        }
+        let cfg = serde_json::json!({ "walks_dir": "~/walks" });
+        assert!(resolve_walks_dir_with_home(&cfg, &target, &data, None).is_err());
+    }
+
+    #[test]
+    fn a_walk_installed_in_the_resolved_directory_is_found() {
+        let tmp = tempdir().unwrap();
+        let (target, data) = (tmp.path().join("target"), tmp.path().join("data"));
+        let walks_dir =
+            resolve_walks_dir_with_home(&serde_json::json!({}), &target, &data, None).unwrap();
+        install_walk_fixture(&walks_dir, "sink-walk", &minimal_walk_body("sink-walk"));
+        let cfg = serde_json::json!({"walks": ["sink-walk"]});
+        let got = parse_walks_config(&cfg, &walks_dir).unwrap().unwrap();
+        assert_eq!(got.walks, vec!["sink-walk".to_string()]);
     }
 
     #[test]

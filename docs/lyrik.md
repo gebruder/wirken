@@ -148,6 +148,8 @@ committed; run state lives under `.lyrik/state/`.
 |---|---|
 | Wirken vault | provider API keys |
 | `<data_dir>/sandbox.json` | sandbox mode |
+| `<data_dir>/lyrik.json` | the operator's `walks_dir` |
+| `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
 | `<repo>/.lyrik/context.md` | the team's project context |
@@ -201,10 +203,22 @@ The validator runs at config-parse time, before any LLM call, and hard-fails
 when the array is empty (the way to skip Lyrik is not to run it), when a name
 is outside the canonical set (`chain-walk`, `crypto-walk`,
 `differential-walk`, `doc-walk`, `fuzz-walk`, `graph-walk`, `invariant-walk`,
-`sink-walk`), or when the named walk is not installed at
-`~/.claude/skills/<walk-name>/SKILL.md`. `max_concurrent_walks` defaults to 4,
+`sink-walk`), or when the named walk is not installed as
+`<walks_dir>/<walk-name>/SKILL.md`; the error names the walks directory it
+looked in. `max_concurrent_walks` defaults to 4,
 tuned to the conservative end of common provider rate limits; 0 is rejected
 and a value above the walk count is a no-op.
+
+**`walks_dir`**: the walks directory, where installed walk skills live. The
+first of: `walks_dir` here, a relative path resolved against the target;
+`walks_dir` in the operator's `<data_dir>/lyrik.json`, a relative path
+resolved against the data directory; `<data_dir>/lyrik/walks`. A leading `~/`
+is the home directory. The runner reads the installed walk files and never
+writes them; each run stages its own copy under the run directory.
+
+```json
+{ "walks_dir": "~/walks" }
+```
 
 Each walk runs as its own task gated by a semaphore. Every walk's agent shares
 the run-level session id (`lyrik-<run-id>`), so all walk turns land in one

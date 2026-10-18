@@ -23,6 +23,7 @@ moves every process at once.
 | `cron.db` | Scheduled cron jobs | `wirken cron create` |
 | `memory.db` | Labelled cross-channel memory entries | `wirken run` |
 | `imported.db` | Imported assistant archives | `wirken import` |
+| `lyrik.json` | Lyrik settings. Key read: `walks_dir`, the walks directory for targets that do not set their own (default `lyrik/walks/`); see [lyrik.md](lyrik.md#lyrikconfigjson) | Manual |
 | `sandbox.json` | Sandbox settings. Keys read: `mode`, `image`, `network`, `shell`, `sidecar_binary`; any other key is named in a startup warning and ignored | `wirken setup` or manual |
 | `siem.json` | SIEM forwarding config | Manual or org config |
 | `budget.json` | Per-agent spend budgets | Manual |

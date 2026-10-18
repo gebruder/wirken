@@ -10,6 +10,15 @@ tagged.
 
 ## [Unreleased]
 
+### Lyrik
+
+- Walk skills are read from the walks directory: `walks_dir` in the
+  target's `.lyrik/config.json`, else `walks_dir` in `<data_dir>/lyrik.json`,
+  else `<data_dir>/lyrik/walks`. The home-directory skills tree they were read
+  from before is no longer read; to keep walks installed there, set
+  `walks_dir` to it in `<data_dir>/lyrik.json`. A walk that is not installed
+  is reported with the walks directory the runner looked in.
+
 ## [2.3.0] - 2026-10-18
 
 #288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0

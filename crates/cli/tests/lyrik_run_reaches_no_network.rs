@@ -91,7 +91,7 @@ fn run_scenario(walk: bool) {
     );
     std::fs::create_dir_all(&home).unwrap();
     if walk {
-        let dir = home.join(".claude/skills/sink-walk");
+        let dir = data.join("lyrik/walks/sink-walk");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("SKILL.md"),

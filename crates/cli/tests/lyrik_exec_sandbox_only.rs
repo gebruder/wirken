@@ -55,7 +55,7 @@ fn scenario(walk: bool, sandbox_off: bool) {
         std::fs::write(data.join("sandbox.json"), r#"{"mode":"off"}"#).unwrap();
     }
     if walk {
-        let dir = home.join(".claude/skills/sink-walk");
+        let dir = data.join("lyrik/walks/sink-walk");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("SKILL.md"),

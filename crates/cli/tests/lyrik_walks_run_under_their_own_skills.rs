@@ -54,7 +54,7 @@ fn a_refused_exec_is_skipped_and_writes_stay_under_lyrik() {
         tmp.path().join("target"),
     );
     // The walk body, where `lyrik` reads walks from.
-    let walk = home.join(".claude/skills/sink-walk");
+    let walk = data.join("lyrik/walks/sink-walk");
     std::fs::create_dir_all(&walk).unwrap();
     std::fs::write(
         walk.join("SKILL.md"),

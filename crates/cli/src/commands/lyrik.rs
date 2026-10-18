@@ -23,7 +23,7 @@ use super::lyrik_semgrep::{
     self, DispatchOutcome, Seed, parse_scanner_config, write_bundled_ruleset, write_seed_files,
 };
 use super::lyrik_walks::{
-    build_walk_prompt, default_walks_source_dir, ensure_walk_staging, parse_walks_config,
+    build_walk_prompt, ensure_walk_staging, parse_walks_config, resolve_walks_dir,
     stage_walk_skills,
 };
 use super::open_permission_store;
@@ -233,7 +233,8 @@ pub async fn run(
         );
     } else {
         let pin = resolve_phase_pin(&config)?;
-        let walks = parse_walks_config(&config, &default_walks_source_dir())
+        let walks_dir = resolve_walks_dir(&config, target, &super::config().data_dir)?;
+        let walks = parse_walks_config(&config, &walks_dir)
             .context("parse walks config")?
             .map(|c| c.walks);
         let exec_available = super::load_sandbox_config(&super::config().data_dir).mode
@@ -898,7 +899,7 @@ async fn dispatch_via_agent_runtime(
     // misconfigured walks list fails before any LLM call. The
     // one-call slice (no `walks` field in config) keeps the
     // existing single-prompt /lyrik dispatch path.
-    let walks_source_dir = default_walks_source_dir();
+    let walks_source_dir = resolve_walks_dir(config, target, &super::config().data_dir)?;
     let walks_cfg = parse_walks_config(config, &walks_source_dir).context("parse walks config")?;
 
     let run_dir = target
