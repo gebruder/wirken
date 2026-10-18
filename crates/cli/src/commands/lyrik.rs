@@ -110,6 +110,7 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
     if !target.is_dir() {
         anyhow::bail!("target is not a directory: {}", target.display());
     }
+    check_run_id(run_id)?;
     let config_path = target.join(".lyrik").join("config.json");
     if !config_path.exists() {
         anyhow::bail!(
@@ -117,6 +118,9 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
             config_path.display()
         );
     }
+
+    // Taken before the run touches anything, compared after it.
+    let locked_at_start = hash_locked_files(target)?;
 
     let config_body = std::fs::read_to_string(&config_path)
         .with_context(|| format!("read {}", config_path.display()))?;
@@ -170,30 +174,62 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
     // run the Lyrik skill phases end-to-end. The fixture path remains
     // for CI reproduction without spending tokens.
     let findings_dest = run_dir.join("findings.json");
-    match use_fixture {
-        Some(fixture) => {
-            let body = std::fs::read_to_string(fixture)
-                .with_context(|| format!("read fixture {}", fixture.display()))?;
-            // Targeted byte-level rewrite of the top-level run_id value.
-            // Round-tripping through serde_json::Value reorders keys
-            // (BTreeMap shape); we want the destination byte-identical to
-            // the fixture except for the run_id value, so the slice's
-            // reproduction acceptance check passes.
-            let rewritten = rewrite_top_level_run_id(&body, run_id)?;
-            std::fs::write(&findings_dest, rewritten)
-                .with_context(|| format!("write {}", findings_dest.display()))?;
-            audit.emit(
-                "lyrik.dispatch",
-                serde_json::json!({
-                    "mode": "fixture",
-                    "fixture": fixture.display().to_string(),
-                    "findings_path": findings_dest.display().to_string(),
-                }),
-            )?;
+    let dispatched: Result<()> = async {
+        match use_fixture {
+            Some(fixture) => {
+                let body = std::fs::read_to_string(fixture)
+                    .with_context(|| format!("read fixture {}", fixture.display()))?;
+                // Targeted byte-level rewrite of the top-level run_id value.
+                // Round-tripping through serde_json::Value reorders keys
+                // (BTreeMap shape); we want the destination byte-identical to
+                // the fixture except for the run_id value, so the slice's
+                // reproduction acceptance check passes.
+                let rewritten = rewrite_top_level_run_id(&body, run_id)?;
+                std::fs::write(&findings_dest, rewritten)
+                    .with_context(|| format!("write {}", findings_dest.display()))?;
+                audit.emit(
+                    "lyrik.dispatch",
+                    serde_json::json!({
+                        "mode": "fixture",
+                        "fixture": fixture.display().to_string(),
+                        "findings_path": findings_dest.display().to_string(),
+                    }),
+                )?;
+            }
+            None => {
+                dispatch_via_agent_runtime(target, run_id, &config, &mut audit, &findings_dest)
+                    .await?;
+            }
         }
-        None => {
-            dispatch_via_agent_runtime(target, run_id, &config, &mut audit, &findings_dest).await?;
-        }
+        Ok(())
+    }
+    .await;
+
+    // Whatever the dispatch did, a team-owned file it changed fails
+    // the run. Write scopes keep the agents out; this catches anything
+    // else in the run that would write there.
+    let changed = changed_locked_files(target, &locked_at_start)?;
+    for c in &changed {
+        audit.emit(
+            "lyrik.locked_file.changed",
+            serde_json::json!({
+                "file": c.file,
+                "sha256_start": c.sha256_start,
+                "sha256_end": c.sha256_end,
+            }),
+        )?;
+    }
+    dispatched?;
+    if !changed.is_empty() {
+        anyhow::bail!(
+            "team-owned file changed during the run: {}; see lyrik.locked_file.changed in {}",
+            changed
+                .iter()
+                .map(|c| c.file.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            run_dir.join("audit.log").display()
+        );
     }
 
     // High-severity review. Bench mode auto-approves at delivery time;
@@ -216,7 +252,99 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
 
     println!("findings written to {}", findings_dest.display());
     println!("audit log at {}", run_dir.join("audit.log").display());
+    for name in PROPOSED_FILES {
+        let proposed = run_dir.join("proposed").join(name);
+        if proposed.is_file() {
+            println!(
+                "proposed {name} at {} (promote it to .lyrik/{name} by hand)",
+                proposed.display()
+            );
+        }
+    }
     Ok(())
+}
+
+/// Team-owned files under `.lyrik/` that a run leaves as it found
+/// them. The run reads them; it never writes them.
+const LOCKED_FILES: &[&str] = &["rubric.md", "context.md", "config.json"];
+
+/// What a run proposes in place of a team-owned file. Written under
+/// `<run-dir>/proposed/`; promoting one is an operator step.
+const PROPOSED_FILES: &[&str] = &["rubric.md", "context.md"];
+
+/// A run id names a directory under `.lyrik/state/runs/` and the
+/// run's write scope, so it is held to path components that cannot
+/// climb out of it or need quoting: `/`-separated, each non-empty,
+/// not `.` or `..`, of ASCII letters, digits, `.`, `_` and `-`.
+fn check_run_id(run_id: &str) -> Result<()> {
+    let ok = !run_id.is_empty()
+        && run_id.split('/').all(|c| {
+            !c.is_empty()
+                && c != "."
+                && c != ".."
+                && c.chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        });
+    if !ok {
+        anyhow::bail!(
+            "run id {run_id:?} must be `/`-separated components of ASCII letters, digits, \
+             `.`, `_` and `-`, none empty, `.` or `..`"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write;
+        write!(&mut s, "{b:02x}").expect("write to String never fails");
+    }
+    s
+}
+
+/// sha256 of each [`LOCKED_FILES`] entry, `None` where the file is
+/// absent.
+fn hash_locked_files(target: &Path) -> Result<Vec<Option<String>>> {
+    LOCKED_FILES
+        .iter()
+        .map(|name| {
+            let path = target.join(".lyrik").join(name);
+            match std::fs::read(&path) {
+                Ok(bytes) => Ok(Some(sha256_hex(&bytes))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(anyhow::Error::from(e).context(format!("read {}", path.display()))),
+            }
+        })
+        .collect()
+}
+
+/// A team-owned file whose bytes differ between run start and end.
+#[derive(Debug, PartialEq)]
+struct LockedFileChange {
+    /// Repo-relative, `.lyrik/<name>`.
+    file: String,
+    sha256_start: Option<String>,
+    sha256_end: Option<String>,
+}
+
+fn changed_locked_files(
+    target: &Path,
+    at_start: &[Option<String>],
+) -> Result<Vec<LockedFileChange>> {
+    let at_end = hash_locked_files(target)?;
+    Ok(LOCKED_FILES
+        .iter()
+        .zip(at_start.iter().zip(at_end))
+        .filter(|(_, (start, end))| *start != end)
+        .map(|(name, (start, end))| LockedFileChange {
+            file: format!(".lyrik/{name}"),
+            sha256_start: start.clone(),
+            sha256_end: end,
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +701,7 @@ async fn dispatch_via_agent_runtime(
     // [`wirken_agent::bundled_skills::self_sign_skill_dir`]: the pair
     // gives tamper detection across the run and discards the key after
     // sign.
-    let lyrik_staged_dir = stage_lyrik_skill(&run_dir).context("stage Lyrik skill")?;
+    let lyrik_staged_dir = stage_lyrik_skill(&run_dir, run_id).context("stage Lyrik skill")?;
     let lyrik_staged_loaded = wirken_agent::SkillLoader::load_dir(&lyrik_staged_dir)
         .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?
         .loaded
@@ -595,7 +723,7 @@ async fn dispatch_via_agent_runtime(
     let walks_staged_dir = match walks_cfg.as_ref() {
         Some(wc) => {
             ensure_walk_staging(&run_dir, &wc.walks).context("ensure per-walk staging dirs")?;
-            let staged = stage_walk_skills(&wc.walks, &walks_source_dir, &run_dir)
+            let staged = stage_walk_skills(&wc.walks, &walks_source_dir, &run_dir, run_id)
                 .context("stage walk skills")?;
             Some(staged)
         }
@@ -723,10 +851,11 @@ async fn dispatch_via_agent_runtime(
                  `.lyrik/state/runs/{run_id}/staging/context/<NN>-<section>.md`. \
                  Phase 0 rubric: write each tier to \
                  `.lyrik/state/runs/{run_id}/staging/rubric/<NN>-<tier>.md` plus \
-                 `00-axes.md`. Do not write `findings.json`, `.lyrik/context.md`, \
-                 or `.lyrik/rubric.md` directly. The runner aggregates the \
-                 staging directories into the final files after the assessment \
-                 turn returns.{seed_protocol}"
+                 `00-axes.md`. Writes outside `.lyrik/state/runs/{run_id}/` are \
+                 refused. Do not write `findings.json` directly. The runner \
+                 aggregates the staging directories after the assessment turn \
+                 returns; rubric and context sections become proposals for the \
+                 team to review.{seed_protocol}"
             );
             let inbound_id = format!("lyrik-run-{}", uuid::Uuid::new_v4());
             let result = match agent.process_message(&prompt, inbound_id).await {
@@ -795,15 +924,18 @@ async fn dispatch_via_agent_runtime(
     // skip-Phase-0 rule), and `staging/findings/` may be absent if
     // the agent wrote findings.json directly via the legacy
     // single-write path.
+    // Rubric and context sections become proposals under the run's
+    // directory, never the team's committed `.lyrik/rubric.md` or
+    // `.lyrik/context.md`.
     let staging = run_dir.join("staging");
     aggregate_phase0_section(
         &staging.join("context"),
-        &target.join(".lyrik").join("context.md"),
+        &run_dir.join("proposed").join("context.md"),
     )
     .context("aggregate context")?;
     aggregate_phase0_section(
         &staging.join("rubric"),
-        &target.join(".lyrik").join("rubric.md"),
+        &run_dir.join("proposed").join("rubric.md"),
     )
     .context("aggregate rubric")?;
     let mut finding_sources: Vec<(Option<String>, PathBuf)> = Vec::new();
@@ -926,9 +1058,10 @@ async fn dispatch_via_agent_runtime(
 ///
 /// One-shot keypair, discarded after the signature is written, through
 /// [`wirken_agent::bundled_skills::self_sign_skill_dir`].
-fn stage_lyrik_skill(run_dir: &Path) -> Result<PathBuf> {
-    let body = wirken_agent::bundled_skills::bundled_skill_content("lyrik")
+fn stage_lyrik_skill(run_dir: &Path, run_id: &str) -> Result<PathBuf> {
+    let bundled = wirken_agent::bundled_skills::bundled_skill_content("lyrik")
         .ok_or_else(|| anyhow::anyhow!("bundled Lyrik skill content missing from binary"))?;
+    let body = narrow_write_scope(bundled, run_id)?;
 
     let staged_root = run_dir.join("lyrik-skill");
     let lyrik_dir = staged_root.join("lyrik");
@@ -943,11 +1076,29 @@ fn stage_lyrik_skill(run_dir: &Path) -> Result<PathBuf> {
     Ok(staged_root)
 }
 
+/// The bundled skill's write grant, `<workspace>/.lyrik`, narrowed in
+/// the staged copy to the run's own directory. Fails rather than
+/// staging a copy with the broad grant when the bundled frontmatter
+/// does not carry exactly one such line.
+fn narrow_write_scope(bundled: &str, run_id: &str) -> Result<String> {
+    const BUNDLED_GRANT: &str = "write_paths: [\"<workspace>/.lyrik\"]";
+    if bundled.matches(BUNDLED_GRANT).count() != 1 {
+        anyhow::bail!("bundled Lyrik skill does not carry exactly one `{BUNDLED_GRANT}` line");
+    }
+    Ok(bundled.replacen(
+        BUNDLED_GRANT,
+        &format!(
+            "write_paths: [\"{}\"]",
+            super::lyrik_walks::run_write_scope(run_id)
+        ),
+        1,
+    ))
+}
+
 /// Aggregate one Phase 0 staging directory (context or rubric) into a
-/// single markdown file. Empty or missing source directories are
-/// no-ops; the destination is left untouched, which preserves any
-/// prior `.lyrik/context.md` or `.lyrik/rubric.md` from earlier runs.
-/// On success the source directory is removed.
+/// single markdown proposal under the run's `proposed/` directory.
+/// Empty or missing source directories are no-ops. On success the
+/// source directory is removed.
 fn aggregate_phase0_section(source: &Path, dest: &Path) -> Result<()> {
     if !source.is_dir() {
         return Ok(());
@@ -2578,7 +2729,7 @@ mod tests {
         };
 
         let tmp = tempdir().unwrap();
-        let staged = super::stage_lyrik_skill(tmp.path()).unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1").unwrap();
         let lyrik_dir = staged.join("lyrik");
 
         assert!(lyrik_dir.join("SKILL.md").exists(), "SKILL.md missing");
@@ -2594,17 +2745,103 @@ mod tests {
         );
     }
 
-    /// Staged SKILL.md content matches the bundled body byte-for-byte.
+    /// Staged SKILL.md content matches the bundled body byte-for-byte
+    /// apart from the write grant, narrowed to the run's directory.
     /// Guards against the bundled accessor returning the wrong entry or
     /// the staging function trimming/wrapping the body.
     #[test]
     fn stage_lyrik_skill_writes_bundled_content_byte_for_byte() {
         let tmp = tempdir().unwrap();
-        let staged = super::stage_lyrik_skill(tmp.path()).unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path(), "sample/run-1").unwrap();
         let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
         let bundled =
             wirken_agent::bundled_skills::bundled_skill_content("lyrik").expect("lyrik bundled");
-        assert_eq!(written, bundled);
+        assert_eq!(
+            written,
+            bundled.replacen(
+                "write_paths: [\"<workspace>/.lyrik\"]",
+                "write_paths: [\"<workspace>/.lyrik/state/runs/sample/run-1\"]",
+                1
+            )
+        );
+    }
+
+    /// The staged copy's only write grant is the run's directory, as
+    /// the loader reads it.
+    #[test]
+    fn stage_lyrik_skill_grants_writes_only_under_the_run() {
+        let tmp = tempdir().unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1").unwrap();
+        let skills = wirken_agent::SkillLoader::load_dir(&staged).unwrap().loaded;
+        let lyrik = skills
+            .iter()
+            .find(|s| s.name == "lyrik")
+            .expect("lyrik loads");
+        let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
+        assert_eq!(
+            written.matches("write_paths:").count(),
+            1,
+            "one write grant: {written}"
+        );
+        assert!(
+            written.contains("write_paths: [\"<workspace>/.lyrik/state/runs/r1\"]"),
+            "{written}"
+        );
+        assert!(!written.contains("write_paths: [\"<workspace>/.lyrik\"]"));
+        assert_eq!(lyrik.name, "lyrik");
+    }
+
+    #[test]
+    fn narrow_write_scope_refuses_a_body_without_the_bundled_grant() {
+        assert!(super::narrow_write_scope("---\nname: x\n---\n", "r1").is_err());
+    }
+
+    #[test]
+    fn check_run_id_keeps_the_run_inside_its_directory() {
+        for ok in ["refusals", "sample/run-007", "a.b_c-1"] {
+            assert!(super::check_run_id(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", "..", "../x", "a/../b", "a//b", "/abs", "a/", ".", "a b", "a\"b", "a\\b",
+        ] {
+            assert!(super::check_run_id(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// A team-owned file that changes between run start and end is
+    /// reported by name; one that does not is not.
+    #[test]
+    fn changed_locked_files_names_a_changed_rubric() {
+        let tmp = tempdir().unwrap();
+        let lyrik = tmp.path().join(".lyrik");
+        std::fs::create_dir_all(&lyrik).unwrap();
+        std::fs::write(lyrik.join("rubric.md"), "team rubric\n").unwrap();
+        std::fs::write(lyrik.join("config.json"), "{}").unwrap();
+        let at_start = super::hash_locked_files(tmp.path()).unwrap();
+        assert!(
+            super::changed_locked_files(tmp.path(), &at_start)
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::write(lyrik.join("rubric.md"), "rewritten\n").unwrap();
+        std::fs::write(lyrik.join("context.md"), "new\n").unwrap();
+        let changed = super::changed_locked_files(tmp.path(), &at_start).unwrap();
+        assert_eq!(
+            changed,
+            vec![
+                super::LockedFileChange {
+                    file: ".lyrik/rubric.md".to_string(),
+                    sha256_start: Some(super::sha256_hex(b"team rubric\n")),
+                    sha256_end: Some(super::sha256_hex(b"rewritten\n")),
+                },
+                super::LockedFileChange {
+                    file: ".lyrik/context.md".to_string(),
+                    sha256_start: None,
+                    sha256_end: Some(super::sha256_hex(b"new\n")),
+                },
+            ]
+        );
     }
 
     fn write_finding(dir: &std::path::Path, name: &str, content: &serde_json::Value) {
