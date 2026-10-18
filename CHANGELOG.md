@@ -10,6 +10,19 @@ tagged.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-18
+
+#288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0
+deferred, zip 9.0.0 and serde-saphyr 2.0.0, which take a soak cycle before a
+release, and none of its updates carries an open advisory. #286
+(upload-artifact 7.0.2, download-artifact 8.0.2, scorecard-action 2.5.0 and
+codeql-action 4.38.3) is deferred for the reason 2.1.0 gave: the release
+workflow runs only on a tag, so this release would be its first test.
+
+A 2.2.0 or older binary, including one reached with
+`wirken update --allow-downgrade`, reads the `binary_installed` rows on the
+`gateway-install` lane as schema drift rather than as a broken chain.
+
 ### Added
 
 - `wirken update`, run only when the operator asks. `--check` fetches
