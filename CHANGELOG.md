@@ -10,6 +10,24 @@ tagged.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-18
+
+From #287 (eleven Cargo updates), rustls 0.23.46 is taken, which fixes
+RUSTSEC-2026-0346, -0347, -0348 and -0349 on the rustls 0.23 path. The rest
+of #287 is deferred: it carries two major bumps, zip 9.0.0 and serde-saphyr
+2.0.0, the parser for skill frontmatter, which take a soak cycle before a
+release. #286 (upload-artifact 7.0.2, download-artifact 8.0.2,
+scorecard-action 2.5.0 and codeql-action 4.38.3) is deferred for the reason
+2.1.0 gave: the release workflow runs only on a tag, so this release would be
+its first test. The advisories that remain on rustls 0.22, zip 8 and the zbus
+crates are ignored in `deny.toml`, each with its dependency path and why it
+does not apply.
+
+Sessions recorded by this release carry `llm_request` rows with `purpose:
+compaction_summary` or `purpose: tool_call_probe`. A 2.1.x or older binary
+reads those rows as turns, so its `wirken sessions verify` can report them as
+divergent; verify such sessions with 2.2.0 or later.
+
 ### Security
 
 - A Lyrik run's agents may write only under the run's own directory,
