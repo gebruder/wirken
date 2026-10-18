@@ -37,7 +37,8 @@ by tag (`schema-v1.1`), not by Wirken release; see
 
 ## Sequence
 
-Replace `1.22.0` with the target version throughout.
+Replace `X.Y.Z` with the target version throughout, and `P.Q` with the
+previous minor series.
 
 ### 1. Clean main, run pre-flight
 
@@ -79,10 +80,28 @@ fi
 gh pr list --label dependencies --state open
 ```
 
-The secret-scanning branch is spelled out because the API answers `404` both
-when the feature is off and when the caller lacks permission to read it, so a
-swallowed error is indistinguishable from a clean surface. On this repo it is
-the permission case: the release account has push and triage, not admin. An
+The secret-scanning branch is spelled out because the API answers `404` in
+three cases: the feature is off, the caller is not an admin of the
+repository, or the caller is an admin whose token lacks the scope to read the
+alerts. A swallowed error is indistinguishable from a clean surface. Tell the
+three apart:
+
+```bash
+gh api repos/gebruder/wirken \
+    --jq '{admin: .permissions.admin, secret_scanning: .security_and_analysis.secret_scanning.status}'
+gh api -i repos/gebruder/wirken/secret-scanning/alerts 2>&1 \
+    | grep -iE '^(x-oauth-scopes|x-accepted-oauth-scopes|x-accepted-github-permissions):'
+```
+
+`admin: false` is the permission case; on this repo the release account has
+push and triage, not admin. `security_and_analysis` is returned only to an
+admin: `secret_scanning: "disabled"` means the feature is off. An admin with
+`"enabled"` and a `404` holds a token without the scope: the second command
+shows the scopes the token has (`X-OAuth-Scopes`, a classic token) against
+what the endpoint accepts (`X-Accepted-OAuth-Scopes`, or
+`X-Accepted-GitHub-Permissions` for a fine-grained token). For a classic
+token that is `repo` or `security_events` (`gh auth refresh -s
+security_events`); for a fine-grained one, "Secret scanning alerts: read". An
 unverified surface is recorded as unverified, never as clean.
 
 The `shellcheck` and SHA checks exist because a locally modified `install.sh`
@@ -102,6 +121,22 @@ bumped crate's path, done before the tag. It is a run, not a wait: a feed
 parser bump soaks on a real `wirken zirkel run` fetch. Where the crate has no
 path an operator can run, the in-tree end-to-end tests that exercise it are
 its soak, and the CHANGELOG entry for the bump names them.
+
+**The release workflow enforces the gate.** Its first job, `gate`, runs on the
+tag push before any build: `scripts/check-names.sh`, `cargo deny check`, open
+CodeQL alerts (any critical or high fails) and open Dependabot alerts (any
+fails). Every build job needs it, so a failing gate builds nothing and creates
+no draft release. A surface the workflow token cannot read is printed as
+`UNVERIFIED` and fails the job. The token reads code scanning
+(`security-events: read`); it cannot be granted Dependabot alerts, which
+answer `403`, so that surface reports `UNVERIFIED` and the job fails. The
+manual pre-flight above stays the local fast-fail, so a tag is not pushed
+into a gate that will refuse it. To run the gate alone on a branch, without
+the build matrix and without creating a release:
+
+```bash
+gh workflow run release.yml -R gebruder/wirken --ref <branch> -f gate_only=true
+```
 
 **What gates a tag.** `scripts/check-names.sh` passing, and three surfaces,
 not interchangeable:
@@ -150,44 +185,55 @@ rule dimension, so the first would drop the rule from production `src` and the
 second would drop every rule from the test paths. Per-alert dismissal is the
 mechanism, and it persists while the fingerprint does.
 
-### 2. Bump the workspace version
+### 2. Bump the version
 
-```toml
-[workspace.package]
-version = "1.22.0"
-```
+Five files change together in the release commit:
 
-```bash
-cargo update -w
-```
+- `Cargo.toml`: the workspace version.
+
+  ```toml
+  [workspace.package]
+  version = "X.Y.Z"
+  ```
+
+- `Cargo.lock` and `fuzz/Cargo.lock`: the workspace crates' versions, and
+  nothing else.
+
+  ```bash
+  cargo update -w
+  cargo update -w --manifest-path fuzz/Cargo.toml
+  ```
+
+- `README.md`: the gateway banner example, `wirken vX.Y.Z`.
+- `CHANGELOG.md`: the entries under `## [Unreleased]` move under a new
+  `## [X.Y.Z] - YYYY-MM-DD` heading, and `## [Unreleased]` stays, empty.
 
 Scan published docs for prose hardcoded to the previous series; skip for patch
-bumps, and replace `1.21` with the prior minor:
+bumps:
 
 ```bash
-git grep -nE "1\.21\.[0-9x]+|1\.21 " -- README.md SECURITY.md docs/ \
+git grep -nE "P\.Q\.[0-9x]+|P\.Q " -- README.md SECURITY.md docs/ \
     | grep -vE 'docs/release-process\.md|docs/signing\.md|CHANGELOG\.md' \
     || true
 ```
 
 Common offenders: the `SECURITY.md` supported-versions table, and the
-`README.md` status section and gateway banner example. Stage edits alongside
-the bump.
+`README.md` status section. Stage edits alongside the bump.
 
 ### 3. Commit, push, wait for green
 
 ```bash
-git add Cargo.toml Cargo.lock
-git commit -m "chore: bump version to 1.22.0"
-git push
+git add Cargo.toml Cargo.lock fuzz/Cargo.lock README.md CHANGELOG.md
+git commit -m "Release X.Y.Z"
+git push origin main
 gh run watch -R gebruder/wirken
 ```
 
 ### 4. Tag
 
 ```bash
-git tag -a v1.22.0 -m "v1.22.0"
-git push origin v1.22.0
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
 ```
 
 ### 5. Watch the release build
@@ -213,7 +259,7 @@ to run if the private key is inside it.
 
 ```bash
 mkdir -p /tmp/wirken-release && cd /tmp/wirken-release
-gh release download v1.22.0 -R gebruder/wirken --pattern checksums.sha256
+gh release download vX.Y.Z -R gebruder/wirken --pattern checksums.sha256
 cat checksums.sha256   # five lines, one per binary
 
 # The last published manifest, whose entries are reused. Absent before
@@ -222,17 +268,17 @@ cat checksums.sha256   # five lines, one per binary
 gh release download -R gebruder/wirken --pattern releases.json --dir previous \
     || echo "no published releases.json yet"
 PREV=; [ -f previous/releases.json ] && PREV="--previous previous/releases.json"
-"$REPO"/scripts/build-releases-json.py --current v1.22.0 \
+"$REPO"/scripts/build-releases-json.py --current vX.Y.Z \
     --checksums checksums.sha256 $PREV > releases.json
 
-WIRKEN_SIGNING_KEY=~/.ssh/wirken-release-signing "$REPO"/scripts/sign-release.sh v1.22.0
+WIRKEN_SIGNING_KEY=~/.ssh/wirken-release-signing "$REPO"/scripts/sign-release.sh vX.Y.Z
 
 ssh-keygen -Y verify -f "$REPO"/KEYS -I releases@gebruder.ottenheimer.app \
     -n file -s checksums.sha256.sig < checksums.sha256
 ssh-keygen -Y verify -f "$REPO"/KEYS -I releases@gebruder.ottenheimer.app \
     -n wirken-release-manifest -s releases.json.sig < releases.json
 
-gh release upload v1.22.0 checksums.sha256.sig releases.json releases.json.sig \
+gh release upload vX.Y.Z checksums.sha256.sig releases.json releases.json.sig \
     -R gebruder/wirken
 ```
 
@@ -253,7 +299,7 @@ Both verifies must print `Good "file" signature` and
 ### 10. Confirm assets
 
 ```bash
-gh release view v1.22.0 -R gebruder/wirken
+gh release view vX.Y.Z -R gebruder/wirken
 ```
 
 Five binaries, `checksums.sha256`, `checksums.sha256.sig`, `releases.json`,
@@ -270,9 +316,9 @@ flip of the draft flag. Check the body first: it must say nothing about being
 a draft, because whatever it says is what the published release says.
 
 ```bash
-gh release view v1.22.0 -R gebruder/wirken --json body --jq .body | grep -i draft \
+gh release view vX.Y.Z -R gebruder/wirken --json body --jq .body | grep -i draft \
     && echo "body mentions draft; read it before publishing"
-gh release edit v1.22.0 -R gebruder/wirken --draft=false
+gh release edit vX.Y.Z -R gebruder/wirken --draft=false
 ```
 
 ### 12. Smoke test
@@ -283,11 +329,17 @@ Fresh shell, scratch install dir so your local binary survives:
 WIRKEN_INSTALL_DIR=/tmp/wirken-smoke \
     sh -c 'curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh'
 /tmp/wirken-smoke/wirken --version
+/tmp/wirken-smoke/wirken update --check
 ```
 
 The installer output must contain both
 `Signature verified: releases@gebruder.ottenheimer.app` and
 `Checksum verified: ...`. If either is missing the release is broken.
+
+`wirken update --check` from the installed binary must verify the published
+`releases.json` against the key compiled into it and end with `Up to date.`
+A refused signature or a fetch error means the manifest step (6-9) is broken
+for every installed binary.
 
 **Housekeeping.** Re-read `README.md` for any count or version that shifted.
 If `crates/audit/src/session_log.rs` changed since the previous release, sync
@@ -299,8 +351,8 @@ sitting. Clean up `/tmp/wirken-release` and `/tmp/wirken-smoke`.
 **CI failed on the tag push.** The tag exists but no draft was created.
 
 ```bash
-git tag -d v1.22.0
-git push --delete origin v1.22.0
+git tag -d vX.Y.Z
+git push --delete origin vX.Y.Z
 # fix on main, then restart from the tag step
 ```
 
@@ -311,8 +363,8 @@ unverified signature.
 **Wrong signature uploaded.**
 
 ```bash
-gh release delete-asset v1.22.0 checksums.sha256.sig -R gebruder/wirken --yes
-gh release upload v1.22.0 checksums.sha256.sig -R gebruder/wirken
+gh release delete-asset vX.Y.Z checksums.sha256.sig -R gebruder/wirken --yes
+gh release upload vX.Y.Z checksums.sha256.sig -R gebruder/wirken
 ```
 
 **A bad release is already published.** Do not delete it; users may have
@@ -324,58 +376,92 @@ installing stale content.
 
 ## Key rotation
 
-Three steps with a hard dependency order.
+Since 2.3.0 every binary pins the release keys `wirken update` trusts:
+`RELEASE_KEYS` in `crates/gateway/src/release_keys.rs`, with no runtime
+override. An installed binary accepts a `releases.json` signed only by a key
+in its own list. A rotation therefore ships the new key inside a release
+signed with the old one first, and only then moves signing.
 
 **1. Generate offline.** Record the fingerprint and issue date. Store the
-private key outside the repo tree and do not overwrite the old one until step
-3 publishes.
+private key outside the repo tree and do not overwrite the old one.
 
 ```bash
 ssh-keygen -t ed25519 -C releases@gebruder.ottenheimer.app -f wirken-release-signing-NEW
 ssh-keygen -lf wirken-release-signing-NEW.pub
 ```
 
-**2. Swap the trust anchor in one commit.** Every file pinning the public key
-updates together: `KEYS` gains the new key as active and marks the old with
-`# Retired YYYY-MM-DD`, keeping it for verifying pre-rotation releases;
-`install.sh` replaces `ALLOWED_SIGNERS` and its header fingerprint;
-`README.md` bumps the pinned `install.sh` SHA-256; `SECURITY.md` updates the
-active fingerprint and issue date.
+**2. Ship a bridge release that pins both keys, signed with the old key.**
+Every file pinning the public key gains the new key beside the old one, in
+one commit:
 
-**3. Tag and cut the next release with the new key immediately.**
+- `crates/gateway/src/release_keys.rs`: `RELEASE_KEYS` lists both keys. Its
+  tests hold the list equal to the keys in `KEYS` and in `install.sh`'s
+  `ALLOWED_SIGNERS` and check the published fingerprint, so they change with
+  it.
+- `KEYS`: the new key beside the active one.
+- `install.sh`: `ALLOWED_SIGNERS` and its header fingerprint list both keys;
+  `README.md` bumps the pinned `install.sh` SHA-256.
+- `SECURITY.md`: the new fingerprint and its issue date.
 
-**Ordering trap.** Between merging step 2 and publishing step 3, the installer
-on `main` trusts the new key but the latest release is still signed with the
-old one, so `curl | sh` exits 5 during that window. Merge the rotation commit
-and tag the release in the same sitting. Users with a pinned older
-`install.sh` are unaffected.
+Cut and publish that release with the old key. A binary that updates to it
+trusts both keys; `install.sh` on `main` accepts both, so `curl | sh` keeps
+working throughout.
+
+**3. Move signing to the new key in a later release.** Sign the next release
+with the new key. In the same release, retire the old key: `KEYS` marks it
+`# Retired YYYY-MM-DD` and keeps it for verifying earlier releases. Because
+the `release_keys` tests hold `RELEASE_KEYS`, `KEYS` and `ALLOWED_SIGNERS` to
+the same keys, a retired key stays in all three or leaves all three in one
+commit.
+
+**Ordering trap.** A release signed with the new key before the bridge
+release is out cannot be checked by any installed binary: `wirken update`
+refuses its manifest as signed by a key that is not pinned, and those
+binaries cannot update. Their operators reinstall with `install.sh`. Publish
+the bridge release, and give operators time to take it, before signing with
+the new key.
 
 ## Key loss or compromise
 
-Same shape as rotation, with the differences below. Severity depends on
-whether the old private key was lost (nobody has it) or compromised (someone
-might).
+Severity depends on whether the old private key was lost (nobody has it) or
+compromised (someone might). In both cases there is no bridge release: one
+cannot be signed with a lost key and must not be trusted from a compromised
+one.
 
-Users with an already-installed binary are unaffected: the binary has no trust
-path to the release key, and signature verification runs only at install time.
-Users with a pinned older `install.sh` keep working against existing releases
-as long as those signatures verify under the old public key. New installs from
-`main` break until a new signed release is cut, and that is the only
-user-visible cost.
+**`wirken update` stops working for installed binaries until they reinstall.**
+Each installed binary pins only the old key, so it refuses every manifest
+signed with the new one. Operators reinstall with `install.sh`, which installs
+a binary that pins the new key; after that `wirken update` works again. On a
+compromise, also tell operators not to run `wirken update` on a binary that
+pins the compromised key: a manifest signed with that key verifies there.
+Installed binaries otherwise keep running. Users with a pinned older
+`install.sh` keep working against existing releases as long as those
+signatures verify under the old public key. New installs from `main` break
+until a new signed release is cut.
 
 1. **Generate a new key offline.**
-2. **Swap the anchor in one commit**, with two differences from rotation. If
-   **compromised**, remove the old key from `KEYS` entirely rather than
-   retiring it, because any binary signed by it must no longer be treated as
+2. **Swap the anchor in one commit.** Every file pinning the public key gains
+   the new key: `RELEASE_KEYS` in `crates/gateway/src/release_keys.rs` and its
+   tests, `KEYS`, `install.sh`'s `ALLOWED_SIGNERS` and header fingerprint, the
+   `README.md` pin of `install.sh`, and `SECURITY.md`. The `release_keys`
+   tests hold `RELEASE_KEYS`, `KEYS` and `ALLOWED_SIGNERS` to the same keys,
+   so the old key leaves all three or stays in all three. If
+   **compromised**, remove it from all three rather than retiring it, because
+   any binary or manifest signed by it must no longer be treated as
    trustworthy, and edit each existing release to prepend
    `**Revoked, key compromised. Upgrade to vX.Y.Z.**`. If **only lost**, keep
-   the old key with `# Retired YYYY-MM-DD, private key lost, no further
-   signatures will be produced`, so old releases stay verifiable.
+   it in all three, marked in `KEYS` with `# Retired YYYY-MM-DD, private key
+   lost, no further signatures will be produced`: nobody can sign with it, and
+   old releases stay verifiable.
 3. **Tag and publish a new signed release immediately.** On a compromise, bump
-   a patch with no code changes purely to restore the trust path.
+   a patch with no code changes purely to restore the trust path. Its notes
+   tell operators to reinstall with `install.sh`, since `wirken update` cannot
+   reach it from a binary that pins only the old key.
 4. **If compromised, publish an advisory**: which fingerprint is revoked,
-   which releases are affected, which version to upgrade to. Rotate any other
+   which releases are affected, which version to reinstall, and not to run
+   `wirken update` on a binary that pins the revoked key. Rotate any other
    credentials that shared storage with the compromised key.
 
 There is no global revocation mechanism for `ssh-keygen` signatures. Trust
-anchor swap plus a new signed release is the whole fix.
+anchor swap plus a new signed release, and a reinstall of every installed
+binary, is the whole fix.
