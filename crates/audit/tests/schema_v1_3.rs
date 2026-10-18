@@ -232,7 +232,7 @@ fn pre_1_2_0_tool_result_deserializes_with_empty_agent_id() {
 
 #[test]
 fn pre_1_2_0_llm_request_deserializes_with_empty_agent_id() {
-    let legacy = r#"{"kind":"llm_request","provider":"anthropic","model":"claude","request_id":"r1","tools_hash":"a","messages_hash":"b"}"#;
+    let legacy = r#"{"kind":"llm_request","provider":"anthropic","model":"model-a","request_id":"r1","tools_hash":"a","messages_hash":"b"}"#;
     let ev: SessionEvent = serde_json::from_str(legacy).unwrap();
     match ev {
         SessionEvent::LlmRequest {
@@ -256,7 +256,7 @@ fn pre_1_2_0_llm_request_deserializes_with_empty_agent_id() {
 /// back as a turn of unknown size.
 #[test]
 fn pre_request_bytes_llm_request_reads_as_a_turn_of_unknown_size() {
-    let legacy = r#"{"kind":"llm_request","provider":"anthropic","model":"claude","request_id":"r1","tools_hash":"a","messages_hash":"b","agent_id":"default"}"#;
+    let legacy = r#"{"kind":"llm_request","provider":"anthropic","model":"model-a","request_id":"r1","tools_hash":"a","messages_hash":"b","agent_id":"default"}"#;
     match serde_json::from_str::<SessionEvent>(legacy).unwrap() {
         SessionEvent::LlmRequest {
             request_bytes,

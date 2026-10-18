@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract the *structure* of an Anthropic (claude.ai) data-export archive.
+"""Extract the *structure* of an Anthropic data-export archive.
 
 Run locally against a real export zip. Emits key paths, JSON types,
 nullability, value shapes, and closed-set enum values. It does not emit

@@ -13,7 +13,7 @@ agent and letting it read the old one under your approval.
 
 ## Getting the export
 
-The export is requested from your claude.ai account settings. It covers
+The export is requested from your Anthropic account settings. It covers
 the whole account rather than a single conversation or project. It
 arrives as an emailed download link, and the link expires, so download
 it before it does.
@@ -266,7 +266,7 @@ of the index.
 A source records which provider it came from, so archives from
 different assistants stay separate and are never merged.
 
-Only the claude.ai export format is parsed today. An archive from
+Only the Anthropic export format is parsed today. An archive from
 somewhere else is refused rather than partly read.
 
 A zip with no `conversations.json` is refused for not being an export:

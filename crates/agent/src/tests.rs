@@ -9206,7 +9206,7 @@ mod openai_compat_stub {
 
         let config = LlmConfig {
             provider: "anthropic".into(),
-            model: "claude-sonnet-5".into(),
+            model: "model-under-test".into(),
             base_url: format!("http://{addr}/v1"),
             max_tokens: 256,
             temperature: 0.7,

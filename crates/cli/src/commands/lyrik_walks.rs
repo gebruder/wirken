@@ -223,8 +223,8 @@ pub fn parse_walks_config(
 
 /// Stage each selected walk's `SKILL.md` into the per-run staging
 /// directory under a wirken-shaped frontmatter. Operators install
-/// walk skills as Claude-style SKILL.md files (no permissions
-/// block); the wirken Agent's SkillLoader requires a permissions
+/// walk skills as plain SKILL.md files with `name:` and
+/// `description:` frontmatter and no permissions block; the wirken Agent's SkillLoader requires a permissions
 /// block, so we wrap each walk at run time rather than asking
 /// operators to maintain two copies.
 ///
@@ -266,7 +266,7 @@ pub fn stage_walk_skills(
 /// inference provider. Walks do not need anything broader.
 ///
 /// Strips an existing leading `---` frontmatter block from the
-/// source (Claude-style `name:` / `description:`) and writes a
+/// source (`name:` / `description:`) and writes a
 /// fresh one. The original description is preserved when present
 /// so the slash interceptor still surfaces a useful one-liner.
 ///

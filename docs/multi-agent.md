@@ -1,7 +1,7 @@
 # Multiple agents
 
 Route different channels to different agents, each with its own model, API
-key, workspace and skills. A work agent on Slack using Claude with GitHub and
+key, workspace and skills. A work agent on Slack using an Anthropic model with GitHub and
 Datadog MCP servers; a personal agent on Telegram using GPT with notes and
 calendar skills; a coding agent on Discord on a local Ollama model. Each has
 its own conversation history, workspace directory and credentials, and they

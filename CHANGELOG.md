@@ -1928,7 +1928,7 @@ with an existing `permissions.db`.
 ### Added
 
 - **Imported archives.** `wirken import <archive.zip>` reads a
-  claude.ai data export into a local store. Conversations, messages,
+  Anthropic account data export into a local store. Conversations, messages,
   attachment text, projects and project documents are stored; the
   archive's user roster, its memory entries, and project creator names
   are not. Structured content blocks are stored byte for byte and are
@@ -3741,11 +3741,10 @@ serde envelope.
 - Per-walk dispatch. `walks: [...]` in `.lyrik/config.json` opts
   a run into per-walk operation. The validator runs at parse
   time: each named walk must appear in the canonical
-  `KNOWN_WALKS` set and each must exist as
-  `~/.claude/skills/<walk>/SKILL.md`. Empty arrays, unknown
-  names, and missing skill files all hard-fail before any LLM
-  call. Walk skills are operator-installed in the Claude-style
-  tree without a wirken permissions block, so the runner stages
+  `KNOWN_WALKS` set and each must exist as `<walk>/SKILL.md` in
+  the operator's skills directory. Empty arrays, unknown names,
+  and missing skill files all hard-fail before any LLM call. Walk skills are operator-installed in that directory
+  without a wirken permissions block, so the runner stages
   them at `<run-dir>/walks-skills/<walk>/SKILL.md` with
   synthesized wirken-shaped frontmatter wrapping the original
   body; the agent loads them via the new `Agent::extend_skills`
@@ -4040,7 +4039,7 @@ serde envelope.
   is corrected at report-render time and the rationale is
   preserved so the operator can see what the model claimed vs
   what it could actually defend. Found in run-005 against the
-  canonical AVB pin: claude-sonnet-4 emitted "PoC succeeded —
+  canonical AVB pin: the pinned model emitted "PoC succeeded —
   arbitrary code execution confirmed" rationales on three
   findings without ever running a PoC, because the rationale is
   text and the model's training favors decisive language. The

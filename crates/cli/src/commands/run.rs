@@ -5595,7 +5595,7 @@ mod channel_overrides_tests {
         let (tmp, vault_path) = vault_with("ignored-slot", "ignored");
         let provider_json = serde_json::json!({
             "provider": "anthropic",
-            "model": "claude",
+            "model": "base-model",
             "channel_overrides": {},
         });
         let out =
@@ -5609,7 +5609,7 @@ mod channel_overrides_tests {
         let (tmp, vault_path) = vault_with("privatemode-access-key", "pm-secret");
         let provider_json = serde_json::json!({
             "provider": "anthropic",
-            "model": "claude",
+            "model": "base-model",
             "channel_overrides": {
                 "signal": {
                     "provider": "privatemode",
@@ -5635,7 +5635,7 @@ mod channel_overrides_tests {
         let (tmp, vault_path) = vault_with("some-other-slot", "irrelevant");
         let provider_json = serde_json::json!({
             "provider": "anthropic",
-            "model": "claude",
+            "model": "base-model",
             "channel_overrides": {
                 "signal": {
                     "provider": "privatemode",
@@ -5662,7 +5662,7 @@ mod channel_overrides_tests {
         let (tmp, vault_path) = vault_with("ignored", "ignored");
         let provider_json = serde_json::json!({
             "provider": "anthropic",
-            "model": "claude",
+            "model": "base-model",
             "channel_overrides": {
                 "ollama-channel": {
                     "provider": "ollama",
@@ -5684,7 +5684,7 @@ mod channel_overrides_tests {
         let (tmp, vault_path) = vault_with("ignored", "ignored");
         let provider_json = serde_json::json!({
             "provider": "anthropic",
-            "model": "claude",
+            "model": "base-model",
             "channel_overrides": {
                 "signal": { "model": "kimi-k2.5" }
             }
@@ -5709,7 +5709,7 @@ mod provider_override_tests {
     fn stored() -> serde_json::Value {
         json!({
             "provider": "bedrock",
-            "model": "anthropic.claude-v2",
+            "model": "vendor.model-v2",
             "base_url": "https://bedrock-runtime.eu-west-1.amazonaws.com",
             "region": "eu-west-1",
             "channel_overrides": { "signal": { "provider": "ollama", "model": "m" } },
@@ -5719,12 +5719,12 @@ mod provider_override_tests {
     #[test]
     fn model_alone_keeps_the_stored_provider_and_endpoint() {
         let over = ProviderOverride {
-            model: Some("anthropic.claude-v3".into()),
+            model: Some("vendor.model-v3".into()),
             ..Default::default()
         };
         let out = apply_provider_override(stored(), &over).unwrap();
         assert_eq!(out["provider"], "bedrock");
-        assert_eq!(out["model"], "anthropic.claude-v3");
+        assert_eq!(out["model"], "vendor.model-v3");
         assert_eq!(out["base_url"], stored()["base_url"]);
         assert_eq!(out["region"], "eu-west-1");
     }

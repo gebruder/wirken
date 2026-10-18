@@ -174,7 +174,7 @@ mod tests {
     #[test]
     fn cost_missing_model_returns_none() {
         // Known provider, unknown model.
-        let (inp, out, total) = cost_micros("anthropic", "claude-never-shipped", 1000, 1000);
+        let (inp, out, total) = cost_micros("anthropic", "model-never-shipped", 1000, 1000);
         assert_eq!(inp, None);
         assert_eq!(out, None);
         assert_eq!(total, None);
