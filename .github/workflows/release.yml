@@ -4,7 +4,12 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      gate_only:
+        description: Run only the tag gate, not the build matrix
+        type: boolean
+        default: false
 
 # Minimum permissions at the workflow level. The release job
 # escalates to `contents: write` locally so build jobs can't use
@@ -21,8 +26,103 @@ env:
   CAPNP_SHA256: "2c503361f8bf26fa9e7caccb6db04d6b271d5f0ad3da0616cf40e9a51335c89c"
 
 jobs:
+  # The tag gate. Every build job needs it, so when it fails nothing is
+  # built and no draft release is created. A surface the token cannot
+  # read is printed as UNVERIFIED and fails the job: an unread surface
+  # is not a clean one. `workflow_dispatch` with `gate_only` runs this
+  # job alone, on any branch; a dispatched run never creates a release.
+  gate:
+    name: Tag gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout, and the commit range check-names reads
+      security-events: read # code-scanning alerts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # check-names reads the commits since the last tag.
+          fetch-depth: 0
+
+      - name: Names
+        run: scripts/check-names.sh
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
+        if: ${{ !cancelled() }}
+
+      # The same pinned, checksummed cargo-deny the CI Deny job installs.
+      - name: Install cargo-deny
+        if: ${{ !cancelled() }}
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          VERSION=0.20.2
+          NAME="cargo-deny-${VERSION}-x86_64-unknown-linux-musl"
+          EXPECTED_SHA256="9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${VERSION}/${NAME}.tar.gz" \
+            -o "${NAME}.tar.gz"
+
+          echo "${EXPECTED_SHA256}  ${NAME}.tar.gz" | sha256sum -c -
+
+          tar -xzf "${NAME}.tar.gz" "${NAME}/cargo-deny"
+          install -m 0755 "${NAME}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
+          cargo deny --version
+
+      - name: cargo deny
+        if: ${{ !cancelled() }}
+        run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check
+
+      # Code scanning gates on CodeQL; Scorecard findings are reviewed,
+      # not gating (docs/release-process.md).
+      - name: Code-scanning and Dependabot alerts
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          fail=0
+          err=$(mktemp)
+
+          if found=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&tool_name=CodeQL&per_page=100" \
+              --jq '.[] | select(.rule.security_severity_level == "critical" or .rule.security_severity_level == "high")
+                    | "  #\(.number) \(.rule.security_severity_level) \(.rule.id) \(.most_recent_instance.location.path):\(.most_recent_instance.location.start_line)"' \
+              2>"$err"); then
+            if [ -n "$found" ]; then
+              echo "code scanning: open critical or high CodeQL alerts"
+              echo "$found"
+              fail=1
+            else
+              echo "code scanning: no open critical or high CodeQL alert"
+            fi
+          else
+            echo "code scanning: UNVERIFIED, the token cannot read it: $(cat "$err")"
+            fail=1
+          fi
+
+          if found=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/dependabot/alerts?state=open&per_page=100" \
+              --jq '.[] | "  #\(.number) \(.security_advisory.severity) \(.dependency.package.name) \(.security_advisory.ghsa_id)"' \
+              2>"$err"); then
+            if [ -n "$found" ]; then
+              echo "dependabot: open alerts"
+              echo "$found"
+              fail=1
+            else
+              echo "dependabot: no open alert"
+            fi
+          else
+            echo "dependabot: UNVERIFIED, the token cannot read it: $(cat "$err")"
+            fail=1
+          fi
+
+          exit "$fail"
+
   build-linux:
     name: Build Linux (${{ matrix.target }})
+    needs: [gate]
+    if: ${{ !inputs.gate_only }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -70,6 +170,8 @@ jobs:
 
   build-macos:
     name: Build macOS (${{ matrix.target }})
+    needs: [gate]
+    if: ${{ !inputs.gate_only }}
     runs-on: macos-latest
     strategy:
       matrix:
@@ -117,6 +219,8 @@ jobs:
 
   build-windows:
     name: Build Windows (x86_64-pc-windows-msvc)
+    needs: [gate]
+    if: ${{ !inputs.gate_only }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
