@@ -118,8 +118,10 @@ scorers into a consensus, and does not send findings to any delivery channel.
    `--rubric` and `--context`. See
    [Writing the scoring guide](#writing-the-scoring-guide).
 4. Run `wirken lyrik run --target <repo> --run <run-id>` from a terminal. The
-   run id is one or more `/`-separated components of ASCII letters, digits,
-   `.`, `_` and `-`. Before any model call the run shows what it is about to
+   run id names a directory under `.lyrik/state/runs/`, so an empty id, an
+   empty, `.` or `..` component, an absolute path, `"`, `\` and control
+   characters are refused, and on Windows `:` too; anything else, a timestamp
+   or a name with spaces, is kept as given. Before any model call the run shows what it is about to
    do: the target's HEAD and whether tracked files changed, the rubric and
    context with their source and sha256, the provider and model, the walks and
    the commands each may ask to run through `exec`. It then asks

@@ -609,23 +609,47 @@ const LOCKED_FILES: &[&str] = &["rubric.md", "context.md", "config.json"];
 const PROPOSED_FILES: &[&str] = &["rubric.md", "context.md"];
 
 /// A run id names a directory under `.lyrik/state/runs/` and the
-/// run's write scope, so it is held to path components that cannot
-/// climb out of it or need quoting: `/`-separated, each non-empty,
-/// not `.` or `..`, of ASCII letters, digits, `.`, `_` and `-`.
+/// run's write scope, which the staged skills carry as a double-quoted
+/// string. Refused is only what could move either out of that
+/// directory or break the quoting: an empty id; an empty, `.` or `..`
+/// component; an absolute path or anything else the platform reads as
+/// other than a plain name (a Windows drive prefix, say); `"`, `\` and
+/// control characters. On Windows `:` is refused too, since it names a
+/// drive or an NTFS stream there. Anything else, `:` and spaces
+/// included elsewhere, is a plain path component and is kept as given.
 fn check_run_id(run_id: &str) -> Result<()> {
-    let ok = !run_id.is_empty()
-        && run_id.split('/').all(|c| {
-            !c.is_empty()
-                && c != "."
-                && c != ".."
-                && c.chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-        });
-    if !ok {
-        anyhow::bail!(
-            "run id {run_id:?} must be `/`-separated components of ASCII letters, digits, \
-             `.`, `_` and `-`, none empty, `.` or `..`"
-        );
+    let refuse = |why: String| anyhow::bail!("run id {run_id:?} {why}");
+    if run_id.is_empty() {
+        return refuse("is empty".to_string());
+    }
+    if let Some(c) = run_id
+        .chars()
+        .find(|c| matches!(c, '"' | '\\') || c.is_control())
+    {
+        return refuse(format!(
+            "contains {c:?}, which the run's quoted write grant cannot carry"
+        ));
+    }
+    if run_id.starts_with('/') {
+        return refuse("is an absolute path".to_string());
+    }
+    // Split by hand first: `Path::components` drops a `.` in the middle
+    // and folds a doubled `/`, which would hide both.
+    if run_id
+        .split('/')
+        .any(|c| c.is_empty() || c == "." || c == "..")
+    {
+        return refuse("has an empty, `.` or `..` component".to_string());
+    }
+    if !Path::new(run_id)
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return refuse("is not a relative path of plain names".to_string());
+    }
+    #[cfg(windows)]
+    if run_id.contains(':') {
+        return refuse("contains `:`, which Windows reads as a drive or stream".to_string());
     }
     Ok(())
 }
@@ -4155,15 +4179,79 @@ mod tests {
         assert!(super::narrow_write_scope("---\nname: x\n---\n", "r1").is_err());
     }
 
+    /// Run ids an operator would use are kept, an ISO timestamp and a
+    /// spaced name among them; what could leave the run directory or
+    /// break the quoted grant is refused.
     #[test]
-    fn check_run_id_keeps_the_run_inside_its_directory() {
-        for ok in ["refusals", "sample/run-007", "a.b_c-1"] {
-            assert!(super::check_run_id(ok).is_ok(), "{ok}");
+    fn check_run_id_refuses_only_what_is_unsafe() {
+        let mut ok = vec![
+            "refusals",
+            "sample/run-007",
+            "a.b_c-1",
+            "nightly run 1",
+            "café/run",
+            "release v2 #3",
+        ];
+        if cfg!(not(windows)) {
+            ok.extend(["2026-10-18T10:00:00Z", "a:b/c d"]);
+        }
+        for id in ok {
+            assert!(super::check_run_id(id).is_ok(), "{id:?}");
         }
         for bad in [
-            "", "..", "../x", "a/../b", "a//b", "/abs", "a/", ".", "a b", "a\"b", "a\\b",
+            "", "..", "../x", "a/../b", "a/./b", "./a", "a//b", "/abs", "a/", ".", "a\"b", "a\\b",
+            "a\nb", "a\tb", "a\u{7f}b", "a\u{85}b", "a\u{0}b",
         ] {
             assert!(super::check_run_id(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// Each accepted form reaches the staged skills' write grant as
+    /// exactly the run's directory, as the loader reads the quoted
+    /// string back, in the Lyrik copy and in a walk.
+    #[test]
+    fn accepted_run_ids_keep_the_write_grant_on_the_run_directory() {
+        let src = tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("sink-walk")).unwrap();
+        std::fs::write(
+            src.path().join("sink-walk/SKILL.md"),
+            "---\nname: sink-walk\ndescription: d\n---\n\nWalk.\n",
+        )
+        .unwrap();
+        let mut ids = vec!["nightly run 1", "release v2 #3", "sample/run-007"];
+        if cfg!(not(windows)) {
+            ids.extend(["2026-10-18T10:00:00Z", "a:b/c d"]);
+        }
+        for id in ids {
+            super::check_run_id(id).unwrap();
+            let run = tempdir().unwrap();
+            let lyrik =
+                super::stage_lyrik_skill(run.path(), id, &super::Scoring::inline(), true).unwrap();
+            let walks = super::stage_walk_skills(
+                &["sink-walk".to_string()],
+                src.path(),
+                run.path(),
+                id,
+                None,
+                true,
+            )
+            .unwrap();
+            let skills = super::lyrik_run_skills(&lyrik, Some(&walks)).unwrap();
+            assert_eq!(skills.len(), 2, "{id:?}");
+            let expected = std::path::PathBuf::from(format!("<workspace>/.lyrik/state/runs/{id}"));
+            for skill in skills {
+                let grants: Vec<_> = skill.permissions.filesystem.write_paths.iter().collect();
+                assert_eq!(grants, vec![&expected], "{id:?} in {}", skill.name);
+                let below = expected
+                    .strip_prefix("<workspace>/.lyrik/state/runs")
+                    .unwrap();
+                assert!(
+                    below
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                    "{id:?}"
+                );
+            }
         }
     }
 

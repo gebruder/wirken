@@ -20,10 +20,12 @@ tagged.
   changed. Rubric and context sections a run stages are written to the run's
   `proposed/` directory; the runner used to join them over the committed
   files.
-- `wirken lyrik run --run` accepts only `/`-separated components of ASCII
-  letters, digits, `.`, `_` and `-`, none empty, `.` or `..`. The run id names
-  the run's directory and write scope, and a `..` component reached outside
-  it.
+- `wirken lyrik run --run` refuses a run id that could take the run's
+  directory or write scope outside `.lyrik/state/runs/`: an empty id, an
+  empty, `.` or `..` component, an absolute path, and `"`, `\` and control
+  characters, which the quoted write grant cannot carry; on Windows `:` too.
+  A `..` component reached outside the run directory. Other ids, timestamps
+  and names with spaces among them, are kept as given.
 - A Lyrik run refuses to attach a staged skill that grants a tool other than
   `exec`, `read_file`, `write_file` and `list_files`, any egress, or a
   credential, so `http_request`, `web_search`, `generate_image` and MCP tools
