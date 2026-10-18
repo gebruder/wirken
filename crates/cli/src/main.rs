@@ -181,6 +181,20 @@ enum Commands {
 
     /// Run diagnostics
     Doctor,
+
+    /// Check for a signed Wirken release. Runs only when asked; nothing
+    /// checks in the background.
+    Update {
+        /// Report the installed and latest release, and whether any
+        /// release since the installed one carries security fixes.
+        #[arg(long, required = true)]
+        check: bool,
+        /// Fetch release files from this base URL instead of GitHub. It
+        /// must be on a loopback address or be the mirror configured in
+        /// `<data_dir>/update.json`.
+        #[arg(long)]
+        base_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1623,6 +1637,9 @@ async fn main() -> Result<()> {
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
         Commands::Import { archive, sealed } => commands::import::run(&archive, sealed).await,
         Commands::Doctor => commands::doctor::run().await,
+        Commands::Update { check: _, base_url } => {
+            commands::update::run_check(base_url.as_deref()).await
+        }
         Commands::Lyrik(cmd) => match cmd {
             LyrikCommands::Run {
                 target,

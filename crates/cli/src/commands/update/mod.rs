@@ -1,0 +1,300 @@
+//! `wirken update`: an operator-run check for, and install of, a
+//! signed Wirken release.
+//!
+//! It runs only when the operator asks. Nothing checks for updates on
+//! a timer, in the background or at gateway start. A release manifest
+//! is fetched through Wirken's egress client from GitHub, or from a
+//! mirror the operator names, and verified against the release keys
+//! compiled into this binary before anything in it is read.
+
+pub mod fetch;
+pub mod manifest;
+
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+
+use fetch::{Fetcher, Source};
+use manifest::{Release, VerifiedManifest, Version};
+
+/// `<data_dir>/update.json`, the operator's update settings.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateConfig {
+    /// A local mirror of the release files, used instead of GitHub.
+    pub mirror: Option<String>,
+}
+
+pub fn load_config(data_dir: &Path) -> Result<UpdateConfig> {
+    let path = data_dir.join("update.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UpdateConfig::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// What `--check` found.
+#[derive(Debug)]
+pub struct CheckReport {
+    pub source: String,
+    pub current: Version,
+    pub target: String,
+    pub verified: VerifiedManifest,
+    /// Releases newer than the current one, newest first.
+    pub newer: Vec<Release>,
+}
+
+impl CheckReport {
+    pub fn latest(&self) -> &Release {
+        self.verified.manifest.latest()
+    }
+
+    pub fn security(&self) -> Vec<&Release> {
+        self.newer.iter().filter(|r| r.security).collect()
+    }
+
+    pub fn render(&self) -> String {
+        let m = &self.verified.manifest;
+        let latest = self.latest();
+        let mut out = format!(
+            "  installed  {} ({})\n  latest     {} ({})\n  manifest   issued {} from {}, signed by {}\n",
+            self.current,
+            self.target,
+            latest.version,
+            latest.issued_at.format("%Y-%m-%d"),
+            m.issued_at.format("%Y-%m-%dT%H:%M:%SZ"),
+            self.source,
+            self.verified.key_fingerprint,
+        );
+        if self.newer.is_empty() {
+            out.push_str("  Up to date.\n");
+            return out;
+        }
+        let security = self.security();
+        if security.is_empty() {
+            out.push_str(&format!(
+                "  {} newer release(s); none carries security fixes.\n",
+                self.newer.len()
+            ));
+        } else {
+            out.push_str(&format!(
+                "  Security fixes in: {}\n",
+                security
+                    .iter()
+                    .map(|r| r.version.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            for r in security {
+                out.push_str(&format!("    {}  {}\n", r.version, r.summary));
+            }
+        }
+        if !latest
+            .artifacts
+            .contains_key(&format!("wirken-{}", self.target))
+        {
+            out.push_str(&format!(
+                "  {} publishes no artifact for {}.\n",
+                latest.version, self.target
+            ));
+        }
+        out
+    }
+}
+
+/// Fetch, verify and freshness-check the manifest, and compare it with
+/// the running version. `keys` is the pinned release key set.
+pub async fn check(
+    data_dir: &Path,
+    fetcher: &Fetcher,
+    keys: &[[u8; 32]],
+    current: &str,
+    target: &str,
+) -> Result<CheckReport> {
+    let current = Version::parse(current)?;
+    let source = fetcher.source();
+    let body = fetcher
+        .get(
+            source.manifest_url(),
+            manifest::MAX_MANIFEST_BYTES,
+            Duration::from_secs(60),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "fetch releases.json from {}; releases before 2.3.0 publish none",
+                source.describe()
+            )
+        })?;
+    let sig = fetcher
+        .get(
+            source.signature_url(),
+            manifest::MAX_SIGNATURE_BYTES,
+            Duration::from_secs(60),
+        )
+        .await?;
+    let verified = manifest::verify(&body, &sig, keys)?;
+    manifest::check_and_record_freshness(data_dir, &verified)?;
+    let newer = verified
+        .manifest
+        .releases
+        .iter()
+        .filter(|r| r.parsed_version() > current)
+        .cloned()
+        .collect();
+    Ok(CheckReport {
+        source: source.describe(),
+        current,
+        target: target.to_string(),
+        verified,
+        newer,
+    })
+}
+
+/// Refuse on a platform `wirken update` does not install on.
+pub fn require_supported_platform() -> Result<()> {
+    if cfg!(windows) {
+        bail!("wirken update does not install on Windows; reinstall from the release page");
+    }
+    Ok(())
+}
+
+/// `wirken update --check`.
+pub async fn run_check(base_url: Option<&str>) -> Result<()> {
+    require_supported_platform()?;
+    let cfg = super::config();
+    let settings = load_config(&cfg.data_dir)?;
+    let source = Source::choose(base_url, settings.mirror.as_deref())?;
+    let keys = wirken_gateway::release_keys::pinned(wirken_gateway::release_keys::RELEASE_KEYS)
+        .context("pinned release keys")?;
+    let fetcher = Fetcher::new(source);
+    let report = check(
+        &cfg.data_dir,
+        &fetcher,
+        &keys,
+        crate::build_info::VERSION,
+        crate::build_info::TARGET,
+    )
+    .await?;
+    print!("{}", report.render());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fetch::tests::serve;
+    use super::manifest::tests::{manifest_body, release, sign, test_key};
+    use super::*;
+    use wirken_gateway::release_keys::MANIFEST_NAMESPACE;
+
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TARGET: &str = "x86_64-unknown-linux-musl";
+
+    fn releases() -> Vec<Release> {
+        let a = [("wirken-x86_64-unknown-linux-musl", SHA)];
+        vec![
+            release("2.2.0", true, &a),
+            release("2.3.0", true, &a),
+            release("2.4.0", false, &a),
+        ]
+    }
+
+    async fn mirror_with(body: Vec<u8>, sig: String) -> super::fetch::tests::TestServer {
+        serve(vec![
+            ("/releases.json".into(), 200, vec![], body),
+            ("/releases.json.sig".into(), 200, vec![], sig.into_bytes()),
+        ])
+        .await
+    }
+
+    #[tokio::test]
+    async fn check_reports_latest_and_every_security_release_since_the_current_one() {
+        let body = manifest_body("2026-10-20T00:00:00Z", &releases());
+        let sig = sign(&test_key(1), MANIFEST_NAMESPACE, &body);
+        let server = mirror_with(body, sig).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let fetcher = Fetcher::new(Source::choose(Some(&server.base), None).unwrap());
+        let keys = [test_key(1).verifying_key().to_bytes()];
+        let report = check(tmp.path(), &fetcher, &keys, "2.2.0", TARGET)
+            .await
+            .unwrap();
+        assert_eq!(report.latest().version, "2.4.0");
+        assert_eq!(
+            report
+                .security()
+                .iter()
+                .map(|r| r.version.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2.3.0"],
+            "the security release between current and latest is named, not only the latest"
+        );
+        let text = report.render();
+        assert!(text.contains("Security fixes in: 2.3.0"), "{text}");
+        assert!(text.contains("installed  2.2.0"), "{text}");
+
+        let up_to_date = check(tmp.path(), &fetcher, &keys, "2.4.0", TARGET)
+            .await
+            .unwrap();
+        assert!(up_to_date.render().contains("Up to date."));
+    }
+
+    #[tokio::test]
+    async fn check_refuses_a_manifest_signed_by_the_wrong_key() {
+        let body = manifest_body("2026-10-20T00:00:00Z", &releases());
+        let sig = sign(&test_key(9), MANIFEST_NAMESPACE, &body);
+        let server = mirror_with(body, sig).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let fetcher = Fetcher::new(Source::choose(Some(&server.base), None).unwrap());
+        let keys = [test_key(1).verifying_key().to_bytes()];
+        let err = check(tmp.path(), &fetcher, &keys, "2.2.0", TARGET)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not a pinned key"), "{err:#}");
+        // Nothing was recorded from a manifest that did not verify.
+        assert!(!manifest::freeze_state_path(tmp.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn check_refuses_a_stale_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keys = [test_key(1).verifying_key().to_bytes()];
+        for (at, ok) in [
+            ("2026-10-20T00:00:00Z", true),
+            ("2026-10-10T00:00:00Z", false),
+        ] {
+            let body = manifest_body(at, &releases());
+            let sig = sign(&test_key(1), MANIFEST_NAMESPACE, &body);
+            let server = mirror_with(body, sig).await;
+            let fetcher = Fetcher::new(Source::choose(Some(&server.base), None).unwrap());
+            let got = check(tmp.path(), &fetcher, &keys, "2.2.0", TARGET).await;
+            assert_eq!(got.is_ok(), ok, "{at}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn update_json_rejects_unknown_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("update.json"), r#"{"mirorr":"x"}"#).unwrap();
+        assert!(load_config(tmp.path()).is_err());
+        std::fs::write(
+            tmp.path().join("update.json"),
+            r#"{"mirror":"https://m.lan/"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_config(tmp.path()).unwrap().mirror.as_deref(),
+            Some("https://m.lan/")
+        );
+        assert!(
+            load_config(&tmp.path().join("absent"))
+                .unwrap()
+                .mirror
+                .is_none()
+        );
+    }
+}

@@ -12,6 +12,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMMIT: &str = env!("WIRKEN_BUILD_COMMIT");
 /// `clean`, `dirty`, or `unknown` (no repository at build time).
 pub const DIRTY: &str = env!("WIRKEN_BUILD_DIRTY");
+/// The target triple the binary was built for, which names its release
+/// artifact, `wirken-<target>`.
+pub const TARGET: &str = env!("WIRKEN_BUILD_TARGET");
 
 /// `1.19.0 (26e00f5)`, or `1.19.0 (26e00f5, dirty)` when tracked files
 /// had uncommitted changes at build time, or `1.19.0 (unknown)` when

@@ -63,6 +63,10 @@ fn main() {
         _ => "unknown",
     };
 
+    // The target triple, which names this binary's release artifact
+    // (`wirken-<target>`). Cargo sets TARGET for every build script.
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=WIRKEN_BUILD_TARGET={target}");
     println!("cargo:rustc-env=WIRKEN_BUILD_COMMIT={commit}");
     println!("cargo:rustc-env=WIRKEN_BUILD_DIRTY={dirty}");
 }
