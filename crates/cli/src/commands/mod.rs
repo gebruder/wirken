@@ -15,6 +15,7 @@ pub mod import;
 pub mod inbound_scan;
 pub mod lyrik;
 pub mod lyrik_citation;
+pub mod lyrik_git;
 pub mod lyrik_preflight;
 pub mod lyrik_sarif;
 pub mod lyrik_semgrep;

@@ -79,37 +79,22 @@ const FRAMINGS: &[(&str, &str, &str)] = &[
 struct LyrikReport {
     run_id: String,
     #[serde(default)]
-    target: Option<Target>,
-    #[serde(default)]
     findings: Vec<Finding>,
     #[serde(default)]
-    audit: Option<AuditRef>,
-    #[serde(default)]
     concentration: Option<Concentration>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Target {
+    /// Provenance the runner records at run start.
     #[serde(default)]
-    source_state: Option<SourceState>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SourceState {
+    target_sha: Option<String>,
     #[serde(default)]
-    sha: Option<String>,
+    target_dirty: Option<bool>,
+    #[serde(default)]
+    audit_log_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Concentration {
     #[serde(default)]
     concentration_index_top_5: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuditRef {
-    #[serde(default)]
-    log_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,16 +374,13 @@ pub fn build_sarif(findings_path: &Path, driver_version: &str) -> Result<Sarif> 
 
     let invocation_props = serde_json::json!({
         "lyrik": {
-            "audit_log_ref": report.audit.as_ref().and_then(|a| a.log_path.clone()),
+            "audit_log_ref": report.audit_log_ref,
             "concentration_index_top_5": report
                 .concentration
                 .as_ref()
                 .and_then(|c| c.concentration_index_top_5),
-            "target_sha": report
-                .target
-                .as_ref()
-                .and_then(|t| t.source_state.as_ref())
-                .and_then(|s| s.sha.clone()),
+            "target_sha": report.target_sha,
+            "target_dirty": report.target_dirty,
         }
     });
 

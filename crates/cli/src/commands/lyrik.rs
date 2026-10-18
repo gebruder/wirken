@@ -150,6 +150,18 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
         }),
     )?;
 
+    // Provenance, taken before the run writes anything. The fields go
+    // on findings.json; a target whose git state cannot be read gets
+    // null fields and a row saying why.
+    let provenance = super::lyrik_git::provenance(target);
+    if let Some(reason) = &provenance.unavailable {
+        audit.emit(
+            "lyrik.provenance.unavailable",
+            serde_json::json!({"reason": reason}),
+        )?;
+    }
+    let extras = provenance_extras(&provenance, run_id);
+
     // Phase 0 sign-off. Bench mode auto-approves; production routes to
     // the configured channel adapter (not yet wired in this slice).
     if bench_mode {
@@ -197,8 +209,15 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
                 )?;
             }
             None => {
-                dispatch_via_agent_runtime(target, run_id, &config, &mut audit, &findings_dest)
-                    .await?;
+                dispatch_via_agent_runtime(
+                    target,
+                    run_id,
+                    &config,
+                    &mut audit,
+                    &findings_dest,
+                    &extras,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -409,17 +428,49 @@ impl RecoveryObserver for LyrikRecoveryObserver {
     }
 }
 
+/// Top-level findings.json fields outside the 1.1 contract that the
+/// runner records for the whole run: provenance (`target_sha`,
+/// `target_dirty`, `audit_log_ref`). The schema allows extra fields
+/// at both levels.
+type Extras = serde_json::Map<String, serde_json::Value>;
+
+/// The provenance fields: HEAD and tracked-file state of the target
+/// at run start, and the run's audit log relative to the target.
+fn provenance_extras(provenance: &super::lyrik_git::Provenance, run_id: &str) -> Extras {
+    let mut extras = Extras::new();
+    extras.insert("target_sha".into(), serde_json::json!(provenance.sha));
+    extras.insert("target_dirty".into(), serde_json::json!(provenance.dirty));
+    extras.insert(
+        "audit_log_ref".into(),
+        serde_json::json!(format!(".lyrik/state/runs/{run_id}/audit.log")),
+    );
+    extras
+}
+
+/// Add `extras` to a findings.json body.
+fn with_extras(mut body: serde_json::Value, extras: &Extras) -> serde_json::Value {
+    if let Some(obj) = body.as_object_mut() {
+        for (k, v) in extras {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    body
+}
+
 /// Write a canonical empty `findings.json` to `path`. Called when
 /// dispatch failed before the agent could produce real findings (today:
 /// rate-limit exhaustion). Lets the bench harness count the failure
 /// instead of silently losing the run.
-fn write_empty_findings(path: &Path, run_id: &str) -> Result<()> {
-    let body = serde_json::json!({
-        "schema_version": "1.1",
-        "run_id": run_id,
-        "produced_at": chrono::Utc::now().to_rfc3339(),
-        "findings": [],
-    });
+fn write_empty_findings(path: &Path, run_id: &str, extras: &Extras) -> Result<()> {
+    let body = with_extras(
+        serde_json::json!({
+            "schema_version": "1.1",
+            "run_id": run_id,
+            "produced_at": chrono::Utc::now().to_rfc3339(),
+            "findings": [],
+        }),
+        extras,
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -439,6 +490,7 @@ async fn dispatch_via_agent_runtime(
     config: &serde_json::Value,
     audit: &mut AuditLogger,
     expected_findings: &Path,
+    extras: &Extras,
 ) -> Result<()> {
     // Per-walk parallelism opt-in. Parsed and validated here so a
     // misconfigured walks list fails before any LLM call. The
@@ -865,7 +917,7 @@ async fn dispatch_via_agent_runtime(
                         "rate limit exhausted after {attempts} attempts; \
                          writing empty findings.json"
                     );
-                    write_empty_findings(expected_findings, run_id)?;
+                    write_empty_findings(expected_findings, run_id, extras)?;
                     return Ok(());
                 }
                 Err(AgentError::ContextOverflow {
@@ -889,7 +941,7 @@ async fn dispatch_via_agent_runtime(
                         "lyrik dispatch did not converge within the effective context \
                          budget; writing empty findings.json"
                     );
-                    write_empty_findings(expected_findings, run_id)?;
+                    write_empty_findings(expected_findings, run_id, extras)?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -977,6 +1029,7 @@ async fn dispatch_via_agent_runtime(
         dedup_active,
         &seed_locations,
         target,
+        extras,
         audit,
     )
     .context("aggregate findings")?;
@@ -1435,6 +1488,7 @@ fn aggregate_findings_multi(
     dedup_active: bool,
     seed_locations: &std::collections::HashSet<String>,
     workspace: &Path,
+    extras: &Extras,
     audit: &mut AuditLogger,
 ) -> Result<()> {
     use super::lyrik_citation;
@@ -1634,6 +1688,7 @@ fn aggregate_findings_multi(
         },
         "findings": findings,
     });
+    let body = with_extras(body, extras);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -2899,6 +2954,7 @@ mod tests {
             true,
             &no_seeds,
             workspace,
+            &super::Extras::new(),
             &mut audit,
         )
         .unwrap();
@@ -2963,6 +3019,7 @@ mod tests {
             false,
             &no_seeds,
             workspace,
+            &super::Extras::new(),
             &mut audit,
         )
         .unwrap();
@@ -3108,6 +3165,7 @@ mod tests {
             true,
             &seeds,
             tmp.path(),
+            &super::Extras::new(),
             &mut audit,
         )
         .unwrap();
@@ -3148,6 +3206,7 @@ mod tests {
             true,
             &seeds,
             tmp,
+            &super::Extras::new(),
             &mut audit,
         )
         .unwrap();
@@ -3244,6 +3303,60 @@ mod tests {
         );
     }
 
+    /// A git target's provenance reaches findings.json and, from
+    /// there, the SARIF invocation properties.
+    #[test]
+    fn sarif_carries_provenance_for_a_git_target() {
+        let tmp = tempdir().unwrap();
+        super::super::lyrik_git::tests::committed_repo(tmp.path());
+        let provenance = super::super::lyrik_git::provenance(tmp.path());
+        let extras = super::provenance_extras(&provenance, "sample/run-013");
+        let dir = tmp.path().join("staging").join("findings");
+        write_finding(
+            &dir,
+            "finding-001.json",
+            &finding("src/a.rs", 1, "auth", "HIGH"),
+        );
+        let dest = tmp.path().join("findings.json");
+        let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut audit =
+            super::AuditLogger::open(&tmp.path().join("audit.log"), "sample/run-013", true)
+                .unwrap();
+        aggregate_findings_multi(
+            &[(None, dir)],
+            &dest,
+            "sample/run-013",
+            false,
+            &seeds,
+            tmp.path(),
+            &extras,
+            &mut audit,
+        )
+        .unwrap();
+
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(body["target_sha"], serde_json::json!(provenance.sha));
+        assert_eq!(body["target_dirty"], false);
+        assert_eq!(
+            body["audit_log_ref"],
+            ".lyrik/state/runs/sample/run-013/audit.log"
+        );
+        assert!(super::super::lyrik_validate::validate_value(&body).is_empty());
+
+        let sarif =
+            serde_json::to_value(super::super::lyrik_sarif::build_sarif(&dest, "test").unwrap())
+                .unwrap();
+        let props = &sarif["runs"][0]["invocations"][0]["properties"]["lyrik"];
+        assert_eq!(props["target_sha"], serde_json::json!(provenance.sha));
+        assert!(props["target_sha"].is_string(), "{props}");
+        assert_eq!(props["target_dirty"], false);
+        assert_eq!(
+            props["audit_log_ref"],
+            ".lyrik/state/runs/sample/run-013/audit.log"
+        );
+    }
+
     #[test]
     fn aggregate_findings_multi_writes_schema_version_one_one() {
         let tmp = tempdir().unwrap();
@@ -3266,6 +3379,7 @@ mod tests {
             false,
             &seeds,
             workspace,
+            &super::Extras::new(),
             &mut audit,
         )
         .unwrap();
@@ -3297,6 +3411,7 @@ mod tests {
             false,
             &seeds,
             workspace,
+            &super::Extras::new(),
             &mut audit,
         )
         .unwrap();
