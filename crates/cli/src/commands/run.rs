@@ -5476,7 +5476,7 @@ fn apply_provider_override(
 /// ```json
 /// {
 ///   "provider": "anthropic",
-///   "model": "claude-sonnet-4-6",
+///   "model": "<model-id>",
 ///   "base_url": "...",
 ///   "channel_overrides": {
 ///     "signal": {
@@ -5581,7 +5581,7 @@ mod channel_overrides_tests {
         let (tmp, vault_path) = vault_with("ignored-slot", "ignored");
         let provider_json = serde_json::json!({
             "provider": "anthropic",
-            "model": "claude-sonnet-4-6",
+            "model": "base-model",
             "base_url": "https://api.anthropic.com/v1",
         });
         let out =

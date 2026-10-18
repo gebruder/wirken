@@ -3479,7 +3479,7 @@ mod tests {
         let cfg: serde_json::Value = serde_json::from_str(body).expect("example parses");
         let pin = resolve_phase_pin(&cfg).unwrap();
         assert_eq!(pin.provider, "privatemode");
-        assert_eq!(pin.model, "anthropic/claude-opus-4-7");
+        assert_eq!(pin.model, "kimi-k2.5");
         assert_eq!(pin.base_url, "http://localhost:8080/v1");
     }
 

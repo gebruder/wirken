@@ -270,7 +270,7 @@ files. The vault passphrase reaches one process through the environment: the
 gateway, when the operator exports `WIRKEN_VAULT_PASSPHRASE`. No process the
 gateway starts receives it.
 Each agent has its own auth profile, so agent A can run `openai/gpt-4o` and
-agent B `anthropic/claude-sonnet-4` with separate keys.
+agent B `anthropic/<model-id>` with separate keys.
 
 **Direct calls.** The agent's `LlmClient` calls providers over HTTPS with
 `reqwest` and `rustls`; streaming uses `reqwest-eventsource`. Keys are

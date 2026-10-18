@@ -1798,7 +1798,7 @@ mod tests {
             "--provider",
             "anthropic",
             "--model",
-            "claude-sonnet-4-20250514",
+            "model-a",
             "--base-url",
             "https://api.anthropic.com/v1",
             "--credential",

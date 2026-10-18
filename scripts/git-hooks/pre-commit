@@ -11,14 +11,18 @@ report() {
 	fail=1
 }
 
-# Caps tokens anchored at start of a path component, separator-bounded.
-# Matches CLAUDE.md, AGENTS.md, GEMINI.json, CURSOR-rules, ANTHROPIC_NOTES,
-# but not crates/cli/src/commands/agents.rs (lowercase).
-banned_caps='^(CLAUDE|ANTHROPIC|AGENTS|CURSOR|COPILOT|GEMINI)([._\-]|$)'
+# Names are written as character classes (C[L]AUDE) so this file does
+# not itself contain the names it rejects; the patterns match the same
+# strings.
 
-# Dotfile path components: .claude, .cursor, .copilot, .aider (any case).
-# Matches .claude/, .cursor/anything, .cursorrules, .aider.conf.yml.
-banned_dot='^\.(claude|cursor|copilot|aider)'
+# Caps tokens anchored at start of a path component, separator-bounded.
+# Matches AGENTS.md, GEMINI.json, CURSOR-rules, ANTHROPIC_NOTES,
+# but not crates/cli/src/commands/agents.rs (lowercase).
+banned_caps='^(C[L]AUDE|ANTHROPIC|AGENTS|CURSOR|COPILOT|GEMINI)([._\-]|$)'
+
+# Dotfile path components for AI tools (any case).
+# Matches .cursor/anything, .cursorrules, .aider.conf.yml.
+banned_dot='^\.(c[l]aude|cursor|copilot|aider)'
 
 mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
 
@@ -38,9 +42,9 @@ done
 # .gitignore added-line scan (only ADDED lines, grandfathers existing entries).
 if printf '%s\n' "${staged[@]}" | grep -qE '(^|/)\.gitignore$'; then
 	added=$(git diff --cached -U0 -- '*.gitignore' '.gitignore' | grep -E '^\+[^+]' || true)
-	if printf '%s\n' "$added" | grep -qiE '\b(claude|anthropic|cursor|copilot|gemini|aider)\b'; then
+	if printf '%s\n' "$added" | grep -qiE '\b(c[l]aude|anthropic|cursor|copilot|gemini|aider)\b'; then
 		printf 'pre-commit: .gitignore added line references AI-tool token:\n' >&2
-		printf '%s\n' "$added" | grep -iE '\b(claude|anthropic|cursor|copilot|gemini|aider)\b' >&2
+		printf '%s\n' "$added" | grep -iE '\b(c[l]aude|anthropic|cursor|copilot|gemini|aider)\b' >&2
 		fail=1
 	fi
 fi

@@ -24,6 +24,7 @@ moves every process at once.
 | `memory.db` | Labelled cross-channel memory entries | `wirken run` |
 | `imported.db` | Imported assistant archives | `wirken import` |
 | `lyrik.json` | Lyrik settings. Key read: `walks_dir`, the walks directory for targets that do not set their own (default `lyrik/walks/`); see [lyrik.md](lyrik.md#lyrikconfigjson) | Manual |
+| `update.json` | `wirken update` settings. Key read: `mirror`, a local mirror of the release files used instead of GitHub; see [update.md](update.md#mirrors) | Manual |
 | `sandbox.json` | Sandbox settings. Keys read: `mode`, `image`, `network`, `shell`, `sidecar_binary`; any other key is named in a startup warning and ignored | `wirken setup` or manual |
 | `siem.json` | SIEM forwarding config | Manual or org config |
 | `budget.json` | Per-agent spend budgets | Manual |
@@ -62,7 +63,7 @@ Bedrock adds a `region` field:
 ```json
 {
     "provider": "bedrock",
-    "model": "anthropic.claude-sonnet-4-20250514-v2:0",
+    "model": "<bedrock-model-id>",
     "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
     "region": "us-east-1"
 }

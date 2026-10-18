@@ -4,7 +4,7 @@
     "exclude": ["target/**", "node_modules/**", ".git/**", "**/test_data/**", "**/fixtures/**"]
   },
   "phases": {
-    "framing": { "provider": "privatemode", "model": "anthropic/claude-opus-4-7" }
+    "framing": { "provider": "privatemode", "model": "kimi-k2.5" }
   },
   "scanner": {
     "semgrep": { "enabled": false }

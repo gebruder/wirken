@@ -62,7 +62,9 @@ def no_model_name_is_stored_in_the_config_paths():
     provider returned, so a vendor prefix there is a test over the
     provider's own answer rather than a name this repo offers anyone.
     """
-    vendors = ("claude", "gpt", "gemini", "llama", "mistral")
+    # Regex fragments; c[l]aude matches the vendor's name without this
+    # file containing it.
+    vendors = ("c[l]aude", "gpt", "gemini", "llama", "mistral")
     for name in ("agents.rs", "setup.rs"):
         path = ROOT / "crates/cli/src/commands" / name
         for n, line in enumerate(path.read_text().split("\n"), 1):

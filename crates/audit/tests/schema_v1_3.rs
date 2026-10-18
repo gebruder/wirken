@@ -314,7 +314,7 @@ fn llm_request_with_credential_id_round_trips() {
     // populated value to lock the field in.
     let original = SessionEvent::LlmRequest {
         provider: "anthropic".into(),
-        model: "claude-sonnet-4-6".into(),
+        model: "model-a".into(),
         request_id: "req-1".into(),
         tools_hash_version: wirken_audit::ToolsHashVersion::V2,
         tools_hash: HashHex("aa".repeat(32)),

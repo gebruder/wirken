@@ -1,9 +1,9 @@
 # Multiple agents
 
 Route different channels to different agents, each with its own model, API
-key, workspace and skills. A work agent on Slack using an Anthropic model with GitHub and
-Datadog MCP servers; a personal agent on Telegram using GPT with notes and
-calendar skills; a coding agent on Discord on a local Ollama model. Each has
+key, workspace and skills. A work agent on Slack using an Anthropic model
+with GitHub and Datadog MCP servers; a personal agent on Telegram using GPT
+with notes and calendar skills; a coding agent on Discord on a local Ollama model. Each has
 its own conversation history, workspace directory and credentials, and they
 share no state.
 
@@ -25,7 +25,7 @@ configured during `wirken setup`. On `wirken run` the startup output shows the
 routing:
 
 ```
-  Route: slack -> agent:work (anthropic/claude-sonnet-4-20250514)
+  Route: slack -> agent:work (anthropic/<model-id>)
   Route: telegram -> agent:personal (openai/gpt-4o)
 ```
 
@@ -57,7 +57,7 @@ configuration saved once and referenced by name. Internally it is an
 
 ```bash
 wirken persona create alice --preset analyst --provider anthropic \
-    --model claude-sonnet-4-5 --channel telegram --channel signal
+    --model <model-id> --channel telegram --channel signal
 wirken persona list
 wirken persona show alice
 wirken persona edit alice --provider openai --model gpt-5

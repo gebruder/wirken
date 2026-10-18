@@ -28,7 +28,6 @@ crates/*/fuzz/target/
 #.idea/
 
 
-.claude/
 
 # Bench harnesses live in sibling repos under ~/code/
 lyrik-bench/

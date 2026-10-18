@@ -12,7 +12,7 @@ use crate::tool::ToolDef;
 pub struct LlmConfig {
     /// Provider name: "openai", "anthropic", "gemini", "bedrock", "ollama", "custom"
     pub provider: String,
-    /// Model ID (e.g., "gpt-4o", "claude-sonnet-4-20250514", "gemini-2.0-flash")
+    /// Model ID, as the provider names it (e.g., "gpt-4o", "gemini-2.0-flash")
     pub model: String,
     /// API base URL
     pub base_url: String,

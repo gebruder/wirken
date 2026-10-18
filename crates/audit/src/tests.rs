@@ -1098,7 +1098,7 @@ mod session {
                 TrustLevel::System,
                 SessionEvent::LlmRequest {
                     provider: "anthropic".into(),
-                    model: "claude-sonnet-4-20250514".into(),
+                    model: "model-a".into(),
                     request_id: "req-1".into(),
                     tools_hash_version: crate::session_log::ToolsHashVersion::V2,
                     tools_hash: crate::session_log::HashHex("deadbeef".repeat(8)),

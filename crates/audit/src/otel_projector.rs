@@ -1879,7 +1879,7 @@ mod tests {
         let session = SessionId::new("sess-1");
         p.project(&user_message("q", None), &session, at(0), &[]);
         p.project(
-            &llm_request("req-1", "anthropic", "claude-sonnet-4-6"),
+            &llm_request("req-1", "anthropic", "model-a"),
             &session,
             at(1),
             &[],
@@ -1887,10 +1887,7 @@ mod tests {
         p.project(&llm_response("req-1", 0, 0), &session, at(2), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
         let a = attrs(chat_spans(&spans)[0]);
-        assert_eq!(
-            a.get("gen_ai.request.model"),
-            Some(&"claude-sonnet-4-6".to_string())
-        );
+        assert_eq!(a.get("gen_ai.request.model"), Some(&"model-a".to_string()));
         assert_eq!(
             a.get("gen_ai.provider.name"),
             Some(&"anthropic".to_string())

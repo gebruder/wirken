@@ -27,7 +27,7 @@ if printf '%s' "$payload" | grep -qiE '^Generated with '; then
 	report 'attribution trailer (Generated with)'
 fi
 
-if printf '%s' "$subject" | grep -qiE '^(generated|written|created|authored).{0,20}(with|by).{0,20}(claude|anthropic|cursor|copilot|gemini)'; then
+if printf '%s' "$subject" | grep -qiE '^(generated|written|created|authored).{0,20}(with|by).{0,20}(c[l]aude|anthropic|cursor|copilot|gemini)'; then
 	report 'subject suggests AI authorship attribution'
 fi
 
