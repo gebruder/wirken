@@ -1,10 +1,14 @@
-//! Build identity for the wirken binary: which commit it came from and
-//! whether the tree was clean when it was built. Issue 231.
+//! Build identity for the wirken binary: which commit it came from,
+//! whether the tree was clean when it was built, when that commit was
+//! made, and the target it was built for. Issue 231.
 //!
-//! No timestamp, on purpose. The same commit built twice must produce
-//! the same binary, and a clock inside the binary would make that false
-//! for no gain the three incidents behind this needed: every one of
-//! them was a question about which commit, never about when.
+//! No build-time clock, on purpose. The same commit built twice must
+//! produce the same binary, so the only time embedded is the commit's
+//! own timestamp (`git log -1 --format=%ct`), which every build of that
+//! commit shares. `wirken status` reports a build's age from it. A
+//! packager without the repository supplies it through
+//! `WIRKEN_BUILD_COMMIT_TIME` or the reproducible-builds convention
+//! `SOURCE_DATE_EPOCH`, in that order of precedence.
 //!
 //! No dependency, on purpose either: this shells out to `git` and treats
 //! any failure as "unknown" rather than failing the build, so a tarball
@@ -38,6 +42,8 @@ fn main() {
     // An explicit override for builds that have the commit but not the
     // repository, such as a tarball whose packager knows what it holds.
     println!("cargo:rerun-if-env-changed=WIRKEN_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=WIRKEN_BUILD_COMMIT_TIME");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     // GIT_DIR changes what git answers, so it changes the identity.
     println!("cargo:rerun-if-env-changed=GIT_DIR");
 
@@ -67,6 +73,14 @@ fn main() {
     // (`wirken-<target>`). Cargo sets TARGET for every build script.
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=WIRKEN_BUILD_TARGET={target}");
+    // Seconds since the epoch, as a decimal, or `unknown`.
+    let commit_time = ["WIRKEN_BUILD_COMMIT_TIME", "SOURCE_DATE_EPOCH"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .or_else(|| git(&["log", "-1", "--format=%ct"]))
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=WIRKEN_BUILD_COMMIT_TIME={commit_time}");
     println!("cargo:rustc-env=WIRKEN_BUILD_COMMIT={commit}");
     println!("cargo:rustc-env=WIRKEN_BUILD_DIRTY={dirty}");
 }

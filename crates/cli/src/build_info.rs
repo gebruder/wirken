@@ -15,6 +15,58 @@ pub const DIRTY: &str = env!("WIRKEN_BUILD_DIRTY");
 /// The target triple the binary was built for, which names its release
 /// artifact, `wirken-<target>`.
 pub const TARGET: &str = env!("WIRKEN_BUILD_TARGET");
+/// The commit's timestamp in seconds since the epoch, or `unknown`.
+pub const COMMIT_TIME: &str = env!("WIRKEN_BUILD_COMMIT_TIME");
+
+/// When the commit this binary was built from was made.
+pub fn commit_time() -> Option<chrono::DateTime<chrono::Utc>> {
+    parse_commit_time(COMMIT_TIME)
+}
+
+fn parse_commit_time(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::from_timestamp(raw.parse().ok()?, 0)
+}
+
+/// What `wirken status` prints: the build, and its age at `now` from
+/// the commit's timestamp. No network.
+pub fn status_text(now: chrono::DateTime<chrono::Utc>) -> String {
+    status_lines(
+        VERSION,
+        COMMIT,
+        DIRTY,
+        TARGET,
+        commit_time(),
+        now,
+        &binary_path(),
+    )
+}
+
+fn status_lines(
+    version: &str,
+    commit: &str,
+    dirty: &str,
+    target: &str,
+    commit_time: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    binary: &str,
+) -> String {
+    let age = match commit_time {
+        Some(t) => {
+            let days = (now - t).num_days();
+            let age = match days {
+                d if d < 0 => "in the future; check this host's clock".to_string(),
+                0 => "less than a day old".to_string(),
+                1 => "1 day old".to_string(),
+                d => format!("{d} days old"),
+            };
+            format!("{}, {age}", t.format("%Y-%m-%d"))
+        }
+        None => "unknown (built without the commit's timestamp)".to_string(),
+    };
+    format!(
+        "  wirken {version}\n  commit   {commit} ({dirty})\n  built    from a commit of {age}\n  target   {target}\n  binary   {binary}\n"
+    )
+}
 
 /// `1.19.0 (26e00f5)`, or `1.19.0 (26e00f5, dirty)` when tracked files
 /// had uncommitted changes at build time, or `1.19.0 (unknown)` when
@@ -107,6 +159,50 @@ mod tests {
         );
         assert!(matches!(DIRTY, "clean" | "dirty" | "unknown"), "{DIRTY:?}");
         assert!(identity().starts_with(VERSION));
+    }
+
+    #[test]
+    fn status_reports_age_from_the_commit_timestamp() {
+        let t = chrono::DateTime::from_timestamp(1_760_000_000, 0).unwrap();
+        let now = t + chrono::Duration::days(12) + chrono::Duration::hours(3);
+        let text = status_lines(
+            "2.3.0",
+            "abc1234",
+            "clean",
+            "x86_64-unknown-linux-musl",
+            Some(t),
+            now,
+            "/b/wirken",
+        );
+        assert!(text.contains("wirken 2.3.0"), "{text}");
+        assert!(text.contains("commit   abc1234 (clean)"), "{text}");
+        assert!(
+            text.contains(&format!("{}, 12 days old", t.format("%Y-%m-%d"))),
+            "{text}"
+        );
+        assert!(
+            text.contains("target   x86_64-unknown-linux-musl"),
+            "{text}"
+        );
+        let fresh = status_lines("2.3.0", "abc1234", "dirty", "t", Some(t), t, "/b");
+        assert!(fresh.contains("less than a day old"), "{fresh}");
+        let unknown = status_lines("2.3.0", "unknown", "unknown", "t", None, now, "/b");
+        assert!(
+            unknown.contains("built    from a commit of unknown"),
+            "{unknown}"
+        );
+        let skew = status_lines("2.3.0", "a", "clean", "t", Some(now), t, "/b");
+        assert!(skew.contains("in the future"), "{skew}");
+    }
+
+    #[test]
+    fn the_commit_time_is_a_timestamp_or_the_fallback() {
+        assert!(
+            COMMIT_TIME == "unknown" || parse_commit_time(COMMIT_TIME).is_some(),
+            "{COMMIT_TIME:?}"
+        );
+        assert_eq!(parse_commit_time("unknown"), None);
+        assert_eq!(parse_commit_time("12a"), None);
     }
 
     #[test]

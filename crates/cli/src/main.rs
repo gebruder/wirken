@@ -182,6 +182,10 @@ enum Commands {
     /// Run diagnostics
     Doctor,
 
+    /// Report this binary's version, commit, and build age from the
+    /// commit's timestamp. Makes no network request.
+    Status,
+
     /// Check for, install, or roll back a signed Wirken release. Runs
     /// only when asked; nothing checks in the background.
     Update {
@@ -1649,6 +1653,10 @@ async fn main() -> Result<()> {
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
         Commands::Import { archive, sealed } => commands::import::run(&archive, sealed).await,
         Commands::Doctor => commands::doctor::run().await,
+        Commands::Status => {
+            print!("{}", build_info::status_text(chrono::Utc::now()));
+            Ok(())
+        }
         Commands::Update {
             check,
             rollback,
