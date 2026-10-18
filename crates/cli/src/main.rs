@@ -198,6 +198,14 @@ enum LyrikCommands {
         /// runtime. Required until the agent-dispatch wiring lands.
         #[arg(long)]
         use_fixture: Option<std::path::PathBuf>,
+        /// Score against this rubric, a file outside the target, in
+        /// place of `.lyrik/rubric.md` or the inline rubric.
+        #[arg(long)]
+        rubric: Option<std::path::PathBuf>,
+        /// Project context, a file outside the target, in place of
+        /// `.lyrik/context.md`.
+        #[arg(long)]
+        context: Option<std::path::PathBuf>,
     },
     /// Emit a Lyrik report in the requested format.
     Report {
@@ -1620,7 +1628,18 @@ async fn main() -> Result<()> {
                 target,
                 run,
                 use_fixture,
-            } => commands::lyrik::run(&target, &run, use_fixture.as_deref()).await,
+                rubric,
+                context,
+            } => {
+                commands::lyrik::run(
+                    &target,
+                    &run,
+                    use_fixture.as_deref(),
+                    rubric.as_deref(),
+                    context.as_deref(),
+                )
+                .await
+            }
             LyrikCommands::Report {
                 format,
                 findings,

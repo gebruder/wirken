@@ -77,6 +77,27 @@ pub fn provenance(target: &Path) -> Provenance {
     }
 }
 
+/// Whether `rel` (relative to `target`) is in HEAD's tree with exactly
+/// the bytes it has on disk. `Err` carries why it is not, or why that
+/// could not be told.
+pub fn unmodified_at_head(target: &Path, rel: &Path) -> Result<(), String> {
+    let repo = Repo::open(target)?;
+    repo.head()?;
+    // `ls-tree` resolves the path against the working directory.
+    let out = run_git(target, &["ls-tree", "-z", "HEAD", "--"], Some(rel))?;
+    let entry = parse_ls_tree(&out)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "not tracked at HEAD".to_string())?;
+    if entry.kind != "blob" {
+        return Err(format!("tracked as {}, not a file", entry.kind));
+    }
+    match repo.blob_differs(&entry, &target.join(rel))? {
+        false => Ok(()),
+        true => Err("modified against HEAD".to_string()),
+    }
+}
+
 /// A git invocation under the rule above.
 fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
@@ -489,7 +510,34 @@ pub(crate) mod tests {
 
         let p = provenance(&repo);
         assert_eq!(p.dirty, Some(true), "{p:?}");
+        assert!(unmodified_at_head(&repo, Path::new("src/a.rs")).is_err());
+        assert!(unmodified_at_head(&repo, Path::new("run.sh")).is_ok());
         assert!(!marker.exists(), "a repo-configured program ran");
+    }
+
+    #[test]
+    fn unmodified_at_head_tells_tracked_from_untracked_and_modified() {
+        let tmp = tempdir().unwrap();
+        committed_repo(tmp.path());
+        assert_eq!(
+            unmodified_at_head(tmp.path(), Path::new("src/a.rs")),
+            Ok(())
+        );
+        std::fs::write(tmp.path().join("new.md"), "x").unwrap();
+        assert_eq!(
+            unmodified_at_head(tmp.path(), Path::new("new.md")),
+            Err("not tracked at HEAD".to_string())
+        );
+        std::fs::write(tmp.path().join("src/a.rs"), "edited\n").unwrap();
+        assert_eq!(
+            unmodified_at_head(tmp.path(), Path::new("src/a.rs")),
+            Err("modified against HEAD".to_string())
+        );
+        // Relative to the target, which may sit below the top level.
+        assert_eq!(
+            unmodified_at_head(&tmp.path().join("src"), Path::new("a.rs")),
+            Err("modified against HEAD".to_string())
+        );
     }
 
     #[test]

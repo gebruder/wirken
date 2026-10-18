@@ -148,6 +148,12 @@ fn single_call_writes_to_the_committed_rubric_are_refused_and_sections_are_propo
         report.contains("proposed rubric.md at") && report.contains("proposed/rubric.md"),
         "{report}"
     );
+    // Not a git work tree, so the committed-and-unmodified check cannot
+    // pass: the inline rubric applies and the run says why.
+    assert!(
+        report.contains(".lyrik/rubric.md not used: not a git work tree"),
+        "{report}"
+    );
 
     let writes = write_results(&data);
     assert_eq!(writes.len(), 4, "{writes:?}");
@@ -208,4 +214,81 @@ fn a_walk_cannot_write_the_committed_context() {
         "{writes:?}"
     );
     assert!(writes[1].1, "{writes:?}");
+}
+
+/// Test-setup git, with the operator's global and system config kept
+/// out of it.
+fn setup_git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A committed rubric and context reach the model in place of the
+/// inline rubric, and findings.json records which rubric was used.
+#[test]
+fn a_committed_team_rubric_is_what_the_model_scores_against() {
+    const RUN: &str = "team-rubric";
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, data, target) = (
+        tmp.path().join("home"),
+        tmp.path().join("data"),
+        tmp.path().join("target"),
+    );
+    std::fs::create_dir_all(&home).unwrap();
+    let model = ScriptedModel::start(vec![
+        call("probe_ping", serde_json::json!({"marker": "ok"})),
+        call(
+            "write_file",
+            serde_json::json!({
+                "path": format!(".lyrik/state/runs/{RUN}/staging/findings/finding-001.json"),
+                "content": finding(),
+            }),
+        ),
+        serde_json::json!({"role": "assistant", "content": "Findings emitted to staging."}),
+    ]);
+    write_target(&target, &model, None);
+    // The config carries this run's model port, so it stays out of the
+    // commit; the rubric and context are committed.
+    setup_git(&target, &["init", "-q"]);
+    setup_git(
+        &target,
+        &["add", "src", ".lyrik/rubric.md", ".lyrik/context.md"],
+    );
+    setup_git(&target, &["commit", "-q", "-m", "init"]);
+
+    let (ok, report) = run(&data, &home, &target, RUN);
+    assert!(ok, "{report}");
+
+    let sent = model
+        .received()
+        .iter()
+        .map(|r| r.body.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(sent.contains("## Team rubric"), "{sent}");
+    assert!(sent.contains("HIGH: anything reaching auth."), "{sent}");
+    assert!(sent.contains("# Team context"), "{sent}");
+    assert!(!sent.contains("## Inline rubric"), "{sent}");
+
+    let body: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(target.join(format!(".lyrik/state/runs/{RUN}/findings.json")))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["rubric"]["source"], "team", "{body}");
+    assert_eq!(body["rubric"]["path"], ".lyrik/rubric.md", "{body}");
+    assert_eq!(body["context"]["source"], "team", "{body}");
 }

@@ -150,6 +150,7 @@ pub fn stage_walk_skills(
     walks_source_dir: &Path,
     run_dir: &Path,
     run_id: &str,
+    scoring: Option<&str>,
 ) -> Result<PathBuf> {
     let staged = run_dir.join("walks-skills");
     std::fs::create_dir_all(&staged).with_context(|| format!("create {}", staged.display()))?;
@@ -161,7 +162,7 @@ pub fn stage_walk_skills(
         std::fs::create_dir_all(&dest_dir)
             .with_context(|| format!("create {}", dest_dir.display()))?;
         let dest = dest_dir.join("SKILL.md");
-        let wrapped = wrap_with_wirken_frontmatter(name, run_id, &body);
+        let wrapped = wrap_with_wirken_frontmatter(name, run_id, scoring, &body);
         std::fs::write(&dest, wrapped).with_context(|| format!("write {}", dest.display()))?;
         wirken_agent::bundled_skills::self_sign_skill_dir(&dest_dir)
             .with_context(|| format!("sign staged walk skill at {}", dest_dir.display()))?;
@@ -184,12 +185,21 @@ pub fn stage_walk_skills(
 /// Ahead of the body goes [`run_section`], which tells the model
 /// where a run's writes go. The `write_paths` above is what makes
 /// that true; the section is so the walk does not spend its turn on
-/// writes the gate refuses.
-pub fn wrap_with_wirken_frontmatter(walk_name: &str, run_id: &str, source: &str) -> String {
+/// writes the gate refuses. `scoring`, the team rubric and project
+/// context when the run has them, follows the run section.
+pub fn wrap_with_wirken_frontmatter(
+    walk_name: &str,
+    run_id: &str,
+    scoring: Option<&str>,
+    source: &str,
+) -> String {
     let (orig_description, body) = strip_leading_frontmatter(source);
     let description =
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
-    let section = run_section(walk_name);
+    let section = match scoring {
+        Some(scoring) => format!("{}\n{scoring}", run_section(walk_name)),
+        None => run_section(walk_name),
+    };
     let write_scope = run_write_scope(run_id);
     format!(
         "---\nname: {walk_name}\ndescription: {description}\ndisable-model-invocation: true\npermissions:\n  tools:\n    allow: [exec, read_file, write_file, list_files]\n  egress:\n    mode: deny\n  filesystem:\n    read_paths: [\"<workspace>\"]\n    write_paths: [\"{write_scope}\"]\n  inference:\n    allow: [\"*\"]\n---\n\n{section}\n{body}"
@@ -468,16 +478,16 @@ mod tests {
 
     #[test]
     fn the_staged_walk_lists_the_commands_it_will_ask_for() {
-        let sink = wrap_with_wirken_frontmatter("sink-walk", "r1", "body\n");
+        let sink = wrap_with_wirken_frontmatter("sink-walk", "r1", None, "body\n");
         assert!(sink.contains("`git log`, `git blame`"), "{sink}");
-        let doc = wrap_with_wirken_frontmatter("doc-walk", "r1", "body\n");
+        let doc = wrap_with_wirken_frontmatter("doc-walk", "r1", None, "body\n");
         assert!(doc.contains("runs no commands through `exec`"), "{doc}");
     }
 
     #[test]
     fn wrap_puts_run_rules_ahead_of_the_walk_text() {
         let src = "---\nname: fuzz-walk\ndescription: d\n---\n\nHarnesses live in the project's test tree.\n";
-        let wrapped = wrap_with_wirken_frontmatter("fuzz-walk", "r1", src);
+        let wrapped = wrap_with_wirken_frontmatter("fuzz-walk", "r1", None, src);
         let rules = wrapped
             .find("## Under `wirken lyrik run`")
             .expect("run rules present");
@@ -491,7 +501,7 @@ mod tests {
     #[test]
     fn wrap_with_wirken_frontmatter_strips_existing_block_and_preserves_description() {
         let src = "---\nname: sink-walk\ndescription: existing one\n---\n\n# Sink-Walk\n\nbody.";
-        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", src);
+        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, src);
         assert!(wrapped.starts_with("---\nname: sink-walk\n"));
         assert!(wrapped.contains("description: existing one"));
         assert!(wrapped.contains("# Sink-Walk"));
@@ -502,14 +512,14 @@ mod tests {
     #[test]
     fn wrap_with_wirken_frontmatter_supplies_default_description_when_missing() {
         let src = "---\nname: sink-walk\n---\n\n# Sink-Walk\n";
-        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", src);
+        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, src);
         assert!(wrapped.contains("Per-walk Lyrik dispatch: sink-walk"));
     }
 
     #[test]
     fn wrap_with_wirken_frontmatter_handles_no_existing_frontmatter() {
         let src = "# Just a body\n";
-        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", src);
+        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, src);
         assert!(wrapped.starts_with("---\nname: sink-walk"));
         assert!(wrapped.contains("# Just a body"));
     }
@@ -525,6 +535,7 @@ mod tests {
             src.path(),
             run.path(),
             "r1",
+            None,
         )
         .unwrap();
         assert!(staged.join("sink-walk/SKILL.md").is_file());
@@ -552,6 +563,7 @@ mod tests {
             src.path(),
             run.path(),
             "r1",
+            None,
         )
         .unwrap();
         for walk in ["sink-walk", "chain-walk"] {

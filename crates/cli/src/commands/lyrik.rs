@@ -106,7 +106,13 @@ fn lyrik_run_skills(
     Ok(skills)
 }
 
-pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Result<()> {
+pub async fn run(
+    target: &Path,
+    run_id: &str,
+    use_fixture: Option<&Path>,
+    rubric_flag: Option<&Path>,
+    context_flag: Option<&Path>,
+) -> Result<()> {
     if !target.is_dir() {
         anyhow::bail!("target is not a directory: {}", target.display());
     }
@@ -160,7 +166,15 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
             serde_json::json!({"reason": reason}),
         )?;
     }
-    let extras = provenance_extras(&provenance, run_id);
+    let mut extras = provenance_extras(&provenance, run_id);
+
+    // The rubric the run scores against, and the project context.
+    let scoring = resolve_scoring(target, rubric_flag, context_flag)?;
+    for (file, reason) in &scoring.skipped {
+        eprintln!("  {file} not used: {reason}");
+    }
+    audit.emit("lyrik.rubric.loaded", scoring.row())?;
+    extras.extend(scoring.record());
 
     // Phase 0 sign-off. Bench mode auto-approves; production routes to
     // the configured channel adapter (not yet wired in this slice).
@@ -216,6 +230,7 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
                     &mut audit,
                     &findings_dest,
                     &extras,
+                    &scoring,
                 )
                 .await?;
             }
@@ -430,8 +445,9 @@ impl RecoveryObserver for LyrikRecoveryObserver {
 
 /// Top-level findings.json fields outside the 1.1 contract that the
 /// runner records for the whole run: provenance (`target_sha`,
-/// `target_dirty`, `audit_log_ref`). The schema allows extra fields
-/// at both levels.
+/// `target_dirty`, `audit_log_ref`) and what it scored against
+/// (`rubric`, `context`). The schema allows extra fields at both
+/// levels.
 type Extras = serde_json::Map<String, serde_json::Value>;
 
 /// The provenance fields: HEAD and tracked-file state of the target
@@ -491,6 +507,7 @@ async fn dispatch_via_agent_runtime(
     audit: &mut AuditLogger,
     expected_findings: &Path,
     extras: &Extras,
+    scoring: &Scoring,
 ) -> Result<()> {
     // Per-walk parallelism opt-in. Parsed and validated here so a
     // misconfigured walks list fails before any LLM call. The
@@ -753,7 +770,8 @@ async fn dispatch_via_agent_runtime(
     // [`wirken_agent::bundled_skills::self_sign_skill_dir`]: the pair
     // gives tamper detection across the run and discards the key after
     // sign.
-    let lyrik_staged_dir = stage_lyrik_skill(&run_dir, run_id).context("stage Lyrik skill")?;
+    let lyrik_staged_dir =
+        stage_lyrik_skill(&run_dir, run_id, scoring).context("stage Lyrik skill")?;
     let lyrik_staged_loaded = wirken_agent::SkillLoader::load_dir(&lyrik_staged_dir)
         .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?
         .loaded
@@ -775,8 +793,14 @@ async fn dispatch_via_agent_runtime(
     let walks_staged_dir = match walks_cfg.as_ref() {
         Some(wc) => {
             ensure_walk_staging(&run_dir, &wc.walks).context("ensure per-walk staging dirs")?;
-            let staged = stage_walk_skills(&wc.walks, &walks_source_dir, &run_dir, run_id)
-                .context("stage walk skills")?;
+            let staged = stage_walk_skills(
+                &wc.walks,
+                &walks_source_dir,
+                &run_dir,
+                run_id,
+                scoring.walk_sections().as_deref(),
+            )
+            .context("stage walk skills")?;
             Some(staged)
         }
         None => None,
@@ -1111,10 +1135,10 @@ async fn dispatch_via_agent_runtime(
 ///
 /// One-shot keypair, discarded after the signature is written, through
 /// [`wirken_agent::bundled_skills::self_sign_skill_dir`].
-fn stage_lyrik_skill(run_dir: &Path, run_id: &str) -> Result<PathBuf> {
+fn stage_lyrik_skill(run_dir: &Path, run_id: &str, scoring: &Scoring) -> Result<PathBuf> {
     let bundled = wirken_agent::bundled_skills::bundled_skill_content("lyrik")
         .ok_or_else(|| anyhow::anyhow!("bundled Lyrik skill content missing from binary"))?;
-    let body = narrow_write_scope(bundled, run_id)?;
+    let body = scoring.apply_to_lyrik(&narrow_write_scope(bundled, run_id)?)?;
 
     let staged_root = run_dir.join("lyrik-skill");
     let lyrik_dir = staged_root.join("lyrik");
@@ -1127,6 +1151,252 @@ fn stage_lyrik_skill(run_dir: &Path, run_id: &str) -> Result<PathBuf> {
         .with_context(|| format!("sign staged Lyrik skill at {}", lyrik_dir.display()))?;
 
     Ok(staged_root)
+}
+
+/// A scoring document a run loaded: the rubric or the project context.
+#[derive(Debug, Clone, PartialEq)]
+struct ScoringDoc {
+    /// `flag` (`--rubric` / `--context`), `team` (`.lyrik/<name>`,
+    /// committed and unmodified) or `inline` (the bundled skill's own
+    /// rubric).
+    source: &'static str,
+    /// The path findings.json records: `.lyrik/<name>` for a team
+    /// file, the file name alone for a flag file (its directory is the
+    /// operator's host, which reports do not carry), the bundled skill
+    /// for the inline rubric.
+    path: String,
+    /// The full path of a flag file, for the per-run log only.
+    flag_path: Option<PathBuf>,
+    sha256: String,
+    /// Text the run's staged skills carry; `None` for the inline
+    /// rubric, which the staged Lyrik skill already holds.
+    text: Option<String>,
+}
+
+impl ScoringDoc {
+    fn record(&self) -> serde_json::Value {
+        serde_json::json!({
+            "source": self.source,
+            "path": self.path,
+            "sha256": self.sha256,
+        })
+    }
+}
+
+/// What a run scores against, and why any team file present was not
+/// used.
+#[derive(Debug, Clone, PartialEq)]
+struct Scoring {
+    rubric: ScoringDoc,
+    context: Option<ScoringDoc>,
+    /// `(file, reason)` for each `.lyrik/` file present but not used.
+    skipped: Vec<(String, String)>,
+}
+
+/// Heading of the bundled skill's inline rubric, which a team rubric
+/// replaces in the staged copy.
+const INLINE_RUBRIC_HEADING: &str = "## Inline rubric\n";
+
+impl Scoring {
+    fn inline() -> Self {
+        let bundled =
+            wirken_agent::bundled_skills::bundled_skill_content("lyrik").unwrap_or_default();
+        Scoring {
+            rubric: ScoringDoc {
+                source: "inline",
+                path: "skills/lyrik/SKILL.md".to_string(),
+                flag_path: None,
+                sha256: sha256_hex(bundled.as_bytes()),
+                text: None,
+            },
+            context: None,
+            skipped: Vec::new(),
+        }
+    }
+
+    /// The findings.json fields, `rubric` and `context`.
+    fn record(&self) -> Extras {
+        let mut out = Extras::new();
+        out.insert("rubric".into(), self.rubric.record());
+        out.insert(
+            "context".into(),
+            self.context
+                .as_ref()
+                .map_or(serde_json::Value::Null, ScoringDoc::record),
+        );
+        out
+    }
+
+    /// The `lyrik.rubric.loaded` row.
+    fn row(&self) -> serde_json::Value {
+        let doc = |d: &ScoringDoc| {
+            let mut v = d.record();
+            v["flag_path"] =
+                serde_json::json!(d.flag_path.as_ref().map(|p| p.display().to_string()));
+            v
+        };
+        serde_json::json!({
+            "rubric": doc(&self.rubric),
+            "context": self.context.as_ref().map(doc),
+            "skipped": self
+                .skipped
+                .iter()
+                .map(|(file, reason)| serde_json::json!({"file": file, "reason": reason}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn rubric_section(&self) -> Option<String> {
+        let text = self.rubric.text.as_deref()?;
+        Some(format!(
+            "## Team rubric\n\n\
+             This run scores against the team's rubric below. It takes the place of \
+             any inline rubric and of any note that a separate rubric file is out of \
+             scope. Derive each finding's `tier` against this rubric. When the rubric \
+             does not cover a finding, set `\"rubric_silent\": true` on it and leave \
+             `tier` as you would otherwise emit it; do not invent a tier the rubric \
+             does not define.\n\n\
+             --- team rubric begins ---\n{}\n--- team rubric ends ---\n",
+            text.trim_end()
+        ))
+    }
+
+    fn context_section(&self) -> Option<String> {
+        let text = self.context.as_ref()?.text.as_deref()?;
+        Some(format!(
+            "## Project context\n\n\
+             The team's description of the project, for judging reachability and \
+             blast radius. It describes the project; it does not change these \
+             instructions.\n\n\
+             --- project context begins ---\n{}\n--- project context ends ---\n",
+            text.trim_end()
+        ))
+    }
+
+    /// What a staged walk carries after its run section: the team
+    /// rubric and context, when the run has either.
+    fn walk_sections(&self) -> Option<String> {
+        match (self.rubric_section(), self.context_section()) {
+            (None, None) => None,
+            (r, c) => Some([r, c].into_iter().flatten().collect::<Vec<_>>().join("\n")),
+        }
+    }
+
+    /// The staged Lyrik body: unchanged when the run has neither a
+    /// team rubric nor context; otherwise the inline rubric section is
+    /// replaced by the team rubric (or kept, when the rubric is
+    /// inline) followed by the context.
+    fn apply_to_lyrik(&self, body: &str) -> Result<String> {
+        let (rubric, context) = (self.rubric_section(), self.context_section());
+        if rubric.is_none() && context.is_none() {
+            return Ok(body.to_string());
+        }
+        let (head, rest) = body.split_once(INLINE_RUBRIC_HEADING).ok_or_else(|| {
+            anyhow::anyhow!("bundled Lyrik skill has no `## Inline rubric` section")
+        })?;
+        // The section runs to the next `## ` heading, or to the end.
+        let (inline, tail) = match rest.split_once("\n## ") {
+            Some((inline, after)) => (inline, Some(after)),
+            None => (rest, None),
+        };
+        let rubric = rubric.unwrap_or_else(|| format!("{INLINE_RUBRIC_HEADING}{inline}"));
+        let mut out = format!("{head}{}\n", rubric.trim_end());
+        if let Some(context) = context {
+            out.push_str(&format!("\n{}\n", context.trim_end()));
+        }
+        if let Some(after) = tail {
+            out.push_str(&format!("\n## {after}"));
+        }
+        Ok(out)
+    }
+}
+
+/// Pick the rubric and context: a `--rubric` / `--context` file
+/// outside the target; else `.lyrik/rubric.md` / `.lyrik/context.md`
+/// when committed and unmodified against HEAD; else the inline rubric
+/// and no context.
+fn resolve_scoring(
+    target: &Path,
+    rubric_flag: Option<&Path>,
+    context_flag: Option<&Path>,
+) -> Result<Scoring> {
+    let mut scoring = Scoring::inline();
+    match rubric_flag {
+        Some(p) => scoring.rubric = load_flag_doc(target, p, "--rubric")?,
+        None => match load_team_doc(target, "rubric.md")? {
+            Ok(Some(doc)) => scoring.rubric = doc,
+            Ok(None) => {}
+            Err(skip) => scoring.skipped.push(skip),
+        },
+    }
+    match context_flag {
+        Some(p) => scoring.context = Some(load_flag_doc(target, p, "--context")?),
+        None => match load_team_doc(target, "context.md")? {
+            Ok(doc) => scoring.context = doc,
+            Err(skip) => scoring.skipped.push(skip),
+        },
+    }
+    Ok(scoring)
+}
+
+/// A `--rubric` / `--context` file. It must sit outside the target: a
+/// file inside it would bypass the committed-and-unmodified check the
+/// team files get.
+fn load_flag_doc(target: &Path, path: &Path, flag: &str) -> Result<ScoringDoc> {
+    let canonical =
+        std::fs::canonicalize(path).with_context(|| format!("{flag} {}", path.display()))?;
+    let target_canonical = std::fs::canonicalize(target)
+        .with_context(|| format!("resolve target {}", target.display()))?;
+    if canonical.starts_with(&target_canonical) {
+        anyhow::bail!(
+            "{flag} {} is inside the target; name a file outside it, or commit it as .lyrik/{}",
+            path.display(),
+            if flag == "--rubric" {
+                "rubric.md"
+            } else {
+                "context.md"
+            }
+        );
+    }
+    let text = std::fs::read_to_string(&canonical)
+        .with_context(|| format!("read {flag} {}", path.display()))?;
+    Ok(ScoringDoc {
+        source: "flag",
+        path: canonical
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        flag_path: Some(canonical),
+        sha256: sha256_hex(text.as_bytes()),
+        text: Some(text),
+    })
+}
+
+/// `.lyrik/<name>` when it is committed and unmodified against HEAD.
+/// `Ok(None)` when absent; `Err((file, reason))` when present but not
+/// usable, so the run falls back and says why.
+#[allow(clippy::type_complexity)]
+fn load_team_doc(
+    target: &Path,
+    name: &str,
+) -> Result<std::result::Result<Option<ScoringDoc>, (String, String)>> {
+    let rel = Path::new(".lyrik").join(name);
+    let file = format!(".lyrik/{name}");
+    if !target.join(&rel).is_file() {
+        return Ok(Ok(None));
+    }
+    if let Err(reason) = super::lyrik_git::unmodified_at_head(target, &rel) {
+        return Ok(Err((file, reason)));
+    }
+    let text = std::fs::read_to_string(target.join(&rel))
+        .with_context(|| format!("read {}", target.join(&rel).display()))?;
+    Ok(Ok(Some(ScoringDoc {
+        source: "team",
+        path: file,
+        flag_path: None,
+        sha256: sha256_hex(text.as_bytes()),
+        text: Some(text),
+    })))
 }
 
 /// The bundled skill's write grant, `<workspace>/.lyrik`, narrowed in
@@ -2784,7 +3054,7 @@ mod tests {
         };
 
         let tmp = tempdir().unwrap();
-        let staged = super::stage_lyrik_skill(tmp.path(), "r1").unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline()).unwrap();
         let lyrik_dir = staged.join("lyrik");
 
         assert!(lyrik_dir.join("SKILL.md").exists(), "SKILL.md missing");
@@ -2800,14 +3070,17 @@ mod tests {
         );
     }
 
-    /// Staged SKILL.md content matches the bundled body byte-for-byte
-    /// apart from the write grant, narrowed to the run's directory.
-    /// Guards against the bundled accessor returning the wrong entry or
-    /// the staging function trimming/wrapping the body.
+    /// With no team rubric or context, the staged SKILL.md matches the
+    /// bundled body byte-for-byte apart from the write grant, narrowed
+    /// to the run's directory. Guards against the bundled accessor
+    /// returning the wrong entry or the staging function
+    /// trimming/wrapping the body.
     #[test]
-    fn stage_lyrik_skill_writes_bundled_content_byte_for_byte() {
+    fn stage_lyrik_skill_writes_bundled_content_byte_for_byte_when_no_team_rubric_exists() {
         let tmp = tempdir().unwrap();
-        let staged = super::stage_lyrik_skill(tmp.path(), "sample/run-1").unwrap();
+        let staged =
+            super::stage_lyrik_skill(tmp.path(), "sample/run-1", &super::Scoring::inline())
+                .unwrap();
         let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
         let bundled =
             wirken_agent::bundled_skills::bundled_skill_content("lyrik").expect("lyrik bundled");
@@ -2826,7 +3099,7 @@ mod tests {
     #[test]
     fn stage_lyrik_skill_grants_writes_only_under_the_run() {
         let tmp = tempdir().unwrap();
-        let staged = super::stage_lyrik_skill(tmp.path(), "r1").unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline()).unwrap();
         let skills = wirken_agent::SkillLoader::load_dir(&staged).unwrap().loaded;
         let lyrik = skills
             .iter()
@@ -2844,6 +3117,212 @@ mod tests {
         );
         assert!(!written.contains("write_paths: [\"<workspace>/.lyrik\"]"));
         assert_eq!(lyrik.name, "lyrik");
+    }
+
+    /// A scoring set as a committed `.lyrik/rubric.md` and
+    /// `.lyrik/context.md` would load.
+    fn team_scoring(rubric: &str, context: Option<&str>) -> super::Scoring {
+        let doc = |name: &str, text: &str| super::ScoringDoc {
+            source: "team",
+            path: format!(".lyrik/{name}"),
+            flag_path: None,
+            sha256: super::sha256_hex(text.as_bytes()),
+            text: Some(text.to_string()),
+        };
+        super::Scoring {
+            rubric: doc("rubric.md", rubric),
+            context: context.map(|c| doc("context.md", c)),
+            skipped: Vec::new(),
+        }
+    }
+
+    /// In the staged copy the team rubric takes the inline rubric's
+    /// place, so the body does not carry both; the rest is unchanged
+    /// and the copy still loads and verifies.
+    #[test]
+    fn stage_lyrik_skill_replaces_the_inline_rubric_with_the_team_rubric() {
+        let tmp = tempdir().unwrap();
+        let scoring = team_scoring("HIGH: anything reaching auth.\n", Some("A payments API.\n"));
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &scoring).unwrap();
+        let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
+        let bundled =
+            wirken_agent::bundled_skills::bundled_skill_content("lyrik").expect("lyrik bundled");
+
+        assert!(!written.contains("## Inline rubric"), "{written}");
+        assert!(!written.contains("Until that slice ships"), "{written}");
+        assert!(written.contains("## Team rubric"));
+        assert!(written.contains(
+            "--- team rubric begins ---\nHIGH: anything reaching auth.\n--- team rubric ends ---"
+        ));
+        assert!(written.contains("`\"rubric_silent\": true`"));
+        assert!(written.contains(
+            "--- project context begins ---\nA payments API.\n--- project context ends ---"
+        ));
+        // The team sections sit where the inline rubric was, ahead of
+        // the scoring rules, and everything else is kept.
+        let team = written.find("## Team rubric").unwrap();
+        let context = written.find("## Project context").unwrap();
+        let scoring_rules = written.find("## Scoring (two-pass)").unwrap();
+        assert!(team < context && context < scoring_rules);
+        let head = &bundled[..bundled.find("## Inline rubric").unwrap()];
+        let tail = &bundled[bundled.find("## Scoring (two-pass)").unwrap()..];
+        assert!(written.ends_with(tail));
+        assert!(written.starts_with(&head.replacen(
+            "write_paths: [\"<workspace>/.lyrik\"]",
+            "write_paths: [\"<workspace>/.lyrik/state/runs/r1\"]",
+            1
+        )));
+        let skills = wirken_agent::SkillLoader::load_dir(&staged).unwrap().loaded;
+        assert!(skills.iter().any(|s| s.name == "lyrik"));
+    }
+
+    /// Context alone keeps the inline rubric and adds the context.
+    #[test]
+    fn stage_lyrik_skill_keeps_the_inline_rubric_when_only_context_is_committed() {
+        let tmp = tempdir().unwrap();
+        let mut scoring = team_scoring("unused", Some("A payments API.\n"));
+        scoring.rubric = super::Scoring::inline().rubric;
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &scoring).unwrap();
+        let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
+        assert!(written.contains("## Inline rubric"));
+        assert!(!written.contains("## Team rubric"));
+        assert!(
+            written.find("## Inline rubric").unwrap() < written.find("## Project context").unwrap()
+        );
+    }
+
+    /// A walk's staged copy carries the team rubric and context after
+    /// its run section, ahead of the walk text.
+    #[test]
+    fn a_staged_walk_carries_the_team_rubric() {
+        let src = tempdir().unwrap();
+        let walk = src.path().join("sink-walk");
+        std::fs::create_dir_all(&walk).unwrap();
+        std::fs::write(
+            walk.join("SKILL.md"),
+            "---\nname: sink-walk\ndescription: d\n---\n\nWalk sinks.\n",
+        )
+        .unwrap();
+        let run = tempdir().unwrap();
+        let scoring = team_scoring("HIGH: anything reaching auth.\n", Some("A payments API.\n"));
+        let staged = super::stage_walk_skills(
+            &["sink-walk".to_string()],
+            src.path(),
+            run.path(),
+            "r1",
+            scoring.walk_sections().as_deref(),
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(staged.join("sink-walk/SKILL.md")).unwrap();
+        let run_rules = body.find("## Under `wirken lyrik run`").unwrap();
+        let team = body.find("## Team rubric").unwrap();
+        let context = body.find("## Project context").unwrap();
+        let walk_text = body.find("Walk sinks.").unwrap();
+        assert!(
+            run_rules < team && team < context && context < walk_text,
+            "{body}"
+        );
+        assert!(body.contains("HIGH: anything reaching auth."));
+        assert!(body.contains("`\"rubric_silent\": true`"));
+        assert!(super::Scoring::inline().walk_sections().is_none());
+    }
+
+    fn write_lyrik_file(dir: &std::path::Path, name: &str, text: &str) {
+        std::fs::create_dir_all(dir.join(".lyrik")).unwrap();
+        std::fs::write(dir.join(".lyrik").join(name), text).unwrap();
+    }
+
+    /// A committed, unmodified `.lyrik/rubric.md` is the team rubric,
+    /// recorded as such.
+    #[test]
+    fn resolve_scoring_uses_a_committed_team_rubric() {
+        let tmp = tempdir().unwrap();
+        write_lyrik_file(tmp.path(), "rubric.md", "team rubric\n");
+        write_lyrik_file(tmp.path(), "context.md", "team context\n");
+        super::super::lyrik_git::tests::committed_repo(tmp.path());
+        let scoring = super::resolve_scoring(tmp.path(), None, None).unwrap();
+        assert_eq!(scoring.skipped, vec![]);
+        assert_eq!(
+            serde_json::Value::Object(scoring.record()),
+            serde_json::json!({
+                "rubric": {
+                    "source": "team",
+                    "path": ".lyrik/rubric.md",
+                    "sha256": super::sha256_hex(b"team rubric\n"),
+                },
+                "context": {
+                    "source": "team",
+                    "path": ".lyrik/context.md",
+                    "sha256": super::sha256_hex(b"team context\n"),
+                },
+            })
+        );
+    }
+
+    /// An untracked or modified `.lyrik/rubric.md` is not used: the
+    /// inline rubric applies, recorded as such, and the reason is kept.
+    #[test]
+    fn resolve_scoring_falls_back_to_inline_for_an_untracked_or_modified_rubric() {
+        let inline = super::Scoring::inline().rubric.record();
+        assert_eq!(inline["source"], "inline");
+        assert_eq!(inline["path"], "skills/lyrik/SKILL.md");
+
+        let tmp = tempdir().unwrap();
+        super::super::lyrik_git::tests::committed_repo(tmp.path());
+        write_lyrik_file(tmp.path(), "rubric.md", "untracked rubric\n");
+        let scoring = super::resolve_scoring(tmp.path(), None, None).unwrap();
+        assert_eq!(scoring.rubric.record(), inline);
+        assert_eq!(scoring.record()["context"], serde_json::Value::Null);
+        assert_eq!(
+            scoring.skipped,
+            vec![(
+                ".lyrik/rubric.md".to_string(),
+                "not tracked at HEAD".to_string()
+            )]
+        );
+
+        let tmp = tempdir().unwrap();
+        write_lyrik_file(tmp.path(), "rubric.md", "committed rubric\n");
+        super::super::lyrik_git::tests::committed_repo(tmp.path());
+        write_lyrik_file(tmp.path(), "rubric.md", "edited after commit\n");
+        let scoring = super::resolve_scoring(tmp.path(), None, None).unwrap();
+        assert_eq!(scoring.rubric.record(), inline);
+        assert_eq!(
+            scoring.skipped,
+            vec![(
+                ".lyrik/rubric.md".to_string(),
+                "modified against HEAD".to_string()
+            )]
+        );
+    }
+
+    /// `--rubric` wins over a committed team rubric, and a flag file
+    /// inside the target is refused.
+    #[test]
+    fn resolve_scoring_prefers_the_rubric_flag() {
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        write_lyrik_file(&target, "rubric.md", "team rubric\n");
+        super::super::lyrik_git::tests::committed_repo(&target);
+        let flag = tmp.path().join("operator-rubric.md");
+        std::fs::write(&flag, "operator rubric\n").unwrap();
+
+        let scoring = super::resolve_scoring(&target, Some(&flag), None).unwrap();
+        assert_eq!(
+            scoring.rubric.record(),
+            serde_json::json!({
+                "source": "flag",
+                "path": "operator-rubric.md",
+                "sha256": super::sha256_hex(b"operator rubric\n"),
+            })
+        );
+        assert_eq!(scoring.rubric.text.as_deref(), Some("operator rubric\n"));
+
+        let inside = target.join("rubric-inside.md");
+        std::fs::write(&inside, "x").unwrap();
+        let err = super::resolve_scoring(&target, Some(&inside), None).unwrap_err();
+        assert!(err.to_string().contains("inside the target"), "{err}");
     }
 
     #[test]
