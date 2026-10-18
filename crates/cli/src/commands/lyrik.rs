@@ -236,6 +236,8 @@ pub async fn run(
         let walks = parse_walks_config(&config, &default_walks_source_dir())
             .context("parse walks config")?
             .map(|c| c.walks);
+        let exec_available = super::load_sandbox_config(&super::config().data_dir).mode
+            != wirken_agent::sandbox::SandboxMode::Off;
         let summary = signoff_summary(
             run_id,
             target,
@@ -243,6 +245,7 @@ pub async fn run(
             &scoring,
             &pin,
             walks.as_deref(),
+            exec_available,
         );
         let shown = summary.clone();
         let answer = tokio::task::spawn_blocking(move || {
@@ -466,6 +469,7 @@ fn signoff_summary(
     scoring: &Scoring,
     pin: &PhasePin,
     walks: Option<&[String]>,
+    exec_available: bool,
 ) -> String {
     let head = match (&provenance.sha, provenance.dirty) {
         (Some(sha), Some(false)) => format!("HEAD {sha}, tracked files unchanged"),
@@ -505,6 +509,11 @@ fn signoff_summary(
             "lyrik: none listed".to_string(),
         ),
     };
+    let exec_line = if exec_available {
+        exec_line
+    } else {
+        "unavailable: the sandbox is off, so a command would run on the host".to_string()
+    };
     let mut lines = vec![format!(
         "Lyrik run {} on {}",
         one_line(run_id),
@@ -520,11 +529,13 @@ fn signoff_summary(
     ] {
         lines.push(format!("  {label:<8} {}", one_line(&value)));
     }
-    lines.push(
+    lines.push(if exec_available {
         "  Each exec command is asked again before it runs; nothing else leaves \
          this host but calls to the model."
-            .to_string(),
-    );
+            .to_string()
+    } else {
+        "  Nothing leaves this host but calls to the model.".to_string()
+    });
     lines.join("\n")
 }
 
@@ -1129,8 +1140,13 @@ async fn dispatch_via_agent_runtime(
     // [`wirken_agent::bundled_skills::self_sign_skill_dir`]: the pair
     // gives tamper detection across the run and discards the key after
     // sign.
-    let lyrik_staged_dir =
-        stage_lyrik_skill(&run_dir, run_id, scoring).context("stage Lyrik skill")?;
+    // `exec` only in the sandbox. With it off, an approved command
+    // would run on the host with the host's network, so the run's
+    // skills do not grant it and a call to it is refused.
+    let exec_available =
+        super::load_sandbox_config(&cfg.data_dir).mode != wirken_agent::sandbox::SandboxMode::Off;
+    let lyrik_staged_dir = stage_lyrik_skill(&run_dir, run_id, scoring, exec_available)
+        .context("stage Lyrik skill")?;
     let lyrik_staged_loaded = wirken_agent::SkillLoader::load_dir(&lyrik_staged_dir)
         .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?
         .loaded
@@ -1158,6 +1174,7 @@ async fn dispatch_via_agent_runtime(
                 &run_dir,
                 run_id,
                 scoring.walk_sections().as_deref(),
+                exec_available,
             )
             .context("stage walk skills")?;
             Some(staged)
@@ -1522,10 +1539,18 @@ async fn dispatch_via_agent_runtime(
 ///
 /// One-shot keypair, discarded after the signature is written, through
 /// [`wirken_agent::bundled_skills::self_sign_skill_dir`].
-fn stage_lyrik_skill(run_dir: &Path, run_id: &str, scoring: &Scoring) -> Result<PathBuf> {
+fn stage_lyrik_skill(
+    run_dir: &Path,
+    run_id: &str,
+    scoring: &Scoring,
+    exec_available: bool,
+) -> Result<PathBuf> {
     let bundled = wirken_agent::bundled_skills::bundled_skill_content("lyrik")
         .ok_or_else(|| anyhow::anyhow!("bundled Lyrik skill content missing from binary"))?;
-    let body = scoring.apply_to_lyrik(&narrow_write_scope(bundled, run_id)?)?;
+    let body = scoring.apply_to_lyrik(&narrow_tools(
+        &narrow_write_scope(bundled, run_id)?,
+        exec_available,
+    )?)?;
 
     let staged_root = run_dir.join("lyrik-skill");
     let lyrik_dir = staged_root.join("lyrik");
@@ -1805,6 +1830,22 @@ fn narrow_write_scope(bundled: &str, run_id: &str) -> Result<String> {
     ))
 }
 
+/// The bundled skill's tool grant, without `exec` when the sandbox is
+/// off ([`super::lyrik_walks::run_tools`]). Fails rather than staging
+/// a copy that still grants `exec` when the bundled frontmatter does
+/// not carry exactly one such line.
+fn narrow_tools(bundled: &str, exec_available: bool) -> Result<String> {
+    const BUNDLED_TOOLS: &str = "allow: [exec, read_file, write_file, list_files]";
+    if bundled.matches(BUNDLED_TOOLS).count() != 1 {
+        anyhow::bail!("bundled Lyrik skill does not carry exactly one `{BUNDLED_TOOLS}` line");
+    }
+    Ok(bundled.replacen(
+        BUNDLED_TOOLS,
+        &format!("allow: [{}]", super::lyrik_walks::run_tools(exec_available)),
+        1,
+    ))
+}
+
 /// Aggregate one Phase 0 staging directory (context or rubric) into a
 /// single markdown proposal under the run's `proposed/` directory.
 /// Empty or missing source directories are no-ops. On success the
@@ -1913,7 +1954,13 @@ async fn dispatch_walks_concurrent(
             (!commands.is_empty()).then(|| format!("{w}: {}", commands.join(", ")))
         })
         .collect();
-    if !asks.is_empty() {
+    if !asks.is_empty() && sandbox.mode == wirken_agent::sandbox::SandboxMode::Off {
+        eprintln!(
+            "  exec is not available in this run: the sandbox is off, so these commands \
+             are refused and skipped: {}",
+            asks.join("; ")
+        );
+    } else if !asks.is_empty() {
         if terminal.is_some() {
             // Said before anything is asked: an approved command that
             // needs a binary the sandbox lacks can only fail.
@@ -3596,7 +3643,8 @@ mod tests {
         };
 
         let tmp = tempdir().unwrap();
-        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline()).unwrap();
+        let staged =
+            super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline(), true).unwrap();
         let lyrik_dir = staged.join("lyrik");
 
         assert!(lyrik_dir.join("SKILL.md").exists(), "SKILL.md missing");
@@ -3621,7 +3669,7 @@ mod tests {
     fn stage_lyrik_skill_writes_bundled_content_byte_for_byte_when_no_team_rubric_exists() {
         let tmp = tempdir().unwrap();
         let staged =
-            super::stage_lyrik_skill(tmp.path(), "sample/run-1", &super::Scoring::inline())
+            super::stage_lyrik_skill(tmp.path(), "sample/run-1", &super::Scoring::inline(), true)
                 .unwrap();
         let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
         let bundled =
@@ -3641,7 +3689,8 @@ mod tests {
     #[test]
     fn stage_lyrik_skill_grants_writes_only_under_the_run() {
         let tmp = tempdir().unwrap();
-        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline()).unwrap();
+        let staged =
+            super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline(), true).unwrap();
         let skills = wirken_agent::SkillLoader::load_dir(&staged).unwrap().loaded;
         let lyrik = skills
             .iter()
@@ -3685,7 +3734,7 @@ mod tests {
     fn stage_lyrik_skill_replaces_the_inline_rubric_with_the_team_rubric() {
         let tmp = tempdir().unwrap();
         let scoring = team_scoring("HIGH: anything reaching auth.\n", Some("A payments API.\n"));
-        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &scoring).unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &scoring, true).unwrap();
         let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
         let bundled =
             wirken_agent::bundled_skills::bundled_skill_content("lyrik").expect("lyrik bundled");
@@ -3724,7 +3773,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut scoring = team_scoring("unused", Some("A payments API.\n"));
         scoring.rubric = super::Scoring::inline().rubric;
-        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &scoring).unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &scoring, true).unwrap();
         let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
         assert!(written.contains("## Inline rubric"));
         assert!(!written.contains("## Team rubric"));
@@ -3753,6 +3802,7 @@ mod tests {
             run.path(),
             "r1",
             scoring.walk_sections().as_deref(),
+            true,
         )
         .unwrap();
         let body = std::fs::read_to_string(staged.join("sink-walk/SKILL.md")).unwrap();
@@ -3897,7 +3947,8 @@ mod tests {
     #[test]
     fn run_skills_reach_no_network() {
         let tmp = tempdir().unwrap();
-        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline()).unwrap();
+        let staged =
+            super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline(), true).unwrap();
         let src = tempdir().unwrap();
         std::fs::create_dir_all(src.path().join("sink-walk")).unwrap();
         std::fs::write(
@@ -3911,6 +3962,7 @@ mod tests {
             tmp.path(),
             "r1",
             None,
+            true,
         )
         .unwrap();
         let skills = super::lyrik_run_skills(&staged, Some(&walks)).unwrap();
@@ -3996,6 +4048,7 @@ mod tests {
             &scoring,
             &pin,
             Some(&walks),
+            true,
         );
         let lines: Vec<&str> = summary.lines().collect();
         assert_eq!(lines.len(), 8, "{summary}");
@@ -4017,6 +4070,84 @@ mod tests {
             lines[6],
             "  exec     sink-walk: git log, git blame; chain-walk: none listed"
         );
+    }
+
+    /// With the sandbox off, neither the staged Lyrik copy nor a staged
+    /// walk grants `exec`, the walk is told so, and the copies still
+    /// load; with it on, both grant it.
+    #[test]
+    fn staged_skills_grant_exec_only_with_the_sandbox_on() {
+        let tmp = tempdir().unwrap();
+        let src = tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("sink-walk")).unwrap();
+        std::fs::write(
+            src.path().join("sink-walk/SKILL.md"),
+            "---\nname: sink-walk\ndescription: d\n---\n\nWalk.\n",
+        )
+        .unwrap();
+        for exec_available in [true, false] {
+            let run = tmp.path().join(format!("exec-{exec_available}"));
+            let lyrik =
+                super::stage_lyrik_skill(&run, "r1", &super::Scoring::inline(), exec_available)
+                    .unwrap();
+            let walks = super::stage_walk_skills(
+                &["sink-walk".to_string()],
+                src.path(),
+                &run,
+                "r1",
+                None,
+                exec_available,
+            )
+            .unwrap();
+            for skill in super::lyrik_run_skills(&lyrik, Some(&walks)).unwrap() {
+                let wirken_agent::skill_perms::AllowSet::Set(tools) =
+                    &skill.permissions.tools.allow
+                else {
+                    panic!("{} grants a wildcard", skill.name);
+                };
+                assert_eq!(tools.contains("exec"), exec_available, "{}", skill.name);
+                assert!(tools.contains("read_file") && tools.contains("write_file"));
+            }
+            let walk = std::fs::read_to_string(walks.join("sink-walk/SKILL.md")).unwrap();
+            assert_eq!(
+                walk.contains("`exec` is not available in this run: the sandbox is off"),
+                !exec_available,
+                "{walk}"
+            );
+        }
+        assert!(super::narrow_tools("---\nname: x\n---\n", false).is_err());
+    }
+
+    #[test]
+    fn signoff_summary_says_exec_is_unavailable_with_the_sandbox_off() {
+        let provenance = super::super::lyrik_git::Provenance {
+            sha: None,
+            dirty: None,
+            unavailable: Some("not a git work tree".into()),
+        };
+        let pin = super::PhasePin {
+            provider: "ollama".into(),
+            model: "m".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            context_window: None,
+        };
+        let walks = vec!["sink-walk".to_string()];
+        let summary = super::signoff_summary(
+            "r1",
+            std::path::Path::new("/t"),
+            &provenance,
+            &super::Scoring::inline(),
+            &pin,
+            Some(&walks),
+            false,
+        );
+        assert!(
+            summary.contains(
+                "  exec     unavailable: the sandbox is off, so a command would run on the host"
+            ),
+            "{summary}"
+        );
+        assert!(!summary.contains("git log"), "{summary}");
     }
 
     #[test]

@@ -151,6 +151,7 @@ pub fn stage_walk_skills(
     run_dir: &Path,
     run_id: &str,
     scoring: Option<&str>,
+    exec_available: bool,
 ) -> Result<PathBuf> {
     let staged = run_dir.join("walks-skills");
     std::fs::create_dir_all(&staged).with_context(|| format!("create {}", staged.display()))?;
@@ -162,7 +163,7 @@ pub fn stage_walk_skills(
         std::fs::create_dir_all(&dest_dir)
             .with_context(|| format!("create {}", dest_dir.display()))?;
         let dest = dest_dir.join("SKILL.md");
-        let wrapped = wrap_with_wirken_frontmatter(name, run_id, scoring, &body);
+        let wrapped = wrap_with_wirken_frontmatter(name, run_id, scoring, exec_available, &body);
         std::fs::write(&dest, wrapped).with_context(|| format!("write {}", dest.display()))?;
         wirken_agent::bundled_skills::self_sign_skill_dir(&dest_dir)
             .with_context(|| format!("sign staged walk skill at {}", dest_dir.display()))?;
@@ -191,19 +192,33 @@ pub fn wrap_with_wirken_frontmatter(
     walk_name: &str,
     run_id: &str,
     scoring: Option<&str>,
+    exec_available: bool,
     source: &str,
 ) -> String {
     let (orig_description, body) = strip_leading_frontmatter(source);
     let description =
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
     let section = match scoring {
-        Some(scoring) => format!("{}\n{scoring}", run_section(walk_name)),
-        None => run_section(walk_name),
+        Some(scoring) => format!("{}\n{scoring}", run_section(walk_name, exec_available)),
+        None => run_section(walk_name, exec_available),
     };
+    let tools = run_tools(exec_available);
     let write_scope = run_write_scope(run_id);
     format!(
-        "---\nname: {walk_name}\ndescription: {description}\ndisable-model-invocation: true\npermissions:\n  tools:\n    allow: [exec, read_file, write_file, list_files]\n  egress:\n    mode: deny\n  filesystem:\n    read_paths: [\"<workspace>\"]\n    write_paths: [\"{write_scope}\"]\n  inference:\n    allow: [\"*\"]\n---\n\n{section}\n{body}"
+        "---\nname: {walk_name}\ndescription: {description}\ndisable-model-invocation: true\npermissions:\n  tools:\n    allow: [{tools}]\n  egress:\n    mode: deny\n  filesystem:\n    read_paths: [\"<workspace>\"]\n    write_paths: [\"{write_scope}\"]\n  inference:\n    allow: [\"*\"]\n---\n\n{section}\n{body}"
     )
+}
+
+/// The tools a run's staged skills grant. `exec` only when the sandbox
+/// is on: with it off, an approved command (`cargo test` running the
+/// target's `build.rs`, say) would run on the host with the host's
+/// network.
+pub fn run_tools(exec_available: bool) -> &'static str {
+    if exec_available {
+        "exec, read_file, write_file, list_files"
+    } else {
+        "read_file, write_file, list_files"
+    }
 }
 
 /// The one directory a run's agents may write: the run's own
@@ -265,9 +280,14 @@ pub fn sandbox_banner(where_exec_runs: &str, missing: Option<&[String]>) -> Opti
 /// The rules a walk runs under inside `wirken lyrik run`, placed ahead
 /// of the operator's walk text. They take precedence over a location
 /// the walk text names, such as a harness in the project's test tree.
-fn run_section(walk_name: &str) -> String {
+fn run_section(walk_name: &str, exec_available: bool) -> String {
     let commands = walk_exec_commands(walk_name);
-    let exec_line = if commands.is_empty() {
+    let exec_line = if !exec_available {
+        "- `exec` is not available in this run: the sandbox is off, so a command \
+         would run on the host. A call to it is refused: record the step as skipped \
+         and carry on."
+            .to_string()
+    } else if commands.is_empty() {
         "- This walk runs no commands through `exec`. Any command it tries is put \
          to the operator first, and a refused one is a step skipped."
             .to_string()
@@ -478,16 +498,16 @@ mod tests {
 
     #[test]
     fn the_staged_walk_lists_the_commands_it_will_ask_for() {
-        let sink = wrap_with_wirken_frontmatter("sink-walk", "r1", None, "body\n");
+        let sink = wrap_with_wirken_frontmatter("sink-walk", "r1", None, true, "body\n");
         assert!(sink.contains("`git log`, `git blame`"), "{sink}");
-        let doc = wrap_with_wirken_frontmatter("doc-walk", "r1", None, "body\n");
+        let doc = wrap_with_wirken_frontmatter("doc-walk", "r1", None, true, "body\n");
         assert!(doc.contains("runs no commands through `exec`"), "{doc}");
     }
 
     #[test]
     fn wrap_puts_run_rules_ahead_of_the_walk_text() {
         let src = "---\nname: fuzz-walk\ndescription: d\n---\n\nHarnesses live in the project's test tree.\n";
-        let wrapped = wrap_with_wirken_frontmatter("fuzz-walk", "r1", None, src);
+        let wrapped = wrap_with_wirken_frontmatter("fuzz-walk", "r1", None, true, src);
         let rules = wrapped
             .find("## Under `wirken lyrik run`")
             .expect("run rules present");
@@ -501,7 +521,7 @@ mod tests {
     #[test]
     fn wrap_with_wirken_frontmatter_strips_existing_block_and_preserves_description() {
         let src = "---\nname: sink-walk\ndescription: existing one\n---\n\n# Sink-Walk\n\nbody.";
-        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, src);
+        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, true, src);
         assert!(wrapped.starts_with("---\nname: sink-walk\n"));
         assert!(wrapped.contains("description: existing one"));
         assert!(wrapped.contains("# Sink-Walk"));
@@ -512,14 +532,14 @@ mod tests {
     #[test]
     fn wrap_with_wirken_frontmatter_supplies_default_description_when_missing() {
         let src = "---\nname: sink-walk\n---\n\n# Sink-Walk\n";
-        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, src);
+        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, true, src);
         assert!(wrapped.contains("Per-walk Lyrik dispatch: sink-walk"));
     }
 
     #[test]
     fn wrap_with_wirken_frontmatter_handles_no_existing_frontmatter() {
         let src = "# Just a body\n";
-        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, src);
+        let wrapped = wrap_with_wirken_frontmatter("sink-walk", "r1", None, true, src);
         assert!(wrapped.starts_with("---\nname: sink-walk"));
         assert!(wrapped.contains("# Just a body"));
     }
@@ -536,6 +556,7 @@ mod tests {
             run.path(),
             "r1",
             None,
+            true,
         )
         .unwrap();
         assert!(staged.join("sink-walk/SKILL.md").is_file());
@@ -564,6 +585,7 @@ mod tests {
             run.path(),
             "r1",
             None,
+            true,
         )
         .unwrap();
         for walk in ["sink-walk", "chain-walk"] {
