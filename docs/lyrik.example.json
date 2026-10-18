@@ -4,12 +4,7 @@
     "exclude": ["target/**", "node_modules/**", ".git/**", "**/test_data/**", "**/fixtures/**"]
   },
   "phases": {
-    "articulate": { "provider": "privatemode", "model": "anthropic/claude-opus-4-7" },
-    "rubric":     { "provider": "privatemode", "model": "anthropic/claude-opus-4-7" },
-    "recon":      { "provider": "anthropic",   "model": "claude-haiku-4-5" },
-    "framing":    { "provider": "anthropic",   "model": "claude-opus-4-7" },
-    "score":      { "provider": "privatemode", "model": "anthropic/claude-opus-4-7" },
-    "exploit":    { "provider": "anthropic",   "model": "claude-opus-4-7" }
+    "framing": { "provider": "privatemode", "model": "anthropic/claude-opus-4-7" }
   },
   "gates": {
     "phase_0_signoff":      { "adapter": "slack",  "target": "#secops-leads" },

@@ -130,7 +130,7 @@ committed.
 | `<repo>/.lyrik/memory/` | ADRs, postmortems, threat models, design docs |
 
 `.lyrik/config.json` references operator-level resources by name:
-`phases.score.provider: "privatemode"` resolves through the vault,
+`phases.framing.provider: "privatemode"` resolves through the vault,
 `gates.phase_0_signoff.adapter: "slack"` through the channel registry. Lyrik
 never sees a credential.
 

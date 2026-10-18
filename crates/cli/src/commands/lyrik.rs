@@ -2261,6 +2261,18 @@ mod tests {
         assert_eq!(pin.context_window, None);
     }
 
+    /// The published sample config parses and its one pin is the
+    /// pin the run resolves.
+    #[test]
+    fn example_config_resolves_to_privatemode() {
+        let body = include_str!("../../../../docs/lyrik.example.json");
+        let cfg: serde_json::Value = serde_json::from_str(body).expect("example parses");
+        let pin = resolve_phase_pin(&cfg).unwrap();
+        assert_eq!(pin.provider, "privatemode");
+        assert_eq!(pin.model, "anthropic/claude-opus-4-7");
+        assert_eq!(pin.base_url, "http://localhost:8080/v1");
+    }
+
     use super::dedup_findings;
     use super::tier_severity;
 
