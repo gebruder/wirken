@@ -61,9 +61,10 @@ delivery channel without human signoff.
 - **Grade caps at 0.5.** The skill sets `grade: 0.5` when both passes mark
   `real_bug: yes` and `reachable: yes`, and `0` otherwise. The ceiling is by
   design: Lyrik confirms real-and-reachable, and exploit verification is a
-  separate workload against the same findings. The runner neither computes
-  nor clamps `grade`; it carries the skill's value through to `findings.json`
-  and SARIF.
+  separate workload against the same findings. The runner enforces the cap
+  for every walk: a staged finding whose `grade` is above 0.5 is written at
+  0.5, and the per-run log records `lyrik.finding.grade_corrected` with the
+  stable ID, the walk, and the original and new value.
 - **Per-finding `detection_source` provenance**, a closed enum enforced when
   present.
 - **Opt-in Semgrep prescreen.** With `scanner.semgrep.enabled` set, the runner

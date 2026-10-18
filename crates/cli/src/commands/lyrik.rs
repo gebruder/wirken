@@ -1322,6 +1322,17 @@ fn aggregate_findings_multi(
             let mut parsed: serde_json::Value = serde_json::from_str(&body)
                 .with_context(|| format!("parse staged finding {}", p.display()))?;
             annotate_detection_source(&mut parsed, seed_locations);
+            if let Some(original) = cap_grade(&mut parsed) {
+                audit.emit(
+                    "lyrik.finding.grade_corrected",
+                    serde_json::json!({
+                        "stable_id": parsed.get("stable_id").and_then(|v| v.as_str()),
+                        "walk": walk_name,
+                        "original": original,
+                        "new": GRADE_CAP,
+                    }),
+                )?;
+            }
 
             let outcome = lyrik_citation::check(&parsed, workspace);
             use lyrik_citation::{Gate, Status};
@@ -1476,6 +1487,22 @@ pub(super) fn annotate_detection_source(
         obj.entry("detection_source".to_string())
             .or_insert(serde_json::Value::String(provenance.to_string()));
     }
+}
+
+/// Highest `grade` a run writes. No exploit adapter runs, so no
+/// finding is graded past real-and-reachable; the skill states the
+/// cap and the runner holds every walk to it.
+const GRADE_CAP: f64 = 0.5;
+
+/// Lower a numeric `grade` above [`GRADE_CAP`] to the cap. Returns
+/// the original value when it was lowered, `None` when the grade is
+/// absent, non-numeric or within the cap.
+fn cap_grade(finding: &mut serde_json::Value) -> Option<serde_json::Value> {
+    let obj = finding.as_object_mut()?;
+    if obj.get("grade")?.as_f64()? <= GRADE_CAP {
+        return None;
+    }
+    obj.insert("grade".to_string(), serde_json::json!(GRADE_CAP))
 }
 
 /// Numeric severity ordering used by the dedup tier-rises rule.
@@ -2700,6 +2727,73 @@ mod tests {
         assert_eq!(
             merged[0].get("detection_source").and_then(|v| v.as_str()),
             Some("static_prescreen"),
+        );
+    }
+
+    /// The `detail` of every row in the run's audit.log carrying
+    /// `event`.
+    fn audit_details(path: &std::path::Path, event: &str) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|r| r["event"] == event)
+            .map(|r| r["detail"].clone())
+            .collect()
+    }
+
+    #[test]
+    fn cap_grade_leaves_grades_within_the_cap() {
+        for grade in [serde_json::json!(0), serde_json::json!(0.5)] {
+            let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+            f["grade"] = grade.clone();
+            assert_eq!(super::cap_grade(&mut f), None);
+            assert_eq!(f["grade"], grade);
+        }
+        let mut absent = finding("src/a.rs", 10, "auth", "HIGH");
+        assert_eq!(super::cap_grade(&mut absent), None);
+        assert!(absent.get("grade").is_none());
+    }
+
+    /// A walk that grades a finding 1.0 lands at 0.5 in
+    /// findings.json, with the correction on the per-run log.
+    #[test]
+    fn aggregate_findings_multi_caps_grade_one_at_half() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp
+            .path()
+            .join("staging")
+            .join("sink-walk")
+            .join("findings");
+        let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+        f["grade"] = serde_json::json!(1.0);
+        write_finding(&dir, "finding-001.json", &f);
+        let dest = tmp.path().join("findings.json");
+        let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let log = tmp.path().join("audit.log");
+        let mut audit = super::AuditLogger::open(&log, "sample/run-011", true).unwrap();
+        aggregate_findings_multi(
+            &[(Some("sink-walk".to_string()), dir)],
+            &dest,
+            "sample/run-011",
+            true,
+            &seeds,
+            tmp.path(),
+            &mut audit,
+        )
+        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(body["findings"][0]["grade"], serde_json::json!(0.5));
+        let rows = audit_details(&log, "lyrik.finding.grade_corrected");
+        assert_eq!(
+            rows,
+            vec![serde_json::json!({
+                "stable_id": "auth::src/a.rs:10",
+                "walk": "sink-walk",
+                "original": 1.0,
+                "new": 0.5,
+            })]
         );
     }
 
