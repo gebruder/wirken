@@ -254,6 +254,7 @@ compromise impossible. The honest edges:
 [Configuration](docs/configuration.md) ·
 [Channels](docs/channels.md) ·
 [Troubleshooting](docs/troubleshooting.md) ·
+[Updating](docs/update.md) ·
 [Windows](docs/windows.md)
 
 **Security**

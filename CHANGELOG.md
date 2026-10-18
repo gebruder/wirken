@@ -10,6 +10,35 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `wirken update`, run only when the operator asks. `--check` fetches
+  `releases.json`, verifies its SSH signature in process against the release
+  key compiled into the binary, and reports the installed and latest release
+  and any security release since the installed one. `wirken update` installs
+  the latest release or `--to <version>`, `--rollback` restores the binary it
+  replaced. Install and rollback refuse without a terminal, inside a Wirken
+  `exec`, while a gateway runs, and for a binary that is not a release
+  artifact; a downgrade needs `--allow-downgrade`. A manifest older than the
+  newest one the install has verified is refused. Release files come from
+  GitHub or from a mirror named in `update.json`. See
+  [docs/update.md](docs/update.md).
+- Each release publishes `releases.json` and `releases.json.sig`, a signed
+  list of every release with its artifacts' sha256 and whether it carries
+  security fixes.
+- `binary_installed` audit rows on the `gateway-install` lane record each
+  install and rollback: from and to version, binary sha256, target, the key
+  that signed the manifest, and whether it was a rollback.
+- The `gateway.start` row and each session's opening chain head name the
+  build: version, commit and whether the tree was dirty.
+- `wirken status` prints the version, commit, dirty flag, the age of the
+  commit the binary was built from, and the target, with no network request.
+
+### Changed
+
+- `install.sh` downloads into the install directory and renames the binary
+  into place, so an existing `wirken` is replaced in one step.
+
 ## [2.2.0] - 2026-10-18
 
 From #287 (eleven Cargo updates), rustls 0.23.46 is taken, which fixes

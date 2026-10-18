@@ -310,6 +310,28 @@ wirken import <ARCHIVE> [--sealed]
 and refuses afterwards, and there is no unseal. See
 [imported-archives.md](imported-archives.md).
 
+## wirken update
+
+```bash
+wirken update --check
+wirken update [--to <VERSION>] [--allow-downgrade] [--base-url <URL>]
+wirken update --rollback
+```
+
+Checks for, installs, or rolls back a signed release. Runs only when asked.
+Install and rollback need a terminal and a stopped gateway, and ask for a
+typed confirmation. `--base-url` must be on a loopback address or be the
+mirror in `<data_dir>/update.json`. See [update.md](update.md).
+
+## wirken status
+
+```bash
+wirken status
+```
+
+Prints the version, commit, dirty flag, build age from the commit's
+timestamp, target and binary path. Makes no network request.
+
 ## wirken doctor
 
 ```bash
