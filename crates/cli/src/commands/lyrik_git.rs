@@ -27,6 +27,11 @@
 //!   command-line option switches off for every driver. Whether the
 //!   work tree matches HEAD is decided here instead, by hashing each
 //!   tracked file as a git blob and comparing it with HEAD's tree.
+//! - Where git would convert content (a filter, LFS, line-ending or
+//!   encoding conversion), the work-tree bytes are not the blob's, so
+//!   no comparison is made and the reason is returned instead. `git
+//!   config --get` and `git check-attr` tell; both only read config
+//!   and attributes files.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -63,7 +68,20 @@ pub fn provenance(target: &Path) -> Provenance {
         Ok(sha) => sha,
         Err(reason) => return Provenance::unavailable(reason),
     };
-    match repo.tracked_changes() {
+    let dirty = repo.head_entries().and_then(|entries| {
+        let paths: Vec<&Path> = entries
+            .iter()
+            .filter(|e| e.kind == "blob")
+            .map(|e| e.path.as_path())
+            .collect();
+        if let Some(conversion) = conversion_declared(&repo.toplevel, &paths)? {
+            return Err(format!(
+                "content conversion declared ({conversion}); tracked files not compared"
+            ));
+        }
+        repo.tracked_changes(&entries)
+    });
+    match dirty {
         Ok(dirty) => Provenance {
             sha: Some(sha),
             dirty: Some(dirty),
@@ -75,6 +93,92 @@ pub fn provenance(target: &Path) -> Provenance {
             unavailable: Some(reason),
         },
     }
+}
+
+/// Attributes under which git converts content between the work tree
+/// and the object database: filters (LFS among them), line-ending
+/// conversion, `$Id$` expansion, re-encoding. Where one applies, the
+/// work-tree bytes are not the blob's bytes, so comparing them says
+/// nothing about whether the file changed.
+const CONVERSION_ATTRIBUTES: &[&str] = &[
+    "filter",
+    "text",
+    "eol",
+    "crlf",
+    "ident",
+    "working-tree-encoding",
+];
+
+/// The first content conversion that applies to any of `paths`
+/// (relative to `dir`), through `core.autocrlf` or an attribute from
+/// any attributes file. `git config` and `git check-attr` only read
+/// config and attributes files; neither runs a filter.
+fn conversion_declared(dir: &Path, paths: &[&Path]) -> Result<Option<String>, String> {
+    let out = git(dir)
+        .args(["config", "--get", "core.autocrlf"])
+        .output()
+        .map_err(|e| format!("run git: {e}"))?;
+    match out.status.code() {
+        Some(0) => {
+            let value = trimmed(out.stdout);
+            if value != "false" {
+                return Ok(Some(format!("core.autocrlf={value}")));
+            }
+        }
+        // Unset.
+        Some(1) => {}
+        _ => {
+            return Err(format!(
+                "git config --get core.autocrlf: {}",
+                trimmed(out.stderr)
+            ));
+        }
+    }
+    if paths.is_empty() {
+        return Ok(None);
+    }
+
+    let mut input = Vec::new();
+    for p in paths {
+        input.extend_from_slice(p.as_os_str().as_encoded_bytes());
+        input.push(0);
+    }
+    let mut child = git(dir)
+        .args(["check-attr", "-z", "--stdin"])
+        .args(CONVERSION_ATTRIBUTES)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("run git: {e}"))?;
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        stdin.write_all(&input)
+    });
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("run git: {e}"))?;
+    let written = writer
+        .join()
+        .map_err(|_| "git check-attr input writer panicked")?;
+    if !out.status.success() {
+        return Err(format!("git check-attr: {}", trimmed(out.stderr)));
+    }
+    written.map_err(|e| format!("git check-attr input: {e}"))?;
+    // `<path>\0<attribute>\0<value>\0` per path and attribute.
+    let fields: Vec<&[u8]> = out.stdout.split(|b| *b == 0).collect();
+    for [path, attribute, value] in fields.as_chunks::<3>().0 {
+        let value = String::from_utf8_lossy(value);
+        if value != "unspecified" && value != "unset" {
+            return Ok(Some(format!(
+                "{}={value} on {}",
+                String::from_utf8_lossy(attribute),
+                String::from_utf8_lossy(path)
+            )));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether `rel` (relative to `target`) is in HEAD's tree with exactly
@@ -91,6 +195,11 @@ pub fn unmodified_at_head(target: &Path, rel: &Path) -> Result<(), String> {
         .ok_or_else(|| "not tracked at HEAD".to_string())?;
     if entry.kind != "blob" {
         return Err(format!("tracked as {}, not a file", entry.kind));
+    }
+    if let Some(conversion) = conversion_declared(target, &[rel])? {
+        return Err(format!(
+            "content conversion declared ({conversion}); not compared with HEAD"
+        ));
     }
     match repo.blob_differs(&entry, &target.join(rel))? {
         false => Ok(()),
@@ -182,20 +291,25 @@ impl Repo {
         .map_err(|_| "HEAD has no commit".to_string())
     }
 
-    /// Whether any entry of HEAD's tree differs from the work tree:
-    /// missing, a different kind of file, a different executable bit,
-    /// different bytes, or a submodule at a different commit.
-    fn tracked_changes(&self) -> Result<bool, String> {
+    /// Every entry of HEAD's tree, paths relative to the top level.
+    fn head_entries(&self) -> Result<Vec<TreeEntry>, String> {
         let out = run_git(
             &self.toplevel,
             &["ls-tree", "-r", "-z", "--full-tree", "HEAD"],
             None,
         )?;
-        for entry in parse_ls_tree(&out) {
+        Ok(parse_ls_tree(&out))
+    }
+
+    /// Whether any of `entries` differs from the work tree: missing, a
+    /// different kind of file, a different executable bit, different
+    /// bytes, or a submodule at a different commit.
+    fn tracked_changes(&self, entries: &[TreeEntry]) -> Result<bool, String> {
+        for entry in entries {
             let path = self.toplevel.join(&entry.path);
             let differs = match entry.kind.as_str() {
-                "blob" => self.blob_differs(&entry, &path)?,
-                "commit" => submodule_differs(&entry, &path)?,
+                "blob" => self.blob_differs(entry, &path)?,
+                "commit" => submodule_differs(entry, &path)?,
                 other => return Err(format!("unexpected tree entry kind {other}")),
             };
             if differs {
@@ -508,10 +622,16 @@ pub(crate) mod tests {
         assert!(marker.exists(), "control: git status runs the trap");
         std::fs::remove_file(&marker).unwrap();
 
+        // The trap's filter applies to every path, so no comparison is
+        // made, and asking which attributes apply runs nothing.
         let p = provenance(&repo);
-        assert_eq!(p.dirty, Some(true), "{p:?}");
+        assert_eq!(p.dirty, None, "{p:?}");
+        assert!(
+            p.unavailable.as_deref().unwrap().contains("filter=trap"),
+            "{p:?}"
+        );
         assert!(unmodified_at_head(&repo, Path::new("src/a.rs")).is_err());
-        assert!(unmodified_at_head(&repo, Path::new("run.sh")).is_ok());
+        assert!(unmodified_at_head(&repo, Path::new("run.sh")).is_err());
         assert!(!marker.exists(), "a repo-configured program ran");
     }
 
@@ -537,6 +657,64 @@ pub(crate) mod tests {
         assert_eq!(
             unmodified_at_head(&tmp.path().join("src"), Path::new("a.rs")),
             Err("modified against HEAD".to_string())
+        );
+    }
+
+    /// A filter, line-ending conversion or LFS on any tracked path
+    /// leaves `dirty` unknown, with the reason; `-text` does not.
+    #[test]
+    fn declared_content_conversion_leaves_dirty_unknown() {
+        for (attributes, expected) in [
+            (
+                "*.rs filter=lfs diff=lfs merge=lfs -text\n",
+                Some("filter=lfs on src/a.rs"),
+            ),
+            ("* text=auto\n", Some("text=auto on ")),
+            ("*.sh eol=crlf\n", Some("eol=crlf on run.sh")),
+            ("*.rs ident\n", Some("ident=set on src/a.rs")),
+            ("*.rs -text\n", None),
+        ] {
+            let tmp = tempdir().unwrap();
+            std::fs::write(tmp.path().join(".gitattributes"), attributes).unwrap();
+            committed_repo(tmp.path());
+            let p = provenance(tmp.path());
+            match expected {
+                Some(reason) => {
+                    assert_eq!(p.dirty, None, "{attributes}: {p:?}");
+                    assert!(p.sha.is_some());
+                    let why = p.unavailable.unwrap();
+                    assert!(
+                        why.starts_with("content conversion declared (") && why.contains(reason),
+                        "{attributes}: {why}"
+                    );
+                }
+                None => assert_eq!(p.dirty, Some(false), "{attributes}: {p:?}"),
+            }
+        }
+
+        let tmp = tempdir().unwrap();
+        committed_repo(tmp.path());
+        setup_git(tmp.path(), &["config", "core.autocrlf", "input"]);
+        let p = provenance(tmp.path());
+        assert_eq!(p.dirty, None);
+        assert!(p.unavailable.unwrap().contains("core.autocrlf=input"));
+    }
+
+    /// A conversion on the compared path makes `unmodified_at_head`
+    /// say so rather than compare; one on another path does not.
+    #[test]
+    fn unmodified_at_head_refuses_a_converted_path() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitattributes"), "*.sh text eol=crlf\n").unwrap();
+        committed_repo(tmp.path());
+        let err = unmodified_at_head(tmp.path(), Path::new("run.sh")).unwrap_err();
+        assert!(
+            err.starts_with("content conversion declared (") && err.contains("on run.sh"),
+            "{err}"
+        );
+        assert_eq!(
+            unmodified_at_head(tmp.path(), Path::new("src/a.rs")),
+            Ok(())
         );
     }
 

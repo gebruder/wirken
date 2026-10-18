@@ -3476,6 +3476,30 @@ mod tests {
         );
     }
 
+    /// A committed rubric that git would convert (here, line endings)
+    /// is not compared with HEAD: the inline rubric applies and the
+    /// reason is kept.
+    #[test]
+    fn resolve_scoring_falls_back_to_inline_for_a_converted_rubric() {
+        let tmp = tempdir().unwrap();
+        write_lyrik_file(tmp.path(), "rubric.md", "team rubric\n");
+        std::fs::write(
+            tmp.path().join(".gitattributes"),
+            ".lyrik/*.md text eol=crlf\n",
+        )
+        .unwrap();
+        super::super::lyrik_git::tests::committed_repo(tmp.path());
+        let scoring = super::resolve_scoring(tmp.path(), None, None).unwrap();
+        assert_eq!(scoring.rubric.source, "inline");
+        assert_eq!(scoring.skipped.len(), 1, "{:?}", scoring.skipped);
+        let (file, reason) = &scoring.skipped[0];
+        assert_eq!(file, ".lyrik/rubric.md");
+        assert!(
+            reason.starts_with("content conversion declared (") && reason.contains("rubric.md"),
+            "{reason}"
+        );
+    }
+
     /// `--rubric` wins over a committed team rubric, and a flag file
     /// inside the target is refused.
     #[test]

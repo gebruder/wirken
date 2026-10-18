@@ -6,8 +6,8 @@
 //! `core.fsmonitor` and a clean filter on every path to commands that
 //! write marker files, and a tracked file is edited so `git status`
 //! would re-read it through the filter. The run completes, the markers
-//! stay absent, and findings.json and the SARIF report carry the
-//! provenance. Afterwards a plain `git status` trips both markers, so
+//! stay absent, and findings.json and the SARIF report carry HEAD, with
+//! the tracked-file state left unknown because a filter applies. Afterwards a plain `git status` trips both markers, so
 //! the trap was live.
 
 mod common;
@@ -136,7 +136,23 @@ fn provenance_is_recorded_and_no_repo_configured_program_runs() {
     let body: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&findings).unwrap()).unwrap();
     assert_eq!(body["target_sha"], head.as_str(), "{body}");
-    assert_eq!(body["target_dirty"], true, "{body}");
+    // The repo declares a filter on every path, so the work tree is not
+    // compared with HEAD and the run says why.
+    assert!(body["target_dirty"].is_null(), "{body}");
+    let audit =
+        std::fs::read_to_string(target.join(format!(".lyrik/state/runs/{RUN}/audit.log"))).unwrap();
+    let row: serde_json::Value = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| e["event"] == "lyrik.provenance.unavailable")
+        .unwrap_or_else(|| panic!("no provenance.unavailable row:\n{audit}"));
+    assert!(
+        row["detail"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("filter=trap"),
+        "{row}"
+    );
     assert_eq!(
         body["audit_log_ref"],
         format!(".lyrik/state/runs/{RUN}/audit.log")
@@ -155,7 +171,7 @@ fn provenance_is_recorded_and_no_repo_configured_program_runs() {
         serde_json::from_str(&std::fs::read_to_string(&sarif_path).unwrap()).unwrap();
     let props = &sarif["runs"][0]["invocations"][0]["properties"]["lyrik"];
     assert_eq!(props["target_sha"], head.as_str(), "{props}");
-    assert_eq!(props["target_dirty"], true, "{props}");
+    assert!(props["target_dirty"].is_null(), "{props}");
     assert_eq!(
         props["audit_log_ref"],
         format!(".lyrik/state/runs/{RUN}/audit.log")
