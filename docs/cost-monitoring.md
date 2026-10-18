@@ -46,6 +46,7 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
         "subagent_spawned",
         "subagent_session_bound",
         "exec_location_disagreement",
+        "binary_installed",
         "subagent_result",
         "chain_head",
         "mcp_entry_verified",

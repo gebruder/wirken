@@ -1205,6 +1205,9 @@ async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
+    // Every session this process opens names the build on its opening
+    // chain head.
+    wirken_audit::set_build_identity(build_info::audit_identity());
 
     // The default filter applies to every crate whose name starts
     // with `wirken` (the EnvFilter target-match is a prefix, so

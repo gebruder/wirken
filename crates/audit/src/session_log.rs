@@ -586,6 +586,34 @@ pub struct ExecLocation {
 /// who rewrites it can recompute its own leaf and chain hash and no
 /// later row disagrees. The signature is what stands between the
 /// operator's stated reason and any other reason someone prefers.
+/// The build of the binary that wrote a row: its version, the commit it
+/// was built from, and whether the tree had uncommitted changes.
+///
+/// Carried on each session's opening `SessionStart` chain head, so every
+/// chain segment can be attributed to the build that wrote it whatever
+/// way that build was installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildIdentity {
+    pub version: String,
+    /// Short commit hash, or `unknown`.
+    pub commit: String,
+    /// `clean`, `dirty`, or `unknown`.
+    pub dirty: String,
+}
+
+static BUILD_IDENTITY: std::sync::OnceLock<BuildIdentity> = std::sync::OnceLock::new();
+
+/// Name the build this process is, once, at startup. Every
+/// `SessionStart` head it writes afterwards carries it. A second call is
+/// ignored: the binary does not change while it runs.
+pub fn set_build_identity(build: BuildIdentity) {
+    let _ = BUILD_IDENTITY.set(build);
+}
+
+fn build_identity() -> Option<BuildIdentity> {
+    BUILD_IDENTITY.get().cloned()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactionRecord {
     /// The row that was rewritten.
@@ -1068,6 +1096,31 @@ pub enum SessionEvent {
         /// Adapter the attempt arrived through, when there is one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         adapter_id: Option<String>,
+    },
+    /// `wirken update` replaced the running binary with a release, or
+    /// `wirken update --rollback` restored the binary an update had
+    /// replaced.
+    ///
+    /// Written to the `gateway-install` lane, outside any session,
+    /// right after the file is swapped, and sealed with a chain head.
+    /// It records that this install's operator ran the command and what
+    /// was checked; it does not prove the bytes on disk were never
+    /// changed by other means, which anyone who can write the install
+    /// directory can do.
+    BinaryInstalled {
+        from_version: String,
+        to_version: String,
+        /// sha256 of the binary now installed.
+        binary_sha256: String,
+        /// `wirken-<target>`'s target triple.
+        target: String,
+        /// Fingerprint (`SHA256:...`) of the release key that signed the
+        /// manifest the binary's sha256 was checked against. On a
+        /// rollback, the key recorded when the restored binary was set
+        /// aside; absent when none was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verifying_key: Option<String>,
+        rollback: bool,
     },
     /// `wirken sessions verify` found an approval whose prompt said one
     /// place for an `exec` while the command ran in another.
@@ -1590,6 +1643,12 @@ pub enum SessionEvent {
         /// pair above says which head stopped covering it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redaction: Option<RedactionRecord>,
+        /// The build that opened the session, on a `SessionStart` head
+        /// written by a binary that named its build. Not part of the
+        /// signed message; it is covered like any other row content, by
+        /// the row hash and the next head over it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<BuildIdentity>,
     },
     /// The harness records its current effective system prompt as a
     /// session event before the first
@@ -3152,6 +3211,9 @@ impl SqliteSessionLog {
             superseded_chain_hash: superseded.as_ref().map(|(h, _)| h.clone()),
             superseded_signature: superseded.map(|(_, sig)| sig),
             redaction,
+            build: matches!(reason, ChainHeadReason::SessionStart)
+                .then(build_identity)
+                .flatten(),
         };
 
         let next_seq = append_inner(conn, handle, TrustLevel::System, event, None)?;

@@ -4298,6 +4298,7 @@ pub fn session_events(
             SessionEvent::PermissionApprovalRefused { .. } => None,
             // Written to the verify lane, which no conversation shows.
             SessionEvent::ExecLocationDisagreement { .. } => None,
+            SessionEvent::BinaryInstalled { .. } => None,
             // An operator removed a grant out of band, with no turn to draw
             // it against.
             SessionEvent::PermissionRevoked { .. } => None,
@@ -6416,6 +6417,7 @@ mod tests {
                     superseded_chain_hash: None,
                     superseded_signature: None,
                     redaction: None,
+                    build: None,
                 },
             ),
             (

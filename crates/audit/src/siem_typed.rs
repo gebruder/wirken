@@ -132,6 +132,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         // An operator told one place for an exec that ran in another.
         // Forwarded because the approval rows it is drawn from are not.
         SessionEvent::ExecLocationDisagreement { .. } => true,
+        // What the install runs changed, by the operator's hand.
+        SessionEvent::BinaryInstalled { .. } => true,
         SessionEvent::SubagentResult { .. } => true,
         SessionEvent::ChainHead { .. } => true,
         SessionEvent::McpEntryVerified { .. } => true,
@@ -267,6 +269,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::PermissionRevoked { .. } => "permission_revoked",
         SessionEvent::PermissionApprovalRefused { .. } => "permission_approval_refused",
         SessionEvent::ExecLocationDisagreement { .. } => "exec_location_disagreement",
+        SessionEvent::BinaryInstalled { .. } => "binary_installed",
         SessionEvent::PermissionRenewed { .. } => "permission_renewed",
         SessionEvent::PermissionGrantExpired { .. } => "permission_grant_expired",
         SessionEvent::PermissionGrantPruned { .. } => "permission_grant_pruned",

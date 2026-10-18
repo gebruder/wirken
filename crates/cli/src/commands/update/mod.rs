@@ -165,6 +165,34 @@ pub fn require_supported_platform() -> Result<()> {
     Ok(())
 }
 
+/// The audit lane install and rollback rows go to, outside any session.
+pub const INSTALL_LANE: &str = "gateway-install";
+
+/// Append `event` to the install lane of `log` and seal it with a chain
+/// head, so the row is covered by a signature as soon as it is written.
+pub fn record_on(
+    log: &wirken_audit::SqliteSessionLog,
+    event: wirken_audit::SessionEvent,
+) -> Result<()> {
+    use wirken_audit::SessionLog as _;
+    let handle = log.handle_for(wirken_audit::SessionId::new(INSTALL_LANE.to_string()));
+    log.append(&handle, wirken_audit::TrustLevel::User, event)
+        .context("append the install row")?;
+    super::seal_operator_lane(log, INSTALL_LANE);
+    Ok(())
+}
+
+/// Record an install or rollback on this install's signed chain. Called
+/// after the file is swapped, so the row says what happened, not what
+/// was about to.
+fn record(event: wirken_audit::SessionEvent) -> Result<()> {
+    let cfg = super::config();
+    let log = super::open_signed_session_log(&cfg)?;
+    record_on(&log, event).with_context(|| {
+        format!("the binary was swapped, but its {INSTALL_LANE} audit row could not be written")
+    })
+}
+
 /// The largest release artifact accepted.
 const MAX_ARTIFACT_BYTES: usize = 512 * 1024 * 1024;
 
@@ -289,8 +317,17 @@ pub async fn run_install(
         &install::Kept {
             version: report.current.to_string(),
             sha256: current_sha,
+            verifying_key: Some(report.verified.key_fingerprint.clone()),
         },
     )?;
+    record(wirken_audit::SessionEvent::BinaryInstalled {
+        from_version: report.current.to_string(),
+        to_version: release.version.clone(),
+        binary_sha256: sha.clone(),
+        target: target.to_string(),
+        verifying_key: Some(report.verified.key_fingerprint.clone()),
+        rollback: false,
+    })?;
     println!(
         "  Installed wirken {} at {} (sha256 {sha}), checked against releases.json signed by {}.",
         release.version,
@@ -324,6 +361,14 @@ pub async fn run_rollback() -> Result<()> {
     )
     .await?;
     let back = install::rollback(&exe, current)?;
+    record(wirken_audit::SessionEvent::BinaryInstalled {
+        from_version: back.from.clone(),
+        to_version: back.to.version.clone(),
+        binary_sha256: back.to.sha256.clone(),
+        target: crate::build_info::TARGET.to_string(),
+        verifying_key: back.to.verifying_key.clone(),
+        rollback: true,
+    })?;
     println!(
         "  Restored wirken {} at {} (sha256 {}). {} is kept as {}.",
         back.to.version,
@@ -446,6 +491,56 @@ mod tests {
             let got = check(tmp.path(), &fetcher, &keys, "2.2.0", TARGET).await;
             assert_eq!(got.is_ok(), ok, "{at}: {got:?}");
         }
+    }
+
+    /// An install row lands on the gateway-install lane, sealed by a
+    /// chain head right after it, and the lane verifies.
+    #[test]
+    fn an_install_row_is_sealed_on_its_own_lane() {
+        use wirken_audit::{SessionEvent, SessionLog as _};
+        let tmp = tempfile::tempdir().unwrap();
+        let signer =
+            std::sync::Arc::new(wirken_audit::AuditSigningKey::load_or_create(tmp.path()).unwrap());
+        let log =
+            wirken_audit::SqliteSessionLog::open_with_signer(&tmp.path().join("audit.db"), signer)
+                .unwrap();
+        for rollback in [false, true] {
+            record_on(
+                &log,
+                SessionEvent::BinaryInstalled {
+                    from_version: "2.2.0".into(),
+                    to_version: "2.3.0".into(),
+                    binary_sha256: SHA.into(),
+                    target: TARGET.into(),
+                    verifying_key: Some("SHA256:test".into()),
+                    rollback,
+                },
+            )
+            .unwrap();
+        }
+        let handle = log.handle_for(wirken_audit::SessionId::new(INSTALL_LANE.to_string()));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let kinds: Vec<&str> = rows
+            .iter()
+            .map(|r| match &r.event {
+                SessionEvent::BinaryInstalled {
+                    rollback: false, ..
+                } => "install",
+                SessionEvent::BinaryInstalled { rollback: true, .. } => "rollback",
+                SessionEvent::ChainHead { .. } => "head",
+                _ => "other",
+            })
+            .collect();
+        // Each row is followed by a head before anything else.
+        assert_eq!(kinds.last(), Some(&"head"), "{kinds:?}");
+        let install = kinds.iter().position(|k| *k == "install").unwrap();
+        let rollback = kinds.iter().position(|k| *k == "rollback").unwrap();
+        assert_eq!(kinds[install + 1], "head", "{kinds:?}");
+        assert_eq!(kinds[rollback + 1], "head", "{kinds:?}");
+        assert!(matches!(
+            log.verify(&handle).unwrap(),
+            wirken_audit::SessionVerifyResult::Ok { .. }
+        ));
     }
 
     #[test]

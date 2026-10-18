@@ -43,6 +43,15 @@ pub fn binary_path() -> String {
     }
 }
 
+/// This build as the audit chain records it.
+pub fn audit_identity() -> wirken_audit::BuildIdentity {
+    wirken_audit::BuildIdentity {
+        version: VERSION.to_string(),
+        commit: COMMIT.to_string(),
+        dirty: DIRTY.to_string(),
+    }
+}
+
 /// The two lines `--version` prints after the program name.
 pub fn version_text() -> String {
     format!("{}\nbinary: {}", identity(), binary_path())

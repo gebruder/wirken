@@ -2500,6 +2500,7 @@ mod chain_head_signing {
             superseded_chain_hash: None,
             superseded_signature: None,
             redaction,
+            build: None,
         };
         let payload = serde_json::to_string(&event).unwrap();
         log.with_conn(|conn| {
@@ -3391,6 +3392,14 @@ fn every_session_event() -> Vec<SessionEvent> {
             reason: ApprovalRefusalReason::UnauthorizedActor,
             adapter_id: None,
         },
+        SessionEvent::BinaryInstalled {
+            from_version: String::new(),
+            to_version: String::new(),
+            binary_sha256: String::new(),
+            target: String::new(),
+            verifying_key: None,
+            rollback: false,
+        },
         SessionEvent::ExecLocationDisagreement {
             verified_session_id: String::new(),
             approval_seq: 0,
@@ -3556,6 +3565,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             superseded_chain_hash: None,
             superseded_signature: None,
             redaction: None,
+            build: None,
         },
         SessionEvent::SystemPromptSet {
             content: String::new(),
@@ -3829,6 +3839,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::PermissionRevoked { .. } => "PermissionRevoked",
         SessionEvent::PermissionApprovalRefused { .. } => "PermissionApprovalRefused",
         SessionEvent::ExecLocationDisagreement { .. } => "ExecLocationDisagreement",
+        SessionEvent::BinaryInstalled { .. } => "BinaryInstalled",
         SessionEvent::PermissionRenewed { .. } => "PermissionRenewed",
         SessionEvent::PermissionGrantExpired { .. } => "PermissionGrantExpired",
         SessionEvent::PermissionGrantPruned { .. } => "PermissionGrantPruned",
@@ -3888,7 +3899,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 68;
+const SESSION_EVENT_VARIANTS: usize = 69;
 
 /// The list covers the enum.
 #[test]

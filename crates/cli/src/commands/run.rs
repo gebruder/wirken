@@ -284,12 +284,10 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let legacy_lifecycle_shim = maybe_spawn_legacy_lifecycle_shim(&cfg, siem_config.as_ref());
 
     audit
-        .log(AuditEvent::new(
-            ActorKind::Service,
-            "gateway",
-            "gateway.start",
-            "daemon",
-        ))
+        .log(
+            AuditEvent::new(ActorKind::Service, "gateway", "gateway.start", "daemon")
+                .with_detail(gateway_start_detail()),
+        )
         .await?;
     // Step 6 of `wirken setup` now surfaces the audit DB path with
     // its full trust-claim framing (append-only, SHA-256 hash chain,
@@ -2294,6 +2292,12 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
 
     println!("  Wirken stopped.");
     Ok(())
+}
+
+/// The `gateway.start` row's detail: the build that started, so the
+/// rows after it can be attributed to it however it was installed.
+fn gateway_start_detail() -> serde_json::Value {
+    serde_json::to_value(crate::build_info::audit_identity()).unwrap_or_default()
 }
 
 /// Build the audit event for a rejected adapter handshake. Records the
@@ -6293,5 +6297,16 @@ mod proxy_handoff_tests {
         let oauth = entries.remove("notion-oauth").unwrap();
         assert!(oauth.expose().contains("\"access_token\":\"AT\""));
         assert!(!oauth.expose().contains("RT-secret"), "{}", oauth.expose());
+    }
+}
+
+#[cfg(test)]
+mod gateway_start_row_tests {
+    #[test]
+    fn the_start_row_names_the_build() {
+        let d = super::gateway_start_detail();
+        assert_eq!(d["version"], crate::build_info::VERSION);
+        assert_eq!(d["commit"], crate::build_info::COMMIT);
+        assert_eq!(d["dirty"], crate::build_info::DIRTY);
     }
 }

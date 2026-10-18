@@ -19,6 +19,8 @@ agent runtime drives, and the `AuditLegacy` wrapper for the flat-tuple events
 the gateway and subsystems emit (`gateway.start`, `audit.chain_broken`,
 adapter handshake records). Variants are serde-tagged with `kind =
 "<snake_case>"` so wire consumers dispatch on a single string field.
+`gateway.start` carries the starting build's `version`, `commit` and `dirty`
+state in its detail.
 
 | `kind` | Identity fields | Emit context |
 |--------|-----------------|--------------|
@@ -50,7 +52,8 @@ adapter handshake records). Variants are serde-tagged with `kind =
 | `compaction` | `agent_id`, `provider`, `model` | Context engine trimmed the conversation. |
 | `system_prompt_set` | `agent_id` | New effective system prompt. |
 | `attestation` | `signer_pubkey`, `signature` | Per-agent Ed25519 signature over the chain head. |
-| `chain_head` | `signing_pubkey` | Signed chain-head record. A `reason` of `redaction` also carries `superseded_chain_hash` and `superseded_signature`. |
+| `chain_head` | `signing_pubkey` | Signed chain-head record. A `reason` of `redaction` also carries `superseded_chain_hash` and `superseded_signature`. A `reason` of `session_start` carries `build`, the `version`, `commit` and `dirty` state of the binary that opened the session, so every chain segment names the build that wrote it however it was installed; `build` is row content covered by the row hash, not part of the signed message. |
+| `binary_installed` | none | `wirken update` replaced the binary, or `--rollback` restored the one it replaced, on the `gateway-install` lane, sealed by a chain head right after it. Carries `from_version`, `to_version`, `binary_sha256`, `target`, `verifying_key` (the fingerprint of the release key whose signed manifest the sha256 was checked against) and `rollback`. It records that the operator ran the command; it does not prove the file was not changed by other means. Forwarded by default. See [update](update.md). |
 | `rewind` | `agent_id`, `reason` | Sentinel emitted before truncating the most recent N events. |
 | `audit_legacy` | `actor_kind`, `actor_id`, `action`, `target` | Gateway-emitted flat-tuple events. |
 

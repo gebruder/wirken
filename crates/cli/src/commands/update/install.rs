@@ -213,6 +213,10 @@ pub fn confirm(
 pub struct Kept {
     pub version: String,
     pub sha256: String,
+    /// The release key whose signed manifest this binary's sha256 was
+    /// checked against when it was set aside, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifying_key: Option<String>,
 }
 
 fn sibling(exe: &Path, suffix: &str) -> Result<PathBuf> {
@@ -330,6 +334,7 @@ pub fn rollback(exe: &Path, current_version: &str) -> Result<RolledBack> {
     let running = Kept {
         version: current_version.to_string(),
         sha256: sha256_file(exe)?,
+        verifying_key: None,
     };
     let hold = temp_beside(exe, "hold")?;
     let _ = std::fs::remove_file(&hold);
@@ -529,6 +534,7 @@ mod tests {
         let old = Kept {
             version: "2.3.0".into(),
             sha256: sha256_hex(b"version 2.3.0"),
+            verifying_key: Some("SHA256:test".into()),
         };
         install(&exe, b"version 2.4.0", &old).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"version 2.4.0");
@@ -571,6 +577,7 @@ mod tests {
             &Kept {
                 version: "2.3.0".into(),
                 sha256: sha256_hex(b"old"),
+                verifying_key: None,
             },
         )
         .unwrap();
