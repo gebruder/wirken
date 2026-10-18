@@ -3,8 +3,10 @@
 <img src="img/lyrik-wirken.png" alt="Lyrik" width="360" align="right">
 
 Lyrik audits a codebase against a scoring guide your team has written. The
-report shows every finding it considered, which it kept, which it threw out,
-which it could not decide on, and the reason for each.
+findings it keeps go to `findings.json`. What it sets aside goes to the
+per-run audit log, one row each: scanner candidates the model declined, with
+the model's reason, or left unaddressed, and staged findings the runner
+refused or corrected.
 
 ## Who it is for
 
@@ -97,15 +99,17 @@ delivery channel without human signoff.
 
 ## Setup
 
-1. Install Wirken and pick at least one provider and one channel adapter that
-   can carry the gates. See [getting-started.md](getting-started.md).
-2. From the assessed repo, message the agent: *"run a lyrik assessment, full
-   type."*
-3. Phase 0 generates the project context and severity rubric and routes them
-   to `gates.phase_0_signoff`. Lyrik does not proceed on silence.
-4. On approval, Lyrik writes `.lyrik/rubric.md` and `.lyrik/context.md`.
-   Commit them. Later runs skip Phase 0 unless the dependency lockfile hash or
-   the framework version fingerprint changes, or the team asks for a re-run.
+1. Install Wirken and configure the provider that `phases.framing` names.
+   See [getting-started.md](getting-started.md).
+2. Write `.lyrik/config.json` in the assessed repo with `bench_mode: true`. A
+   run without it exits before dispatch; no sign-off is routed to a channel.
+3. Run `wirken lyrik run --target <repo> --run <run-id>`. The run writes
+   `findings.json` and `audit.log` under
+   `<repo>/.lyrik/state/runs/<run-id>/`.
+4. The bundled skill does not run Phase 0. When a walk stages context or
+   rubric sections, the runner joins them into `.lyrik/context.md` and
+   `.lyrik/rubric.md`, replacing any existing file, with no approval step.
+   Review and commit them like any other change.
 5. Optionally populate `.lyrik/prior/` with past CVEs, pentest reports and
    internal disclosures; the dedup gate reads it recursively. Without it the
    regression-finding stream stays empty.
@@ -124,7 +128,7 @@ committed.
 |---|---|
 | Wirken vault | provider API keys, channel adapter credentials |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<repo>/.lyrik/config.json` | scope, model pins per phase, gate destinations, prior-findings path, memory path |
+| `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), gate destinations, prior-findings path, memory path |
 | `<repo>/.lyrik/rubric.md` | severity rubric approved at Phase 0 |
 | `<repo>/.lyrik/context.md` | project context approved at Phase 0 |
 | `<repo>/.lyrik/prior/` | past CVEs, pentest reports, internal disclosures |
@@ -353,15 +357,15 @@ wirken lyrik report --format sarif --run <run-id> --output findings.sarif
 wirken lyrik validate --path findings.json
 ```
 
-Every phase output writes to the Wirken audit subsystem with no opt-out, each
-entry carrying a run ID that the final report includes so downstream readers
-can pull the chain. The report opens with the assessment shape: counts of
-findings produced, duplicates of each other, duplicates of earlier runs,
-scored, sent for human review, exploit-tested, and set aside with the reason.
-The numbers reconcile and a reader can check the math. That funnel disclosure
-is the structural rebuttal to "we found N high-severity bugs": a finding count
-without disclosure of what was dropped or stopped before scoring is not an
-assessment.
+Every run writes the per-run `audit.log` with no opt-out, each row carrying
+the run ID. The SARIF report carries the same ID as `automationDetails.id`
+(`lyrik/run/<run-id>`) and on every result, so a reader can pull the rows for
+a finding. Neither report has a counts summary. `findings.json` carries a
+`citation_check` block with resolved and unresolved counts per citation
+sub-gate; what the run set aside is in `audit.log`, one row each:
+`lyrik.candidate.declined`, `lyrik.candidate.unaddressed`,
+`lyrik.finding.refused`, `lyrik.finding.framing_stripped` and
+`lyrik.finding.grade_corrected`.
 
 Scanner rows (`lyrik.scanner.dispatched`, `lyrik.scanner.unavailable`,
 `lyrik.candidate.declined`, `lyrik.candidate.unaddressed`) live in the per-run
