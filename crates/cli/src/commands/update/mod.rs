@@ -79,8 +79,8 @@ impl CheckReport {
         let security = self.security();
         if security.is_empty() {
             out.push_str(&format!(
-                "  {} newer release(s); none carries security fixes.\n",
-                self.newer.len()
+                "  No release since {} carries security fixes.\n",
+                self.current
             ));
         } else {
             out.push_str(&format!(
@@ -91,10 +91,9 @@ impl CheckReport {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
-            for r in security {
-                out.push_str(&format!("    {}  {}\n", r.version, r.summary));
-            }
         }
+        out.push_str(&format!("  Releases since {}:\n", self.current));
+        release_lines(&mut out, self.newer.iter());
         if !latest
             .artifacts
             .contains_key(&format!("wirken-{}", self.target))
@@ -105,6 +104,47 @@ impl CheckReport {
             ));
         }
         out
+    }
+
+    /// What the operator confirms an install against: the `--check`
+    /// report, the move from the installed version to `release`, what a
+    /// downgrade leaves behind, and the question.
+    pub fn install_prompt(&self, release: &Release, exe: &Path) -> String {
+        let mut out = self.render();
+        out.push_str(&format!(
+            "  wirken {} -> {}\n",
+            self.current, release.version
+        ));
+        let target = release.parsed_version();
+        if target < self.current {
+            out.push_str("  Downgrading leaves behind:\n");
+            release_lines(
+                &mut out,
+                self.verified.manifest.releases.iter().filter(|r| {
+                    let v = r.parsed_version();
+                    v > target && v <= self.current
+                }),
+            );
+        }
+        out.push_str(&format!(
+            "Install wirken {} over {} at {}?",
+            release.version,
+            self.current,
+            exe.display()
+        ));
+        out
+    }
+}
+
+/// One line per release: its version, whether it carries security
+/// fixes, and its summary.
+fn release_lines<'a>(out: &mut String, releases: impl Iterator<Item = &'a Release>) {
+    for r in releases {
+        let mark = if r.security { "security" } else { "" };
+        out.push_str(&format!(
+            "    {:<8} {:<8}  {}\n",
+            r.version, mark, r.summary
+        ));
     }
 }
 
@@ -289,14 +329,8 @@ pub async fn run_install(
         println!("  wirken {} is installed already.", report.current);
         return Ok(());
     };
-    print!("{}", report.render());
     confirm(
-        format!(
-            "Install wirken {} over {} at {}?",
-            release.version,
-            report.current,
-            exe.display()
-        ),
+        report.install_prompt(release, &exe),
         release.version.clone(),
     )
     .await?;
@@ -458,6 +492,52 @@ mod tests {
             .await
             .unwrap();
         assert!(up_to_date.render().contains("Up to date."));
+    }
+
+    #[tokio::test]
+    async fn the_install_prompt_shows_the_move_the_security_releases_and_every_skipped_summary() {
+        let body = manifest_body("2026-10-20T00:00:00Z", &releases());
+        let sig = sign(&test_key(1), MANIFEST_NAMESPACE, &body);
+        let server = mirror_with(body, sig).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let fetcher = Fetcher::new(Source::choose(Some(&server.base), None).unwrap());
+        let keys = [test_key(1).verifying_key().to_bytes()];
+        let exe = Path::new("/opt/wirken/wirken");
+
+        let report = check(tmp.path(), &fetcher, &keys, "2.2.0", TARGET)
+            .await
+            .unwrap();
+        let prompt = report.install_prompt(report.latest(), exe);
+        for want in [
+            "wirken 2.2.0 -> 2.4.0",
+            "Security fixes in: 2.3.0",
+            // The release skipped over, and the one installed.
+            "2.3.0    security  release 2.3.0",
+            "2.4.0              release 2.4.0",
+            "Install wirken 2.4.0 over 2.2.0 at /opt/wirken/wirken?",
+        ] {
+            assert!(prompt.contains(want), "{want:?} missing from:\n{prompt}");
+        }
+        assert!(
+            prompt.starts_with(&report.render()),
+            "the prompt carries everything --check prints"
+        );
+
+        // A downgrade names the releases, and security fixes, it leaves.
+        let report = check(tmp.path(), &fetcher, &keys, "2.4.0", TARGET)
+            .await
+            .unwrap();
+        let back = report.verified.manifest.release(Version(2, 2, 0)).unwrap();
+        let prompt = report.install_prompt(back, exe);
+        for want in [
+            "wirken 2.4.0 -> 2.2.0",
+            "Downgrading leaves behind:",
+            "2.3.0    security  release 2.3.0",
+            "2.4.0              release 2.4.0",
+        ] {
+            assert!(prompt.contains(want), "{want:?} missing from:\n{prompt}");
+        }
+        assert!(!prompt.contains("    2.2.0 "), "{prompt}");
     }
 
     #[tokio::test]

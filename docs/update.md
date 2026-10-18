@@ -49,7 +49,9 @@ reports:
 - when the manifest was issued, where it came from, and the fingerprint of
   the key that signed it;
 - whether any release newer than the installed one carries security fixes,
-  with each one's version and summary;
+  and which;
+- every release newer than the installed one, with its summary, marked
+  when it carries security fixes;
 - when the latest release publishes no binary for this target, that it
   does not.
 
@@ -80,8 +82,10 @@ Installs the latest release, or the one `--to` names. In order, it:
 6. Chooses the release. One older than the installed version is refused
    unless `--allow-downgrade` is given. When the chosen release is the
    installed one, it says so and stops.
-7. Prints the `--check` report and asks the operator to type the version
-   to install. Anything else stops with nothing changed.
+7. Prints the `--check` report, the move from the installed version to
+   the chosen one and, for a downgrade, every release it leaves behind with
+   its summary, then asks the operator to type the version to install.
+   Anything else stops with nothing changed.
 8. Downloads the binary for this target and refuses it unless its sha256
    is the manifest's.
 9. Keeps the running binary beside it as `wirken.prev`, with a record of
