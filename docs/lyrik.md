@@ -152,14 +152,12 @@ Confidentiality is the pin: there is no `confidential: true` flag, so pinning
 the resolved phase to Privatemode or Tinfoil is the mechanism. A `score` pin
 does not apply while a `framing` pin is present.
 
-The nine framings are `auth`, `crypto`, `injection`, `deserialization`,
-`memory_safety`, `secrets`, `supply_chain`, `race_condition` and
-`prompt_injection`. Recon activates `prompt_injection` when the scope contains
-an LLM client, an agent loop, tool execution, system-prompt construction,
-retrieval, or an MCP host. Untrusted text reaching a model's context is a
-distinct trust model from classical SQL or shell injection: sanitization
-shapes from those domains do not apply, and in-context content inherits trust
-from the surrounding prompt by default.
+The skill assesses two framings, `auth` and `injection`, the same two the
+findings schema 1.1 accepts. The SARIF emitter carries rules for nine: those
+two plus `crypto`, `deserialization`, `memory_safety`, `secrets`,
+`supply_chain`, `race_condition` and `prompt_injection`. A walk that emits a
+framing outside the 1.1 enum still lands in `findings.json`, and
+`wirken lyrik validate` rejects that file.
 
 **`gates`**: one entry per human gate, each naming an `adapter` and an
 adapter-native `target`.
