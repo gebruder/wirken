@@ -89,6 +89,9 @@ struct LyrikReport {
     target_dirty: Option<bool>,
     #[serde(default)]
     audit_log_ref: Option<String>,
+    /// The run's funnel, carried as-is into the run properties.
+    #[serde(default)]
+    funnel: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +232,8 @@ struct SarifRun {
     automation_details: AutomationDetails,
     invocations: Vec<Invocation>,
     results: Vec<SarifResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    properties: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -404,6 +409,9 @@ pub fn build_sarif(findings_path: &Path, driver_version: &str) -> Result<Sarif> 
                 properties: invocation_props,
             }],
             results,
+            properties: report
+                .funnel
+                .map(|funnel| serde_json::json!({ "lyrik": { "funnel": funnel } })),
         }],
     })
 }

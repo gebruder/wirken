@@ -200,7 +200,7 @@ pub async fn run(
     // run the Lyrik skill phases end-to-end. The fixture path remains
     // for CI reproduction without spending tokens.
     let findings_dest = run_dir.join("findings.json");
-    let dispatched: Result<()> = async {
+    let dispatched: Result<Option<Funnel>> = async {
         match use_fixture {
             Some(fixture) => {
                 let body = std::fs::read_to_string(fixture)
@@ -223,7 +223,7 @@ pub async fn run(
                 )?;
             }
             None => {
-                dispatch_via_agent_runtime(
+                return dispatch_via_agent_runtime(
                     target,
                     run_id,
                     &config,
@@ -232,10 +232,10 @@ pub async fn run(
                     &extras,
                     &scoring,
                 )
-                .await?;
+                .await;
             }
         }
-        Ok(())
+        Ok(None)
     }
     .await;
 
@@ -253,7 +253,7 @@ pub async fn run(
             }),
         )?;
     }
-    dispatched?;
+    let funnel = dispatched?;
     if !changed.is_empty() {
         anyhow::bail!(
             "team-owned file changed during the run: {}; see lyrik.locked_file.changed in {}",
@@ -286,6 +286,9 @@ pub async fn run(
 
     println!("findings written to {}", findings_dest.display());
     println!("audit log at {}", run_dir.join("audit.log").display());
+    if let Some(funnel) = &funnel {
+        println!("funnel: {}", serde_json::to_string_pretty(funnel)?);
+    }
     for name in PROPOSED_FILES {
         let proposed = run_dir.join("proposed").join(name);
         if proposed.is_file() {
@@ -508,7 +511,7 @@ async fn dispatch_via_agent_runtime(
     expected_findings: &Path,
     extras: &Extras,
     scoring: &Scoring,
-) -> Result<()> {
+) -> Result<Option<Funnel>> {
     // Per-walk parallelism opt-in. Parsed and validated here so a
     // misconfigured walks list fails before any LLM call. The
     // one-call slice (no `walks` field in config) keeps the
@@ -613,6 +616,7 @@ async fn dispatch_via_agent_runtime(
     // mismatch / parse failure degrade-and-log (the runner pin is
     // the contract, mismatched binary on PATH is unavailable).
     let scanner_cfg = parse_scanner_config(config).context("parse scanner config")?;
+    let mut scanner_ran = false;
     let seeds: Vec<Seed> = if scanner_cfg.semgrep_enabled {
         let ruleset_path =
             write_bundled_ruleset(&run_dir).context("materialise bundled semgrep ruleset")?;
@@ -622,6 +626,7 @@ async fn dispatch_via_agent_runtime(
                 ruleset_sha,
                 seeds,
             } => {
+                scanner_ran = true;
                 write_seed_files(&run_dir, &seeds).context("write seed files")?;
                 audit.emit(
                     "lyrik.scanner.dispatched",
@@ -868,6 +873,7 @@ async fn dispatch_via_agent_runtime(
     let total_response_len: usize;
     let total_denials: usize;
     let walk_outcomes: Option<Vec<WalkOutcome>>;
+    let mut single_call_skipped: Vec<String> = Vec::new();
     match walks_cfg.as_ref() {
         Some(wc) => {
             // Build per-spawn dependencies. Each walk constructs its
@@ -942,7 +948,7 @@ async fn dispatch_via_agent_runtime(
                          writing empty findings.json"
                     );
                     write_empty_findings(expected_findings, run_id, extras)?;
-                    return Ok(());
+                    return Ok(None);
                 }
                 Err(AgentError::ContextOverflow {
                     current_tokens,
@@ -966,7 +972,7 @@ async fn dispatch_via_agent_runtime(
                          budget; writing empty findings.json"
                     );
                     write_empty_findings(expected_findings, run_id, extras)?;
-                    return Ok(());
+                    return Ok(None);
                 }
                 Err(e) => {
                     return Err(
@@ -976,6 +982,11 @@ async fn dispatch_via_agent_runtime(
             };
             total_response_len = result.response.len();
             total_denials = result.denials.len();
+            single_call_skipped = result
+                .denials
+                .iter()
+                .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
+                .collect();
             walk_outcomes = None;
         }
     }
@@ -1037,7 +1048,7 @@ async fn dispatch_via_agent_runtime(
     // reads the as-staged finding locations and the per-walk
     // staging/<walk?>/declines/ trees while they still exist.
     // aggregate_findings_multi removes consumed staging dirs.
-    process_seed_dispositions(
+    let scanner_counts = process_seed_dispositions(
         &staging,
         walks_cfg.as_ref().map(|wc| wc.walks.as_slice()),
         &seeds,
@@ -1046,7 +1057,17 @@ async fn dispatch_via_agent_runtime(
     )
     .context("process seed dispositions")?;
 
-    aggregate_findings_multi(
+    // Steps each turn skipped, keyed as the funnel keys its walks.
+    let skipped: std::collections::BTreeMap<String, Vec<String>> = match walk_outcomes.as_ref() {
+        Some(outcomes) => outcomes
+            .iter()
+            .map(|o| (o.walk_name.clone(), o.skipped.clone()))
+            .collect(),
+        None => [(SINGLE_CALL_KEY.to_string(), single_call_skipped)].into(),
+    };
+    // Held until the signed chain is closed below, so a funnel that
+    // does not reconcile still leaves a closed chain.
+    let aggregated = aggregate_findings_multi(
         &finding_sources,
         expected_findings,
         run_id,
@@ -1054,9 +1075,11 @@ async fn dispatch_via_agent_runtime(
         &seed_locations,
         target,
         extras,
+        &skipped,
+        scanner_ran.then_some(scanner_counts),
         audit,
     )
-    .context("aggregate findings")?;
+    .context("aggregate findings");
     // remove_dir succeeds only if empty — exactly the semantics we
     // want for cleaning up the parent staging/ once each subdir
     // aggregator has removed its own. A non-empty parent (partial
@@ -1094,6 +1117,8 @@ async fn dispatch_via_agent_runtime(
         }
     }
 
+    let funnel = aggregated?;
+
     if !expected_findings.exists() {
         anyhow::bail!(
             "agent ran but findings.json was not written at {} \
@@ -1122,7 +1147,7 @@ async fn dispatch_via_agent_runtime(
         }
     }
 
-    Ok(())
+    Ok(Some(funnel))
 }
 
 /// Stage the bundled Lyrik SKILL.md into a per-run dir and self-sign
@@ -1750,6 +1775,10 @@ async fn dispatch_walks_concurrent(
 /// upgrades the pair `{static_prescreen, model_reasoning}` to
 /// `both` (single-call mode has no dedup and never produces
 /// `both` — documented in `docs/lyrik-json-schema.md`).
+///
+/// Counts what each turn emitted and what this step did with it into
+/// the returned [`Funnel`], written to findings.json when it
+/// reconciles (see [`write_findings_with_funnel`]).
 #[allow(clippy::too_many_arguments)]
 fn aggregate_findings_multi(
     sources: &[(Option<String>, PathBuf)],
@@ -1759,10 +1788,24 @@ fn aggregate_findings_multi(
     seed_locations: &std::collections::HashSet<String>,
     workspace: &Path,
     extras: &Extras,
+    skipped: &std::collections::BTreeMap<String, Vec<String>>,
+    scanner: Option<ScannerFunnel>,
     audit: &mut AuditLogger,
-) -> Result<()> {
+) -> Result<Funnel> {
     use super::lyrik_citation;
 
+    let mut walks: std::collections::BTreeMap<String, WalkFunnel> = skipped
+        .iter()
+        .map(|(walk, steps)| {
+            (
+                walk.clone(),
+                WalkFunnel {
+                    skipped: steps.clone(),
+                    ..WalkFunnel::default()
+                },
+            )
+        })
+        .collect();
     let mut tagged: Vec<(Option<String>, serde_json::Value)> = Vec::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
     let mut literal_claim_resolved: usize = 0;
@@ -1782,6 +1825,9 @@ fn aggregate_findings_multi(
     let mut file_line_only_resolved: usize = 0;
     let mut file_line_only_unresolved: usize = 0;
     for (walk_name, source) in sources {
+        let counts = walks
+            .entry(walk_name.as_deref().unwrap_or(SINGLE_CALL_KEY).to_string())
+            .or_default();
         if !source.is_dir() {
             continue;
         }
@@ -1796,12 +1842,14 @@ fn aggregate_findings_multi(
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
             let mut parsed: serde_json::Value = serde_json::from_str(&body)
                 .with_context(|| format!("parse staged finding {}", p.display()))?;
+            counts.emitted += 1;
             match conform_framing(&mut parsed) {
                 FramingOutcome::Kept => {}
                 FramingOutcome::Stripped {
                     removed,
                     staged_stable_id,
                 } => {
+                    counts.framing_stripped += 1;
                     audit.emit(
                         "lyrik.finding.framing_stripped",
                         serde_json::json!({
@@ -1813,6 +1861,7 @@ fn aggregate_findings_multi(
                     )?;
                 }
                 FramingOutcome::Refused => {
+                    counts.refused += 1;
                     audit.emit(
                         "lyrik.finding.refused",
                         serde_json::json!({
@@ -1826,6 +1875,7 @@ fn aggregate_findings_multi(
             }
             annotate_detection_source(&mut parsed, seed_locations);
             if let Some(original) = cap_grade(&mut parsed) {
+                counts.grade_corrected += 1;
                 audit.emit(
                     "lyrik.finding.grade_corrected",
                     serde_json::json!({
@@ -1908,15 +1958,24 @@ fn aggregate_findings_multi(
             consumed.push(source.clone());
         }
     }
-    if tagged.is_empty() && consumed.is_empty() {
-        return Ok(());
-    }
-
-    let findings: Vec<serde_json::Value> = if dedup_active {
+    let (findings, collapsed): (Vec<serde_json::Value>, usize) = if dedup_active {
         dedup_findings(tagged)
     } else {
-        tagged.into_iter().map(|(_, f)| f).collect()
+        (tagged.into_iter().map(|(_, f)| f).collect(), 0)
     };
+    let funnel = Funnel {
+        merged: MergedFunnel {
+            emitted: walks.values().map(|w| w.emitted).sum(),
+            refused: walks.values().map(|w| w.refused).sum(),
+            collapsed,
+            kept: findings.len(),
+        },
+        walks,
+        scanner,
+    };
+    if findings.is_empty() && consumed.is_empty() {
+        return Ok(funnel);
+    }
 
     let body = serde_json::json!({
         "schema_version": "1.1",
@@ -1958,15 +2017,119 @@ fn aggregate_findings_multi(
         },
         "findings": findings,
     });
-    let body = with_extras(body, extras);
+    write_findings_with_funnel(dest, with_extras(body, extras), &funnel, audit)?;
+    for source in consumed {
+        std::fs::remove_dir_all(&source)
+            .with_context(|| format!("remove staging dir {}", source.display()))?;
+    }
+    Ok(funnel)
+}
+
+/// Funnel key for the single-call turn, which has no walk name.
+const SINGLE_CALL_KEY: &str = "lyrik";
+
+/// What one walk's turn (or the single-call turn) put through the
+/// merge step.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
+struct WalkFunnel {
+    /// Staged findings read.
+    emitted: usize,
+    /// Not written: no framing in the 1.1 enum.
+    refused: usize,
+    framing_stripped: usize,
+    grade_corrected: usize,
+    /// Steps the turn skipped, as on its `lyrik.walk.completed` row.
+    skipped: Vec<String>,
+}
+
+/// Every turn's findings taken together.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
+struct MergedFunnel {
+    emitted: usize,
+    refused: usize,
+    /// Findings folded into another at the same location by dedup.
+    collapsed: usize,
+    /// Findings in findings.json.
+    kept: usize,
+}
+
+/// Semgrep candidates, each counted once: accepted when a written
+/// finding sits at its location, else declined when any walk declined
+/// it, else unaddressed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize)]
+struct ScannerFunnel {
+    candidates: usize,
+    accepted: usize,
+    declined: usize,
+    unaddressed: usize,
+}
+
+/// The run's funnel: what each turn emitted, what the merge step did
+/// with it, and the scanner's candidates when Semgrep ran.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct Funnel {
+    walks: std::collections::BTreeMap<String, WalkFunnel>,
+    merged: MergedFunnel,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scanner: Option<ScannerFunnel>,
+}
+
+impl Funnel {
+    /// Each check that does not hold. `kept` is the length of the
+    /// written findings list and `collapsed` comes from dedup's group
+    /// sizes, so neither is derived from the per-turn counts.
+    fn mismatches(&self) -> Vec<String> {
+        let m = &self.merged;
+        let mut out = Vec::new();
+        if m.emitted
+            .checked_sub(m.refused)
+            .and_then(|n| n.checked_sub(m.collapsed))
+            != Some(m.kept)
+        {
+            out.push(format!(
+                "emitted {} - refused {} - collapsed {} != kept {}",
+                m.emitted, m.refused, m.collapsed, m.kept
+            ));
+        }
+        if let Some(sc) = &self.scanner
+            && sc.accepted + sc.declined + sc.unaddressed != sc.candidates
+        {
+            out.push(format!(
+                "scanner accepted {} + declined {} + unaddressed {} != candidates {}",
+                sc.accepted, sc.declined, sc.unaddressed, sc.candidates
+            ));
+        }
+        out
+    }
+}
+
+/// Write findings.json carrying `funnel`. A funnel that does not
+/// reconcile is not written: findings.json goes out without it, the
+/// per-run log records every number, and the run fails.
+fn write_findings_with_funnel(
+    dest: &Path,
+    mut body: serde_json::Value,
+    funnel: &Funnel,
+    audit: &mut AuditLogger,
+) -> Result<()> {
+    let mismatches = funnel.mismatches();
+    if mismatches.is_empty() {
+        body["funnel"] = serde_json::to_value(funnel)?;
+    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(dest, serde_json::to_string_pretty(&body)?)
         .with_context(|| format!("write {}", dest.display()))?;
-    for source in consumed {
-        std::fs::remove_dir_all(&source)
-            .with_context(|| format!("remove staging dir {}", source.display()))?;
+    if !mismatches.is_empty() {
+        audit.emit(
+            "lyrik.funnel.mismatch",
+            serde_json::json!({"funnel": funnel, "mismatches": mismatches}),
+        )?;
+        anyhow::bail!(
+            "funnel does not reconcile ({}); findings.json written without it, staging kept",
+            mismatches.join("; ")
+        );
     }
     Ok(())
 }
@@ -2089,13 +2252,14 @@ fn tier_severity(tier: &str) -> u32 {
 
 /// Collapse findings sharing a `(location.file, location.line_start)`
 /// key into one merged record per the dedup contract documented on
-/// [`aggregate_findings_multi`]. Findings without a usable location
+/// [`aggregate_findings_multi`]. Also returns how many findings were
+/// folded into another, from the group sizes. Findings without a usable location
 /// key (missing file or line_start) pass through unchanged so a
 /// malformed input does not collide with everything else under a
 /// shared default key.
 pub(super) fn dedup_findings(
     tagged: Vec<(Option<String>, serde_json::Value)>,
-) -> Vec<serde_json::Value> {
+) -> (Vec<serde_json::Value>, usize) {
     use std::collections::BTreeMap;
 
     let mut order: Vec<String> = Vec::new();
@@ -2116,8 +2280,10 @@ pub(super) fn dedup_findings(
     }
 
     let mut out = Vec::with_capacity(order.len() + passthrough.len());
+    let mut collapsed = 0;
     for key in order {
         let mut group = groups.remove(&key).expect("key from order list");
+        collapsed += group.len() - 1;
         if group.len() == 1 {
             // Solo finding: still tag dedup_sources for traceability when a
             // walk_name was supplied; leave the rest of the record alone.
@@ -2134,7 +2300,7 @@ pub(super) fn dedup_findings(
         out.push(merge_finding_group(group));
     }
     out.extend(passthrough);
-    out
+    (out, collapsed)
 }
 
 /// Merge two or more findings sharing the same location. Framings
@@ -2318,9 +2484,13 @@ fn process_seed_dispositions(
     seeds: &[Seed],
     finding_sources: &[(Option<String>, PathBuf)],
     audit: &mut AuditLogger,
-) -> Result<()> {
+) -> Result<ScannerFunnel> {
+    let mut counts = ScannerFunnel {
+        candidates: seeds.len(),
+        ..ScannerFunnel::default()
+    };
     if seeds.is_empty() {
-        return Ok(());
+        return Ok(counts);
     }
 
     // Build the accepted set: every (file, line) covered by a staged
@@ -2340,10 +2510,15 @@ fn process_seed_dispositions(
             }
             let body =
                 std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
-            let parsed: serde_json::Value = match serde_json::from_str(&body) {
+            let mut parsed: serde_json::Value = match serde_json::from_str(&body) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            // A finding the merge step refuses is not written, so it
+            // does not accept the seed at its location.
+            if conform_framing(&mut parsed) == FramingOutcome::Refused {
+                continue;
+            }
             if let Some(key) = location_key(&parsed) {
                 accepted.insert(key);
             }
@@ -2411,6 +2586,11 @@ fn process_seed_dispositions(
         let seed_key = format!("{}:{}", seed.file, seed.line);
         let is_accepted = accepted.contains(&seed_key);
         let declines = declined_by_seed.get(&seed.seed_id);
+        match (is_accepted, declines.is_some()) {
+            (true, _) => counts.accepted += 1,
+            (false, true) => counts.declined += 1,
+            (false, false) => counts.unaddressed += 1,
+        }
 
         if let Some(rows) = declines {
             // Emit a decline row per (walk, decline-file) pair so
@@ -2462,7 +2642,7 @@ fn process_seed_dispositions(
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    Ok(())
+    Ok(counts)
 }
 
 /// Aggregate `staging/findings/finding-NNN.json` files into the final
@@ -2904,7 +3084,7 @@ mod tests {
                 finding("src/a.rs", 10, "injection", "HIGH"),
             ),
         ];
-        let merged = dedup_findings(tagged);
+        let merged = dedup_findings(tagged).0;
         assert_eq!(merged.len(), 1);
         let m = &merged[0];
         let framings: Vec<&str> = m
@@ -2944,7 +3124,7 @@ mod tests {
                 finding("src/a.rs", 10, "injection", "HIGH"),
             ),
         ];
-        let merged = dedup_findings(tagged);
+        let merged = dedup_findings(tagged).0;
         assert_eq!(merged.len(), 1);
         assert_eq!(
             merged[0]
@@ -2970,7 +3150,7 @@ mod tests {
                 finding("src/b.rs", 10, "auth", "HIGH"),
             ),
         ];
-        let merged = dedup_findings(tagged);
+        let merged = dedup_findings(tagged).0;
         assert_eq!(merged.len(), 3);
     }
 
@@ -2980,7 +3160,7 @@ mod tests {
             Some("sink-walk".into()),
             finding("src/a.rs", 10, "auth", "HIGH"),
         )];
-        let merged = dedup_findings(tagged);
+        let merged = dedup_findings(tagged).0;
         assert_eq!(merged.len(), 1);
         let s = merged[0]
             .get("dedup_sources")
@@ -3001,7 +3181,7 @@ mod tests {
                 finding("src/a.rs", 10, "auth", "HIGH"),
             ),
         ];
-        let merged = dedup_findings(tagged);
+        let merged = dedup_findings(tagged).0;
         // The malformed finding cannot collide on the location key,
         // so it passes through unchanged alongside the normal one.
         assert_eq!(merged.len(), 2);
@@ -3024,7 +3204,7 @@ mod tests {
                     finding("src/a.rs", 10, "auth", b_tier),
                 ),
             ];
-            let merged = dedup_findings(tagged);
+            let merged = dedup_findings(tagged).0;
             assert_eq!(
                 merged[0].get("tier").and_then(|v| v.as_str()),
                 Some(expected),
@@ -3434,6 +3614,8 @@ mod tests {
             &no_seeds,
             workspace,
             &super::Extras::new(),
+            &Default::default(),
+            None,
             &mut audit,
         )
         .unwrap();
@@ -3499,6 +3681,8 @@ mod tests {
             &no_seeds,
             workspace,
             &super::Extras::new(),
+            &Default::default(),
+            None,
             &mut audit,
         )
         .unwrap();
@@ -3564,7 +3748,8 @@ mod tests {
         let merged = dedup_findings(vec![
             (Some("sink-walk".into()), a),
             (Some("graph-walk".into()), b),
-        ]);
+        ])
+        .0;
         assert_eq!(merged.len(), 1);
         assert_eq!(
             merged[0].get("detection_source").and_then(|v| v.as_str()),
@@ -3587,7 +3772,8 @@ mod tests {
         let merged = dedup_findings(vec![
             (Some("sink-walk".into()), a),
             (Some("graph-walk".into()), b),
-        ]);
+        ])
+        .0;
         assert_eq!(merged.len(), 1);
         assert_eq!(
             merged[0].get("detection_source").and_then(|v| v.as_str()),
@@ -3645,6 +3831,8 @@ mod tests {
             &seeds,
             tmp.path(),
             &super::Extras::new(),
+            &Default::default(),
+            None,
             &mut audit,
         )
         .unwrap();
@@ -3686,6 +3874,8 @@ mod tests {
             &seeds,
             tmp,
             &super::Extras::new(),
+            &Default::default(),
+            None,
             &mut audit,
         )
         .unwrap();
@@ -3809,6 +3999,8 @@ mod tests {
             &seeds,
             tmp.path(),
             &extras,
+            &Default::default(),
+            None,
             &mut audit,
         )
         .unwrap();
@@ -3836,6 +4028,245 @@ mod tests {
         );
     }
 
+    /// Three walks, one with nothing staged; a refusal, a strip, a
+    /// grade correction and two dedup collisions. The funnel
+    /// reconciles and lands in findings.json and the SARIF run
+    /// properties.
+    #[test]
+    fn funnel_reconciles_across_walks_with_refusals_and_dedup() {
+        let tmp = tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let sink = staging.join("sink-walk").join("findings");
+        let graph = staging.join("graph-walk").join("findings");
+        write_finding(
+            &sink,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "auth", "HIGH"),
+        );
+        write_finding(
+            &sink,
+            "finding-002.json",
+            &finding("src/b.rs", 5, "crypto", "HIGH"),
+        );
+        let mut stripped = finding("src/c.rs", 7, "auth", "MEDIUM");
+        stripped["framing"] = serde_json::json!(["auth", "crypto"]);
+        stripped["grade"] = serde_json::json!(1.0);
+        write_finding(&sink, "finding-003.json", &stripped);
+        write_finding(
+            &graph,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "injection", "MEDIUM"),
+        );
+        write_finding(
+            &graph,
+            "finding-002.json",
+            &finding("src/c.rs", 7, "auth", "LOW"),
+        );
+        write_finding(
+            &graph,
+            "finding-003.json",
+            &finding("src/d.rs", 1, "injection", "LOW"),
+        );
+
+        let skipped: std::collections::BTreeMap<String, Vec<String>> = [
+            ("sink-walk".to_string(), vec![]),
+            (
+                "graph-walk".to_string(),
+                vec!["exec (shell:git)".to_string()],
+            ),
+            ("chain-walk".to_string(), vec![]),
+        ]
+        .into();
+        let scanner = super::ScannerFunnel {
+            candidates: 3,
+            accepted: 1,
+            declined: 1,
+            unaddressed: 1,
+        };
+        let dest = tmp.path().join("findings.json");
+        let mut audit =
+            super::AuditLogger::open(&tmp.path().join("audit.log"), "sample/run-014", true)
+                .unwrap();
+        let funnel = aggregate_findings_multi(
+            &[
+                (Some("sink-walk".to_string()), sink),
+                (Some("graph-walk".to_string()), graph),
+                (
+                    Some("chain-walk".to_string()),
+                    staging.join("chain-walk").join("findings"),
+                ),
+            ],
+            &dest,
+            "sample/run-014",
+            true,
+            &std::collections::HashSet::new(),
+            tmp.path(),
+            &super::Extras::new(),
+            &skipped,
+            Some(scanner),
+            &mut audit,
+        )
+        .unwrap();
+
+        let expected = serde_json::json!({
+            "walks": {
+                "chain-walk": {
+                    "emitted": 0, "refused": 0, "framing_stripped": 0,
+                    "grade_corrected": 0, "skipped": [],
+                },
+                "graph-walk": {
+                    "emitted": 3, "refused": 0, "framing_stripped": 0,
+                    "grade_corrected": 0, "skipped": ["exec (shell:git)"],
+                },
+                "sink-walk": {
+                    "emitted": 3, "refused": 1, "framing_stripped": 1,
+                    "grade_corrected": 1, "skipped": [],
+                },
+            },
+            "merged": {"emitted": 6, "refused": 1, "collapsed": 2, "kept": 3},
+            "scanner": {"candidates": 3, "accepted": 1, "declined": 1, "unaddressed": 1},
+        });
+        assert_eq!(serde_json::to_value(&funnel).unwrap(), expected);
+        assert!(funnel.mismatches().is_empty());
+
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(body["funnel"], expected);
+        assert_eq!(body["findings"].as_array().unwrap().len(), 3);
+        assert!(super::super::lyrik_validate::validate_value(&body).is_empty());
+
+        let sarif =
+            serde_json::to_value(super::super::lyrik_sarif::build_sarif(&dest, "test").unwrap())
+                .unwrap();
+        assert_eq!(sarif["runs"][0]["properties"]["lyrik"]["funnel"], expected);
+    }
+
+    /// A funnel that does not reconcile is left out of findings.json,
+    /// every number goes on the per-run log, and the write fails.
+    #[test]
+    fn a_funnel_that_does_not_reconcile_fails_the_write_and_is_logged() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("findings.json");
+        let log = tmp.path().join("audit.log");
+        let mut audit = super::AuditLogger::open(&log, "sample/run-015", true).unwrap();
+        let funnel = super::Funnel {
+            walks: [(
+                "lyrik".to_string(),
+                super::WalkFunnel {
+                    emitted: 4,
+                    refused: 1,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            merged: super::MergedFunnel {
+                emitted: 4,
+                refused: 1,
+                collapsed: 0,
+                kept: 2,
+            },
+            scanner: Some(super::ScannerFunnel {
+                candidates: 2,
+                accepted: 1,
+                declined: 0,
+                unaddressed: 0,
+            }),
+        };
+        let body = serde_json::json!({
+            "schema_version": "1.1",
+            "run_id": "sample/run-015",
+            "produced_at": "2026-10-18T00:00:00Z",
+            "findings": [],
+        });
+        let err = super::write_findings_with_funnel(&dest, body, &funnel, &mut audit).unwrap_err();
+        assert!(
+            err.to_string().contains("funnel does not reconcile"),
+            "{err}"
+        );
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(written.get("funnel").is_none(), "{written}");
+        let rows = audit_details(&log, "lyrik.funnel.mismatch");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["funnel"], serde_json::to_value(&funnel).unwrap());
+        assert_eq!(
+            rows[0]["mismatches"],
+            serde_json::json!([
+                "emitted 4 - refused 1 - collapsed 0 != kept 2",
+                "scanner accepted 1 + declined 0 + unaddressed 0 != candidates 2",
+            ])
+        );
+    }
+
+    /// Each seed counts once: accepted by a written finding, declined
+    /// once however many walks declined it, and unaddressed when the
+    /// only finding at its location is one the merge step refuses.
+    #[test]
+    fn scanner_funnel_counts_each_seed_once() {
+        let tmp = tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let sink = staging.join("sink-walk").join("findings");
+        let graph = staging.join("graph-walk").join("findings");
+        write_finding(
+            &sink,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "auth", "HIGH"),
+        );
+        write_finding(
+            &graph,
+            "finding-001.json",
+            &finding("src/b.rs", 5, "crypto", "HIGH"),
+        );
+        for walk in ["sink-walk", "graph-walk"] {
+            write_finding(
+                &staging.join(walk).join("declines"),
+                "decline-001.json",
+                &serde_json::json!({"seed_id": "s2", "reason": "not reachable"}),
+            );
+        }
+        let seed = |id: &str, file: &str, line: u64| super::Seed {
+            seed_id: id.to_string(),
+            rule_id: "r".to_string(),
+            file: file.to_string(),
+            line,
+            message: String::new(),
+        };
+        let seeds = vec![
+            seed("s1", "src/a.rs", 10),
+            seed("s2", "src/x.rs", 1),
+            seed("s3", "src/b.rs", 5),
+        ];
+        let walks = vec!["sink-walk".to_string(), "graph-walk".to_string()];
+        let log = tmp.path().join("audit.log");
+        let mut audit = super::AuditLogger::open(&log, "sample/run-016", true).unwrap();
+        let counts = super::process_seed_dispositions(
+            &staging,
+            Some(&walks),
+            &seeds,
+            &[
+                (Some("sink-walk".to_string()), sink),
+                (Some("graph-walk".to_string()), graph),
+            ],
+            &mut audit,
+        )
+        .unwrap();
+        assert_eq!(
+            counts,
+            super::ScannerFunnel {
+                candidates: 3,
+                accepted: 1,
+                declined: 1,
+                unaddressed: 1,
+            }
+        );
+        // Decline rows stay per (seed, walk); the count is per seed.
+        assert_eq!(audit_details(&log, "lyrik.candidate.declined").len(), 2);
+        let unaddressed = audit_details(&log, "lyrik.candidate.unaddressed");
+        assert_eq!(unaddressed.len(), 1);
+        assert_eq!(unaddressed[0]["seed_id"], "s3");
+    }
+
     #[test]
     fn aggregate_findings_multi_writes_schema_version_one_one() {
         let tmp = tempdir().unwrap();
@@ -3859,6 +4290,8 @@ mod tests {
             &seeds,
             workspace,
             &super::Extras::new(),
+            &Default::default(),
+            None,
             &mut audit,
         )
         .unwrap();
@@ -3891,6 +4324,8 @@ mod tests {
             &seeds,
             workspace,
             &super::Extras::new(),
+            &Default::default(),
+            None,
             &mut audit,
         )
         .unwrap();

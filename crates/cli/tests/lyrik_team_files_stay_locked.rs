@@ -291,4 +291,27 @@ fn a_committed_team_rubric_is_what_the_model_scores_against() {
     assert_eq!(body["rubric"]["source"], "team", "{body}");
     assert_eq!(body["rubric"]["path"], ".lyrik/rubric.md", "{body}");
     assert_eq!(body["context"]["source"], "team", "{body}");
+
+    // The funnel for the single-call turn, printed at run end too.
+    assert_eq!(
+        body["funnel"],
+        serde_json::json!({
+            "walks": {"lyrik": {
+                "emitted": 1, "refused": 0, "framing_stripped": 0,
+                "grade_corrected": 0, "skipped": [],
+            }},
+            "merged": {"emitted": 1, "refused": 0, "collapsed": 0, "kept": 1},
+        }),
+        "{body}"
+    );
+    let printed = report
+        .split_once("funnel: ")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("no funnel printed: {report}"));
+    let printed: serde_json::Value = serde_json::Deserializer::from_str(printed)
+        .into_iter::<serde_json::Value>()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(printed, body["funnel"]);
 }
