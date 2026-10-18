@@ -103,7 +103,43 @@ fn lyrik_run_skills(
                 .loaded,
         );
     }
+    for skill in &skills {
+        check_run_skill_reaches_no_network(skill)?;
+    }
     Ok(skills)
+}
+
+/// The tools a run's agents may hold. None of them reaches the
+/// network: `exec` runs in a sandbox whose egress a run's session
+/// denies, and the file tools touch the target and the run's
+/// directory only.
+const RUN_TOOLS: &[&str] = &["exec", "list_files", "read_file", "write_file"];
+
+/// A run's only outbound traffic is to its model provider. The staged
+/// skills' frontmatter is what keeps `http_request`, `web_search`,
+/// `generate_image` and MCP tools away from the run's agents, so a
+/// staged skill that grants any tool outside [`RUN_TOOLS`], any
+/// egress, or any credential is refused rather than attached.
+fn check_run_skill_reaches_no_network(skill: &wirken_agent::skill::Skill) -> Result<()> {
+    use wirken_agent::skill_perms::{AllowSet, EgressMode};
+    let p = &skill.permissions;
+    let tools_ok = match &p.tools.allow {
+        AllowSet::Wildcard => false,
+        AllowSet::Set(set) => set.iter().all(|t| RUN_TOOLS.contains(&t.as_str())),
+    };
+    let egress_ok = matches!(p.egress.mode, EgressMode::Deny);
+    let credentials_ok = matches!(&p.credentials.allow, AllowSet::Set(set) if set.is_empty());
+    if !(tools_ok && egress_ok && credentials_ok) {
+        anyhow::bail!(
+            "staged skill `{}` grants more than a run may hold (tools {:?}, egress {:?}, \
+             credentials {:?}); a run reaches nothing but its model provider",
+            skill.name,
+            p.tools.allow,
+            p.egress.mode,
+            p.credentials.allow
+        );
+    }
+    Ok(())
 }
 
 pub async fn run(
@@ -3527,6 +3563,57 @@ mod tests {
         std::fs::write(&inside, "x").unwrap();
         let err = super::resolve_scoring(&target, Some(&inside), None).unwrap_err();
         assert!(err.to_string().contains("inside the target"), "{err}");
+    }
+
+    /// The staged Lyrik copy and a staged walk pass the run's
+    /// no-network check; a skill granting `web_search`, egress or a
+    /// credential does not.
+    #[test]
+    fn run_skills_reach_no_network() {
+        let tmp = tempdir().unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path(), "r1", &super::Scoring::inline()).unwrap();
+        let src = tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("sink-walk")).unwrap();
+        std::fs::write(
+            src.path().join("sink-walk/SKILL.md"),
+            "---\nname: sink-walk\ndescription: d\n---\n\nWalk.\n",
+        )
+        .unwrap();
+        let walks = super::stage_walk_skills(
+            &["sink-walk".to_string()],
+            src.path(),
+            tmp.path(),
+            "r1",
+            None,
+        )
+        .unwrap();
+        let skills = super::lyrik_run_skills(&staged, Some(&walks)).unwrap();
+        assert_eq!(skills.len(), 2);
+
+        let base = "---\nname: wide\ndescription: d\ndisable-model-invocation: true\npermissions:\n  tools:\n    allow: [read_file, TOOL]\n  egress:\n    mode: MODE\n    DOMAINS\n  filesystem:\n    read_paths: [\"<workspace>\"]\n  inference:\n    allow: [\"*\"]\n---\n\nbody\n";
+        for (tool, mode, domains) in [
+            ("web_search", "deny", ""),
+            ("http_request", "deny", ""),
+            ("generate_image", "deny", ""),
+            ("mcp__github__create_issue", "deny", ""),
+            ("list_files", "allowlist", "domains: [example.com]"),
+        ] {
+            let dir = tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("wide")).unwrap();
+            std::fs::write(
+                dir.path().join("wide/SKILL.md"),
+                base.replace("TOOL", tool)
+                    .replace("MODE", mode)
+                    .replace("DOMAINS", domains),
+            )
+            .unwrap();
+            wirken_agent::bundled_skills::self_sign_skill_dir(&dir.path().join("wide")).unwrap();
+            let err = super::lyrik_run_skills(dir.path(), None).unwrap_err();
+            assert!(
+                err.to_string().contains("grants more than a run may hold"),
+                "{tool}/{mode}: {err}"
+            );
+        }
     }
 
     #[test]

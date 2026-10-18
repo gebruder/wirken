@@ -111,6 +111,18 @@ pub enum DispatchOutcome {
     },
 }
 
+/// A `semgrep` invocation that reaches nothing on the network: a run's
+/// only outbound traffic is to its model provider. The scan already
+/// passes `--metrics=off`; the environment also turns off metrics for
+/// `--version` and the check for a newer release, which semgrep
+/// otherwise makes on every invocation.
+fn semgrep() -> Command {
+    let mut cmd = Command::new("semgrep");
+    cmd.env("SEMGREP_SEND_METRICS", "off")
+        .env("SEMGREP_ENABLE_VERSION_CHECK", "0");
+    cmd
+}
+
 /// Run Semgrep against `target` with the bundled ruleset. Writes
 /// nothing; the caller materialises seeds and emits audit rows.
 ///
@@ -128,7 +140,7 @@ pub enum DispatchOutcome {
 ///   { reason: "parse_failed" }`.
 /// - Otherwise → `Dispatched` with the parsed seeds.
 pub fn dispatch_semgrep(target: &Path, ruleset_path: &Path) -> DispatchOutcome {
-    let version_out = match Command::new("semgrep").arg("--version").output() {
+    let version_out = match semgrep().arg("--version").output() {
         Ok(o) => o,
         Err(e) => {
             return DispatchOutcome::Unavailable {
@@ -150,7 +162,7 @@ pub fn dispatch_semgrep(target: &Path, ruleset_path: &Path) -> DispatchOutcome {
         };
     }
 
-    let scan = match Command::new("semgrep")
+    let scan = match semgrep()
         .arg("--config")
         .arg(ruleset_path)
         .arg("--json")
@@ -341,6 +353,28 @@ mod tests {
     fn parse_scanner_config_non_bool_enabled_errors() {
         let cfg = serde_json::json!({"scanner": {"semgrep": {"enabled": "yes"}}});
         assert!(parse_scanner_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn semgrep_runs_with_metrics_and_the_version_check_off() {
+        let cmd = semgrep();
+        let envs: std::collections::BTreeMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs.get("SEMGREP_SEND_METRICS"),
+            Some(&Some("off".to_string()))
+        );
+        assert_eq!(
+            envs.get("SEMGREP_ENABLE_VERSION_CHECK"),
+            Some(&Some("0".to_string()))
+        );
     }
 
     #[test]
