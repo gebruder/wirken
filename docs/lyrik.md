@@ -58,10 +58,12 @@ delivery channel without human signoff.
   `scoring_disagreement: true` and the runner picks the lower-implied tier.
   That is the mechanism behind "will not average": disagreement is recorded
   and resolved conservatively.
-- **Grade caps at 0.5.** A finding gets `grade: 0.5` when both passes mark
-  `real_bug: yes` and `reachable: yes`; everything else gets `0`. The ceiling
-  is by design: Lyrik confirms real-and-reachable, and exploit verification is
-  a separate workload against the same findings.
+- **Grade caps at 0.5.** The skill sets `grade: 0.5` when both passes mark
+  `real_bug: yes` and `reachable: yes`, and `0` otherwise. The ceiling is by
+  design: Lyrik confirms real-and-reachable, and exploit verification is a
+  separate workload against the same findings. The runner neither computes
+  nor clamps `grade`; it carries the skill's value through to `findings.json`
+  and SARIF.
 - **Per-finding `detection_source` provenance**, a closed enum enforced when
   present.
 - **Opt-in Semgrep prescreen.** With `scanner.semgrep.enabled` set, the runner
@@ -140,16 +142,15 @@ A sample is at [`lyrik.example.json`](lyrik.example.json).
 (default `["target/**", "node_modules/**", ".git/**"]`). A user request like
 "assess only `src/`" overrides this for the run.
 
-**`phases`**: one entry per phase that makes a model call, pinning provider
-and model. Phases: `articulate` (Phase 0 context generation), `rubric` (Phase
-0 rubric derivation), `recon` (entry-point and trust-boundary mapping),
-`framing` (the nine framing classes and their sub-passes, the largest token
-consumer), `score` (four-axis scoring, multi-instance), `exploit`
-(exploit-attempt code, run inside the gVisor sandbox).
+**`phases`**: provider and model pins keyed by phase name. The runner
+resolves one pin for the whole run, `phases.framing`, else `phases.score`,
+else `phases.recon`, and every model call in the run, the preflight probe and
+each walk included, goes to it. Other keys, including `articulate`, `rubric`
+and `exploit`, are accepted and not read; no exploit phase runs.
 
 Confidentiality is the pin: there is no `confidential: true` flag, so pinning
-a phase to Privatemode or Tinfoil is the mechanism. Per-class pinning inside
-`framing` is not supported.
+the resolved phase to Privatemode or Tinfoil is the mechanism. A `score` pin
+does not apply while a `framing` pin is present.
 
 The nine framings are `auth`, `crypto`, `injection`, `deserialization`,
 `memory_safety`, `secrets`, `supply_chain`, `race_condition` and
@@ -163,11 +164,16 @@ from the surrounding prompt by default.
 **`gates`**: one entry per human gate, each naming an `adapter` and an
 adapter-native `target`.
 
-| Gate | Fires when |
+| Gate | Covers |
 |---|---|
-| `phase_0_signoff` | Phase 0 artifacts await approval |
-| `scoring_disagreement` | Two scoring passes disagree by more than one tier on any axis |
-| `high_severity_review` | A finding lands at grade 1.0. There is no auto-routing for these, encrypted channel or otherwise |
+| `phase_0_signoff` | Phase 0 artifacts awaiting approval |
+| `scoring_disagreement` | Two scoring passes disagreeing by more than one step on any axis |
+| `high_severity_review` | Findings at grade 1.0. There is no auto-routing for these, encrypted channel or otherwise |
+
+The runner does not read `gates`, and no finding reaches grade 1.0 under the
+0.5 ceiling: a run without `bench_mode` stops before dispatch, and a bench run
+records `phase_0_signoff` and `high_severity_review` as `auto_bench` audit
+rows without routing anything.
 
 Target syntax is whatever the adapter natively addresses a destination by:
 Slack a channel ID (`C012ABCDEF`) or `#channel-name`, Matrix a room ID
@@ -236,13 +242,13 @@ walk carries on. Each walk's `lyrik.walk.completed` row lists what it skipped
 under `skipped`, as `tool (approval key)`, for example `exec (shell:git)`.
 Either way a `findings.json` is produced.
 
-**`bench_mode`**: defaults false. When true, `phase_0_signoff` and
-`high_severity_review` auto-approve so a run completes without an interactive
-reviewer. `scoring_disagreement` is **not** short-circuited; three-way
-disagreement still routes, to a benchmark-side log file rather than a channel.
-Both auto-approvals emit audit records with `signoff.decision: "auto_bench"`
-so bench runs are distinguishable after the fact. Set it only on benchmark or
-batch-evaluation targets.
+**`bench_mode`**: defaults false, and a run requires it: without it the
+runner writes a `lyrik.phase_0.signoff` row with `decision:
+"pending_adapter_route"` and exits non-zero before dispatch. When true, the
+runner writes `lyrik.phase_0.signoff` and `lyrik.high_severity_review.signoff`
+rows with `decision: "auto_bench"`, so bench runs are distinguishable after
+the fact. `scoring_disagreement` has no bench handling and no routing; a
+disagreement is recorded on the finding as `scoring_disagreement: true`.
 
 ## Writing the scoring guide
 
