@@ -20,8 +20,8 @@ want a single PASS/FAIL number.
 
 Common LLM code audits work for a single file and become unreliable across a
 repository. The same bugs come back run after run, severity scores drift,
-there is no log of what the model considered, CI cannot block on the output,
-and when the model is unsure the output does not say so.
+there is no log of what the model considered, and when the model is unsure
+the output does not say so.
 
 Pre-ship defensive review needs more than a findings list. It needs a record
 of what the audit decided, what it set aside, what was a duplicate, and where
