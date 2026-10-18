@@ -323,6 +323,11 @@ change it do not move the tag, and schema changes cut a new tag and a new
 spec. `wirken lyrik validate --path <path>` embeds the schema bytes and never
 fetches `$id`; the URL is for external JSON Schema validators.
 
+Pin the schema, not the CLI. `wirken lyrik` is outside Wirken's stability
+surface: its subcommands, flags, run output, and the fields `findings.json`
+carries outside schema 1.1 can change in any minor release. The 1.1 contract
+changes only with a new schema tag.
+
 ```json
 {
   "schema_version": "1.1",

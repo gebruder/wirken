@@ -39,6 +39,15 @@ tagged.
 - `install.sh` downloads into the install directory and renames the binary
   into place, so an existing `wirken` is replaced in one step.
 
+### Lyrik
+
+- `wirken lyrik` is outside Wirken's stability surface: its subcommands,
+  flags, run output, and the fields `findings.json` carries outside schema
+  1.1. A change to it never forces more than a minor bump. The findings
+  schema stays versioned by its own tag, `schema-v1.1`. The CLI outside
+  `wirken lyrik` and the on-disk audit format remain the stability surface.
+  See [docs/release-process.md](docs/release-process.md#version-scheme).
+
 ## [2.2.0] - 2026-10-18
 
 From #287 (eleven Cargo updates), rustls 0.23.46 is taken, which fixes

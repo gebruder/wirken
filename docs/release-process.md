@@ -28,6 +28,13 @@ on-disk audit format or configuration that requires operator action, and never
 for a crate API change alone. Every workspace crate shares
 `workspace.package.version`; the git tag is `v<version>`.
 
+The stability surface is the CLI outside `wirken lyrik` and the on-disk audit
+format. `wirken lyrik` is outside it: its subcommands, flags, run output, and
+the fields `findings.json` carries outside schema 1.1. A change there never
+forces more than a minor bump. The findings schema is versioned on its own,
+by tag (`schema-v1.1`), not by Wirken release; see
+[lyrik.md](lyrik.md#findings-schema-11).
+
 ## Sequence
 
 Replace `1.22.0` with the target version throughout.
