@@ -6,13 +6,6 @@
   "phases": {
     "framing": { "provider": "privatemode", "model": "anthropic/claude-opus-4-7" }
   },
-  "gates": {
-    "phase_0_signoff":      { "adapter": "slack",  "target": "#secops-leads" },
-    "scoring_disagreement": { "adapter": "slack",  "target": "#secops-leads" },
-    "high_severity_review": { "adapter": "signal", "target": "+15551234567" }
-  },
-  "prior_findings_path": "./.lyrik/prior",
-  "memory_path": "./.lyrik/memory",
   "scanner": {
     "semgrep": { "enabled": false }
   },

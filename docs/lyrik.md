@@ -2,11 +2,13 @@
 
 <img src="img/lyrik-wirken.png" alt="Lyrik" width="360" align="right">
 
-Lyrik audits a codebase against a scoring guide your team has written. The
-findings it keeps go to `findings.json`. What it sets aside goes to the
-per-run audit log, one row each: scanner candidates the model declined, with
-the model's reason, or left unaddressed, and staged findings the runner
-refused or corrected.
+Lyrik audits a codebase against a scoring guide your team has written: a file
+named with `--rubric`, else the `.lyrik/rubric.md` committed in the assessed
+repo, else the rubric built into the skill. The findings it keeps go to
+`findings.json`, with a funnel that accounts for every finding the run staged.
+What it sets aside goes to the per-run audit log, one row each: scanner
+candidates the model declined, with the model's reason, or left unaddressed,
+and staged findings the runner refused or corrected.
 
 ## Who it is for
 
@@ -45,16 +47,18 @@ whose every step is recorded against a scoring guide the team owns.
 
 It will not claim a finding is exploitable without verifying it, will not
 invent a severity tier the guide does not cover, will not average disagreeing
-scorers into a consensus, and will not auto-route high-severity findings to a
-delivery channel without human signoff.
+scorers into a consensus, and does not send findings to any delivery channel.
 
 ## What ships today
 
-- **Scoring against the inline rubric in `SKILL.md`.** The rubric that derives
-  every finding's tier lives in the skill body. The committed-guide workflow
-  (Phase 0 sign-off writing `.lyrik/rubric.md` and `.lyrik/context.md` for the
-  team to review) auto-approves under bench mode and is not wired into
-  production runs.
+- **Scoring against the team's rubric**, in single-call and walk mode, with
+  the inline rubric in `SKILL.md` as the fallback. See
+  [Writing the scoring guide](#writing-the-scoring-guide).
+- **Team-owned files locked.** A run's agents may write only under the run's
+  own directory, and the runner never writes `.lyrik/rubric.md`,
+  `.lyrik/context.md` or `.lyrik/config.json`. It hashes all three at run
+  start and end; if one changed, it records `lyrik.locked_file.changed` with
+  the file and both sha256 values and the run fails.
 - **Two-pass scoring.** Each finding is scored by two independent passes. When
   they disagree by more than one step on any axis the finding carries
   `scoring_disagreement: true` and the runner picks the lower-implied tier.
@@ -91,10 +95,13 @@ delivery channel without human signoff.
   review or tighten it before install. A run's agents attach only the run's
   own skills, the staged Lyrik copy and the staged walks, and nothing from the
   shared skills directory, so a shared skill's grants never widen a run:
-  reads anywhere in the target, writes only under `.lyrik`.
+  reads anywhere in the target, writes only under
+  `.lyrik/state/runs/<run-id>/`.
 - **Audit logs.** A per-run NDJSON `<run>/audit.log` for every dispatch
   decision, plus the signed hash-chained gateway chain for cross-session
   integrity. See [audit-cli.md](audit-cli.md).
+- **Provenance and funnel** on every `findings.json`. See
+  [Reports and audit](#reports-and-audit).
 - **JSON findings schema** with a reference validator and a SARIF emitter.
 
 ## Setup
@@ -103,40 +110,37 @@ delivery channel without human signoff.
    See [getting-started.md](getting-started.md).
 2. Write `.lyrik/config.json` in the assessed repo with `bench_mode: true`. A
    run without it exits before dispatch; no sign-off is routed to a channel.
-3. Run `wirken lyrik run --target <repo> --run <run-id>`. The run writes
-   `findings.json` and `audit.log` under
-   `<repo>/.lyrik/state/runs/<run-id>/`.
-4. The bundled skill does not run Phase 0. When a walk stages context or
-   rubric sections, the runner joins them into `.lyrik/context.md` and
-   `.lyrik/rubric.md`, replacing any existing file, with no approval step.
-   Review and commit them like any other change.
-5. Optionally populate `.lyrik/prior/` with past CVEs, pentest reports and
-   internal disclosures; the dedup gate reads it recursively. Without it the
-   regression-finding stream stays empty.
-6. Optionally populate `.lyrik/memory/` with ADRs, postmortems, threat models
-   and design docs, plus `jira.csv` if you have an export. Both feed Phase 0's
-   hot-zones and per-component history. Without them the context still builds,
-   minus the history layer.
+3. Commit the team's rubric as `.lyrik/rubric.md`, and project context as
+   `.lyrik/context.md` if you have one, or pass files outside the repo with
+   `--rubric` and `--context`. See
+   [Writing the scoring guide](#writing-the-scoring-guide).
+4. Run `wirken lyrik run --target <repo> --run <run-id>`. The run id is one or
+   more `/`-separated components of ASCII letters, digits, `.`, `_` and `-`.
+   The run writes `findings.json` and `audit.log` under
+   `<repo>/.lyrik/state/runs/<run-id>/` and prints the funnel.
+5. The bundled skill does not run Phase 0. When a walk stages context or
+   rubric sections, the runner joins them into
+   `.lyrik/state/runs/<run-id>/proposed/context.md` and `proposed/rubric.md`
+   and prints their paths; it never writes over the committed files.
+   Promoting a proposal is a commit the team makes.
 
 ## What lives where
 
 Operator-level state stays where it already lives in Wirken; the Lyrik config
-does not duplicate or override it. Per-repo state lives in `.lyrik/` and is
-committed.
+does not duplicate or override it. The team's files in `.lyrik/` are
+committed; run state lives under `.lyrik/state/`.
 
 | Lives at | What |
 |---|---|
-| Wirken vault | provider API keys, channel adapter credentials |
+| Wirken vault | provider API keys |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), gate destinations, prior-findings path, memory path |
-| `<repo>/.lyrik/rubric.md` | severity rubric approved at Phase 0 |
-| `<repo>/.lyrik/context.md` | project context approved at Phase 0 |
-| `<repo>/.lyrik/prior/` | past CVEs, pentest reports, internal disclosures |
-| `<repo>/.lyrik/memory/` | ADRs, postmortems, threat models, design docs |
+| `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode |
+| `<repo>/.lyrik/rubric.md` | the team's severity rubric |
+| `<repo>/.lyrik/context.md` | the team's project context |
+| `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `audit.log`, `proposed/`, staging; the only place a run's agents may write |
 
-`.lyrik/config.json` references operator-level resources by name:
-`phases.framing.provider: "privatemode"` resolves through the vault,
-`gates.phase_0_signoff.adapter: "slack"` through the channel registry. Lyrik
+`.lyrik/config.json` names the provider, not its key:
+`phases.framing.provider: "privatemode"` resolves through the vault. Lyrik
 never sees a credential.
 
 ## `.lyrik/config.json`
@@ -171,28 +175,6 @@ the first framing that remains, and the row carries the written ID as
 `framing` array, is not written to `findings.json`; the per-run log records
 it whole as `lyrik.finding.refused`.
 
-**`gates`**: one entry per human gate, each naming an `adapter` and an
-adapter-native `target`.
-
-| Gate | Covers |
-|---|---|
-| `phase_0_signoff` | Phase 0 artifacts awaiting approval |
-| `scoring_disagreement` | Two scoring passes disagreeing by more than one step on any axis |
-| `high_severity_review` | Findings at grade 1.0. There is no auto-routing for these, encrypted channel or otherwise |
-
-The runner does not read `gates`, and no finding reaches grade 1.0 under the
-0.5 ceiling: a run without `bench_mode` stops before dispatch, and a bench run
-records `phase_0_signoff` and `high_severity_review` as `auto_bench` audit
-rows without routing anything.
-
-Target syntax is whatever the adapter natively addresses a destination by:
-Slack a channel ID (`C012ABCDEF`) or `#channel-name`, Matrix a room ID
-(`!roomid:server.tld`), Signal an E.164 number. Others use their own
-conversation ids.
-
-**`prior_findings_path`** and **`memory_path`** default to `./.lyrik/prior`
-and `./.lyrik/memory`.
-
 **`walks` and `max_concurrent_walks`**: opt into per-walk dispatch: one agent
 turn per named walk, run concurrently against the same target, producing a
 single deduped `findings.json`.
@@ -220,8 +202,9 @@ walk text: everything the walk writes goes under its staging directory, and a
 harness the walk text would put in the project's test tree goes under
 `staging/<walk-name>/harness/` instead. Promoting a harness into the test tree
 is an operator step after the run. The staged frontmatter's `write_paths`,
-`<workspace>/.lyrik`, is what enforces it; the installed walk files are not
-modified.
+`<workspace>/.lyrik/state/runs/<run-id>`, is what enforces it; the installed
+walk files are not modified. When the run has a team rubric or context, the
+staged walk carries it after that section.
 
 `exec` stays gated. The staged section lists the commands a walk runs through
 `exec` (`crypto-walk`: `cargo audit`; `fuzz-walk`: `cargo test`; `sink-walk`:
@@ -250,7 +233,9 @@ failed transiently. A refused call does not fail a walk or the run: the
 refusal is on the chain, the model is told the step was not executed, and the
 walk carries on. Each walk's `lyrik.walk.completed` row lists what it skipped
 under `skipped`, as `tool (approval key)`, for example `exec (shell:git)`.
-Either way a `findings.json` is produced.
+Either way a `findings.json` is produced. Two more conditions exit non-zero
+after writing it: a funnel that does not reconcile, and a team-owned file that
+changed during the run.
 
 **`bench_mode`**: defaults false, and a run requires it: without it the
 runner writes a `lyrik.phase_0.signoff` row with `decision:
@@ -262,8 +247,9 @@ disagreement is recorded on the finding as `scoring_disagreement: true`.
 
 ## Writing the scoring guide
 
-A markdown file at `.lyrik/rubric.md` in the repo being assessed. The team
-owns it, commits it, and reviews it in PR like any other artifact. It is not
+A markdown file at `.lyrik/rubric.md` in the repo being assessed, or a file
+outside it named with `--rubric`. The team owns it, commits it, and reviews it
+in PR like any other artifact. It is not
 CVSS-shaped (CVSS produces a number; a rubric produces tier definitions
 specific to the software), not a compliance checklist, and not universal:
 different projects need different rubrics, and the same project needs a
@@ -272,15 +258,36 @@ different one when its threat model changes.
 Sections worth including: software identification; what counts as a security
 property of *this* software and what does not; tier definitions with concrete
 examples; **acknowledged tensions**, the project-level constraints the rubric
-consciously accepts, so Lyrik can reference them as INFO-tier lines per run
-instead of regenerating findings the team will discard; rubric-silent cases,
-which route to human review rather than getting an invented tier; and any
-run-specific constraints.
+consciously accepts; and any run-specific constraints. A finding the rubric
+does not cover is marked `rubric_silent: true` and keeps the tier the model
+would otherwise emit, rather than getting an invented one.
 
-Lyrik drafts most of it at Phase 0 in collaboration with you, rather than
-expecting you to write it from scratch. The form is whatever the channel
-renders well: prose, tables, bulleted tiers. The team picks at first sign-off
-and the chosen form is committed.
+The run picks its rubric in this order:
+
+1. `--rubric <path>`, a file outside the target. A path inside the target is
+   refused, since it would skip the check below.
+2. `.lyrik/rubric.md`, when it is committed and its bytes match HEAD. An
+   untracked or modified file is not used; the run prints why and records it.
+3. The inline rubric in the bundled `SKILL.md`.
+
+Project context follows the same order with `--context` and
+`.lyrik/context.md`, and is absent when neither applies. Whether a file
+matches HEAD is decided by hashing it in-process against the blob HEAD
+records, so no program the repository configures runs (see
+[Reports and audit](#reports-and-audit)).
+
+In single-call mode the team rubric takes the place of the inline rubric
+section in the run's staged copy of the skill, followed by the context; in
+walk mode each staged walk carries both after its run section. `findings.json`
+records what was used as `rubric` and `context`, each `{source, path,
+sha256}` with `source` one of `flag`, `team` or `inline`, and the per-run log
+records the same as `lyrik.rubric.loaded`, with any skipped file and the
+reason. For a flag file, `findings.json` carries the file name only, and the
+full path stays in the per-run log.
+
+Lyrik does not write the rubric for you. Rubric sections a run stages land
+under the run's `proposed/` directory; promoting one is a commit the team
+makes.
 
 ## Findings schema (1.1)
 
@@ -318,8 +325,11 @@ walks. **`both` is produced only by per-walk dedup**, so single-call mode never
 emits it.
 
 Extra fields at both levels are allowed and ignored, so producers can carry
-`grade`, `stream`, `scoring_passes`, `dedup_sources`, `location.line_end` and
-similar through without the validator enforcing their shape.
+`grade`, `stream`, `scoring_passes`, `dedup_sources`, `rubric_silent`,
+`location.line_end` and similar through without the validator enforcing their
+shape. The runner adds run-level extras of its own, outside the 1.1 contract:
+`target_sha`, `target_dirty`, `audit_log_ref`, `rubric`, `context`, `funnel`
+and `citation_check`.
 
 **Stable-ID grammar.**
 
@@ -345,7 +355,8 @@ file-proximity matching on an exact-ID miss.
 stable across runs of the same scope.
 
 **Not in the 1.1 surface**, and consumers must not pin against them: a
-top-level `target`, `funnel`, `concentration` or `observations` block;
+top-level `target`, `funnel`, `concentration` or `observations` block (the
+runner's `funnel` is one of the extras above);
 per-finding `gate_routed`, `dedup_match` or `stream` as closed enums; a
 `triage_status` field. 1.1 does not require producers to emit `$schema`, and
 if a report carries one the validator asserts it string-equals `$id`.
@@ -360,21 +371,57 @@ wirken lyrik validate --path findings.json
 Every run writes the per-run `audit.log` with no opt-out, each row carrying
 the run ID. The SARIF report carries the same ID as `automationDetails.id`
 (`lyrik/run/<run-id>`) and on every result, so a reader can pull the rows for
-a finding. Neither report has a counts summary. `findings.json` carries a
-`citation_check` block with resolved and unresolved counts per citation
-sub-gate; what the run set aside is in `audit.log`, one row each:
-`lyrik.candidate.declined`, `lyrik.candidate.unaddressed`,
-`lyrik.finding.refused`, `lyrik.finding.framing_stripped` and
-`lyrik.finding.grade_corrected`.
+a finding. `findings.json` carries a `citation_check` block with resolved and
+unresolved counts per citation sub-gate; what the run set aside is in
+`audit.log`, one row each: `lyrik.candidate.declined`,
+`lyrik.candidate.unaddressed`, `lyrik.finding.refused`,
+`lyrik.finding.framing_stripped` and `lyrik.finding.grade_corrected`.
+
+**Funnel.** `findings.json` carries `funnel`, the run prints it at the end,
+and the SARIF report carries it under the run's `properties.lyrik.funnel`:
+
+- `walks`, one entry per walk (`lyrik` for single-call mode): `emitted`,
+  `refused`, `framing_stripped`, `grade_corrected`, and the `skipped` steps
+  from its `lyrik.walk.completed` row.
+- `merged`: `emitted`, `refused`, `collapsed` (findings folded into another at
+  the same location by dedup) and `kept` (findings in `findings.json`).
+- `scanner`, when Semgrep ran: `candidates`, each counted once as `accepted`
+  (a written finding sits at its location), `declined` (otherwise, when any
+  walk declined it) or `unaddressed`.
+
+Before writing, the runner checks emitted - refused - collapsed = kept, with
+`kept` taken from the written findings list and `collapsed` from dedup's group
+sizes, and that the scanner's three counts sum to its candidates. If either
+check fails, `findings.json` is written without `funnel`, the per-run log
+records `lyrik.funnel.mismatch` with every number, the staging directory is
+kept, and the run exits non-zero.
 
 Scanner rows (`lyrik.scanner.dispatched`, `lyrik.scanner.unavailable`,
 `lyrik.candidate.declined`, `lyrik.candidate.unaddressed`) live in the per-run
 NDJSON only and are not signed.
 
-Each report records the source location (git URL, commit SHA, and whether the
-run was on current code, before a fix, after a fix, or a pinned state), the
-scoring guide path, the audit log path, and instructions to reproduce from a
-clean clone.
+**Provenance.** At run start, before dispatch, the runner records on
+`findings.json`:
+
+- `target_sha`: HEAD of the repository the target sits in.
+- `target_dirty`: whether any tracked file differs from HEAD in content,
+  executable bit or kind, or a checked-out submodule sits at a different
+  commit. Untracked files do not count. Files are compared byte for byte with
+  no filters applied, so a repository that relies on clean filters or
+  line-ending conversion reports dirty.
+- `audit_log_ref`: the run's `audit.log`, relative to the target.
+
+The SARIF report carries all three in its invocation properties. A target
+that is not in a git work tree, or whose HEAD has no commit, gets null git
+fields and a `lyrik.provenance.unavailable` row with the reason. No remote URL
+is recorded.
+
+No program the target repository configures runs on the host. The runner asks
+git only `rev-parse` and `ls-tree`, which read refs, config and objects and
+neither refresh the index nor convert content, with `core.fsmonitor=false`,
+`protocol.allow=never`, no pager and inherited `GIT_*` variables removed, and
+compares the work tree against HEAD in-process. It does not use `git status`
+or `git diff`, which can run a repository's clean filters.
 
 ## When markdown is not enough
 
