@@ -10,24 +10,6 @@ tagged.
 
 ## [Unreleased]
 
-### Added
-
-- `scripts/check-names.sh` fails on an AI-tool name in a tracked file or path,
-  with an allowlist for functional model identifiers in code and tests, and
-  on an attribution trailer in a commit message. The `Names` workflow runs it
-  on every push, and the release pre-flight runs it as a tag gate.
-
-### Lyrik
-
-- Walk skills are read from the walks directory, the operator's setting:
-  `walks_dir` in `<data_dir>/lyrik.json`, else `<data_dir>/lyrik/walks`. A
-  target's `.lyrik/config.json` that sets `walks_dir` is refused, naming the
-  key, since a directory the target chose would let its own text be staged as
-  a walk. The home-directory skills tree they were read from before is no
-  longer read; to keep walks installed there, set `walks_dir` to it in
-  `<data_dir>/lyrik.json`. A walk that is not installed is reported with the
-  walks directory the runner looked in.
-
 ## [2.3.0] - 2026-10-18
 
 #288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0
@@ -64,11 +46,20 @@ A 2.2.0 or older binary, including one reached with
   build: version, commit and whether the tree was dirty.
 - `wirken status` prints the version, commit, dirty flag, the age of the
   commit the binary was built from, and the target, with no network request.
+- `scripts/check-names.sh` fails on an AI-tool name in a tracked file or path,
+  with an allowlist for functional model identifiers in code and tests, and
+  on an attribution trailer in a commit message. The `Names` workflow runs it
+  on every push, and the release pre-flight runs it as a tag gate.
 
 ### Changed
 
 - `install.sh` downloads into the install directory and renames the binary
   into place, so an existing `wirken` is replaced in one step.
+- Docs, examples and test fixtures use neutral model placeholders in place of
+  vendor model identifiers, outside the pricing table and the provider tests
+  that exercise it. `docs/lyrik.example.json` pins `kimi-k2.5`, a model
+  Privatemode serves. The git hooks and source lints write the names they
+  reject as character classes, with unchanged behaviour.
 
 ### Lyrik
 
@@ -78,6 +69,14 @@ A 2.2.0 or older binary, including one reached with
   schema stays versioned by its own tag, `schema-v1.1`. The CLI outside
   `wirken lyrik` and the on-disk audit format remain the stability surface.
   See [docs/release-process.md](docs/release-process.md#version-scheme).
+- Walk skills are read from the walks directory, the operator's setting:
+  `walks_dir` in `<data_dir>/lyrik.json`, else `<data_dir>/lyrik/walks`. A
+  target's `.lyrik/config.json` that sets `walks_dir` is refused, naming the
+  key, since a directory the target chose would let its own text be staged as
+  a walk. The home-directory skills tree they were read from before is no
+  longer read; to keep walks installed there, set `walks_dir` to it in
+  `<data_dir>/lyrik.json`. A walk that is not installed is reported with the
+  walks directory the runner looked in.
 
 ## [2.2.0] - 2026-10-18
 
