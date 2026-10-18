@@ -1,0 +1,8 @@
+# Tracked files that may carry the AI-tool name scripts/check-names.sh
+# checks for: the exact path, then why. Only functional model
+# identifiers in code and tests belong here, never documentation. An
+# entry for a file that no longer carries the name fails the check.
+crates/audit/src/pricing.toml    The pricing table; the vendor's model identifiers are the keys a call is priced by.
+crates/audit/src/pricing.rs      Tests that price those identifiers against the table.
+crates/agent/src/runtime.rs      Usage-attribution tests that need a model the pricing table prices.
+crates/agent/src/tests.rs        Provider-config and response-parsing tests for the vendor's API and Bedrock, which take the vendor's model identifiers.

@@ -10,6 +10,13 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/check-names.sh` fails on an AI-tool name in a tracked file or path,
+  with an allowlist for functional model identifiers in code and tests, and
+  on an attribution trailer in a commit message. The `Names` workflow runs it
+  on every push, and the release pre-flight runs it as a tag gate.
+
 ### Lyrik
 
 - Walk skills are read from the walks directory, the operator's setting:

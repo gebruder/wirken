@@ -1,0 +1,42 @@
+name: Names
+
+# Fail on an AI-tool name in a tracked file or path, and on an
+# attribution trailer in a pushed commit. scripts/check-names.sh does
+# the work; scripts/check-names.allow lists the files allowed to carry
+# a model identifier, with reasons. Runs on every push, to any branch
+# or tag, and on pull requests.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  names:
+    name: No tool names or attribution trailers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit range and the last tag need the history.
+          fetch-depth: 0
+
+      - name: Check names
+        env:
+          BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          if [ -n "$PR_BASE" ]; then
+            scripts/check-names.sh "$PR_BASE..$PR_HEAD"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
+              && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            scripts/check-names.sh "$BEFORE..$GITHUB_SHA"
+          else
+            # A new branch or tag, or a before that is gone after a
+            # force push: from the last tag.
+            scripts/check-names.sh
+          fi
