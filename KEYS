@@ -16,7 +16,7 @@
 #       -s checksums.sha256.sig \
 #       < checksums.sha256
 #
-# Key rotation history lives in docs/release-signing.md.
+# Key rotation history lives in docs/signing.md.
 #
 # Current active key
 #   Identity:    releases@gebruder.ottenheimer.app
