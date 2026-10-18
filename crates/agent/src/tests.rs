@@ -12603,7 +12603,9 @@ mod host_exec_inherits_nothing {
                 continue;
             };
             assert!(
-                crate::tool::HOST_EXEC_ENV_ALLOWLIST.contains(&name) || SHELL_SET.contains(&name),
+                crate::tool::HOST_EXEC_ENV_ALLOWLIST.contains(&name)
+                    || SHELL_SET.contains(&name)
+                    || name == crate::tool::EXEC_MARKER_ENV,
                 "{name} reached the command from the gateway's environment:\n{}",
                 result.output
             );
@@ -12611,6 +12613,14 @@ mod host_exec_inherits_nothing {
         assert!(
             result.output.contains("PATH="),
             "a command still finds programs"
+        );
+        assert!(
+            result
+                .output
+                .lines()
+                .any(|l| l == format!("{}=1", crate::tool::EXEC_MARKER_ENV)),
+            "the command is marked as run by exec:\n{}",
+            result.output
         );
     }
 

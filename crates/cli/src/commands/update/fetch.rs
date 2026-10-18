@@ -78,6 +78,18 @@ impl Source {
         }
     }
 
+    pub fn artifact_url(&self, version: &str, artifact: &str) -> Url {
+        match self {
+            Source::GitHub => Url::parse(&format!(
+                "https://github.com/{REPO}/releases/download/v{version}/{artifact}"
+            ))
+            .expect("static url"),
+            Source::Mirror(base) => base
+                .join(&format!("v{version}/{artifact}"))
+                .expect("joined to a base url"),
+        }
+    }
+
     pub fn describe(&self) -> String {
         match self {
             Source::GitHub => format!("github.com/{REPO}"),
@@ -297,6 +309,16 @@ pub(crate) mod tests {
         assert_eq!(
             s.manifest_url().as_str(),
             "https://github.com/gebruder/wirken/releases/latest/download/releases.json"
+        );
+        assert_eq!(
+            s.artifact_url("2.3.0", "wirken-x86_64-unknown-linux-musl")
+                .as_str(),
+            "https://github.com/gebruder/wirken/releases/download/v2.3.0/wirken-x86_64-unknown-linux-musl"
+        );
+        let m = Source::choose(Some("http://127.0.0.1:9/w"), None).unwrap();
+        assert_eq!(
+            m.artifact_url("2.3.0", "wirken-x").as_str(),
+            "http://127.0.0.1:9/w/v2.3.0/wirken-x"
         );
     }
 

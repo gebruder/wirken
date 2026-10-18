@@ -789,6 +789,7 @@ impl ToolRegistry {
                 cmd.env(name, value);
             }
         }
+        cmd.env(EXEC_MARKER_ENV, "1");
         // The shell leads a process group of its own, so everything it
         // starts and does not move out of the group (`&`, `nohup`, a
         // double fork) can be ended with it. See `HostGroup`.
@@ -1802,6 +1803,13 @@ pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
         _ => None,
     }
 }
+
+/// Set to `1` on every command a host `exec` (`mode: off`) runs, so a
+/// program can tell it was started by a model's `exec`. `wirken update`
+/// refuses to run under it. A sandboxed `exec` does not need it: the
+/// container holds no `wirken` binary and no path to the install, and
+/// carries no `WIRKEN_*` variable at all.
+pub const EXEC_MARKER_ENV: &str = "WIRKEN_EXEC";
 
 /// Environment variables a host `exec` keeps from the gateway's
 /// environment. Everything else is dropped. See [`ToolRegistry`]'s

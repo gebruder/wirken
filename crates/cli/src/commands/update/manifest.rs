@@ -82,6 +82,10 @@ impl Manifest {
     pub fn latest(&self) -> &Release {
         &self.releases[0]
     }
+
+    pub fn release(&self, version: Version) -> Option<&Release> {
+        self.releases.iter().find(|r| r.parsed_version() == version)
+    }
 }
 
 /// The verified manifest and the key that signed it.

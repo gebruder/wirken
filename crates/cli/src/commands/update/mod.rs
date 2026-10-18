@@ -8,6 +8,7 @@
 //! compiled into this binary before anything in it is read.
 
 pub mod fetch;
+pub mod install;
 pub mod manifest;
 
 use std::path::Path;
@@ -161,6 +162,177 @@ pub fn require_supported_platform() -> Result<()> {
     if cfg!(windows) {
         bail!("wirken update does not install on Windows; reinstall from the release page");
     }
+    Ok(())
+}
+
+/// The largest release artifact accepted.
+const MAX_ARTIFACT_BYTES: usize = 512 * 1024 * 1024;
+
+/// `wirken update`, `--check` or `--rollback`.
+pub async fn run(
+    check: bool,
+    rollback: bool,
+    to: Option<String>,
+    allow_downgrade: bool,
+    base_url: Option<&str>,
+) -> Result<()> {
+    if check {
+        run_check(base_url).await
+    } else if rollback {
+        run_rollback().await
+    } else {
+        run_install(base_url, to.as_deref(), allow_downgrade).await
+    }
+}
+
+/// The gate an install and a rollback pass before anything else.
+fn operator_preflight() -> Result<()> {
+    let cfg = super::config();
+    let socket = cfg.socket_dir().join("gateway.sock");
+    install::preflight(&install::Environment {
+        stdin_is_tty: super::oauth_scope::stdin_is_tty(),
+        in_exec: std::env::var_os(wirken_agent::tool::EXEC_MARKER_ENV).is_some(),
+        gateway_socket: &socket,
+        service_unit: install::ServiceUnit::installed(),
+    })
+}
+
+fn running_binary() -> Result<std::path::PathBuf> {
+    std::env::current_exe().context("resolve the running binary")
+}
+
+/// Ask for a typed confirmation on the terminal.
+async fn confirm(prompt: String, expected: String) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        install::confirm(
+            &prompt,
+            &expected,
+            std::io::stdin().lock(),
+            std::io::stderr(),
+        )
+    })
+    .await
+    .context("confirmation prompt")?
+}
+
+fn restart_hint() -> String {
+    match install::ServiceUnit::installed() {
+        Some(install::ServiceUnit::Systemd(_)) => {
+            "Start the gateway again: systemctl --user start wirken.service".to_string()
+        }
+        Some(install::ServiceUnit::Launchd(p)) => {
+            format!("Start the gateway again: launchctl load {}", p.display())
+        }
+        None => "Start the gateway again with `wirken run`.".to_string(),
+    }
+}
+
+/// `wirken update`: install the latest release, or `to`.
+pub async fn run_install(
+    base_url: Option<&str>,
+    to: Option<&str>,
+    allow_downgrade: bool,
+) -> Result<()> {
+    require_supported_platform()?;
+    operator_preflight()?;
+    let cfg = super::config();
+    let settings = load_config(&cfg.data_dir)?;
+    let source = Source::choose(base_url, settings.mirror.as_deref())?;
+    let keys = wirken_gateway::release_keys::pinned(wirken_gateway::release_keys::RELEASE_KEYS)
+        .context("pinned release keys")?;
+    let fetcher = Fetcher::new(source);
+    let target = crate::build_info::TARGET;
+    let report = check(
+        &cfg.data_dir,
+        &fetcher,
+        &keys,
+        crate::build_info::VERSION,
+        target,
+    )
+    .await?;
+    let manifest = &report.verified.manifest;
+    let exe = running_binary()?;
+    let current_sha = install::require_release_binary(manifest, report.current, target, &exe)?;
+    let to = to
+        .map(|v| Version::parse(v.trim_start_matches('v')))
+        .transpose()?;
+    let Some(release) = install::choose_release(manifest, report.current, to, allow_downgrade)?
+    else {
+        println!("  wirken {} is installed already.", report.current);
+        return Ok(());
+    };
+    print!("{}", report.render());
+    confirm(
+        format!(
+            "Install wirken {} over {} at {}?",
+            release.version,
+            report.current,
+            exe.display()
+        ),
+        release.version.clone(),
+    )
+    .await?;
+
+    let name = install::artifact_name(target);
+    let bytes = fetcher
+        .get(
+            fetcher.source().artifact_url(&release.version, &name),
+            MAX_ARTIFACT_BYTES,
+            Duration::from_secs(600),
+        )
+        .await
+        .with_context(|| format!("download {name} {}", release.version))?;
+    let sha = install::verify_artifact(&bytes, release, target)?;
+    install::install(
+        &exe,
+        &bytes,
+        &install::Kept {
+            version: report.current.to_string(),
+            sha256: current_sha,
+        },
+    )?;
+    println!(
+        "  Installed wirken {} at {} (sha256 {sha}), checked against releases.json signed by {}.",
+        release.version,
+        exe.display(),
+        report.verified.key_fingerprint
+    );
+    println!(
+        "  {} is kept as {}; `wirken update --rollback` restores it.",
+        report.current,
+        install::prev_path(&exe)?.display()
+    );
+    println!("  {}", restart_hint());
+    Ok(())
+}
+
+/// `wirken update --rollback`: restore the binary the last update
+/// replaced.
+pub async fn run_rollback() -> Result<()> {
+    require_supported_platform()?;
+    operator_preflight()?;
+    let exe = running_binary()?;
+    let kept = install::kept(&exe)?;
+    let current = crate::build_info::VERSION;
+    confirm(
+        format!(
+            "Roll back wirken {current} to {} at {}?",
+            kept.version,
+            exe.display()
+        ),
+        "rollback".to_string(),
+    )
+    .await?;
+    let back = install::rollback(&exe, current)?;
+    println!(
+        "  Restored wirken {} at {} (sha256 {}). {} is kept as {}.",
+        back.to.version,
+        exe.display(),
+        back.to.sha256,
+        back.from,
+        install::prev_path(&exe)?.display()
+    );
+    println!("  {}", restart_hint());
     Ok(())
 }
 
