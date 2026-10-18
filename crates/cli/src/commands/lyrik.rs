@@ -168,6 +168,7 @@ pub async fn run(
         .with_context(|| format!("read {}", config_path.display()))?;
     let config: serde_json::Value = serde_json::from_str(&config_body)
         .with_context(|| format!("parse {}", config_path.display()))?;
+    super::lyrik_walks::refuse_target_walks_dir(&config, &super::config().data_dir)?;
     let bench_mode = config
         .get("bench_mode")
         .and_then(|v| v.as_bool())
@@ -233,7 +234,7 @@ pub async fn run(
         );
     } else {
         let pin = resolve_phase_pin(&config)?;
-        let walks_dir = resolve_walks_dir(&config, target, &super::config().data_dir)?;
+        let walks_dir = resolve_walks_dir(&config, &super::config().data_dir)?;
         let walks = parse_walks_config(&config, &walks_dir)
             .context("parse walks config")?
             .map(|c| c.walks);
@@ -899,7 +900,7 @@ async fn dispatch_via_agent_runtime(
     // misconfigured walks list fails before any LLM call. The
     // one-call slice (no `walks` field in config) keeps the
     // existing single-prompt /lyrik dispatch path.
-    let walks_source_dir = resolve_walks_dir(config, target, &super::config().data_dir)?;
+    let walks_source_dir = resolve_walks_dir(config, &super::config().data_dir)?;
     let walks_cfg = parse_walks_config(config, &walks_source_dir).context("parse walks config")?;
 
     let run_dir = target

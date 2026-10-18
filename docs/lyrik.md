@@ -209,16 +209,20 @@ looked in. `max_concurrent_walks` defaults to 4,
 tuned to the conservative end of common provider rate limits; 0 is rejected
 and a value above the walk count is a no-op.
 
-**`walks_dir`**: the walks directory, where installed walk skills live. The
-first of: `walks_dir` here, a relative path resolved against the target;
-`walks_dir` in the operator's `<data_dir>/lyrik.json`, a relative path
-resolved against the data directory; `<data_dir>/lyrik/walks`. A leading `~/`
-is the home directory. The runner reads the installed walk files and never
-writes them; each run stages its own copy under the run directory.
+**The walks directory** is where installed walk skills live. It is the
+operator's setting, not the target's: `walks_dir` in `<data_dir>/lyrik.json`,
+a relative path resolved against the data directory and a leading `~/` the
+home directory, else `<data_dir>/lyrik/walks`.
 
 ```json
 { "walks_dir": "~/walks" }
 ```
+
+A `.lyrik/config.json` that sets `walks_dir` is refused before the run
+starts. A target is input that may try to steer the run, and a directory it
+chose would let its own text be staged as a walk. The runner reads the
+installed walk files and never writes them; each run stages its own copy
+under the run directory.
 
 Each walk runs as its own task gated by a semaphore. Every walk's agent shares
 the run-level session id (`lyrik-<run-id>`), so all walk turns land in one

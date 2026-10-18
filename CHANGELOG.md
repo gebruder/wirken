@@ -12,12 +12,14 @@ tagged.
 
 ### Lyrik
 
-- Walk skills are read from the walks directory: `walks_dir` in the
-  target's `.lyrik/config.json`, else `walks_dir` in `<data_dir>/lyrik.json`,
-  else `<data_dir>/lyrik/walks`. The home-directory skills tree they were read
-  from before is no longer read; to keep walks installed there, set
-  `walks_dir` to it in `<data_dir>/lyrik.json`. A walk that is not installed
-  is reported with the walks directory the runner looked in.
+- Walk skills are read from the walks directory, the operator's setting:
+  `walks_dir` in `<data_dir>/lyrik.json`, else `<data_dir>/lyrik/walks`. A
+  target's `.lyrik/config.json` that sets `walks_dir` is refused, naming the
+  key, since a directory the target chose would let its own text be staged as
+  a walk. The home-directory skills tree they were read from before is no
+  longer read; to keep walks installed there, set `walks_dir` to it in
+  `<data_dir>/lyrik.json`. A walk that is not installed is reported with the
+  walks directory the runner looked in.
 
 ## [2.3.0] - 2026-10-18
 
