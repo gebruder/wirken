@@ -56,7 +56,7 @@ chrono = { workspace = true }
 # Used by `wirken skills migrate` for round-tripping YAML frontmatter
 # through an untyped value so the migration can splice individual keys
 # without losing unknown fields. indexmap keeps the keys in file order.
-serde-saphyr = "1.3"
+serde-saphyr = "2.0"
 indexmap = { version = "2", features = ["serde"] }
 openssl = { workspace = true }
 libc = "0.2"
