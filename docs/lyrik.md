@@ -156,9 +156,16 @@ does not apply while a `framing` pin is present.
 The skill assesses two framings, `auth` and `injection`, the same two the
 findings schema 1.1 accepts. The SARIF emitter carries rules for nine: those
 two plus `crypto`, `deserialization`, `memory_safety`, `secrets`,
-`supply_chain`, `race_condition` and `prompt_injection`. A walk that emits a
-framing outside the 1.1 enum still lands in `findings.json`, and
-`wirken lyrik validate` rejects that file.
+`supply_chain`, `race_condition` and `prompt_injection`.
+
+The runner holds every walk to the 1.1 enum before dedup. It removes framing
+values outside the enum and records each removal in the per-run log as
+`lyrik.finding.framing_stripped` with the stable ID, the walk and the removed
+values. When the stable ID was keyed on a removed framing, it is rewritten to
+the first framing that remains, and the row carries the written ID as
+`stable_id_written`. A finding left with no framing in the enum, or with no
+`framing` array, is not written to `findings.json`; the per-run log records
+it whole as `lyrik.finding.refused`.
 
 **`gates`**: one entry per human gate, each naming an `adapter` and an
 adapter-native `target`.

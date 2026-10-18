@@ -1321,6 +1321,34 @@ fn aggregate_findings_multi(
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
             let mut parsed: serde_json::Value = serde_json::from_str(&body)
                 .with_context(|| format!("parse staged finding {}", p.display()))?;
+            match conform_framing(&mut parsed) {
+                FramingOutcome::Kept => {}
+                FramingOutcome::Stripped {
+                    removed,
+                    staged_stable_id,
+                } => {
+                    audit.emit(
+                        "lyrik.finding.framing_stripped",
+                        serde_json::json!({
+                            "stable_id": staged_stable_id,
+                            "walk": walk_name,
+                            "removed": removed,
+                            "stable_id_written": parsed.get("stable_id").and_then(|v| v.as_str()),
+                        }),
+                    )?;
+                }
+                FramingOutcome::Refused => {
+                    audit.emit(
+                        "lyrik.finding.refused",
+                        serde_json::json!({
+                            "stable_id": parsed.get("stable_id").and_then(|v| v.as_str()),
+                            "walk": walk_name,
+                            "finding": parsed,
+                        }),
+                    )?;
+                    continue;
+                }
+            }
             annotate_detection_source(&mut parsed, seed_locations);
             if let Some(original) = cap_grade(&mut parsed) {
                 audit.emit(
@@ -1486,6 +1514,70 @@ pub(super) fn annotate_detection_source(
     if let Some(obj) = finding.as_object_mut() {
         obj.entry("detection_source".to_string())
             .or_insert(serde_json::Value::String(provenance.to_string()));
+    }
+}
+
+/// What [`conform_framing`] did to a staged finding.
+#[derive(Debug, PartialEq)]
+enum FramingOutcome {
+    /// Every framing is in the schema 1.1 enum.
+    Kept,
+    /// Framings outside the enum were removed and at least one
+    /// remains. `staged_stable_id` is the stable_id as the walk
+    /// wrote it, before any rewrite.
+    Stripped {
+        removed: Vec<serde_json::Value>,
+        staged_stable_id: Option<String>,
+    },
+    /// No framing in the enum remains, or `framing` is not an
+    /// array. The finding is not written to findings.json.
+    Refused,
+}
+
+/// Hold a staged finding's `framing` to the schema 1.1 enum
+/// ([`super::lyrik_validate::ALLOWED_FRAMINGS`]) so findings.json
+/// passes `wirken lyrik validate` whatever a walk emits. Values
+/// outside the enum are removed. When the stable_id's framing
+/// segment was one of them, the segment becomes the first framing
+/// that remains, since the validator rejects a stable_id whose
+/// framing is outside the enum.
+fn conform_framing(finding: &mut serde_json::Value) -> FramingOutcome {
+    use super::lyrik_validate::ALLOWED_FRAMINGS;
+
+    let Some(obj) = finding.as_object_mut() else {
+        return FramingOutcome::Refused;
+    };
+    let Some(framing) = obj.get("framing").and_then(|v| v.as_array()) else {
+        return FramingOutcome::Refused;
+    };
+    let (kept, removed): (Vec<serde_json::Value>, Vec<serde_json::Value>) = framing
+        .iter()
+        .cloned()
+        .partition(|v| v.as_str().is_some_and(|s| ALLOWED_FRAMINGS.contains(&s)));
+    if kept.is_empty() {
+        return FramingOutcome::Refused;
+    }
+    if removed.is_empty() {
+        return FramingOutcome::Kept;
+    }
+    let staged_stable_id = obj
+        .get("stable_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    if let Some(sid) = &staged_stable_id
+        && let Some((segment, rest)) = sid.split_once("::")
+        && removed.iter().any(|v| v.as_str() == Some(segment))
+        && let Some(first) = kept[0].as_str()
+    {
+        obj.insert(
+            "stable_id".to_string(),
+            serde_json::Value::String(format!("{first}::{rest}")),
+        );
+    }
+    obj.insert("framing".to_string(), serde_json::Value::Array(kept));
+    FramingOutcome::Stripped {
+        removed,
+        staged_stable_id,
     }
 }
 
@@ -2794,6 +2886,124 @@ mod tests {
                 "original": 1.0,
                 "new": 0.5,
             })]
+        );
+    }
+
+    /// Aggregate one walk's staged findings and return the
+    /// findings.json body and the audit.log path.
+    fn aggregate_one_walk(
+        tmp: &std::path::Path,
+        walk: &str,
+        staged: &[serde_json::Value],
+    ) -> (serde_json::Value, std::path::PathBuf) {
+        let dir = tmp.join("staging").join(walk).join("findings");
+        for (i, f) in staged.iter().enumerate() {
+            write_finding(&dir, &format!("finding-{:03}.json", i + 1), f);
+        }
+        let dest = tmp.join("findings.json");
+        let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let log = tmp.join("audit.log");
+        let mut audit = super::AuditLogger::open(&log, "sample/run-012", true).unwrap();
+        aggregate_findings_multi(
+            &[(Some(walk.to_string()), dir)],
+            &dest,
+            "sample/run-012",
+            true,
+            &seeds,
+            tmp,
+            &mut audit,
+        )
+        .unwrap();
+        let body = serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        (body, log)
+    }
+
+    /// A finding framed only outside the 1.1 enum is not written;
+    /// the per-run log carries it whole.
+    #[test]
+    fn aggregate_findings_multi_refuses_crypto_only_finding() {
+        let tmp = tempdir().unwrap();
+        let staged = finding("src/a.rs", 10, "crypto", "HIGH");
+        let (body, log) =
+            aggregate_one_walk(tmp.path(), "crypto-walk", std::slice::from_ref(&staged));
+        assert_eq!(body["findings"], serde_json::json!([]));
+        assert_eq!(
+            super::super::lyrik_validate::validate_value(&body),
+            vec![],
+            "findings.json must pass validate"
+        );
+        assert_eq!(
+            audit_details(&log, "lyrik.finding.refused"),
+            vec![serde_json::json!({
+                "stable_id": "crypto::src/a.rs:10",
+                "walk": "crypto-walk",
+                "finding": staged,
+            })]
+        );
+        assert!(audit_details(&log, "lyrik.finding.framing_stripped").is_empty());
+    }
+
+    /// `["auth", "crypto"]` is written as `["auth"]`; a stable_id
+    /// keyed on the stripped framing moves to the one that remains.
+    #[test]
+    fn aggregate_findings_multi_strips_crypto_beside_auth() {
+        let tmp = tempdir().unwrap();
+        let mut staged = finding("src/a.rs", 10, "crypto", "HIGH");
+        staged["framing"] = serde_json::json!(["auth", "crypto"]);
+        let (body, log) = aggregate_one_walk(tmp.path(), "crypto-walk", &[staged]);
+        let written = &body["findings"][0];
+        assert_eq!(written["framing"], serde_json::json!(["auth"]));
+        assert_eq!(written["stable_id"], "auth::src/a.rs:10");
+        assert_eq!(
+            super::super::lyrik_validate::validate_value(&body),
+            vec![],
+            "findings.json must pass validate"
+        );
+        assert_eq!(
+            audit_details(&log, "lyrik.finding.framing_stripped"),
+            vec![serde_json::json!({
+                "stable_id": "crypto::src/a.rs:10",
+                "walk": "crypto-walk",
+                "removed": ["crypto"],
+                "stable_id_written": "auth::src/a.rs:10",
+            })]
+        );
+        assert!(audit_details(&log, "lyrik.finding.refused").is_empty());
+    }
+
+    #[test]
+    fn conform_framing_keeps_stable_id_keyed_on_a_kept_framing() {
+        let mut f = finding("src/a.rs", 10, "injection", "HIGH");
+        f["framing"] = serde_json::json!(["memory_safety", "injection"]);
+        assert_eq!(
+            super::conform_framing(&mut f),
+            super::FramingOutcome::Stripped {
+                removed: vec![serde_json::json!("memory_safety")],
+                staged_stable_id: Some("injection::src/a.rs:10".to_string()),
+            }
+        );
+        assert_eq!(f["framing"], serde_json::json!(["injection"]));
+        assert_eq!(f["stable_id"], "injection::src/a.rs:10");
+    }
+
+    #[test]
+    fn conform_framing_refuses_missing_or_empty_framing() {
+        let mut empty = finding("src/a.rs", 10, "auth", "HIGH");
+        empty["framing"] = serde_json::json!([]);
+        assert_eq!(
+            super::conform_framing(&mut empty),
+            super::FramingOutcome::Refused
+        );
+        let mut missing = finding("src/a.rs", 10, "auth", "HIGH");
+        missing.as_object_mut().unwrap().remove("framing");
+        assert_eq!(
+            super::conform_framing(&mut missing),
+            super::FramingOutcome::Refused
+        );
+        let mut kept = finding("src/a.rs", 10, "auth", "HIGH");
+        assert_eq!(
+            super::conform_framing(&mut kept),
+            super::FramingOutcome::Kept
         );
     }
 

@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 pub const SCHEMA_ID: &str =
     "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json";
 
-const ALLOWED_FRAMINGS: &[&str] = &["auth", "injection"];
+pub(super) const ALLOWED_FRAMINGS: &[&str] = &["auth", "injection"];
 const ALLOWED_TIERS: &[&str] = &["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
 const ALLOWED_DETECTION_SOURCES: &[&str] = &["static_prescreen", "model_reasoning", "both"];
 
