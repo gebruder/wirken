@@ -33,6 +33,7 @@ UNVERIFIED_WARNED=0
 main() {
     detect_platform
     get_latest_version
+    prepare_install_dir
     download_binary
     install_binary
     verify
@@ -98,7 +99,21 @@ verification_failure() {
     echo "Error: ${message}" >&2
     echo "Hint: set WIRKEN_ALLOW_UNVERIFIED=1 to override (not recommended)." >&2
     rm -rf "${TMPDIR:-/nonexistent}"
+    rm -f "${TMPFILE:-/nonexistent}"
     exit "$code"
+}
+
+# The binary is downloaded into the install directory itself, so the
+# final step is a rename within one filesystem: an existing wirken is
+# replaced in one step and is never seen half-written.
+prepare_install_dir() {
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+
+    if [ ! -w "$INSTALL_DIR" ]; then
+        echo "Error: ${INSTALL_DIR} is not writable." >&2
+        echo "Set WIRKEN_INSTALL_DIR to a writable directory, or make ${INSTALL_DIR} writable." >&2
+        exit 1
+    fi
 }
 
 download_binary() {
@@ -108,7 +123,9 @@ download_binary() {
     SIG_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.sha256.sig"
 
     TMPDIR=$(mktemp -d)
-    TMPFILE="${TMPDIR}/wirken"
+    TMPFILE="${INSTALL_DIR}/.wirken.download.$$"
+    # A failed or interrupted download leaves no partial file behind.
+    trap 'rm -f "$TMPFILE"' EXIT
     CHECKSUM_FILE="${TMPDIR}/checksums.sha256"
     SIG_FILE="${TMPDIR}/checksums.sha256.sig"
     SIGNERS_FILE="${TMPDIR}/allowed_signers"
@@ -201,8 +218,6 @@ verify_checksum() {
 }
 
 install_binary() {
-    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
-
     EXISTING="${INSTALL_DIR}/wirken"
     if [ -x "$EXISTING" ]; then
         CURRENT=$("$EXISTING" --version 2>/dev/null | awk '{print $NF}')
@@ -210,19 +225,14 @@ install_binary() {
         if [ "$CURRENT" = "$TAG_VERSION" ]; then
             echo "wirken ${CURRENT} is already installed."
             rm -rf "$TMPDIR"
+            rm -f "$TMPFILE"
             return
         fi
         echo "Upgrading wirken ${CURRENT} -> ${TAG_VERSION}"
     fi
 
-    if [ ! -w "$INSTALL_DIR" ]; then
-        echo "Error: ${INSTALL_DIR} is not writable." >&2
-        echo "Set WIRKEN_INSTALL_DIR to a writable directory, or make ${INSTALL_DIR} writable." >&2
-        rm -rf "$TMPDIR"
-        exit 1
-    fi
-
-    mv "$TMPFILE" "${INSTALL_DIR}/wirken"
+    # Same directory, so this is a rename: atomic on one filesystem.
+    mv -f "$TMPFILE" "${INSTALL_DIR}/wirken"
     echo "Installed to ${INSTALL_DIR}/wirken"
 
     rm -rf "$TMPDIR"
