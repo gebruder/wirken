@@ -122,16 +122,16 @@ parser bump soaks on a real `wirken zirkel run` fetch. Where the crate has no
 path an operator can run, the in-tree end-to-end tests that exercise it are
 its soak, and the CHANGELOG entry for the bump names them.
 
-**The release workflow enforces the gate.** Its first job, `gate`, runs on the
-tag push before any build: `scripts/check-names.sh`, `cargo deny check`, open
-CodeQL alerts (any critical or high fails) and open Dependabot alerts (any
-fails). Every build job needs it, so a failing gate builds nothing and creates
-no draft release. A surface the workflow token cannot read is printed as
-`UNVERIFIED` and fails the job. The token reads code scanning
-(`security-events: read`); it cannot be granted Dependabot alerts, which
-answer `403`, so that surface reports `UNVERIFIED` and the job fails. The
-manual pre-flight above stays the local fast-fail, so a tag is not pushed
-into a gate that will refuse it. To run the gate alone on a branch, without
+**The release workflow enforces part of the gate.** Its first job, `gate`,
+runs on the tag push before any build: `scripts/check-names.sh`,
+`cargo deny check`, and open CodeQL alerts (any critical or high fails),
+read with the workflow token's `security-events: read`. Every build job needs
+it, so a failing gate builds nothing and creates no draft release. If the
+token cannot read code scanning, the job prints it as `UNVERIFIED` and fails.
+Dependabot alerts are not in the job: the workflow token cannot be granted
+them, so they are checked only by the manual pre-flight above, run with the
+maintainer's account. The pre-flight is also the local fast-fail, so a tag is
+not pushed into a gate that will refuse it. To run the gate alone on a branch, without
 the build matrix and without creating a release:
 
 ```bash

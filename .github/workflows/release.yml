@@ -74,8 +74,10 @@ jobs:
         run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check
 
       # Code scanning gates on CodeQL; Scorecard findings are reviewed,
-      # not gating (docs/release-process.md).
-      - name: Code-scanning and Dependabot alerts
+      # not gating (docs/release-process.md). Dependabot alerts are not
+      # read here: the workflow token cannot be granted them, so they
+      # stay in the manual pre-flight, run with the maintainer's account.
+      - name: Open CodeQL alerts
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -98,22 +100,6 @@ jobs:
             fi
           else
             echo "code scanning: UNVERIFIED, the token cannot read it: $(cat "$err")"
-            fail=1
-          fi
-
-          if found=$(gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/dependabot/alerts?state=open&per_page=100" \
-              --jq '.[] | "  #\(.number) \(.security_advisory.severity) \(.dependency.package.name) \(.security_advisory.ghsa_id)"' \
-              2>"$err"); then
-            if [ -n "$found" ]; then
-              echo "dependabot: open alerts"
-              echo "$found"
-              fail=1
-            else
-              echo "dependabot: no open alert"
-            fi
-          else
-            echo "dependabot: UNVERIFIED, the token cannot read it: $(cat "$err")"
             fail=1
           fi
 
