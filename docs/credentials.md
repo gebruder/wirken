@@ -226,3 +226,92 @@ Together these mean a bearer token cannot reach stdout, stderr,
 or the tracing log through ordinary Rust formatting. The encrypted
 vault row remains the only place the secret exists outside of an
 in-flight HTTP request.
+
+## ChatGPT plan (Sign in with ChatGPT)
+
+The `chatgpt` provider runs agents on the operator's ChatGPT plan (Go, Plus
+or Pro) instead of an API key, under OpenAI's program for open-source and
+locally run apps
+([developers.openai.com/siwc/token-sharing-open-source](https://developers.openai.com/siwc/token-sharing-open-source)).
+Wirken is a public OAuth client with no secret: the first sign-in registers
+it (`client_id=dynamic_agent_client`), the callback carries the issued id,
+and that id is stored with the grant and used for every later request.
+
+```bash
+wirken setup                                   # pick "ChatGPT plan"
+wirken credentials authorize chatgpt           # or sign in on its own
+wirken agents add --provider chatgpt --model <slug> --credential chatgpt-plan
+```
+
+The sign-in once, then every turn:
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant W as wirken
+    participant Br as Browser
+    participant Auth as auth.openai.com
+    participant Api as api.openai.com/v1
+    Op->>W: wirken credentials authorize chatgpt
+    W->>Br: opens the sign-in URL (client_id=dynamic_agent_client, PKCE)
+    Br->>Auth: sign in, allow "Use your ChatGPT plan"
+    Auth-->>W: redirect to 127.0.0.1/auth/callback with the code and the issued client id
+    W->>Auth: exchange the code (issued client id, resource)
+    Auth-->>W: access token (1 h) and refresh token (30 d)
+    W->>W: store the grant in the vault as chatgpt-plan
+    Note over W,Api: each turn
+    W->>Auth: refresh when the token is near expiry, store the rotated pair
+    W->>Api: POST /responses, Bearer access token, streamed
+    Api-->>W: text, function calls, usage
+```
+
+**What is stored.** One OAuth-managed entry, `chatgpt-plan` by default:
+access token, rotating refresh token, expiry, granted scopes and the issued
+client id, encrypted like every other entry. `wirken credentials show
+chatgpt-plan` prints provider, scopes and expiry and never a token. A grant
+that lacks `chatgpt.tokens.use.direct`, the scope that permits plan usage, is
+not stored: the operator declined the one thing the credential is for, and
+the command says so. `<data_dir>/chatgpt-host-id` holds the host identifier
+the provider attributes usage to; it is an opaque label, not a credential.
+
+**Refresh.** The access token lives an hour. The gateway (and `wirken ask`)
+asks for the current token before each call and refreshes it in process
+when it is within five minutes of expiry, serialised per entry because the
+provider rotates the refresh token on every use; the refreshed value is
+written to the vault and taught to leak detection. A refresh the provider
+refuses outright (`invalid_grant`, an expired or reused refresh token) fails
+the turn with a message naming `wirken credentials rescope chatgpt-plan`,
+which signs in again with the saved client id. A refresh that fails for a
+network reason keeps using the token until it expires.
+
+**Inference.** The plan accepts `POST https://api.openai.com/v1/responses`
+and nothing else, streaming, storing nothing, with the system prompt as
+`instructions` and no `temperature` or `max_output_tokens`. Function tools
+work, so the tool loop is unchanged; `generate_image` is refused on this
+provider, as the plan route does not serve image generation. A usage-limit refusal
+(`subscription_sharing_usage_limit_exceeded`) is never retried: the turn
+fails with a `LlmRequestFailed` row and the gateway log points at
+`chatgpt.com/settings/usage`, where the weekly cap for the "Wirken" app is
+set. `LlmRequest` rows carry `provider: chatgpt` and `credential_id:
+chatgpt-plan`; cost is uncosted ([cost-monitoring.md](cost-monitoring.md)).
+
+**Removal.** `wirken credentials remove chatgpt-plan` revokes the grant at
+the provider before deleting the entry, best effort; if revocation could not
+be confirmed, disconnect the app under ChatGPT Settings, Security and login,
+Login connections.
+
+**Headless hosts.** The sign-in needs a browser that can reach the loopback
+callback. On a server, run `wirken credentials authorize chatgpt --port 1455
+--no-browser` and open the printed URL from a machine with `ssh -L
+1455:127.0.0.1:1455 <host>` in place, which carries the redirect back. OpenAI
+also documents signing in on a laptop and copying the credential file to the
+server over SSH; the vault entry is that file here, so `wirken credentials
+add chatgpt-plan --channel oauth --value-file <json>` with the grant's JSON
+does the same (the `oauth` tag is what `show` and `rescope` go by).
+
+**Limits to know.** The grant is the operator's own plan; it is meant for a
+personal gateway, bound to one agent, and the per-app weekly cap is the
+exposure limit. A `channel_overrides` entry cannot name `chatgpt`: an
+override carries a static key, and the plan grant is refreshed per call. The
+identity scopes the sign-in requests are not read; nothing about the account
+beyond the tokens is kept.

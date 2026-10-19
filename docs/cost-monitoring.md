@@ -142,7 +142,7 @@ In block mode, a ledger error (the spend ledger cannot be read) fails closed: th
 
 At gateway start the posture is the same. If `budget.db` cannot be opened while any block-mode budget is configured, the gateway refuses to start, so a wedged ledger file cannot silently convert block into off. If only alert-mode budgets are configured, startup continues but emits a `budget.control_offline` audit event (on the audit chain, so a SIEM or dashboard sees the control is down), not just a stderr warning. A present-but-malformed `budget.json` is a hard startup error for the same reason.
 
-A call whose (provider, model) pair is absent from the pricing table records no cost, so it does not advance the ledger. This is a blind spot: block mode plus a costless provider is no protection. The first uncosted call in a session with an active budget logs a warning so an operator sees the control is pass-through for that provider. Keep the pricing table current for the models you meter.
+A call whose (provider, model) pair is absent from the pricing table records no cost, so it does not advance the ledger. This is a blind spot: block mode plus a costless provider is no protection. A ChatGPT plan (`chatgpt`) is always such a provider: plan usage has no per-token price, so its rows carry tokens and no cost, and the cap on what it spends is the weekly app limit the operator sets in ChatGPT settings, not a Wirken budget. The first uncosted call in a session with an active budget logs a warning so an operator sees the control is pass-through for that provider. Keep the pricing table current for the models you meter.
 
 ## Boundary
 

@@ -24,6 +24,7 @@ const LABELS: &[&str] = &[
     "Infomaniak (Swiss)",
     "Hetzner (EU)",
     "Custom endpoint",
+    "ChatGPT plan (Sign in with ChatGPT)",
 ];
 
 /// Provider ids a flag may name. NIM and Privatemode are not among
@@ -39,6 +40,7 @@ pub const IDS: &[&str] = &[
     "infomaniak",
     "hetzner",
     "custom",
+    "chatgpt",
 ];
 
 /// The provider's own API base, for the providers whose endpoint is
@@ -53,6 +55,7 @@ pub fn default_base_url(provider: &str) -> Option<&'static str> {
         "ollama" => Some("http://localhost:11434/v1"),
         "tinfoil" => Some("https://inference.tinfoil.sh/v1"),
         "hetzner" => Some("https://inference.hetzner.com/api/v1"),
+        "chatgpt" => Some("https://api.openai.com/v1"),
         _ => None,
     }
 }
@@ -84,6 +87,7 @@ pub async fn list_models(provider: &str, base_url: &str, api_key: &str) -> Vec<S
         "gemini" => super::list_gemini_models(api_key).await,
         "ollama" => super::list_ollama_models(base_url).await,
         "bedrock" => Vec::new(),
+        "chatgpt" => super::chatgpt_plan::list_models(base_url, api_key).await,
         _ => super::list_openai_compatible_models(base_url, api_key)
             .await
             .unwrap_or_default(),
@@ -456,6 +460,29 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
                 let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
                 choice("custom", model, url, None)
             }
+        }
+        11 => {
+            // ChatGPT plan. No key: the sign-in stores the grant under
+            // its own entry, and the gateway reads that entry back.
+            // The models are the signed-in account's.
+            println!("  Your ChatGPT plan (Go, Plus or Pro) pays for the agent's requests.");
+            println!("  OpenAI's program for open-source apps; no API key.");
+            let pp = super::cached_vault_passphrase()?;
+            let keychain = probe_keychain(&cfg.data_dir, move || pp);
+            let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                .context("Failed to open credential store")?;
+            let cred = super::chatgpt_plan::sign_in(
+                cfg,
+                &store,
+                super::chatgpt_plan::DEFAULT_CREDENTIAL,
+                None,
+                true,
+            )
+            .await?;
+            let base_url = default_base_url("chatgpt").unwrap_or_default().to_string();
+            let models = super::chatgpt_plan::list_models(&base_url, &cred.access_token).await;
+            let model = super::pick_model(models)?;
+            choice("chatgpt", model, base_url, None)
         }
         _ => unreachable!(),
     })

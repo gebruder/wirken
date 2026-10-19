@@ -445,7 +445,27 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // ollama (no vault lookup) and for the failure paths below where
     // the key didn't resolve.
     let mut api_key_credential: Option<String> = None;
-    let api_key = if provider != "ollama" {
+    // The plan provider holds no key: its grant is read before each
+    // call by a token source the vault backs, opened here so a missing
+    // or scope-less grant stops the start rather than the first turn.
+    let mut plan_token_source: Option<Arc<dyn wirken_agent::llm::ProviderTokenSource>> = None;
+    let api_key = if provider == super::chatgpt_plan::PROVIDER {
+        let keychain = probe_keychain(&cfg.data_dir, || {
+            prompt_vault_passphrase(&mut vault_passphrase)
+        });
+        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+            .context("Failed to open credential store")?;
+        let name = super::chatgpt_plan::DEFAULT_CREDENTIAL;
+        let source = super::chatgpt_plan::VaultOAuthTokenSource::open(
+            Arc::new(std::sync::Mutex::new(store)),
+            name,
+            leak_matcher.clone(),
+        )?;
+        println!("  ChatGPT plan: credential '{name}'");
+        api_key_credential = Some(name.to_string());
+        plan_token_source = Some(source as Arc<dyn wirken_agent::llm::ProviderTokenSource>);
+        None
+    } else if provider != "ollama" {
         let keychain = probe_keychain(&cfg.data_dir, || {
             prompt_vault_passphrase(&mut vault_passphrase)
         });
@@ -660,21 +680,46 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             } else {
                 Some(agent_cfg.api_key_credential.clone())
             };
-            let agent_api_key = if !agent_cfg.api_key_credential.is_empty() {
-                vault
-                    .as_ref()
-                    .and_then(|v| v.retrieve(&agent_cfg.api_key_credential).ok())
-                    .map(|(secret, meta)| {
-                        leak_matcher.learn(
-                            &agent_cfg.api_key_credential,
-                            secret.expose(),
-                            meta.kind,
-                        );
-                        secret.expose().to_string()
-                    })
+            // An agent on the plan runs on a token source over its
+            // grant, named by `api_key_credential` or the default
+            // entry, and takes no key from the vault.
+            let agent_token_source = if agent_cfg.provider == super::chatgpt_plan::PROVIDER {
+                let name = if agent_cfg.api_key_credential.is_empty() {
+                    super::chatgpt_plan::DEFAULT_CREDENTIAL.to_string()
+                } else {
+                    agent_cfg.api_key_credential.clone()
+                };
+                let keychain = probe_keychain(&cfg.data_dir, || {
+                    prompt_vault_passphrase(&mut vault_passphrase)
+                });
+                let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                    .context("Failed to open credential store")?;
+                let source = super::chatgpt_plan::VaultOAuthTokenSource::open(
+                    Arc::new(std::sync::Mutex::new(store)),
+                    &name,
+                    leak_matcher.clone(),
+                )
+                .with_context(|| format!("agent '{}'", agent_cfg.id))?;
+                Some(source as Arc<dyn wirken_agent::llm::ProviderTokenSource>)
             } else {
                 None
             };
+            let agent_api_key =
+                if agent_token_source.is_none() && !agent_cfg.api_key_credential.is_empty() {
+                    vault
+                        .as_ref()
+                        .and_then(|v| v.retrieve(&agent_cfg.api_key_credential).ok())
+                        .map(|(secret, meta)| {
+                            leak_matcher.learn(
+                                &agent_cfg.api_key_credential,
+                                secret.expose(),
+                                meta.kind,
+                            );
+                            secret.expose().to_string()
+                        })
+                } else {
+                    None
+                };
 
             let llm = super::llm_config_for_agent(&agent_cfg);
             let workspace = cfg.agent_workspace(&agent_cfg.id);
@@ -743,6 +788,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     channel_egress: agent_cfg.channel_egress.clone(),
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
+                    token_source: agent_token_source,
                 },
             );
         }
@@ -832,6 +878,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                 channel_egress: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                token_source: plan_token_source,
             },
         );
     }
@@ -5530,6 +5577,13 @@ fn resolve_channel_overrides(
         let model = cfg.get("model").and_then(|v| v.as_str()).ok_or_else(|| {
             anyhow::anyhow!("channel_overrides['{channel}'] missing 'model' field")
         })?;
+        if provider == super::chatgpt_plan::PROVIDER {
+            anyhow::bail!(
+                "channel_overrides['{channel}'] names provider 'chatgpt', which a channel \
+                 cannot override to: the plan grant is refreshed per call and is not a key. \
+                 Run an agent on it and bind the channel to that agent."
+            );
+        }
         let base_url = cfg.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
 
         let (api_key, api_key_credential) = match cfg.get("api_key_name").and_then(|v| v.as_str()) {
@@ -6264,6 +6318,7 @@ mod proxy_handoff_tests {
                 expires_at: 1,
                 scope: String::new(),
                 provider: "notion".into(),
+                client_id: None,
             },
         )
         .unwrap();

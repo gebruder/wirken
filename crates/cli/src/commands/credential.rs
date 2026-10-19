@@ -198,6 +198,20 @@ pub async fn rescope(
     let public = load_oauth_public(&store, name)
         .map_err(|e| anyhow!("read OAuth credential '{name}': {e}"))?;
 
+    // A ChatGPT grant has one scope set and no picker: rescoping it
+    // is signing in again, which is also the way back from a refresh
+    // token the provider no longer accepts.
+    if public.provider == super::chatgpt_plan::PROVIDER {
+        if !scope.is_empty() || no_scopes || all_scopes {
+            anyhow::bail!(
+                "credential '{name}' is a ChatGPT sign-in; its scope set is fixed, so \
+                 --scope, --no-scopes and --all-scopes do not apply"
+            );
+        }
+        super::chatgpt_plan::sign_in(&cfg, &store, name, None, true).await?;
+        return Ok(());
+    }
+
     let provider_def = lookup_provider(&public.provider).ok_or_else(|| {
         anyhow!(
             "credential '{name}' references unknown OAuth provider '{}'; cannot rescope.",
@@ -453,6 +467,10 @@ pub async fn remove(name: &str) -> Result<()> {
 
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
+
+    // A ChatGPT grant is revoked at the provider first, best effort;
+    // the entry goes whatever the provider answered.
+    super::chatgpt_plan::revoke_before_remove(&store, name).await;
 
     store
         .delete(name)

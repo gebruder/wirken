@@ -129,6 +129,11 @@ pub struct AgentStaticConfig {
     /// [`ChannelOverride::api_key_credential`]; same role at the
     /// agent-wide-default level.
     pub api_key_credential: Option<String>,
+    /// For a provider whose credential expires: asked for the bearer
+    /// before each call instead of `api_key`. Attached to every waked
+    /// Agent that runs on the agent-wide defaults; a channel override
+    /// carries its own static key and is left as it is.
+    pub token_source: Option<Arc<dyn crate::llm::ProviderTokenSource>>,
     pub skills: Vec<Skill>,
     /// Long-lived MCP proxy connection shared across every waked
     /// Agent for this agent_id. Concurrent waked Agents serialize
@@ -669,6 +674,11 @@ impl AgentFactory {
             cfg.sandbox.clone(),
             self.permissions.clone(),
         )?;
+        if override_for_channel.is_none()
+            && let Some(source) = &cfg.token_source
+        {
+            agent.set_token_source(source.clone());
+        }
         // Name the agent before anything can gate on it. `agent_id`
         // is the key this config was looked up under, so a sub-agent
         // woken as a different config carries that config's id and is

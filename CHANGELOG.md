@@ -10,6 +10,37 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `chatgpt` as an LLM provider: an agent runs on the operator's ChatGPT plan
+  through Sign in with ChatGPT, under OpenAI's program for open-source and
+  locally run apps, with no API key. `wirken setup` offers it, and
+  `wirken credentials authorize chatgpt` signs in on its own: a public OAuth
+  client that registers itself on the first sign-in, keeps the grant in the
+  vault under `chatgpt-plan` with the issued client id, and refuses to store
+  a grant that does not permit plan usage. The gateway reads the grant before
+  each call and refreshes it in process, serialised per entry, writing the
+  rotated tokens back to the vault and to leak detection. Inference goes
+  through the Responses API as the plan requires: streaming, `store: false`,
+  the system prompt as `instructions`, no `temperature` or output cap; the
+  non-streaming callers assemble the stream. A usage-limit refusal is never
+  retried. `wirken agents add --provider chatgpt --credential <name>` runs a
+  named agent on it, `wirken credentials remove` revokes the grant at the
+  provider first, and `wirken credentials rescope` signs in again. Cost is
+  uncosted, and a `channel_overrides` entry cannot name the provider. See
+  [docs/credentials.md](docs/credentials.md#chatgpt-plan-sign-in-with-chatgpt).
+- `WIRKEN_CHATGPT_OAUTH_BASE`, a loopback-only base for the ChatGPT sign-in
+  and token endpoints, for the integration test's stub; refused for any
+  other host.
+
+### Changed
+
+- The OAuth provider table in `wirken-mcp-proxy` carries where a client id
+  comes from (an environment variable, or dynamic registration), a callback
+  path, a `resource` and a discovery URL, and a stored `OAuthCredential` may
+  carry the issued `client_id`. Entries stored before the field existed read
+  unchanged.
+
 ## [2.3.0] - 2026-10-18
 
 #288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0

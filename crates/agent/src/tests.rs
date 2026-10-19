@@ -2021,6 +2021,7 @@ mod wake {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         );
         (
@@ -2079,6 +2080,7 @@ mod wake {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         )]);
         let factory = AgentFactory::for_verify(configs, log.clone());
@@ -2597,6 +2599,7 @@ mod wake {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -2670,6 +2673,7 @@ mod subagent {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         );
         configs.insert(
@@ -2689,6 +2693,7 @@ mod subagent {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         );
         (
@@ -3407,6 +3412,7 @@ mod subagent {
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
                     channel_egress: Default::default(),
+                    token_source: None,
                 },
             );
         }
@@ -7258,6 +7264,7 @@ mod per_channel_llm_override {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -7407,6 +7414,7 @@ mod per_channel_llm_override {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -7570,6 +7578,7 @@ mod per_channel_llm_override {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -7696,6 +7705,7 @@ mod org_tool_policy {
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
                 channel_egress: Default::default(),
+                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -13691,6 +13701,7 @@ mod leak_detection {
             extra_interceptors: vec![],
             zirkel_db_path: None,
             channel_egress: Default::default(),
+            token_source: None,
         };
         let ceiling = SubagentCeiling {
             tool_allowlist: vec![],

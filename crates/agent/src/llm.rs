@@ -179,6 +179,10 @@ impl LlmConfig {
             "bedrock" => 200_000,
             "ollama" => 32_768,
             "tinfoil" => 128_000,
+            // A ChatGPT plan serves whatever the signed-in account's
+            // catalog lists, and the window differs by model. The
+            // smaller figure is the safe direction, as for Hetzner.
+            "chatgpt" => 128_000,
             // Hetzner's catalog spans 262,144 (Qwen3.6, Kimi-K2.7) to
             // 512,000 (DeepSeek-V4-Flash, GLM-5.2) as of August 2026.
             // This table keys on provider rather than model, so one
@@ -244,6 +248,19 @@ pub struct Usage {
     pub output_tokens: u32,
     pub cache_creation_input_tokens: u32,
     pub cache_read_input_tokens: u32,
+}
+
+/// Where an agent gets the bearer for a provider whose credential
+/// expires. Asked before each call, so a refresh the gateway performs
+/// reaches the next request without a restart; a static API key needs
+/// none of this and is passed as it is.
+#[async_trait::async_trait]
+pub trait ProviderTokenSource: Send + Sync {
+    /// The current bearer, refreshed first when it is about to expire.
+    async fn bearer(&self) -> Result<String, AgentError>;
+    /// The vault entry the bearer comes from, stamped on every
+    /// `LlmRequest` and `LlmResponse` row as the credential id.
+    fn credential_name(&self) -> &str;
 }
 
 /// LLM client that makes completion requests.
@@ -357,7 +374,10 @@ impl LlmClient {
     /// or non-429 error) is returned to the caller unchanged. Network
     /// errors propagate immediately (no retry) so a wedged client
     /// doesn't sit in a backoff loop.
-    async fn send_with_retry<F>(&self, mut build: F) -> Result<reqwest::Response, AgentError>
+    pub(crate) async fn send_with_retry<F>(
+        &self,
+        mut build: F,
+    ) -> Result<reqwest::Response, AgentError>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
@@ -376,8 +396,13 @@ impl LlmClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
-            // Drop the response body so the connection can be reused.
-            drop(resp);
+            // The body says whether this 429 is a rate limit, which a
+            // retry waits out, or a plan's usage limit, which it does
+            // not. Reading it also lets the connection be reused.
+            let body = resp.text().await.unwrap_or_default();
+            if let Some(limit) = crate::llm_responses::plan_usage_limit(&body) {
+                return Err(limit);
+            }
             if attempt >= MAX_RATE_LIMIT_RETRIES {
                 if let Some(obs) = self.observer.lock().unwrap().clone() {
                     obs.on_rate_limit_exhausted(attempt);
@@ -420,6 +445,9 @@ impl LlmClient {
             "bedrock" => self.complete_bedrock(messages, tools, api_key).await,
             "ollama" => self.complete_ollama(messages, tools).await,
             "tinfoil" => self.complete_tinfoil(messages, tools, api_key).await,
+            crate::llm_responses::PROVIDER => {
+                self.complete_responses(messages, tools, api_key).await
+            }
             _ => self.complete_openai(messages, tools, api_key).await,
         }
     }

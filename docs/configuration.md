@@ -33,6 +33,7 @@ moves every process at once.
 | `tool_policy.json` | Org allow and deny tool lists | `wirken setup --org` |
 | `org.url` | Organization config endpoint | `wirken setup --org` |
 | `registry-root.pub` | Operator skill-registry root (mode 0o644) | `wirken skills trust-root` |
+| `chatgpt-host-id` | The host identifier a ChatGPT plan sign-in attributes usage to; an opaque label, not a credential | `wirken credentials authorize chatgpt` |
 | `signing-key.hex` | Per-author skill and MCP signing seed | `wirken skills sign` |
 | `keychain/` | age-encrypted device key when the OS keychain is unavailable | `wirken setup` |
 | `skills/` | Installed skills | `wirken skills install` or setup |
@@ -54,9 +55,16 @@ a loose 0o755 left by an earlier run or a permissive umask converges back.
 ```
 
 Values `wirken setup` writes: `openai`, `anthropic`, `gemini`, `bedrock`,
-`ollama`, `tinfoil`, `infomaniak`, `hetzner`, `custom`. Privatemode is saved
-as `openai` pointed at its loopback proxy (`http://localhost:8080/v1` by
-default), and NIM as `custom`, which covers any OpenAI-compatible endpoint.
+`ollama`, `tinfoil`, `infomaniak`, `hetzner`, `custom`, `chatgpt`. Privatemode
+is saved as `openai` pointed at its loopback proxy (`http://localhost:8080/v1`
+by default), and NIM as `custom`, which covers any OpenAI-compatible endpoint.
+
+`chatgpt` is a ChatGPT plan, used through Sign in with ChatGPT rather than an
+API key: no `<provider>-api-key` entry exists; the gateway reads the OAuth
+grant the sign-in stored under `chatgpt-plan` and refreshes it before each
+call. The route is the Responses API at `https://api.openai.com/v1`, which is
+the only `base_url` the plan accepts. See
+[credentials.md](credentials.md#chatgpt-plan-sign-in-with-chatgpt).
 
 Bedrock adds a `region` field:
 
@@ -239,6 +247,7 @@ variable. See [mcp.md](mcp.md).
 | `WIRKEN_ASK_APPROVAL_TIMEOUT_S` | Deadline on the `wirken ask` approval prompt. Default: `60` |
 | `WIRKEN_VETO_BUDGET_MS` / `WIRKEN_EGRESS_BUDGET_MS` | Cumulative hook-dispatch budget. Default `1000` each, per-hook ceiling 500ms |
 | `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES` | Flush cycles between continuous verification passes. Default: `100` |
+| `WIRKEN_CHATGPT_OAUTH_BASE` | Loopback base the ChatGPT sign-in and token requests go to instead of `auth.openai.com`, for a test stub. A base that is not loopback is refused; warns at every use |
 | `RUST_LOG` | Log verbosity, e.g. `RUST_LOG=wirken=debug` |
 
 Per-adapter port and token overrides (`WIRKEN_TEAMS_PORT`,

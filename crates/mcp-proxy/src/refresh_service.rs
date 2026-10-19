@@ -345,6 +345,7 @@ mod tests {
                 expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
                 scope: cred.scope.clone(),
                 provider: cred.provider.clone(),
+                client_id: None,
             })
         }
     }
@@ -397,6 +398,7 @@ mod tests {
                 expires_at: 1,
                 scope: "read".into(),
                 provider: "linear".into(),
+                client_id: None,
             },
         )
         .unwrap();
@@ -633,6 +635,7 @@ mod tests {
                 expires_at: 1,
                 scope: "read".into(),
                 provider: "linear".into(),
+                client_id: None,
             },
         )
         .unwrap();
@@ -684,6 +687,7 @@ mod tests {
                 expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
                 scope: cred.scope.clone(),
                 provider: cred.provider.clone(),
+                client_id: None,
             })
         }
     }

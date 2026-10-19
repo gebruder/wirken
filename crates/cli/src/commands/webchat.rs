@@ -2143,6 +2143,9 @@ function renderStatusValues() {
   const agent = status.agent || {};
   const ag = el('span', null, agent.id || 'default');
   if (agent.model) ag.appendChild(el('span', 'yield-3', ' · ' + agent.model));
+  // An agent on a ChatGPT plan says so where the model is named, with
+  // where the plan's share for this app is managed.
+  if (agent.provider === 'chatgpt') ag.appendChild(el('span', 'hedge', ' · using ChatGPT plan · manage usage at chatgpt.com/settings/usage'));
   items.push({ node: ag, yield: 0 });
   const sandbox = status.sandbox || {};
   if (sandbox.mode) {
@@ -3521,7 +3524,11 @@ pub async fn status_snapshot(
                             "id": "default",
                             "provider": provider,
                             "model": model,
-                            "api_key_credential": pj["api_key_name"].as_str(),
+                            "api_key_credential": if provider == "chatgpt" {
+                                Some("chatgpt-plan")
+                            } else {
+                                pj["api_key_name"].as_str()
+                            },
                             "context_window": llm.context_window,
                             "effective_context_budget": wirken_agent::context::effective_budget(llm.context_window),
                             "tools_enabled": Value::Null,
@@ -7441,6 +7448,7 @@ mod tests {
                 channel_egress: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                token_source: None,
             },
         );
         let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
@@ -8466,6 +8474,7 @@ mod tests {
                     channel_egress: Default::default(),
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
+                    token_source: None,
                 },
             );
             let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())

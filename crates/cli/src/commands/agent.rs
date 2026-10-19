@@ -120,7 +120,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // ollama (no vault lookup) and for the warn-and-continue failure
     // path below.
     let mut api_key_credential: Option<String> = None;
-    let api_key = if provider != "ollama" {
+    let api_key = if provider != "ollama" && provider != super::chatgpt_plan::PROVIDER {
         let pp = super::cached_vault_passphrase()?;
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
@@ -140,7 +140,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         None
     };
 
-    if api_key.is_none() && provider != "ollama" {
+    if api_key.is_none() && provider != "ollama" && provider != super::chatgpt_plan::PROVIDER {
         anyhow::bail!("No API key available for '{provider}'. Run `wirken setup` to configure.");
     }
 
@@ -185,14 +185,26 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // same agent.
     // Every stored secret, set before the skills, which are checked
     // against it as they load.
-    agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
-        &cfg.vault_db_path(),
-        || {
-            probe_keychain(&cfg.data_dir, || {
-                super::cached_vault_passphrase().unwrap_or_default()
-            })
-        },
-    )));
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            super::cached_vault_passphrase().unwrap_or_default()
+        })
+    }));
+    agent.set_leak_matcher(leak_matcher.clone());
+    // On the plan, the bearer is read before each call from the grant
+    // the sign-in stored, as `wirken run` does.
+    if provider == super::chatgpt_plan::PROVIDER {
+        let pp = super::cached_vault_passphrase()?;
+        let keychain = probe_keychain(&cfg.data_dir, move || pp);
+        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+            .context("Failed to open credential store")?;
+        let source = super::chatgpt_plan::VaultOAuthTokenSource::open(
+            Arc::new(Mutex::new(store)),
+            super::chatgpt_plan::DEFAULT_CREDENTIAL,
+            leak_matcher,
+        )?;
+        agent.set_token_source(source);
+    }
     agent
         .attach_skills(super::skills_for_default_agent(&cfg)?)
         .context("attach skills")?;
@@ -241,7 +253,8 @@ async fn send_with_agent_config(
     } else {
         Some(agent_cfg.api_key_credential.clone())
     };
-    let api_key = if !agent_cfg.api_key_credential.is_empty() {
+    let on_plan = agent_cfg.provider == super::chatgpt_plan::PROVIDER;
+    let api_key = if !on_plan && !agent_cfg.api_key_credential.is_empty() {
         let pp = super::cached_vault_passphrase()?;
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
@@ -290,14 +303,29 @@ async fn send_with_agent_config(
     // operator-actionable error, not silent skill absence.
     // Every stored secret, set before the skills, which are checked
     // against it as they load.
-    agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
-        &cfg.vault_db_path(),
-        || {
-            probe_keychain(&cfg.data_dir, || {
-                super::cached_vault_passphrase().unwrap_or_default()
-            })
-        },
-    )));
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            super::cached_vault_passphrase().unwrap_or_default()
+        })
+    }));
+    agent.set_leak_matcher(leak_matcher.clone());
+    if on_plan {
+        let name = if agent_cfg.api_key_credential.is_empty() {
+            super::chatgpt_plan::DEFAULT_CREDENTIAL
+        } else {
+            agent_cfg.api_key_credential.as_str()
+        };
+        let pp = super::cached_vault_passphrase()?;
+        let keychain = probe_keychain(&cfg.data_dir, move || pp);
+        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+            .context("Failed to open credential store")?;
+        let source = super::chatgpt_plan::VaultOAuthTokenSource::open(
+            Arc::new(Mutex::new(store)),
+            name,
+            leak_matcher,
+        )?;
+        agent.set_token_source(source);
+    }
     agent
         .attach_skills(super::skills_for_agent(cfg, agent_cfg)?)
         .context("attach skills")?;

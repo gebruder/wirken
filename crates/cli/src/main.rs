@@ -564,8 +564,13 @@ enum AgentCommands {
         channels: Option<String>,
         /// Read the API key from this environment variable rather than
         /// prompting. The value never appears on the command line.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "credential")]
         api_key_env: Option<String>,
+        /// Vault entry the agent runs on, for a provider whose grant a
+        /// sign-in stored rather than a typed key: `chatgpt`, default
+        /// `chatgpt-plan`
+        #[arg(long)]
+        credential: Option<String>,
     },
     /// List all configured agents
     List,
@@ -1004,6 +1009,24 @@ enum CredentialCommands {
         #[arg(long)]
         identifier: bool,
     },
+    /// Sign in to a provider that grants plan usage over OAuth and keep
+    /// the grant in the vault. `chatgpt` is that provider: Sign in with
+    /// ChatGPT, under OpenAI's program for open-source apps, so agents
+    /// run on your ChatGPT plan with no API key.
+    Authorize {
+        /// The provider: `chatgpt`
+        provider: String,
+        /// Vault entry to keep the grant under (default: chatgpt-plan)
+        #[arg(long)]
+        name: Option<String>,
+        /// Fixed loopback port for the sign-in callback, so an SSH port
+        /// forward can carry the browser's redirect to a headless host
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the sign-in URL instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Rotate a credential's value. Prompts for the new value on
     /// stderr unless --stdin or --value-file supplies it.
     Rotate {
@@ -1415,6 +1438,15 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            CredentialCommands::Authorize {
+                provider,
+                name,
+                port,
+                no_browser,
+            } => {
+                commands::chatgpt_plan::authorize(&provider, name.as_deref(), port, !no_browser)
+                    .await
+            }
             CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
             CredentialCommands::Show { name } => commands::credential::show(&name).await,
             CredentialCommands::Rescope {
@@ -1577,6 +1609,7 @@ async fn main() -> Result<()> {
                 base_url,
                 channels,
                 api_key_env,
+                credential,
             } => {
                 commands::agents::add(commands::agents::AddArgs {
                     id,
@@ -1586,6 +1619,7 @@ async fn main() -> Result<()> {
                     base_url,
                     channels,
                     api_key_env,
+                    credential,
                 })
                 .await
             }
@@ -1757,6 +1791,83 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("clap parse failed")
+    }
+
+    /// `credentials authorize chatgpt` takes a name, a fixed port and
+    /// the no-browser switch; `agents add --credential` names a stored
+    /// grant and excludes `--api-key-env`.
+    #[test]
+    fn credentials_authorize_and_agents_add_credential_parse() {
+        let cli = parse(&[
+            "wirken",
+            "credentials",
+            "authorize",
+            "chatgpt",
+            "--name",
+            "plan",
+            "--port",
+            "1455",
+            "--no-browser",
+        ]);
+        match cli.command {
+            Commands::Credentials(CredentialCommands::Authorize {
+                provider,
+                name,
+                port,
+                no_browser,
+            }) => {
+                assert_eq!(provider, "chatgpt");
+                assert_eq!(name.as_deref(), Some("plan"));
+                assert_eq!(port, Some(1455));
+                assert!(no_browser);
+            }
+            _ => panic!("parsed into another command"),
+        }
+
+        let cli = parse(&[
+            "wirken",
+            "agents",
+            "add",
+            "--id",
+            "plan",
+            "--provider",
+            "chatgpt",
+            "--model",
+            "gpt-test",
+            "--credential",
+            "chatgpt-plan",
+        ]);
+        match cli.command {
+            Commands::Agents(AgentCommands::Add {
+                credential,
+                api_key_env,
+                ..
+            }) => {
+                assert_eq!(credential.as_deref(), Some("chatgpt-plan"));
+                assert_eq!(api_key_env, None);
+            }
+            _ => panic!("parsed into another command"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "wirken",
+                "agents",
+                "add",
+                "--id",
+                "x",
+                "--provider",
+                "chatgpt",
+                "--model",
+                "m",
+                "--credential",
+                "c",
+                "--api-key-env",
+                "K",
+            ])
+            .is_err(),
+            "--credential and --api-key-env exclude each other"
+        );
     }
 
     #[test]

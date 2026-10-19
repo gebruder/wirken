@@ -58,6 +58,9 @@ impl LlmClient {
                 self.stream_openai(messages, tools, api_key, &tx).await
             }
             "anthropic" => self.stream_anthropic(messages, tools, api_key, &tx).await,
+            crate::llm_responses::PROVIDER => {
+                self.stream_responses(messages, tools, api_key, &tx).await
+            }
             _ => {
                 // Fall back to non-streaming. Plumbs the underlying
                 // `complete` usage through unchanged so providers

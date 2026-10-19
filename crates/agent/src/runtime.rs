@@ -246,6 +246,10 @@ pub struct Agent {
     /// `provider.json`, env-var override, tests). Never the secret
     /// itself.
     api_key_credential: Option<String>,
+    /// Asked for the bearer before each model call, for a provider
+    /// whose credential expires and is refreshed by the gateway. When
+    /// set it replaces [`Self::api_key`] for every call.
+    token_source: Option<Arc<dyn crate::llm::ProviderTokenSource>>,
     /// What every dispatched tool call passes. There is no ungated
     /// shape: see [`ToolGate`].
     permissions: ToolGate,
@@ -686,6 +690,7 @@ impl Agent {
             system_prompt,
             api_key,
             api_key_credential,
+            token_source: None,
             permissions: ToolGate::Store(permissions),
             org_permissions: None,
             current_trigger: None,
@@ -791,6 +796,7 @@ impl Agent {
             system_prompt,
             api_key,
             api_key_credential,
+            token_source: None,
             permissions,
             org_permissions: None,
             current_trigger: None,
@@ -2019,6 +2025,22 @@ impl Agent {
         self.llm.config()
     }
 
+    /// Take the bearer for every model call from `source` instead of
+    /// the static key, and stamp its credential name on the rows.
+    pub fn set_token_source(&mut self, source: Arc<dyn crate::llm::ProviderTokenSource>) {
+        self.api_key_credential = Some(source.credential_name().to_string());
+        self.token_source = Some(source);
+    }
+
+    /// The bearer this call sends: the token source's current one when
+    /// a source is attached, else the static key.
+    async fn bearer_for_call(&self) -> Result<Option<String>, AgentError> {
+        match &self.token_source {
+            Some(source) => source.bearer().await.map(Some),
+            None => Ok(self.api_key.clone()),
+        }
+    }
+
     /// Test-only accessor returning the api_key this agent was
     /// woken with. Lets a test prove per-channel credential
     /// selection pairs the right key with the right provider.
@@ -2230,10 +2252,10 @@ impl Agent {
             ),
         )?;
         let started = std::time::Instant::now();
-        let result = self
-            .llm
-            .complete(&messages, &[], self.api_key.as_deref())
-            .await;
+        let result = match self.bearer_for_call().await {
+            Ok(bearer) => self.llm.complete(&messages, &[], bearer.as_deref()).await,
+            Err(e) => Err(e),
+        };
         let result = match result {
             Ok((response, usage)) => {
                 let (row, total_cost_usd_micros) = side_call_response(
@@ -2923,13 +2945,13 @@ impl Agent {
 
             self.check_inference_or_deny()?;
             let started = std::time::Instant::now();
+            let bearer = self
+                .bearer_for_call()
+                .await
+                .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let (response, usage) = self
                 .llm
-                .complete(
-                    self.conversation.messages(),
-                    &tool_defs,
-                    self.api_key.as_deref(),
-                )
+                .complete(self.conversation.messages(), &tool_defs, bearer.as_deref())
                 .await
                 .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let latency_ms = started.elapsed().as_millis() as u64;
@@ -3272,11 +3294,15 @@ impl Agent {
             self.check_inference_or_deny()?;
             // Spawn streaming in background, forward text deltas to caller
             let started = std::time::Instant::now();
+            let bearer = self
+                .bearer_for_call()
+                .await
+                .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let (response, usage) = {
                 let stream_future = self.llm.complete_stream(
                     self.conversation.messages(),
                     &tool_defs,
-                    self.api_key.as_deref(),
+                    bearer.as_deref(),
                     round_tx,
                 );
 

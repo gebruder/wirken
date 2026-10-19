@@ -19,6 +19,8 @@ pub struct AddArgs {
     pub base_url: Option<String>,
     pub channels: Option<String>,
     pub api_key_env: Option<String>,
+    /// A stored grant the agent runs on instead of a typed key.
+    pub credential: Option<String>,
 }
 
 impl AddArgs {
@@ -36,6 +38,7 @@ impl AddArgs {
             || self.model.is_some()
             || self.base_url.is_some()
             || self.api_key_env.is_some()
+            || self.credential.is_some()
             || self.channels.is_some()
             || self.name.is_some()
     }
@@ -92,6 +95,10 @@ pub async fn add(args: AddArgs) -> Result<()> {
 
         println!("  API key encrypted as '{cred_name}'.");
         cred_name
+    } else if provider == super::chatgpt_plan::PROVIDER {
+        // The sign-in the picker ran stored the grant; the agent runs
+        // on that entry.
+        super::chatgpt_plan::DEFAULT_CREDENTIAL.to_string()
     } else {
         String::new()
     };
@@ -210,9 +217,20 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
 
     // The key arrives through the environment, never as an argument:
     // arguments are visible in the process table to every other user
-    // on the machine.
-    let api_key_credential = match args.api_key_env {
-        Some(var) => {
+    // on the machine. A plan provider has no key: `--credential` names
+    // the grant a sign-in stored, or the default entry stands in.
+    let api_key_credential = match (args.api_key_env, args.credential) {
+        (Some(_), _) if provider == super::chatgpt_plan::PROVIDER => {
+            anyhow::bail!(
+                "--api-key-env does not apply to provider '{provider}': its grant comes from \
+                 `wirken credentials authorize chatgpt`; pass --credential to name the entry"
+            );
+        }
+        (None, Some(name)) => name,
+        (None, None) if provider == super::chatgpt_plan::PROVIDER => {
+            super::chatgpt_plan::DEFAULT_CREDENTIAL.to_string()
+        }
+        (Some(var), _) => {
             let api_key = std::env::var(&var).map_err(|_| {
                 anyhow::anyhow!("--api-key-env named '{var}', which is not set in this environment")
             })?;
@@ -237,7 +255,7 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
             println!("  API key encrypted as '{cred_name}'.");
             cred_name
         }
-        None => String::new(),
+        (None, None) => String::new(),
     };
 
     let channels: Vec<String> = args
@@ -492,7 +510,13 @@ pub async fn set(
             // `--model list` asks the provider rather than taking the
             // literal word as an id.
             updated.model = if m == "list" {
-                let key = resolve_api_key(&cfg, &existing.api_key_credential);
+                // A plan agent lists with its grant's current bearer,
+                // not the stored entry, which is an OAuth record.
+                let key = if existing.provider == super::chatgpt_plan::PROVIDER {
+                    resolve_plan_bearer(&cfg, plan_credential_name(&existing)).await
+                } else {
+                    resolve_api_key(&cfg, &existing.api_key_credential)
+                };
                 let models = super::provider_pick::list_models(
                     &updated.provider,
                     &updated.base_url,
@@ -515,6 +539,16 @@ pub async fn set(
     }
 
     if replace_api_key {
+        // A typed key would overwrite the plan's OAuth grant with a
+        // value the gateway cannot use; signing in again is the way
+        // to replace that grant.
+        if existing.provider == super::chatgpt_plan::PROVIDER {
+            anyhow::bail!(
+                "agent '{id}' runs on a ChatGPT plan, which has no API key. To sign in again, \
+                 run `wirken credentials rescope {}`.",
+                plan_credential_name(&existing)
+            );
+        }
         let api_key = super::read_secret("  New API key: ")?;
         // Reuse the credential name already on the row when there is
         // one, so the vault entry the gateway resolves is the entry
@@ -588,6 +622,37 @@ pub async fn set(
 /// credential all yield `None`, and the listing then comes back empty
 /// and the operator types the id. Not being able to list is not a
 /// reason to refuse the command.
+/// The vault entry a plan agent's grant lives under: the row's
+/// credential, or the default entry when the row names none.
+fn plan_credential_name(agent: &AgentConfig) -> &str {
+    if agent.api_key_credential.is_empty() {
+        super::chatgpt_plan::DEFAULT_CREDENTIAL
+    } else {
+        agent.api_key_credential.as_str()
+    }
+}
+
+/// The current bearer of a ChatGPT plan grant, refreshed when it is
+/// about to expire, for the same listing convenience as
+/// [`resolve_api_key`]: `None` when the vault cannot be opened without
+/// a prompt or the grant is unusable, and the operator types the id.
+async fn resolve_plan_bearer(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    credential: &str,
+) -> Option<String> {
+    use wirken_agent::llm::ProviderTokenSource;
+    let pp = super::vault_passphrase_source().unwrap_or_default();
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok()?;
+    let source = super::chatgpt_plan::VaultOAuthTokenSource::open(
+        std::sync::Arc::new(std::sync::Mutex::new(store)),
+        credential,
+        std::sync::Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+    )
+    .ok()?;
+    source.bearer().await.ok()
+}
+
 fn resolve_api_key(
     cfg: &wirken_gateway::config::GatewayConfig,
     credential: &str,

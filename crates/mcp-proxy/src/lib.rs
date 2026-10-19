@@ -34,9 +34,11 @@ mod runner;
 pub use error::ProxyError;
 pub use mcp_config::McpConfig;
 pub use oauth::{
-    OAuthCredential, OAuthProvider, PublicOAuthCredential, ScopeCategory, ScopeChoice,
-    default_selected_scopes, load_oauth_public, lookup_provider, parse_public_view,
-    run_authorization_code_flow, store_oauth,
+    CHATGPT_OAUTH_BASE_ENV, CHATGPT_RESOURCE, ClientIdSource, OAuthCredential, OAuthProvider,
+    PLAN_USAGE_SCOPE, PublicOAuthCredential, ScopeCategory, ScopeChoice, SignInOptions,
+    default_selected_scopes, load_oauth, load_oauth_public, lookup_provider, parse_public_view,
+    refresh_oauth_token, revoke_oauth_token, run_authorization_code_flow,
+    run_authorization_code_flow_with, store_oauth,
 };
 pub use runner::{ConfiguredCredentials, configured_credentials, run};
 pub use tool_error::{McpToolError, detect_scope_not_granted};
