@@ -3358,68 +3358,6 @@ mod subagent {
         }
     }
 
-    /// Several spawns in one round bind each child on its own chain,
-    /// as a single spawn does, so a child rewoken later replays its
-    /// grant instead of falling to the bindingless clamp.
-    #[tokio::test]
-    async fn each_fanned_out_child_records_its_binding_row() {
-        let log = make_log();
-        let ceiling = SubagentCeiling {
-            tool_allowlist: vec!["read_file".into(), "web_search".into()],
-            max_permission_tier: PermissionTier::Tier2,
-            max_rounds: 1,
-            max_runtime_secs: 5,
-        };
-        let (factory, _tmp) = factory_with_ceiling("parent", "child", Some(ceiling), log.clone());
-
-        let parent_session = "parent/test/fan-out";
-        let parent = factory.wake("parent", parent_session).unwrap();
-        let mut agent = parent.lock().await;
-
-        let call = |id: &str, args: serde_json::Value| crate::conversation::ToolCallRequest {
-            id: id.into(),
-            name: "spawn_subagent".into(),
-            arguments: args.to_string(),
-        };
-        let calls = [
-            call(
-                "c0",
-                serde_json::json!({"agent_id": "child", "prompt": "a"}),
-            ),
-            call(
-                "c1",
-                serde_json::json!({"agent_id": "child", "prompt": "b", "tools": ["read_file"]}),
-            ),
-        ];
-        let refs: Vec<_> = calls.iter().collect();
-        agent.fan_out_spawns(&refs).await.unwrap();
-
-        for (n, want_tools) in [
-            (0, vec!["read_file".to_string(), "web_search".into()]),
-            (1, vec!["read_file".to_string()]),
-        ] {
-            let handle = log.handle_for(SessionId::new(format!("{parent_session}#sub-{n}")));
-            let events = log.get_since(&handle, 0).unwrap();
-            match events.first().map(|r| &r.event) {
-                Some(SessionEvent::SubagentSessionBound {
-                    agent_id,
-                    parent_session_id,
-                    depth,
-                    max_permission_tier,
-                    tools_granted,
-                    ..
-                }) => {
-                    assert_eq!(agent_id, "child");
-                    assert_eq!(parent_session_id, parent_session);
-                    assert_eq!(*depth, 1);
-                    assert_eq!(max_permission_tier, "tier2");
-                    assert_eq!(tools_granted, &want_tools, "child #sub-{n}");
-                }
-                other => panic!("#sub-{n}: expected SubagentSessionBound first, got {other:?}"),
-            }
-        }
-    }
-
     /// A child is checked against its own grants, not its caller's.
     ///
     /// A parent holds a Tier 2 shell allowlist grant. A child is

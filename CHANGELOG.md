@@ -10,13 +10,6 @@ tagged.
 
 ## [Unreleased]
 
-### Fixed
-
-- Children started by several `spawn_subagent` calls in one turn record their
-  `SubagentSessionBound` row, as a single spawn does. Without it a child rewoken
-  after a crash was clamped to tier1 with no tools, and `wirken sessions verify`
-  reported its tools as not attestable.
-
 ## [2.3.0] - 2026-10-18
 
 #288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0
