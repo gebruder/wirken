@@ -35,15 +35,16 @@ ignore = [
     #     -> wirken-adapter-discord -> wirken-cli
     # serenity 0.12 enables `rustls_backend` by default, so this is a
     # compiled path, not merely a locked one. The 0.103.x instance in
-    # the lock (0.103.15, under rustls 0.23 for reqwest/hyper-rustls)
+    # the lock (0.103.16, under rustls 0.23 for reqwest/hyper-rustls)
     # is past every patched range below. No 0.102.x backport exists
     # upstream and serenity 0.12.5 is the latest stable release, so
-    # all four are revisitable when serenity ships a release on
+    # all five are revisitable when serenity ships a release on
     # rustls 0.23.
     { id = "RUSTSEC-2026-0049", reason = "CRL distribution-point matching: only the first distributionPoint is checked, so a correctly supplied CRL may not be consulted. Not reachable on this path because no CRL is supplied on it. `CertRevocationList` and `with_crls` appear in zero files across serenity 0.12.5, tokio-tungstenite 0.21.0, tungstenite 0.21.0 and tokio-rustls 0.25.0, so the matching logic never runs. Revisit if serenity configures revocation checking, or on serenity with rustls 0.23." },
     { id = "RUSTSEC-2026-0098", reason = "URI name constraints were ignored rather than enforced. rustls-webpki implements no API for asserting URI names, so nothing on this path can present one. Name constraints also restrict otherwise properly-issued certificates and are evaluated only after signature verification, so exploiting this needs a CA in the client trust store to misissue a name-constrained certificate. Revisit on serenity with rustls 0.23." },
     { id = "RUSTSEC-2026-0099", reason = "A permitted-subtree DNS name constraint was accepted for a certificate asserting a wildcard name. Same precondition as RUSTSEC-2026-0098: reachable only after signature verification and only against a name-constrained certificate a trusted CA misissued. Revisit on serenity with rustls 0.23." },
     { id = "RUSTSEC-2026-0104", reason = "Panic in BorrowedCertRevocationList::from_der / OwnedCertRevocationList::from_der on an empty BIT STRING in onlySomeReasons, reachable before the CRL signature is verified. The advisory states applications that do not use CRLs are unaffected, and nothing on this path parses one: `CertRevocationList` and `from_der` are never called through serenity, tokio-tungstenite, tungstenite or tokio-rustls. Revisit if serenity configures revocation checking, or on serenity with rustls 0.23." },
+    { id = "RUSTSEC-2026-0382", reason = "Certificate path validation may accept a path through one of the distrusted emSign intermediates. Reachable only from the Discord adapter: rustls-webpki 0.102.8 is on the serenity path above and on no other, so the exposure is the Discord gateway and REST connections validating a chain a distrusted intermediate signed. No 0.102.x fix exists; the fix starts at 0.103.16, which the rest of the tree runs. Moving serenity off rustls 0.22 is held until the upgraded adapter passes a live Discord round-trip. Revisit on that upgrade." },
 
     # rustls 0.22.4, on the same path as the rustls-webpki entries above:
     #   rustls 0.22.4 -> tokio-rustls 0.25.0 / tungstenite 0.21.0
@@ -58,6 +59,15 @@ ignore = [
     # both are revisitable on a serenity release off rustls 0.22.
     { id = "RUSTSEC-2026-0346", reason = "Derived Debug impls on Tls12ClientSessionValue and Tls13ClientSessionValue print the TLS 1.2 master secret or TLS 1.3 resumption PSK, which leaks only through a custom ClientSessionStore that formats session values with Debug; the built-in session cache is redacted and unaffected. Not reachable on this path: tungstenite 0.21.0 and tokio-tungstenite 0.21.0 build their client config with ClientConfig::builder().with_root_certificates(..).with_no_client_auth(), which keeps the built-in cache, and ClientSessionStore appears in zero files across serenity 0.12.5, tokio-tungstenite 0.21.0, tungstenite 0.21.0 and tokio-rustls 0.25.0. Revisit on a serenity release off rustls 0.22." },
     { id = "RUSTSEC-2026-0349", reason = "The client records the key-exchange group from an unauthenticated ServerHello and predicts it on later connections to that name, so an attacker can steer it off a post-quantum hybrid group (X25519MLKEM768) to classical X25519, losing post-quantum confidentiality. Not reachable on this path: rustls 0.22.4 is built here with the ring provider only, whose groups are X25519, secp256r1 and secp384r1, and the 0.22.4 source has no ML-KEM or Kyber group, so every connection on this path is classical already and there is no hybrid group to lose. Revisit on a serenity release off rustls 0.22." },
+
+    # webpki-roots 0.26.11, reached by:
+    #   wirken-agent -> tinfoil v0.1.1 (git)
+    #   tokio-tungstenite 0.21.0 -> serenity 0.12.5
+    #     -> wirken-adapter-discord -> wirken-cli
+    # 0.26.11 is a shim: its whole lib.rs is
+    # `pub use parent::TLS_SERVER_ROOTS;`, with `parent` the webpki-roots
+    # 1.x the lockfile resolves. Re-derive when the lockfile moves.
+    { id = "RUSTSEC-2026-0381", reason = "Bundled root certificates allow trust in distrusted emSign intermediates. Not reachable as shipped: webpki-roots 0.26.11 holds no roots of its own; it re-exports the webpki-roots 1.x the lockfile resolves, currently 1.0.10, which carries the fix. Pulled in by tinfoil (pinned git dependency) and by tokio-tungstenite 0.21 under serenity. Revisit when either depends on webpki-roots 1.x directly." },
 
     # rsa 0.9.10, reached only by:
     #   wirken-agent -> tinfoil v0.1.1 (git) -> sev 7.1.0 -> rsa

@@ -34,7 +34,7 @@
 //! Subsequent callers serialize through the inner `Mutex<Agent>` on
 //! the cached entry, which is the existing single-writer guarantee.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
@@ -46,7 +46,8 @@ use wirken_gateway::agent_config::SubagentCeiling;
 use wirken_gateway::budget::{BudgetConfig, BudgetStore};
 use wirken_gateway::org::OrgPermissions;
 use wirken_gateway::permissions::{
-    PermissionStore, SESSION_CLEAR_REASON_ENDED, emit_session_scoped_approvals_cleared,
+    PermissionStore, PermissionTier, SESSION_CLEAR_REASON_ENDED,
+    emit_session_scoped_approvals_cleared,
 };
 
 use crate::error::AgentError;
@@ -215,6 +216,39 @@ impl CacheMode {
 struct BudgetWiring {
     store: Arc<StdMutex<BudgetStore>>,
     config: BudgetConfig,
+}
+
+/// The ceiling a parent grants a child it spawns, which
+/// [`AgentFactory::wake_subagent`] applies to the child and records
+/// on the child's own chain as its `SubagentSessionBound` row.
+pub(crate) struct SubagentBinding {
+    /// The child's nesting depth, one more than its parent's.
+    pub(crate) depth: usize,
+    /// The highest tier the child may act at without being refused.
+    pub(crate) max_permission_tier: PermissionTier,
+    /// The tools the child is offered: the ceiling's allowlist,
+    /// narrowed to what the parent asked for when it asked.
+    pub(crate) tools_granted: BTreeSet<String>,
+    pub(crate) parent_session_id: String,
+}
+
+/// Where a newly built agent's sub-agent binding comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingSource {
+    /// The session's own `SubagentSessionBound` row, if it has one.
+    /// Every wake that resumes a session takes this.
+    Replay,
+    /// The spawn that is creating the session, which binds the agent
+    /// once it is built. The lane is empty, so there is nothing to
+    /// replay, and reading its absence as a lost binding would be
+    /// wrong.
+    Spawn,
+}
+
+fn already_woken(child_session_id: &str) -> AgentError {
+    AgentError::SessionLog(format!(
+        "sub-agent session {child_session_id} is already woken; refusing to bind it"
+    ))
 }
 
 /// What a factory is waking agents for.
@@ -636,7 +670,99 @@ impl AgentFactory {
             return Ok(cached);
         }
 
-        // Build a fresh Agent for this session id.
+        let agent = self.build_agent(agent_id, session_id, BindingSource::Replay)?;
+        let arc = Arc::new(AsyncMutex::new(agent));
+
+        // Insert into cache (cached mode only). Double-checked: if
+        // another thread inserted between our lookup and now, return
+        // theirs and discard ours.
+        if self.cache_mode == CacheMode::Cached {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(existing) = cache.get(session_id).cloned() {
+                return Ok(existing);
+            }
+            cache.put(session_id.to_string(), arc.clone());
+        }
+
+        Ok(arc)
+    }
+
+    /// Wake the child a spawn names, and bind it before anyone can
+    /// use it.
+    ///
+    /// A plain [`Self::wake`] on a child's lane at spawn finds no
+    /// binding row, because the spawn has not written it yet, and
+    /// treats the lane as a child whose binding was lost. Binding
+    /// here, between the build and the return, puts the row on the
+    /// child's chain before any caller holds the agent. The agent is
+    /// cached only once it is bound, so a bind that fails leaves
+    /// nothing behind for a later wake to find clamped but unbound.
+    ///
+    /// Refuses, binding nothing, a lane that already has rows or a
+    /// session id already in the cache. A child's id derives from its
+    /// parent's spawn count, so a new spawn names a lane nothing has
+    /// written to or woken. Either one means the slot is not new, and
+    /// binding over it would put a second ceiling on a chain that may
+    /// already be running under the first.
+    pub(crate) async fn wake_subagent(
+        &self,
+        agent_id: &str,
+        child_session_id: &str,
+        binding: SubagentBinding,
+    ) -> Result<Arc<AsyncMutex<Agent>>, AgentError> {
+        if self.cache_mode == CacheMode::Cached
+            && self.cache.lock().unwrap().contains(child_session_id)
+        {
+            return Err(already_woken(child_session_id));
+        }
+        let handle = self
+            .session_log
+            .handle_for(SessionId::new(child_session_id.to_string()));
+        let last = self
+            .session_log
+            .last_index(&handle)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+        if last.is_some() {
+            return Err(AgentError::SessionLog(format!(
+                "sub-agent session {child_session_id} already has rows; refusing to bind it"
+            )));
+        }
+
+        let mut agent = self.build_agent(agent_id, child_session_id, BindingSource::Spawn)?;
+        agent
+            .bind_as_subagent(
+                binding.depth,
+                binding.max_permission_tier,
+                binding.tools_granted,
+                &binding.parent_session_id,
+            )
+            .await?;
+        let arc = Arc::new(AsyncMutex::new(agent));
+
+        // Unlike `wake`, an entry that appeared while this one was
+        // binding is not handed back. It is another agent on the same
+        // lane, one this call did not bind, so the call refuses.
+        if self.cache_mode == CacheMode::Cached {
+            let mut cache = self.cache.lock().unwrap();
+            if cache.contains(child_session_id) {
+                return Err(already_woken(child_session_id));
+            }
+            cache.put(child_session_id.to_string(), arc.clone());
+        }
+
+        Ok(arc)
+    }
+
+    /// Construct the agent for `session_id` from its session log and
+    /// this factory's configuration. Shared by [`Self::wake`] and
+    /// [`Self::wake_subagent`]; neither the cache nor the sub-agent
+    /// bind is its concern.
+    fn build_agent(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        binding: BindingSource,
+    ) -> Result<Agent, AgentError> {
         let cfg = self
             .static_configs
             .get(agent_id)
@@ -726,9 +852,12 @@ impl AgentFactory {
         // means a child woken from its session alone comes back
         // constrained, on crash recovery and on offline verify
         // alike. A read failure leaves the agent unclamped, which is
-        // the wrong direction, so it is loud rather than silent.
-        if let Err(err) =
-            replay_subagent_binding(&mut agent, &self.session_log, session_id, self.purpose)
+        // the wrong direction, so it is loud rather than silent. A
+        // spawn has no row to replay: it binds the agent once this
+        // returns.
+        if binding == BindingSource::Replay
+            && let Err(err) =
+                replay_subagent_binding(&mut agent, &self.session_log, session_id, self.purpose)
         {
             tracing::error!(
                 session_id,
@@ -784,20 +913,14 @@ impl AgentFactory {
             agent.attach_zirkel_db(path.clone());
         }
 
-        let arc = Arc::new(AsyncMutex::new(agent));
+        Ok(agent)
+    }
 
-        // Insert into cache (cached mode only). Double-checked: if
-        // another thread inserted between our lookup and now, return
-        // theirs and discard ours.
-        if self.cache_mode == CacheMode::Cached {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(existing) = cache.get(session_id).cloned() {
-                return Ok(existing);
-            }
-            cache.put(session_id.to_string(), arc.clone());
-        }
-
-        Ok(arc)
+    /// Test-only: whether `session_id` is in the cache, without
+    /// waking it.
+    #[cfg(test)]
+    pub(crate) fn is_cached_for_test(&self, session_id: &str) -> bool {
+        self.cache.lock().unwrap().contains(session_id)
     }
 
     /// Drop a session from the cache. Used by callers that know the

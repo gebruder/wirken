@@ -41,6 +41,24 @@ tagged.
   carry the issued `client_id`. Entries stored before the field existed read
   unchanged.
 
+### Fixed
+
+- Sub-agents started by several `spawn_subagent` calls in one turn now
+  write their `SubagentSessionBound` row, as a single spawn always has.
+  Without it, such a child woken again after a crash came back at tier1
+  with no tools instead of its grant, and `wirken sessions verify` could
+  not attest the tools it was offered. Found by Tanmay Maka
+  (@maka-tanmay).
+- Spawning a sub-agent no longer logs "sub-agent session has no binding
+  row" at ERROR. The factory now binds a spawned child before handing it
+  back, so no spawn sees the child's lane without its row. The ERROR
+  remains for a child lane woken later whose row is missing. Found by
+  Tanmay Maka (@maka-tanmay).
+- A sub-agent that cannot be bound no longer ends its parent's turn. The
+  call returns an error result, the parent's chain records the spawn's
+  `SubagentResult` as an error, and the child does not run. Single and
+  parallel spawns behave the same; siblings in a parallel spawn run on.
+
 ## [2.3.0] - 2026-10-18
 
 #288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0
