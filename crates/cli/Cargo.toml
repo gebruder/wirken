@@ -61,6 +61,12 @@ indexmap = { version = "2", features = ["serde"] }
 openssl = { workspace = true }
 libc = "0.2"
 rusqlite = { workspace = true }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+# Display widths for the chat's layout, grapheme by grapheme: the same two
+# crates ratatui measures with, already in the tree through it.
+unicode-segmentation = "1"
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

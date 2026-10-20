@@ -4473,7 +4473,7 @@ const INTERCEPTED_TOOLS: &[&str] = &["spawn_subagent", "wirken_enter_phase", "wi
 
 /// One row of the tool table: the tier the gate would compute for a
 /// call with no arguments, or the rule when the arguments decide it.
-fn tool_tier_entry(name: &str, description: &str) -> serde_json::Value {
+pub(crate) fn tool_tier_entry(name: &str, description: &str) -> serde_json::Value {
     use serde_json::{Value, json};
     if let Some((_, rule)) = ARGUMENT_DEPENDENT_TOOLS.iter().find(|(n, _)| *n == name) {
         return json!({

@@ -59,6 +59,13 @@ wirken setup
 wirken run
 ```
 
+To talk to an agent straight away, run `wirken` with no arguments. A chat
+opens in the terminal; on a first run it walks through setup before it opens.
+Commands the agent wants to run show up as cards you approve or deny, and
+`/help` lists everything else. See [docs/cli.md](docs/cli.md#wirken-chat).
+
+<img src="docs/img/chat-home.png" alt="wirken chat on first open: a message box, the agent, model and sandbox under it, and three suggestions to start from" width="720">
+
 Pin the installer before piping. The committed `install.sh` has this SHA-256:
 
 ```

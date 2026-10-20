@@ -49,6 +49,23 @@ Six steps, about a minute:
 
 16 bundled skills are installed automatically.
 
+## Chat
+
+```bash
+wirken
+```
+
+![The chat on first open: a greeting, the message box, the agent, model and sandbox under it, and three suggestions to start from](img/chat-home.png)
+
+Opens a chat with the default agent in the terminal; `wirken chat` is the
+same. On a first run it walks through setup before the chat opens. Type a
+message and press Enter, or pick one of the suggestions; a tool that needs
+approval shows a card, answered with its buttons or `y` and `n`; `/help` lists the commands and keys, `/quit` leaves.
+Earlier conversations are in the sidebar and reopen with a click.
+Everything the agent does is on the audit chain under this conversation's
+id, which `/status` shows; a run the agent delegates is on its own lane,
+`<id>#sub-N`. See [cli.md](cli.md#wirken-chat).
+
 ## Run
 
 ```bash

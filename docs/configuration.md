@@ -236,7 +236,7 @@ variable. See [mcp.md](mcp.md).
 | `WIRKEN_SKILLS_INDEX` | Override the skill registry URL |
 | `WIRKEN_CACHE_MODE` | `drop` bypasses the agent LRU cache so every inbound message wakes a fresh agent from the session log. Default: `cached` |
 | `WIRKEN_AGENT_CACHE_SIZE` | LRU cache capacity in hot sessions. Default: `64` |
-| `WIRKEN_ASK_APPROVAL_TIMEOUT_S` | Deadline on the `wirken ask` approval prompt. Default: `60` |
+| `WIRKEN_ASK_APPROVAL_TIMEOUT_S` | Deadline on the `wirken ask` approval prompt and the `wirken chat` approval card. Default: `60` |
 | `WIRKEN_VETO_BUDGET_MS` / `WIRKEN_EGRESS_BUDGET_MS` | Cumulative hook-dispatch budget. Default `1000` each, per-hook ceiling 500ms |
 | `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES` | Flush cycles between continuous verification passes. Default: `100` |
 | `RUST_LOG` | Log verbosity, e.g. `RUST_LOG=wirken=debug` |

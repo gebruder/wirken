@@ -15,8 +15,9 @@ mod commands;
     about = "Secure personal AI agent gateway"
 )]
 struct Cli {
+    /// Absent means `chat`: `wirken` alone opens the chat.
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -164,6 +165,15 @@ enum Commands {
         /// every persona is an AgentConfig row keyed by its name, so
         /// `--agent alice` and `--persona alice` both resolve the
         /// same row. (default: "default")
+        #[arg(long, visible_alias = "persona", default_value = "default")]
+        agent: String,
+    },
+
+    /// Chat with an agent in this terminal (what `wirken` alone runs)
+    Chat {
+        /// A first message to send as soon as the chat opens
+        message: Option<String>,
+        /// Agent / persona name, as for `ask` (default: "default")
         #[arg(long, visible_alias = "persona", default_value = "default")]
         agent: String,
     },
@@ -1227,13 +1237,21 @@ async fn main() -> Result<()> {
     //
     // It is a default, not a floor applied over the operator's
     // filter. See `build_env_filter`.
+    // Stdout, as the default writer is, except while the chat's screen
+    // is up: a log line printed then would land on top of the composer,
+    // so the chat holds it and shows it as a note.
     tracing_subscriber::fmt()
         .with_env_filter(build_env_filter(std::env::var("RUST_LOG").ok().as_deref()))
+        .with_writer(commands::chat::log_writer)
         .init();
 
     let cli = Cli::parse();
 
-    match cli.command {
+    let command = cli.command.unwrap_or(Commands::Chat {
+        message: None,
+        agent: "default".to_string(),
+    });
+    match command {
         Commands::Setup {
             install_service,
             uninstall_service,
@@ -1651,6 +1669,7 @@ async fn main() -> Result<()> {
             CronCommands::Resume { id } => commands::cron::resume(&id).await,
         },
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
+        Commands::Chat { message, agent } => commands::chat::run(&agent, message).await,
         Commands::Import { archive, sealed } => commands::import::run(&archive, sealed).await,
         Commands::Doctor => commands::doctor::run().await,
         Commands::Status => {
@@ -1759,10 +1778,53 @@ mod tests {
         Cli::try_parse_from(args).expect("clap parse failed")
     }
 
+    /// `wirken` alone is the chat: no subcommand parses, and `main`
+    /// fills in `chat` with its defaults.
+    #[test]
+    fn no_subcommand_parses_and_means_chat() {
+        assert!(parse(&["wirken"]).command.is_none());
+    }
+
+    #[test]
+    fn chat_parses_the_agent_and_a_first_message() {
+        match parse(&["wirken", "chat", "--agent", "alice", "hello there"])
+            .command
+            .expect("a subcommand")
+        {
+            Commands::Chat { message, agent } => {
+                assert_eq!(agent, "alice");
+                assert_eq!(message.as_deref(), Some("hello there"));
+            }
+            other => panic!("parsed {}", std::any::type_name_of_val(&other)),
+        }
+    }
+
+    #[test]
+    fn chat_defaults_to_the_default_agent_and_no_message() {
+        match parse(&["wirken", "chat"]).command.expect("a subcommand") {
+            Commands::Chat { message, agent } => {
+                assert_eq!(agent, "default");
+                assert!(message.is_none());
+            }
+            other => panic!("parsed {}", std::any::type_name_of_val(&other)),
+        }
+    }
+
+    #[test]
+    fn chat_takes_persona_as_an_alias_of_agent() {
+        match parse(&["wirken", "chat", "--persona", "bob"])
+            .command
+            .expect("a subcommand")
+        {
+            Commands::Chat { agent, .. } => assert_eq!(agent, "bob"),
+            other => panic!("parsed {}", std::any::type_name_of_val(&other)),
+        }
+    }
+
     #[test]
     fn persona_create_parses_with_defaults() {
         let cli = parse(&["wirken", "persona", "create", "alice"]);
-        match cli.command {
+        match cli.command.expect("a subcommand") {
             Commands::Persona(PersonaCommands::Create {
                 name,
                 preset,
@@ -1810,7 +1872,7 @@ mod tests {
             "--allow-subagent",
             "writer",
         ]);
-        match cli.command {
+        match cli.command.expect("a subcommand") {
             Commands::Persona(PersonaCommands::Create {
                 name,
                 preset,
@@ -1831,7 +1893,7 @@ mod tests {
     fn persona_list_parses() {
         let cli = parse(&["wirken", "persona", "list"]);
         assert!(matches!(
-            cli.command,
+            cli.command.expect("a subcommand"),
             Commands::Persona(PersonaCommands::List)
         ));
     }
@@ -1839,7 +1901,7 @@ mod tests {
     #[test]
     fn persona_show_parses() {
         let cli = parse(&["wirken", "persona", "show", "alice"]);
-        match cli.command {
+        match cli.command.expect("a subcommand") {
             Commands::Persona(PersonaCommands::Show { name }) => assert_eq!(name, "alice"),
             _ => panic!("expected Persona::Show"),
         }
@@ -1855,7 +1917,7 @@ mod tests {
             "--preset",
             "researcher",
         ]);
-        match cli.command {
+        match cli.command.expect("a subcommand") {
             Commands::Persona(PersonaCommands::Edit {
                 name,
                 preset,
@@ -1873,7 +1935,7 @@ mod tests {
     #[test]
     fn persona_edit_with_clear_preset_parses() {
         let cli = parse(&["wirken", "persona", "edit", "alice", "--clear-preset"]);
-        match cli.command {
+        match cli.command.expect("a subcommand") {
             Commands::Persona(PersonaCommands::Edit {
                 preset,
                 clear_preset,
@@ -1906,7 +1968,7 @@ mod tests {
     #[test]
     fn persona_delete_parses() {
         let cli = parse(&["wirken", "persona", "delete", "alice"]);
-        match cli.command {
+        match cli.command.expect("a subcommand") {
             Commands::Persona(PersonaCommands::Delete { name }) => assert_eq!(name, "alice"),
             _ => panic!("expected Persona::Delete"),
         }

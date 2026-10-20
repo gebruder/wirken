@@ -142,7 +142,8 @@ classification, not a command: every command carrying a shell
 metacharacter collapses to `shell::pipeline:`, so the key alone cannot
 tell `cat a | bash` from `cat b | bash`. Both approval surfaces show the
 key, the arguments the model sent, and what the model said in the same
-message.
+message. The `wirken chat` approval card carries the same lines, rendered by
+the same function (`chat::gate::tests::the_card_carries_the_cli_prompt_lines`).
 
 On the CLI, above the `[y/N]`:
 

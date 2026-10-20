@@ -6,6 +6,7 @@ pub mod agents;
 pub mod approvers;
 pub mod audit;
 pub mod channel;
+pub mod chat;
 pub mod connection_tasks;
 pub mod credential;
 pub mod cron;

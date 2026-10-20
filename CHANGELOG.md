@@ -10,6 +10,35 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `wirken chat`, and `wirken` with no subcommand: a full-screen terminal
+  chat. Every configured agent is resolved as `wirken ask` resolves it and
+  woken through one `AgentFactory`, with the permission store, the leak
+  matcher, the org tool policy and budget enforcement, failing closed on a
+  malformed `budget.json` as `wirken run` does; hooks, MCP and the memory
+  stores, which need the daemon, are not attached, and the Safety card names
+  registered hooks. Each conversation is its own audit lane,
+  `{agent}/chat/c-<id>`, sealed when the chat leaves it (also on SIGTERM,
+  SIGHUP, SIGINT and a panic) and never written to when only read. A Tier 2
+  or Tier 3 action shows an approval card with the lines the `ask` prompt
+  shows; only `y` or `yes` alone approves, a draft typed when a card arrives
+  is set aside, and an approval in the card's first 0.7 seconds is not
+  taken. Tool calls are drawn from the chain in the order the model made
+  them. The screen has a sidebar of every agent under its provider and
+  model with its conversations and their delegated runs nested beneath, the
+  conversation with replies laid out as light Markdown by display width, and
+  a panel of cards (Delegations, Environment, Safety, Context, Cost and
+  tokens, Audit, Approvals, Tools) that `/runs`, `/status`, `/safety`,
+  `/context`, `/cost`, `/verify` and `/tools` also reach. An agent allowed
+  sub-agents with `wirken agents allow-subagent` delegates from the chat:
+  each run shows how it stands, its cards say which run asks for which agent
+  and under what ceiling at any depth, a run's lane opens read-only, and
+  finished runs are sealed. `/export` writes under `exports/` in the data
+  directory, never into the agent's workspace. New dependencies `ratatui`
+  and `crossterm` (both MIT), and `unicode-width` and `unicode-segmentation`
+  as direct dependencies (already in the tree through `ratatui`). See [docs/cli.md](docs/cli.md#wirken-chat).
+
 ## [2.3.0] - 2026-10-18
 
 #288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0
