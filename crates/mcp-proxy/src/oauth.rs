@@ -1628,6 +1628,7 @@ mod chatgpt_tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
     async fn a_refresh_sends_the_issued_client_id_and_the_resource_and_no_scope() {
         use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
