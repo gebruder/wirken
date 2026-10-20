@@ -2721,9 +2721,9 @@ checksum = "db13adb97ab515a3691f56e4dbab09283d0b86cb45abd991d8634a9d6f501760"
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libm"
@@ -4767,9 +4767,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slack-morphism"
-version = "2.29.0"
+version = "2.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4286448ffb6c09a3fb58a738269947f9106071cf5ca82f337b386ad145e2202f"
+checksum = "ffc35f287431415f15d6aead55508f0ea9ab9f70f7f3cde1ffb3fb3e30e2e8f1"
 dependencies = [
  "async-recursion",
  "async-trait",
