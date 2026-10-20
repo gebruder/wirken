@@ -55,6 +55,54 @@ pub struct ChannelEgress {
     pub domains: Vec<String>,
 }
 
+/// How an agent authenticates to its provider.
+///
+/// `Key` is every provider's API key or no credential at all, and the
+/// default, so an agent row or `provider.json` written before this
+/// existed reads as it always did. `Plan` is a sign-in mode one
+/// provider offers: the credential is an OAuth grant on the operator's
+/// plan, refreshed per call, and requests go to the provider's
+/// Responses endpoint at a fixed base URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuth {
+    #[default]
+    Key,
+    Plan,
+}
+
+impl ProviderAuth {
+    /// The value `provider.json` and the agent store carry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderAuth::Key => "key",
+            ProviderAuth::Plan => "plan",
+        }
+    }
+
+    /// Parse a stored value. Absent or empty is `Key`; anything else
+    /// unrecognized is an error rather than a guess, since reading an
+    /// unknown mode as an API key would send a request the operator
+    /// did not configure.
+    pub fn parse(raw: Option<&str>) -> Result<Self, GatewayError> {
+        match raw.unwrap_or("") {
+            "" | "key" => Ok(ProviderAuth::Key),
+            "plan" => Ok(ProviderAuth::Plan),
+            other => Err(GatewayError::Config(format!(
+                "unknown auth mode '{other}'; expected 'key' or 'plan'"
+            ))),
+        }
+    }
+
+    pub fn is_key(&self) -> bool {
+        *self == ProviderAuth::Key
+    }
+
+    pub fn is_plan(&self) -> bool {
+        *self == ProviderAuth::Plan
+    }
+}
+
 /// Persistent configuration for a registered agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {

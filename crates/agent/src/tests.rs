@@ -9811,6 +9811,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: true,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
         let messages = vec![Message {
@@ -9877,6 +9878,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: true,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
         let messages = vec![Message {
@@ -9953,6 +9955,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: false,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
 
@@ -10042,6 +10045,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: false,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
 
@@ -10134,6 +10138,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: false,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
 
@@ -10247,6 +10252,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: false,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
 
@@ -12733,6 +12739,7 @@ mod approved_unknown_tool {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -12853,6 +12860,7 @@ mod unanswered_approval {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -13170,6 +13178,7 @@ mod memory_is_not_policy {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -13499,6 +13508,7 @@ mod http_request_after_a_restricting_read {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -13678,6 +13688,7 @@ mod exec_location_reaches_the_gate {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -13924,6 +13935,7 @@ mod webchat_approval_reaches_the_page {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -14169,6 +14181,7 @@ mod leak_detection {
             region: None,
             tools_enabled: true,
             context_window: 32_000,
+            auth: Default::default(),
         }
     }
 

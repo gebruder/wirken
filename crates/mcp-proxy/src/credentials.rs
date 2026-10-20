@@ -343,6 +343,7 @@ impl HandedOAuth {
             expires_at: self.expires_at,
             scope: self.scope,
             provider: self.provider,
+            ..Default::default()
         }
     }
 }
@@ -370,6 +371,7 @@ mod tests {
             expires_at: 10,
             scope: "read".into(),
             provider: "linear".into(),
+            ..Default::default()
         })
         .unwrap();
         let handed = without_refresh_token(&stored);

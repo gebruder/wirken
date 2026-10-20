@@ -368,7 +368,13 @@ pub fn provider_names() -> &'static [&'static str] {
 /// [`PublicOAuthCredential`] is the right type for any code path
 /// that only needs the non-secret fields (provider, scopes,
 /// expiry).
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// The fields after `provider` are carried only by a sign-in that
+/// registers its own client and returns an OpenID identity (the LLM
+/// provider's plan sign-in, `wirken_agent::plan_auth`). Each is
+/// optional and left out of the JSON when absent, so an MCP provider's
+/// entry serializes to the same bytes it did before they existed.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct OAuthCredential {
     pub access_token: String,
     pub refresh_token: String,
@@ -376,6 +382,24 @@ pub struct OAuthCredential {
     pub expires_at: u64,
     pub scope: String,
     pub provider: String,
+    /// The client id the provider issued when this account registered.
+    /// Every exchange, refresh, revocation and later sign-in sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// The issuer the ID token was validated against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// The validated `sub` of the ID token: the account's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// The validated `email` claim, shown to the operator and sent as
+    /// a login hint on the next sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// The ID token of the last successful sign-in, kept to send as
+    /// `id_token_hint` on the next one. Cleared on sign-out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
 }
 
 impl std::fmt::Debug for OAuthCredential {
@@ -386,6 +410,11 @@ impl std::fmt::Debug for OAuthCredential {
             .field("expires_at", &self.expires_at)
             .field("scope", &self.scope)
             .field("provider", &self.provider)
+            .field("client_id", &self.client_id)
+            .field("issuer", &self.issuer)
+            .field("subject", &self.subject)
+            .field("email", &self.email)
+            .field("id_token", &self.id_token.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -402,6 +431,13 @@ pub struct PublicOAuthCredential {
     pub scopes: Vec<String>,
     /// Unix timestamp seconds. Same value as [`OAuthCredential::expires_at`].
     pub expires_at: u64,
+    /// The signed-in account, for an entry whose sign-in validated an
+    /// identity: its email, or its subject when no email was given.
+    /// `None` for the MCP providers.
+    pub account: Option<String>,
+    /// Whether the entry still holds a refresh token. A signed-out
+    /// entry keeps its registration and has none.
+    pub signed_in: bool,
 }
 
 impl PublicOAuthCredential {
@@ -412,6 +448,8 @@ impl PublicOAuthCredential {
         Self {
             scopes: cred.scope.split_whitespace().map(String::from).collect(),
             expires_at: cred.expires_at,
+            account: cred.email.or(cred.subject),
+            signed_in: !cred.refresh_token.is_empty(),
             provider: cred.provider,
         }
     }
@@ -530,6 +568,7 @@ pub async fn refresh_oauth_token(
             })
             .unwrap_or_else(|| cred.scope.clone()),
         provider: cred.provider.clone(),
+        ..cred.clone()
     })
 }
 
@@ -648,6 +687,7 @@ pub async fn run_authorization_code_flow(
             })
             .unwrap_or_else(|| provider.default_scopes.join(" ")),
         provider: provider.name.to_string(),
+        ..Default::default()
     })
 }
 
@@ -1025,13 +1065,39 @@ mod scope_catalog_tests {
             expires_at: 1234567890,
             scope: "openid email".into(),
             provider: "google".into(),
+            id_token: Some("eyJ.id-token-value.sig".into()),
+            ..Default::default()
         };
         let debug = format!("{cred:?}");
         assert!(!debug.contains("ya29.live-token-value"));
         assert!(!debug.contains("1//refresh-token-secret"));
+        assert!(!debug.contains("id-token-value"));
         assert!(debug.contains("<redacted>"));
         assert!(debug.contains("1234567890"));
         assert!(debug.contains("openid email"));
         assert!(debug.contains("google"));
+    }
+
+    /// The registration fields are optional and skipped when absent,
+    /// so an MCP provider's entry is the same bytes it always was, and
+    /// an entry written before they existed reads back unchanged.
+    #[test]
+    fn an_mcp_credential_serializes_to_the_bytes_it_always_did() {
+        let cred = OAuthCredential {
+            access_token: "lin-access".into(),
+            refresh_token: "lin-refresh".into(),
+            expires_at: 1_700_000_000,
+            scope: "read write".into(),
+            provider: "linear".into(),
+            ..Default::default()
+        };
+        const BEFORE: &str = r#"{"access_token":"lin-access","refresh_token":"lin-refresh","expires_at":1700000000,"scope":"read write","provider":"linear"}"#;
+        assert_eq!(serde_json::to_string(&cred).unwrap(), BEFORE);
+        let back: OAuthCredential = serde_json::from_str(BEFORE).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), BEFORE);
+        assert!(back.client_id.is_none() && back.subject.is_none() && back.id_token.is_none());
+        let public = parse_public_view(BEFORE).unwrap();
+        assert_eq!(public.account, None);
+        assert!(public.signed_in);
     }
 }

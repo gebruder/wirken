@@ -6,6 +6,7 @@ use crate::conversation::{Message, Role, ToolCallRequest};
 use crate::error::AgentError;
 use crate::recovery::{MAX_RATE_LIMIT_RETRIES, RecoveryObserver, RetryDecision, classify_429};
 use crate::tool::ToolDef;
+pub use wirken_gateway::agent_config::ProviderAuth;
 
 /// LLM provider configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +35,22 @@ pub struct LlmConfig {
     /// data files pick up.
     #[serde(default = "default_context_window")]
     pub context_window: usize,
+    /// How the provider is authenticated. [`ProviderAuth::Plan`] sends
+    /// the agent through the plan client
+    /// ([`crate::llm_responses`]), which talks to a fixed endpoint and
+    /// takes its bearer from a [`crate::plan_auth::PlanTokenSource`]
+    /// per call; `base_url` and the static key are not used for it.
+    /// Absent in everything serialized before it existed, which reads
+    /// as `Key`.
+    #[serde(default, skip_serializing_if = "ProviderAuth::is_key")]
+    pub auth: ProviderAuth,
 }
+
+/// The context window assumed for every model on a plan. No figure is
+/// documented for them, so this is a conservative fixed value: an
+/// understated window only compacts earlier than needed, an overstated
+/// one builds requests a model cannot hold.
+pub const PLAN_CONTEXT_WINDOW: usize = 128_000;
 
 fn default_tools_enabled() -> bool {
     true
@@ -55,7 +71,31 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window: 128_000,
+        }
+    }
+
+    /// The [`crate::plan_auth::PROVIDER`] provider in plan mode.
+    /// `base_url` is set to the
+    /// pinned plan endpoint so every surface that prints it prints the
+    /// one used; the plan client does not read it.
+    ///
+    /// The provider documents no context window for the models a plan
+    /// serves, and the catalogue is the signed-in account's, so the
+    /// window is the fixed [`PLAN_CONTEXT_WINDOW`] rather than a
+    /// per-model figure.
+    pub fn plan(model: &str) -> Self {
+        Self {
+            provider: "openai".into(),
+            model: model.into(),
+            base_url: crate::plan_auth::API_BASE.into(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            region: None,
+            tools_enabled: true,
+            auth: ProviderAuth::Plan,
+            context_window: PLAN_CONTEXT_WINDOW,
         }
     }
 
@@ -69,6 +109,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window: 200_000,
         }
     }
@@ -83,6 +124,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window: 1_000_000,
         }
     }
@@ -97,6 +139,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: Some(region.into()),
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window: 200_000,
         }
     }
@@ -116,6 +159,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window: 32_768,
         }
     }
@@ -137,6 +181,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window: 128_000,
         }
     }
@@ -151,6 +196,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window: 128_000,
         }
     }
@@ -165,6 +211,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window: 32_000,
         }
     }
@@ -197,6 +244,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            auth: ProviderAuth::Key,
             context_window,
         }
     }
@@ -271,6 +319,13 @@ pub struct LlmClient {
     /// The stored secrets a request to the model may not carry. Empty
     /// until the agent attaches one.
     leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
+    /// The bearer for every call in plan mode, asked for per call. In
+    /// plan mode a call without one is refused before anything is sent.
+    plan_source: Option<Arc<crate::plan_auth::PlanTokenSource>>,
+    /// Where plan-mode calls go. The pinned endpoints outside tests.
+    plan_endpoints: crate::plan_auth::Endpoints,
+    /// The waits between attempts after a 503 on the plan route.
+    plan_unavailable_backoff: Vec<std::time::Duration>,
 }
 
 impl LlmClient {
@@ -288,9 +343,17 @@ impl LlmClient {
             )));
         }
 
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .https_only(!is_localhost)
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(300));
+        if config.auth.is_plan() {
+            // The plan route's bearer is the operator's plan; it goes to
+            // the pinned endpoint and nowhere a redirect points.
+            builder = builder
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none());
+        }
+        let http = builder
             .build()
             .map_err(|e| AgentError::Http(format!("HTTP client: {e}")))?;
 
@@ -300,7 +363,38 @@ impl LlmClient {
             observer: Mutex::new(None),
             tinfoil: tokio::sync::Mutex::new(None),
             leak_matcher: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+            plan_source: None,
+            plan_endpoints: crate::plan_auth::Endpoints::pinned(),
+            plan_unavailable_backoff: crate::llm_responses::UNAVAILABLE_BACKOFF.to_vec(),
         })
+    }
+
+    /// Take the bearer for every plan-mode call from `source`.
+    pub fn set_plan_token_source(&mut self, source: Arc<crate::plan_auth::PlanTokenSource>) {
+        self.plan_source = Some(source);
+    }
+
+    pub(crate) fn plan_source(&self) -> Option<Arc<crate::plan_auth::PlanTokenSource>> {
+        self.plan_source.clone()
+    }
+
+    pub(crate) fn plan_endpoints(&self) -> &crate::plan_auth::Endpoints {
+        &self.plan_endpoints
+    }
+
+    pub(crate) fn plan_unavailable_backoff(&self) -> &[std::time::Duration] {
+        &self.plan_unavailable_backoff
+    }
+
+    /// Point plan-mode calls at a loopback stub, with no backoff waits.
+    #[cfg(test)]
+    pub(crate) fn set_plan_endpoints_for_test(&mut self, endpoints: crate::plan_auth::Endpoints) {
+        self.plan_endpoints = endpoints;
+        self.plan_unavailable_backoff = vec![std::time::Duration::ZERO; 3];
+        self.http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("test http client");
     }
 
     /// Refuse to send a request that carries a stored secret in `matcher`.
@@ -414,6 +508,9 @@ impl LlmClient {
         api_key: Option<&str>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         self.refuse_leaked_request(messages, tools)?;
+        if self.config.auth.is_plan() {
+            return self.complete_plan(messages, tools, None).await;
+        }
         match self.config.provider.as_str() {
             "anthropic" => self.complete_anthropic(messages, tools, api_key).await,
             "gemini" => self.complete_gemini(messages, tools, api_key).await,

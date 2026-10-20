@@ -6849,6 +6849,7 @@ mod proxy_handoff_tests {
                 expires_at: 1,
                 scope: String::new(),
                 provider: "notion".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -7036,6 +7037,7 @@ mod scripted_model {
                     region: None,
                     tools_enabled: true,
                     context_window: 32_000,
+                    auth: Default::default(),
                 },
                 channel_overrides: std::collections::HashMap::new(),
                 api_key: None,

@@ -6429,6 +6429,7 @@ dependencies = [
  "wirken-ipc",
  "wirken-mcp-proxy",
  "wirken-sandbox",
+ "wirken-vault",
 ]
 
 [[package]]
