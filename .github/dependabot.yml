@@ -65,6 +65,13 @@ updates:
       # `deny.toml` `[sources] allow-git` is the backstop, failing the
       # build if the tree gains a git source that is not allowlisted.
       - dependency-name: "tinfoil"
+      # zip 9 changes `ZipFile::name()` from `&str` to
+      # `Result<Cow<str>, ZipError>`, and the entry walk in
+      # crates/gateway/src/imported_archive.rs does not compile
+      # against it. Minor and patch releases inside 8.x still come
+      # through; remove this entry in the commit that adapts to 9.
+      - dependency-name: "zip"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

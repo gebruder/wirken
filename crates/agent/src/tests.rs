@@ -2107,6 +2107,76 @@ mod wake {
         assert_eq!(before, rows(), "a refused dispatch wrote rows");
     }
 
+    /// Notes whether an ERROR event fired while it was the default.
+    struct ErrorSeen(Arc<std::sync::atomic::AtomicBool>);
+
+    impl tracing::Subscriber for ErrorSeen {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Wake `session` and report whether the wake logged an ERROR,
+    /// along with the tier cap and tool count it left the agent with.
+    fn wake_watching_errors(
+        factory: &AgentFactory,
+        session: &str,
+    ) -> (
+        bool,
+        Option<wirken_gateway::permissions::PermissionTier>,
+        usize,
+    ) {
+        let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let agent = tracing::subscriber::with_default(ErrorSeen(seen.clone()), || {
+            factory.wake("a", session).unwrap()
+        });
+        let agent = agent.try_lock().unwrap();
+        (
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            agent.auto_deny_above_tier_for_test(),
+            agent.build_turn_tool_defs(Vec::new()).len(),
+        )
+    }
+
+    /// A fresh child lane wakes quietly, and a child lane with rows
+    /// but no binding row still wakes loudly. Both are clamped.
+    ///
+    /// The spawn path wakes a child before `bind_as_subagent` writes
+    /// its row, so an empty chain is every delegation, not a lost
+    /// binding. A chain with rows and no binding is one that lost it.
+    #[test]
+    fn a_fresh_child_lane_wakes_without_an_error_and_a_bindingless_one_with_one() {
+        use wirken_gateway::permissions::PermissionTier;
+        let log = make_log();
+        let (factory, _tmp) = make_factory("a", log.clone());
+
+        assert_eq!(
+            wake_watching_errors(&factory, "a/webchat/c1#sub-0"),
+            (false, Some(PermissionTier::Tier1), 0),
+            "a fresh lane is clamped until the bind, without an ERROR",
+        );
+
+        let lost = "a/webchat/c1#sub-1";
+        seed_user_message(&*log, lost, "hello");
+        assert_eq!(
+            wake_watching_errors(&factory, lost),
+            (true, Some(PermissionTier::Tier1), 0),
+            "rows without a binding row are a lost binding: clamped, and loud",
+        );
+    }
+
     fn seed_user_message(log: &dyn SessionLog, session: &str, content: &str) {
         let h = log.handle_for(SessionId::new(session));
         log.append(
@@ -3360,6 +3430,68 @@ mod subagent {
                 );
             }
             other => panic!("expected SubagentSessionBound, got {other:?}"),
+        }
+    }
+
+    /// Several spawns in one round bind each child on its own chain,
+    /// as a single spawn does, so a child rewoken later replays its
+    /// grant instead of falling to the bindingless clamp.
+    #[tokio::test]
+    async fn each_fanned_out_child_records_its_binding_row() {
+        let log = make_log();
+        let ceiling = SubagentCeiling {
+            tool_allowlist: vec!["read_file".into(), "web_search".into()],
+            max_permission_tier: PermissionTier::Tier2,
+            max_rounds: 1,
+            max_runtime_secs: 5,
+        };
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", Some(ceiling), log.clone());
+
+        let parent_session = "parent/test/fan-out";
+        let parent = factory.wake("parent", parent_session).unwrap();
+        let mut agent = parent.lock().await;
+
+        let call = |id: &str, args: serde_json::Value| crate::conversation::ToolCallRequest {
+            id: id.into(),
+            name: "spawn_subagent".into(),
+            arguments: args.to_string(),
+        };
+        let calls = [
+            call(
+                "c0",
+                serde_json::json!({"agent_id": "child", "prompt": "a"}),
+            ),
+            call(
+                "c1",
+                serde_json::json!({"agent_id": "child", "prompt": "b", "tools": ["read_file"]}),
+            ),
+        ];
+        let refs: Vec<_> = calls.iter().collect();
+        agent.fan_out_spawns(&refs).await.unwrap();
+
+        for (n, want_tools) in [
+            (0, vec!["read_file".to_string(), "web_search".into()]),
+            (1, vec!["read_file".to_string()]),
+        ] {
+            let handle = log.handle_for(SessionId::new(format!("{parent_session}#sub-{n}")));
+            let events = log.get_since(&handle, 0).unwrap();
+            match events.first().map(|r| &r.event) {
+                Some(SessionEvent::SubagentSessionBound {
+                    agent_id,
+                    parent_session_id,
+                    depth,
+                    max_permission_tier,
+                    tools_granted,
+                    ..
+                }) => {
+                    assert_eq!(agent_id, "child");
+                    assert_eq!(parent_session_id, parent_session);
+                    assert_eq!(*depth, 1);
+                    assert_eq!(max_permission_tier, "tier2");
+                    assert_eq!(tools_granted, &want_tools, "child #sub-{n}");
+                }
+                other => panic!("#sub-{n}: expected SubagentSessionBound first, got {other:?}"),
+            }
         }
     }
 
