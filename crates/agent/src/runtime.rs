@@ -4573,7 +4573,7 @@ impl Agent {
     /// (validates ceilings, writes SubagentSpawned events, wakes
     /// children), then runs the children in parallel via join_all,
     /// then writes SubagentResult events sequentially.
-    async fn fan_out_spawns(
+    pub(crate) async fn fan_out_spawns(
         &mut self,
         calls: &[&crate::conversation::ToolCallRequest],
     ) -> Result<Vec<crate::tool::ToolResult>, AgentError> {
@@ -4699,6 +4699,7 @@ impl Agent {
         }
 
         // Phase B: fan-out child runs in parallel.
+        let parent_session_id = self.session_handle.id().to_string();
         let futures: Vec<_> = batch
             .iter()
             .enumerate()
@@ -4712,9 +4713,17 @@ impl Agent {
                 let depth = p.depth;
                 let max_tier = p.ceiling.max_permission_tier;
                 let tools = p.intersected_tools.clone();
+                let parent_session_id = parent_session_id.as_str();
                 Some(async move {
                     let mut child_guard = child.lock().await;
-                    child_guard.set_subagent_runtime(depth, max_tier, tools);
+                    // Binds the clamp and records it on the child's own
+                    // chain, as the single-spawn path does.
+                    if let Err(e) = child_guard
+                        .bind_as_subagent(depth, max_tier, tools, parent_session_id)
+                        .await
+                    {
+                        return (i, Ok(Err(e)));
+                    }
                     let run = Box::pin(child_guard.process_message_inner(
                         &prompt,
                         inbound_id,
