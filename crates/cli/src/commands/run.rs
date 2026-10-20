@@ -6598,8 +6598,15 @@ mod same_connection_approval_tests {
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("sessions.db")).unwrap());
+        // The approved exec runs on the host, so the turn's outcome does
+        // not depend on whether this machine can reach Docker. What is
+        // under test is the decision reaching the gate, not the sandbox.
+        let mut configs = super::scripted_model::default_agent(model, workspace);
+        if let Some(agent) = configs.get_mut("default") {
+            agent.sandbox.mode = wirken_agent::sandbox::SandboxMode::Off;
+        }
         let factory = AgentFactory::new(
-            super::scripted_model::default_agent(model, workspace),
+            configs,
             log.clone(),
             Arc::new(std::sync::Mutex::new(
                 wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
