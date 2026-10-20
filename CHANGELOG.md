@@ -41,18 +41,6 @@ tagged.
   carry the issued `client_id`. Entries stored before the field existed read
   unchanged.
 
-### Fixed
-
-- Children started by several `spawn_subagent` calls in one turn record their
-  `SubagentSessionBound` row, as a single spawn does. Without it a child rewoken
-  after a crash was clamped to tier1 with no tools, and `wirken sessions verify`
-  reported its tools as not attestable.
-- Every `spawn_subagent` delegation no longer logs a false "sub-agent session
-  has no binding row" ERROR. The factory wakes a child before the spawn path
-  writes its binding row, so a child lane with an empty chain is clamped to
-  tier1 with no tools until the bind, quietly. A child lane with rows but no
-  binding row is still clamped and still logged at ERROR.
-
 ## [2.3.0] - 2026-10-18
 
 #288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0
