@@ -192,6 +192,16 @@ approve? [y/N]:
 The command is cleaned the same way, so it occupies its one line and no
 other.
 
+`wirken chat` shows the same lines on its approval card, off the
+`ApprovalRequest` frame the gateway sends the terminal: the action key, the
+arguments, where an `exec` runs and under which runtime, what the model said
+and the message it replies to. What the model said is drawn apart and
+labeled `model's claim (unverified)`, since the gateway has not checked it;
+the other lines are what the gateway established. Each is model output or an
+inbound message, so escape sequences, bidirectional controls and zero-width
+characters are stripped before it is drawn, and the arguments are cut, with a
+marker, past eight rows.
+
 In WebChat the same three reach the approval card on the `ApprovalRequest`
 event, so the card draws them on its first paint. It previously showed the
 action key where the command belonged and swapped the command in once the

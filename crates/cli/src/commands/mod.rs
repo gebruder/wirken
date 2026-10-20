@@ -6,6 +6,8 @@ pub mod agents;
 pub mod approvers;
 pub mod audit;
 pub mod channel;
+#[cfg(unix)]
+pub mod chat;
 pub mod connection_tasks;
 pub mod credential;
 pub mod cron;
@@ -34,6 +36,7 @@ pub mod session;
 pub mod setup;
 pub mod skills;
 pub mod stdin_approval;
+pub mod terminal_queries;
 pub mod ui;
 pub mod update;
 pub mod vault;

@@ -74,6 +74,101 @@ read deadline (default 60). A prompt left unanswered past the deadline is a
 denial: the model is told the action was refused and not executed, and the
 chain records a `PermissionDenied` row with `approval timeout` as its reason.
 
+## wirken chat
+
+A full-screen chat with an agent in the terminal, through the running
+gateway.
+
+```bash
+wirken chat [--agent <AGENT>]
+```
+
+The chat is a client of `wirken run`, not a second gateway. It connects to
+`gateway.sock` as the `terminal` channel and refuses, starting nothing, when
+no gateway answers there: start one with `wirken run` or start the service
+`wirken setup --install-service` installed. On a first run with no provider
+configured it runs `wirken setup` before it takes the screen. It needs a
+terminal on stdin and stdout; from a script or a pipe it refuses and points
+to `wirken ask -m`.
+
+Every message takes the path any channel's message takes: the injection
+scan, the `message.inbound` row, the session store, the router, the tier
+gate, and the agent's session `{agent}/terminal/c-<id>`, a new conversation
+each time the chat starts. `--agent` (alias `--persona`) picks the agent;
+without it the router picks, as for any channel, and an agent the gateway
+does not know is refused before the screen opens.
+
+The socket is mode 0600 and the gateway checks the peer's user, as for every
+connection. The chat then answers the gateway's challenge with the operator
+key (`<data_dir>/operator/operator.key`), the key `wirken permissions
+pending` signs with; a client without it is refused and recorded as
+`adapter.handshake_rejected`. The `message.inbound` row and the session's
+`UserMessage` name the sender as `operator:<key id>`, and the connection is
+recorded on the adapter lane as `AdapterConnect` and `AdapterDisconnect` with
+channel `terminal`.
+
+The reply streams in as the model writes it, and each tool call shows when
+its row is on the chain and again when it finishes. An approval the turn
+needs is asked on a card at the terminal whose message started the turn
+(`TerminalApprovalGate`), with the lines every approval surface shows; see
+[permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
+The card takes no keys for its first 0.7 seconds. Only a lone `y` or `yes`
+approves; anything else refuses, and text after `n` or `no`, or anything
+else typed, is recorded as the reason. Enter with nothing typed refuses, and
+the two answers are drawn alike, so approving is never the default. The card
+shows the action key, the arguments that will run, where an `exec` runs, the
+runtime it runs under and the message the turn replies to as the gateway
+established them; what the model said beside the call is drawn apart and
+labeled `model's claim (unverified)`. A draft being typed when a card
+arrives is set aside and comes back once the cards are answered; cards that
+arrive together are asked in order. The decision is recorded with
+`approved_via` / `denied_via` `{"kind":"channel_adapter","channel":"terminal"}`
+and, for an approval, `approved_by` `<user> (operator key <key id>)`.
+
+The gateway waits `WIRKEN_TERMINAL_APPROVAL_TIMEOUT_S` seconds (default 300)
+for a decision. The card closes a few seconds before that and stays on
+screen as expired until Enter or Esc puts it away, so a late `y` answers
+nothing; the chain records the timeout as a `PermissionDenied` with
+`approval timeout`. If the chat disconnects while a card is open, the request
+is withdrawn and recorded as refused with the reason
+`terminal client disconnected`.
+
+The runtime is the one the gateway's sandbox settings for the agent give
+`exec`: `gVisor (runsc)` under `"mode": "gvisor"`, Docker's default runtime
+(runc) under `exec-only`, and the host under `off`. There is no fallback
+between them: a `gvisor` mode whose `runsc` runtime is missing refuses
+`exec`. The gateway sends the value; the chat names it and never guesses.
+
+Beside the transcript, panels show what the gateway reports for the
+conversation: Environment (data dir, agent and model, exec runtime and
+sandbox mode), Context (tokens of the last call against the model's
+window), Cost and tokens (calls, tokens in and out, the cost or `uncosted`,
+the budget in force), Audit (rows and chain heads; Ctrl+K has the gateway
+verify the conversation's chain and signed heads and shows the result),
+Approvals (approved and denied on this conversation, the agent's stored
+grants) and Tools (how many, how many ask first, skills, names). A sidebar
+lists the agents with their models and every terminal conversation on the
+chain, newest first; Ctrl+F filters it by agent, model or first message,
+and Enter on a conversation resumes it, its messages read back from the
+session chain. A conversation of another agent opens a new connection for
+that agent. The chat opens no store itself: all of this comes from the
+gateway over the terminal connection.
+
+| Key | Action |
+|-----|--------|
+| Enter | Send the message, or answer the card |
+| Ctrl+J | New line in the message |
+| PgUp / PgDn | Scroll the transcript |
+| Ctrl+U | Clear the message or the answer |
+| Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves |
+| Ctrl+N | New conversation with the same agent |
+| Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels |
+| Ctrl+K | Verify this conversation's chain |
+| Ctrl+C | Leave the chat |
+
+Log output written while the screen is up is held and printed to stderr when
+the chat exits. The chat is not available on Windows.
+
 ## wirken channel
 
 ```bash

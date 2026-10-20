@@ -10,6 +10,19 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `wirken chat [--agent NAME]` opens a full-screen chat in the terminal.
+  It is a channel of the running gateway, `terminal`, so its messages
+  take the same path as any adapter's: injection scan, audit rows, router,
+  tier gate and session chain. It signs in with the operator key, asks
+  approvals on a card in the chat, and shows panels for the environment
+  (including the sandbox runtime the gateway reports), context, cost and
+  tokens, audit with a chain check, approvals and tools, plus a sidebar of
+  agents and conversations with search. Without a terminal it points to
+  `wirken ask`; without a running gateway it points to `wirken run`. Bare
+  `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
+
 ### Fixed
 
 - Sub-agents started by several `spawn_subagent` calls in one turn now

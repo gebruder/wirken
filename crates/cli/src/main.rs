@@ -168,6 +168,18 @@ enum Commands {
         agent: String,
     },
 
+    /// Chat with an agent in the terminal, through the running gateway
+    ///
+    /// Connects to `wirken run` as the `terminal` channel: messages take
+    /// the gateway's path, replies stream in, and approvals are asked
+    /// on a card here. Needs a terminal; from a script use `wirken ask`.
+    Chat {
+        /// Agent / persona to talk to. Without it the router picks, as
+        /// for any channel.
+        #[arg(long, visible_alias = "persona")]
+        agent: Option<String>,
+    },
+
     /// Import an assistant data-export archive into the local store
     Import {
         /// Path to the export archive.
@@ -1213,6 +1225,8 @@ async fn main() -> Result<()> {
     // chain head.
     wirken_audit::set_build_identity(build_info::audit_identity());
 
+    let cli = Cli::parse();
+
     // The default filter applies to every crate whose name starts
     // with `wirken` (the EnvFilter target-match is a prefix, so
     // `wirken` covers `wirken`, `wirken_vault`, `wirken_mcp_proxy`,
@@ -1227,11 +1241,18 @@ async fn main() -> Result<()> {
     //
     // It is a default, not a floor applied over the operator's
     // filter. See `build_env_filter`.
-    tracing_subscriber::fmt()
-        .with_env_filter(build_env_filter(std::env::var("RUST_LOG").ok().as_deref()))
-        .init();
-
-    let cli = Cli::parse();
+    let logs = tracing_subscriber::fmt()
+        .with_env_filter(build_env_filter(std::env::var("RUST_LOG").ok().as_deref()));
+    // The chat holds log output while it has the screen, so a line
+    // cannot draw over it. Every other command writes as it always has.
+    #[cfg(unix)]
+    if matches!(cli.command, Commands::Chat { .. }) {
+        logs.with_writer(commands::chat::log_writer).init();
+    } else {
+        logs.init();
+    }
+    #[cfg(not(unix))]
+    logs.init();
 
     match cli.command {
         Commands::Setup {
@@ -1243,6 +1264,17 @@ async fn main() -> Result<()> {
                 return commands::service::uninstall_service();
             }
             commands::setup::run(install_service, org).await
+        }
+        Commands::Chat { agent } => {
+            #[cfg(unix)]
+            {
+                commands::chat::run(agent).await
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = agent;
+                anyhow::bail!("wirken chat is not available on this platform")
+            }
         }
         Commands::Run {
             port,
@@ -1757,6 +1789,33 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("clap parse failed")
+    }
+
+    /// Bare `wirken` still prints help and fails: the chat is a
+    /// subcommand, not the default.
+    #[test]
+    fn bare_wirken_is_still_an_error() {
+        let err = match Cli::try_parse_from(["wirken"]) {
+            Err(e) => e,
+            Ok(_) => panic!("bare wirken parsed"),
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn chat_parses_with_and_without_an_agent() {
+        match parse(&["wirken", "chat"]).command {
+            Commands::Chat { agent } => assert_eq!(agent, None),
+            _ => panic!("expected Chat"),
+        }
+        match parse(&["wirken", "chat", "--agent", "alice"]).command {
+            Commands::Chat { agent } => assert_eq!(agent.as_deref(), Some("alice")),
+            _ => panic!("expected Chat"),
+        }
     }
 
     #[test]

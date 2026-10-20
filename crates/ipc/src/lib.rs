@@ -18,9 +18,9 @@ pub mod wirken_capnp {
 }
 
 pub use auth::{
-    AdapterIdentity, HookIdentity, HookType, VerifiedHook, perform_adapter_handshake,
-    perform_gateway_handshake, perform_gateway_hook_handshake, perform_hook_handshake,
-    send_rejection,
+    AdapterIdentity, GatewayPeer, HookIdentity, HookType, VerifiedHook, perform_adapter_handshake,
+    perform_gateway_handshake, perform_gateway_hook_handshake, perform_gateway_peer_handshake,
+    perform_hook_handshake, perform_terminal_handshake, send_rejection,
 };
 pub use channel::{AuthenticatedChannel, Channel, ChannelMismatch, SessionHandle, SessionId};
 pub use error::HandshakeError;
