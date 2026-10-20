@@ -923,7 +923,6 @@ fn replay_subagent_binding(
 ) -> Result<(), wirken_audit::AuditError> {
     let handle = log.handle_for(SessionId::new(session_id.to_string()));
     let events = log.get_since(&handle, 0)?;
-    let fresh = events.is_empty();
     let mut latest: Option<(usize, String, Vec<String>)> = None;
     for stored in events {
         if let SessionEvent::SubagentSessionBound {
@@ -954,13 +953,6 @@ fn replay_subagent_binding(
         //
         // Depth comes from the id, which encodes one `#sub-` per
         // level, so nesting stays capped without the row.
-        //
-        // An empty chain is the third way, and the ordinary one: the
-        // spawn path wakes the child before `bind_as_subagent` writes
-        // the row, so every fresh child lane lands here first. It
-        // gets the same clamp, so the agent is never unclamped before
-        // the bind replaces it, but nothing is lost, so nothing is
-        // reported above debug.
         if session_id.contains(SUBAGENT_SESSION_MARKER) {
             let depth = session_id.matches(SUBAGENT_SESSION_MARKER).count();
             match purpose {
@@ -972,23 +964,14 @@ fn replay_subagent_binding(
                     // binding is gone cannot be resumed faithfully,
                     // and the move is to respawn it from its parent
                     // rather than let it continue under a guess.
-                    if fresh {
-                        tracing::debug!(
-                            session_id,
-                            depth,
-                            "factory: fresh sub-agent lane; clamped to tier1 with no tools \
-                             until the spawn path binds it"
-                        );
-                    } else {
-                        tracing::error!(
-                            session_id,
-                            depth,
-                            "factory: sub-agent session has no binding row; clamping to tier1 \
-                             with an empty tool set. It cannot be resumed under its original \
-                             ceiling, because that ceiling is not recorded on this session. \
-                             Respawn the child from its parent."
-                        );
-                    }
+                    tracing::error!(
+                        session_id,
+                        depth,
+                        "factory: sub-agent session has no binding row; clamping to tier1 with \
+                         an empty tool set. It cannot be resumed under its original ceiling, \
+                         because that ceiling is not recorded on this session. Respawn the \
+                         child from its parent."
+                    );
                     agent.set_subagent_runtime(
                         depth,
                         wirken_gateway::permissions::PermissionTier::Tier1,
