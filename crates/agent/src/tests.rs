@@ -3727,6 +3727,670 @@ mod subagent {
 }
 
 // ---------------------------------------------------------------------------
+// A spawned child is bound as it is woken
+// ---------------------------------------------------------------------------
+
+/// Both spawn paths, the single intercept and the fan-out a turn with
+/// several `spawn_subagent` calls takes, wake the child through
+/// `AgentFactory::wake_subagent`, which writes its `SubagentSessionBound`
+/// row before handing it back. Each test here runs against both.
+mod subagent_bound_at_wake {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::ops::Range;
+    use std::sync::{Arc, Mutex};
+
+    use tempfile::TempDir;
+    use wirken_audit::{
+        AuditError, OwnSession, SessionEvent, SessionHandle, SessionId, SessionLog,
+        SessionVerifyResult, SqliteSessionLog, StoredSessionEvent, SubagentStatus, TrustLevel,
+    };
+    use wirken_gateway::agent_config::SubagentCeiling;
+    use wirken_gateway::permissions::PermissionTier;
+
+    use super::leak_detection::{Reply, llm, stub, text};
+    use crate::factory::{AgentFactory, AgentStaticConfig, SubagentBinding};
+    use crate::llm::LlmConfig;
+    use crate::runtime::{Agent, SPAWN_SUBAGENT_TOOL, VerifyOptions};
+
+    const PARENT: &str = "parent/test/c1";
+    /// What the missing-binding log line says, at either level.
+    const MISSING_BINDING: &str = "has no binding row";
+
+    fn child_session(n: usize) -> String {
+        format!("{PARENT}#sub-{n}")
+    }
+
+    fn ceiling() -> SubagentCeiling {
+        SubagentCeiling {
+            tool_allowlist: vec!["list_files".into(), "read_file".into()],
+            max_permission_tier: PermissionTier::Tier2,
+            max_rounds: 3,
+            max_runtime_secs: 30,
+        }
+    }
+
+    fn full_grant() -> Vec<String> {
+        vec!["list_files".to_string(), "read_file".to_string()]
+    }
+
+    /// A parent allowed to spawn `child` under [`ceiling`], and the
+    /// child. Built fresh for every factory, since a restart or a
+    /// verify reads the same configuration again.
+    fn configs(tmp: &TempDir, llm_config: &LlmConfig) -> HashMap<String, AgentStaticConfig> {
+        let config = |id: &str, children: BTreeMap<String, SubagentCeiling>| AgentStaticConfig {
+            agent_id: id.to_string(),
+            workspace: tmp.path().to_path_buf(),
+            llm_config: llm_config.clone(),
+            channel_overrides: HashMap::new(),
+            api_key: Some("unused".into()),
+            api_key_credential: None,
+            skills: Vec::new(),
+            mcp_client: None,
+            identity: None,
+            allowed_subagents: children,
+            sandbox: Default::default(),
+            extra_interceptors: vec![],
+            zirkel_db_path: None,
+            channel_egress: Default::default(),
+        };
+        HashMap::from([
+            (
+                "parent".to_string(),
+                config("parent", BTreeMap::from([("child".to_string(), ceiling())])),
+            ),
+            ("child".to_string(), config("child", BTreeMap::new())),
+        ])
+    }
+
+    fn live_factory(
+        tmp: &TempDir,
+        llm_config: &LlmConfig,
+        log: Arc<dyn SessionLog>,
+    ) -> Arc<AgentFactory> {
+        AgentFactory::new(
+            configs(tmp, llm_config),
+            log,
+            crate::tests::test_permissions(),
+        )
+    }
+
+    fn spawn_args(tools: Option<&[&str]>) -> serde_json::Value {
+        match tools {
+            Some(tools) => {
+                serde_json::json!({"agent_id": "child", "prompt": "look", "tools": tools})
+            }
+            None => serde_json::json!({"agent_id": "child", "prompt": "look"}),
+        }
+    }
+
+    /// One model reply asking for two children: the first with the
+    /// full ceiling, the second narrowed to `read_file`.
+    fn two_spawns() -> Reply {
+        let call = |id: &str, args: serde_json::Value| {
+            serde_json::json!({
+                "id": id,
+                "type": "function",
+                "function": {"name": SPAWN_SUBAGENT_TOOL, "arguments": args.to_string()},
+            })
+        };
+        Reply::Message(serde_json::json!({
+            "role": "assistant",
+            "content": "Two lookups.",
+            "tool_calls": [
+                call("call_a", spawn_args(None)),
+                call("call_b", spawn_args(Some(&["read_file"]))),
+            ],
+        }))
+    }
+
+    fn rows(log: &dyn SessionLog, session: &str) -> Vec<SessionEvent> {
+        log.get_since(&log.handle_for(SessionId::new(session)), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect()
+    }
+
+    fn parse(output: &str) -> serde_json::Value {
+        serde_json::from_str(output).unwrap_or_else(|e| panic!("not an envelope: {e}: {output}"))
+    }
+
+    /// Spawn one child through the single intercept. The child's one
+    /// model call is answered by the stub; returns the parent's
+    /// envelope.
+    async fn spawn_single(
+        tmp: &TempDir,
+        log: Arc<dyn SessionLog>,
+    ) -> (Arc<AgentFactory>, LlmConfig, serde_json::Value) {
+        let (base_url, server, _) = stub(vec![text("child done")]).await;
+        let llm_config = llm(&base_url);
+        let factory = live_factory(tmp, &llm_config, log);
+        let parent = factory.wake("parent", PARENT).unwrap();
+        let result = parent
+            .lock()
+            .await
+            .spawn_subagent_intercept(&spawn_args(None).to_string())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        (factory, llm_config, parse(&result.output))
+    }
+
+    /// Spawn two children in one turn, which takes the fan-out. The
+    /// stub answers the parent, both children, and the parent again.
+    async fn spawn_fan_out(
+        tmp: &TempDir,
+        log: Arc<dyn SessionLog>,
+    ) -> (Arc<AgentFactory>, LlmConfig) {
+        let (base_url, server, _) = stub(vec![
+            two_spawns(),
+            text("child done"),
+            text("child done"),
+            text("parent done"),
+        ])
+        .await;
+        let llm_config = llm(&base_url);
+        let factory = live_factory(tmp, &llm_config, log);
+        let parent = factory.wake("parent", PARENT).unwrap();
+        let result = parent
+            .lock()
+            .await
+            .process_message("ask two children", "m1".into())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(result.response, "parent done");
+        (factory, llm_config)
+    }
+
+    /// The child lanes each path writes, with the tools each was
+    /// granted.
+    async fn spawn_on(
+        path: Path,
+        tmp: &TempDir,
+        log: Arc<dyn SessionLog>,
+    ) -> (Arc<AgentFactory>, LlmConfig, Vec<(String, Vec<String>)>) {
+        match path {
+            Path::Single => {
+                let (factory, llm_config, envelope) = spawn_single(tmp, log).await;
+                assert_eq!(envelope["status"], "ok", "{envelope}");
+                (factory, llm_config, vec![(child_session(0), full_grant())])
+            }
+            Path::FanOut => {
+                let (factory, llm_config) = spawn_fan_out(tmp, log).await;
+                (
+                    factory,
+                    llm_config,
+                    vec![
+                        (child_session(0), full_grant()),
+                        (child_session(1), vec!["read_file".to_string()]),
+                    ],
+                )
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Path {
+        Single,
+        FanOut,
+    }
+
+    const PATHS: [Path; 2] = [Path::Single, Path::FanOut];
+
+    fn offered(agent: &Agent) -> Vec<String> {
+        let mut names: Vec<String> = agent
+            .build_turn_tool_defs(Vec::new())
+            .into_inner()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Every child lane opens with its own binding row: the agent it
+    /// was woken as, its parent, its depth, its tier and its own tool
+    /// grant. In the fan-out the second child asked for fewer tools,
+    /// and its row says so.
+    #[tokio::test]
+    async fn every_spawned_child_lane_opens_with_its_own_binding_row() {
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+            let (_factory, _, children) = spawn_on(path, &tmp, log.clone()).await;
+
+            for (session, granted) in children {
+                let lane = rows(&*log, &session);
+                match lane.first() {
+                    Some(SessionEvent::SubagentSessionBound {
+                        agent_id,
+                        parent_session_id,
+                        depth,
+                        max_permission_tier,
+                        tools_granted,
+                        offered_tools,
+                    }) => {
+                        assert_eq!(agent_id, "child", "{path:?} {session}");
+                        assert_eq!(parent_session_id, PARENT, "{path:?} {session}");
+                        assert_eq!(*depth, 1, "{path:?} {session}");
+                        assert_eq!(max_permission_tier, "tier2", "{path:?} {session}");
+                        assert_eq!(tools_granted, &granted, "{path:?} {session}");
+                        let mut offered = offered_tools.clone();
+                        offered.sort();
+                        assert_eq!(offered, granted, "{path:?} {session}");
+                    }
+                    other => panic!("{path:?} {session}: first row is {other:?}"),
+                }
+                assert_eq!(
+                    lane.iter()
+                        .filter(|e| matches!(e, SessionEvent::SubagentSessionBound { .. }))
+                        .count(),
+                    1,
+                    "{path:?} {session}: bound once",
+                );
+                assert!(
+                    lane.iter()
+                        .any(|e| matches!(e, SessionEvent::LlmRequest { .. })),
+                    "{path:?} {session}: the child ran",
+                );
+            }
+        }
+    }
+
+    /// A child woken from its session alone, by a new factory with
+    /// nothing cached, comes back under the grant it was spawned with,
+    /// not clamped to Tier 1 with no tools.
+    #[tokio::test]
+    async fn a_spawned_child_rewoken_after_a_restart_keeps_its_grant() {
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+            let (factory, llm_config, children) = spawn_on(path, &tmp, log.clone()).await;
+            drop(factory);
+
+            let restarted = live_factory(&tmp, &llm_config, log.clone());
+            for (session, granted) in children {
+                let child = restarted.wake("child", &session).unwrap();
+                let child = child.lock().await;
+                assert_eq!(
+                    child.auto_deny_above_tier_for_test(),
+                    Some(PermissionTier::Tier2),
+                    "{path:?} {session}",
+                );
+                assert_eq!(offered(&child), granted, "{path:?} {session}");
+                assert_eq!(child.subagent_depth_for_test(), 1, "{path:?} {session}");
+            }
+        }
+    }
+
+    /// A spawned child's session verifies on its own: its tools are
+    /// attestable and its `tools_hash` recomputes to what it recorded.
+    #[tokio::test]
+    async fn a_spawned_child_session_verifies_with_attestable_tools() {
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+            let (_factory, llm_config, children) = spawn_on(path, &tmp, log.clone()).await;
+
+            let verifier = AgentFactory::for_verify(configs(&tmp, &llm_config), log.clone());
+            for (session, _) in children {
+                let lane = rows(&*log, &session);
+                let requests = lane
+                    .iter()
+                    .filter(|e| matches!(e, SessionEvent::LlmRequest { purpose, .. } if purpose.is_turn()))
+                    .count();
+                assert!(requests >= 1, "{path:?} {session}: nothing to verify");
+                let responses = lane
+                    .iter()
+                    .filter(|e| matches!(e, SessionEvent::LlmResponse { .. }))
+                    .count();
+
+                let child = verifier.wake("child", &session).unwrap();
+                let report = child
+                    .lock()
+                    .await
+                    .verify_with(VerifyOptions::default())
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(report.chain_status, SessionVerifyResult::Ok { .. }),
+                    "{path:?} {session}: {report:?}",
+                );
+                assert_eq!(report.events_total, lane.len(), "{path:?} {session}");
+                assert_eq!(report.tools_not_attestable_rows, 0, "{path:?} {session}");
+                assert_eq!(
+                    report.tools_hash_unrecomputable_rows, 0,
+                    "{path:?} {session}"
+                );
+                assert!(
+                    report.events_divergent.is_empty(),
+                    "{path:?} {session}: {:?}",
+                    report.events_divergent,
+                );
+                // Only the model's responses are unverifiable, so every
+                // turn request was recomputed and matched.
+                assert_eq!(
+                    report.events_unverifiable, responses,
+                    "{path:?} {session}: {report:?}",
+                );
+            }
+        }
+    }
+
+    /// A buffer a scoped subscriber writes formatted events into.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+            let writer = self.clone();
+            tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .finish()
+        }
+    }
+
+    /// Spawning a child logs nothing about a missing binding: the
+    /// child is bound as it is woken, so no wake finds it unbound.
+    ///
+    /// The control afterwards wakes a child-shaped lane that really has
+    /// no row, through the same capture, and the line is there. Without
+    /// it a capture that saw nothing would pass this test.
+    #[tokio::test]
+    async fn spawning_a_child_logs_no_missing_binding() {
+        use tracing::instrument::WithSubscriber;
+
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+            let captured = Captured::default();
+
+            let (factory, _, _) = spawn_on(path, &tmp, log.clone())
+                .with_subscriber(captured.subscriber())
+                .await;
+            assert!(
+                !captured.text().contains(MISSING_BINDING),
+                "{path:?}: a spawn logged a missing binding:\n{}",
+                captured.text(),
+            );
+
+            async { factory.wake("child", &child_session(99)).unwrap() }
+                .with_subscriber(captured.subscriber())
+                .await;
+            assert!(
+                captured.text().contains(MISSING_BINDING),
+                "{path:?}: the capture did not see the control",
+            );
+        }
+    }
+
+    /// A session log that refuses every append to one session and
+    /// passes everything else to an in-memory log.
+    struct RefusingLane {
+        inner: SqliteSessionLog,
+        refused: String,
+    }
+
+    impl SessionLog for RefusingLane {
+        fn handle_for(&self, id: SessionId) -> SessionHandle<OwnSession> {
+            self.inner.handle_for(id)
+        }
+
+        fn append(
+            &self,
+            handle: &SessionHandle<OwnSession>,
+            trust: TrustLevel,
+            event: SessionEvent,
+        ) -> Result<u64, AuditError> {
+            if handle.id().as_str() == self.refused {
+                return Err(AuditError::ChannelClosed);
+            }
+            self.inner.append(handle, trust, event)
+        }
+
+        fn get_range(
+            &self,
+            handle: &SessionHandle<OwnSession>,
+            range: Range<u64>,
+        ) -> Result<Vec<StoredSessionEvent>, AuditError> {
+            self.inner.get_range(handle, range)
+        }
+
+        fn get_since(
+            &self,
+            handle: &SessionHandle<OwnSession>,
+            start: u64,
+        ) -> Result<Vec<StoredSessionEvent>, AuditError> {
+            self.inner.get_since(handle, start)
+        }
+
+        fn last_index(
+            &self,
+            handle: &SessionHandle<OwnSession>,
+        ) -> Result<Option<u64>, AuditError> {
+            self.inner.last_index(handle)
+        }
+
+        fn rewind(
+            &self,
+            handle: &SessionHandle<OwnSession>,
+            n_before: u64,
+            reason: &str,
+        ) -> Result<u64, AuditError> {
+            self.inner.rewind(handle, n_before, reason)
+        }
+
+        fn verify(
+            &self,
+            handle: &SessionHandle<OwnSession>,
+        ) -> Result<SessionVerifyResult, AuditError> {
+            self.inner.verify(handle)
+        }
+    }
+
+    fn refusing(session: &str) -> Arc<dyn SessionLog> {
+        Arc::new(RefusingLane {
+            inner: SqliteSessionLog::open_in_memory().unwrap(),
+            refused: session.to_string(),
+        })
+    }
+
+    /// The `SubagentResult` rows on the parent's chain, by child.
+    fn results(log: &dyn SessionLog) -> Vec<(String, SubagentStatus)> {
+        rows(log, PARENT)
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::SubagentResult {
+                    child_session_id,
+                    status,
+                    ..
+                } => Some((child_session_id, status)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A child whose binding cannot be written does not run and is not
+    /// cached. The parent records the spawn as failed, its model gets an
+    /// `error` envelope, and its turn goes on.
+    #[tokio::test]
+    async fn a_failed_bind_on_the_single_path_closes_the_spawn_and_the_parent_goes_on() {
+        let tmp = TempDir::new().unwrap();
+        let failed = child_session(0);
+        let log = refusing(&failed);
+        // The child never reaches its model, so nothing answers it.
+        let factory = live_factory(&tmp, &LlmConfig::ollama("test"), log.clone());
+        let parent = factory.wake("parent", PARENT).unwrap();
+
+        let result = parent
+            .lock()
+            .await
+            .spawn_subagent_intercept(&spawn_args(None).to_string())
+            .await
+            .expect("a failed bind is the child's failure, not the parent's");
+        let envelope = parse(&result.output);
+        assert_eq!(envelope["status"], "error", "{envelope}");
+        assert_eq!(envelope["child_session_id"], failed.as_str());
+        assert!(!result.success);
+
+        assert_eq!(
+            results(&*log),
+            vec![(failed.clone(), SubagentStatus::Error)]
+        );
+        assert!(rows(&*log, &failed).is_empty(), "the child wrote nothing");
+        assert!(
+            !factory.is_cached_for_test(&failed),
+            "the unbound child was cached"
+        );
+    }
+
+    /// In the fan-out, the child whose binding cannot be written is
+    /// closed on its own, and its sibling is bound and runs.
+    #[tokio::test]
+    async fn a_failed_bind_in_the_fan_out_closes_that_child_and_its_sibling_runs() {
+        let tmp = TempDir::new().unwrap();
+        let failed = child_session(0);
+        let sibling = child_session(1);
+        let log = refusing(&failed);
+        let (base_url, server, _) =
+            stub(vec![two_spawns(), text("child done"), text("parent done")]).await;
+        let factory = live_factory(&tmp, &llm(&base_url), log.clone());
+        let parent = factory.wake("parent", PARENT).unwrap();
+
+        let result = parent
+            .lock()
+            .await
+            .process_message("ask two children", "m1".into())
+            .await
+            .expect("a failed bind is the child's failure, not the parent's");
+        server.await.unwrap();
+        assert_eq!(result.response, "parent done");
+
+        let mut recorded = results(&*log);
+        recorded.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            recorded,
+            vec![
+                (failed.clone(), SubagentStatus::Error),
+                (sibling.clone(), SubagentStatus::Ok),
+            ],
+        );
+        let model_saw: Vec<serde_json::Value> = rows(&*log, PARENT)
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::ToolResult {
+                    call_id, output, ..
+                } if call_id == "call_a" => Some(parse(&output)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(model_saw.len(), 1);
+        assert_eq!(model_saw[0]["status"], "error", "{:?}", model_saw[0]);
+
+        assert!(
+            rows(&*log, &failed).is_empty(),
+            "the failed child wrote nothing"
+        );
+        assert!(
+            !factory.is_cached_for_test(&failed),
+            "the unbound child was cached"
+        );
+
+        let sibling_lane = rows(&*log, &sibling);
+        assert!(
+            matches!(
+                sibling_lane.first(),
+                Some(SessionEvent::SubagentSessionBound { tools_granted, .. })
+                    if tools_granted == &vec!["read_file".to_string()]
+            ),
+            "{sibling_lane:?}",
+        );
+        assert!(
+            sibling_lane
+                .iter()
+                .any(|e| matches!(e, SessionEvent::AssistantMessage { content, .. } if content == "child done")),
+            "the sibling ran: {sibling_lane:?}",
+        );
+    }
+
+    fn binding() -> SubagentBinding {
+        SubagentBinding {
+            depth: 1,
+            max_permission_tier: PermissionTier::Tier2,
+            tools_granted: BTreeSet::from(["read_file".to_string()]),
+            parent_session_id: PARENT.to_string(),
+        }
+    }
+
+    /// A lane that already has rows is not a new spawn, and is not
+    /// bound over.
+    #[tokio::test]
+    async fn wake_subagent_refuses_a_lane_that_already_has_rows() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let session = child_session(0);
+        log.append(
+            &log.handle_for(SessionId::new(session.clone())),
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "already here".into(),
+                inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
+            },
+        )
+        .unwrap();
+        let factory = live_factory(&tmp, &LlmConfig::ollama("test"), log.clone());
+
+        let err = match factory.wake_subagent("child", &session, binding()).await {
+            Ok(_) => panic!("a lane with rows was bound"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("already has rows"), "{err}");
+        assert_eq!(rows(&*log, &session).len(), 1, "nothing was written");
+        assert!(!factory.is_cached_for_test(&session));
+    }
+
+    /// A session id already in the cache is not a new spawn either.
+    #[tokio::test]
+    async fn wake_subagent_refuses_a_session_already_woken() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let session = child_session(0);
+        let factory = live_factory(&tmp, &LlmConfig::ollama("test"), log.clone());
+        let first = factory.wake("child", &session).unwrap();
+
+        let err = match factory.wake_subagent("child", &session, binding()).await {
+            Ok(_) => panic!("a woken session was bound"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("already woken"), "{err}");
+        assert!(rows(&*log, &session).is_empty(), "nothing was written");
+        assert!(
+            Arc::ptr_eq(&first, &factory.wake("child", &session).unwrap()),
+            "the cached agent is left in place",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sandbox modes
 // ---------------------------------------------------------------------------
 

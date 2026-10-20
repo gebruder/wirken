@@ -10,7 +10,7 @@ use wirken_audit::{
 use crate::context::ContextEngine;
 use crate::conversation::{Conversation, ToolCallRequest};
 use crate::error::{AgentError, PermissionDenialContext};
-use crate::factory::AgentFactory;
+use crate::factory::{AgentFactory, SubagentBinding};
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
 use crate::llm_stream::StreamEvent;
 use crate::mcp::McpProxyClient;
@@ -1930,11 +1930,11 @@ impl Agent {
 
     /// Set this child Agent's nesting depth and headless ceilings
     /// before its `process_message` is invoked.
-    /// Called by the parent's spawn intercept on the freshly woken
-    /// child Agent. The values are sticky for the lifetime of the
-    /// child Arc — wake() returns a fresh Arc per session id, so
-    /// this state never bleeds back into a sibling that happens
-    /// to be cached under the same key.
+    /// Called by [`Self::bind_as_subagent`] when a spawn wakes the
+    /// child, and by the factory when a wake replays the child's
+    /// binding row. The values are sticky for the lifetime of the
+    /// child Arc. Each child has its own session id, and so its own
+    /// Arc, so this state never bleeds into a sibling.
     pub(crate) fn set_subagent_runtime(
         &mut self,
         depth: usize,
@@ -3041,7 +3041,8 @@ impl Agent {
 
                     // Phase 2: prepare all spawn calls sequentially
                     // (validates ceiling, writes SubagentSpawned,
-                    // wakes child), then fan out the child runs.
+                    // wakes and binds child), then fan out the child
+                    // runs.
                     if !spawn_calls.is_empty() {
                         let results = self.fan_out_spawns(&spawn_calls).await?;
                         for (call, result) in spawn_calls.iter().zip(results) {
@@ -4571,8 +4572,8 @@ impl Agent {
     /// Fan-out for multiple spawn_subagent calls in a single
     /// tool-call round. Prepares all spawns sequentially
     /// (validates ceilings, writes SubagentSpawned events, wakes
-    /// children), then runs the children in parallel via join_all,
-    /// then writes SubagentResult events sequentially.
+    /// and binds children), then runs the children in parallel via
+    /// join_all, then writes SubagentResult events sequentially.
     async fn fan_out_spawns(
         &mut self,
         calls: &[&crate::conversation::ToolCallRequest],
@@ -4586,8 +4587,6 @@ impl Agent {
             ceiling: SubagentCeiling,
             prompt: String,
             inbound_id: String,
-            depth: usize,
-            intersected_tools: BTreeSet<String>,
         }
         let mut batch: Vec<Option<Prepared>> = Vec::with_capacity(calls.len());
         let mut early_results: Vec<Option<crate::tool::ToolResult>> = vec![None; calls.len()];
@@ -4665,23 +4664,23 @@ impl Agent {
                 },
             )?;
 
-            let child_arc = match factory.wake(&parsed.agent_id, &child_session_id) {
+            // Bound here, before any child runs, so each child's row
+            // is on its own chain ahead of anything it writes. A child
+            // that cannot be bound is closed on its own and its
+            // siblings go ahead.
+            let binding = SubagentBinding {
+                depth: self.subagent_depth + 1,
+                max_permission_tier: ceiling.max_permission_tier,
+                tools_granted: intersected,
+                parent_session_id,
+            };
+            let child_arc = match factory
+                .wake_subagent(&parsed.agent_id, &child_session_id, binding)
+                .await
+            {
                 Ok(arc) => arc,
                 Err(e) => {
-                    let env = envelope_result(
-                        &child_session_id,
-                        "error",
-                        &format!("factory.wake failed: {e}"),
-                    );
-                    self.log_event(
-                        TrustLevel::System,
-                        SessionEvent::SubagentResult {
-                            child_session_id,
-                            output: env.output.clone(),
-                            status: wirken_audit::SubagentStatus::Error,
-                        },
-                    )?;
-                    early_results[i] = Some(env);
+                    early_results[i] = Some(self.close_unstarted_spawn(&child_session_id, &e)?);
                     batch.push(None);
                     continue;
                 }
@@ -4693,8 +4692,6 @@ impl Agent {
                 ceiling,
                 prompt: parsed.prompt,
                 inbound_id: format!("subagent-{}", uuid::Uuid::new_v4()),
-                depth: self.subagent_depth + 1,
-                intersected_tools: intersected,
             }));
         }
 
@@ -4709,12 +4706,8 @@ impl Agent {
                 let inbound_id = p.inbound_id.clone();
                 let max_rounds = p.ceiling.max_rounds;
                 let max_runtime = std::time::Duration::from_secs(p.ceiling.max_runtime_secs);
-                let depth = p.depth;
-                let max_tier = p.ceiling.max_permission_tier;
-                let tools = p.intersected_tools.clone();
                 Some(async move {
                     let mut child_guard = child.lock().await;
-                    child_guard.set_subagent_runtime(depth, max_tier, tools);
                     let run = Box::pin(child_guard.process_message_inner(
                         &prompt,
                         inbound_id,
@@ -5107,45 +5100,35 @@ impl Agent {
             },
         )?;
 
-        // Wake the child via the factory. The factory uses the
-        // child session id as the cache key, so even when the
-        // child agent_id matches the parent agent_id the lock is
-        // distinct — no deadlock through the AsyncMutex.
-        let child_arc = match factory.wake(&parsed.agent_id, &child_session_id) {
+        // Wake the child via the factory, which binds the clamp and
+        // records it on the child's own chain before handing the
+        // child back, so the child session can be read without the
+        // parent's. The factory uses the child session id as the
+        // cache key, so even when the child agent_id matches the
+        // parent agent_id the lock is distinct: no deadlock through
+        // the AsyncMutex.
+        let binding = SubagentBinding {
+            depth: self.subagent_depth + 1,
+            max_permission_tier: ceiling.max_permission_tier,
+            tools_granted: intersected,
+            parent_session_id,
+        };
+        let child_arc = match factory
+            .wake_subagent(&parsed.agent_id, &child_session_id, binding)
+            .await
+        {
             Ok(arc) => arc,
-            Err(e) => {
-                let envelope = envelope_result(
-                    &child_session_id,
-                    "error",
-                    &format!("factory.wake failed: {e}"),
-                );
-                self.log_event(
-                    TrustLevel::System,
-                    SessionEvent::SubagentResult {
-                        child_session_id: child_session_id.clone(),
-                        output: envelope.output.clone(),
-                        status: wirken_audit::SubagentStatus::Error,
-                    },
-                )?;
-                return Ok(envelope);
-            }
+            Err(e) => return self.close_unstarted_spawn(&child_session_id, &e),
         };
 
         let max_runtime = std::time::Duration::from_secs(ceiling.max_runtime_secs);
         let max_rounds = ceiling.max_rounds;
-        let depth = self.subagent_depth + 1;
-        let max_tier = ceiling.max_permission_tier;
         let inbound_id = format!("subagent-{}", uuid::Uuid::new_v4());
 
         // Lock the child for the entire run. The child's lock is
         // distinct from this parent's lock (different session id),
         // so no deadlock.
         let mut child = child_arc.lock().await;
-        // Binds the clamp and records it on the child's own chain, so
-        // the child session can be read without the parent's.
-        child
-            .bind_as_subagent(depth, max_tier, intersected, &parent_session_id)
-            .await?;
 
         // Run the child under a wall-clock timeout AND a round
         // budget. Either limit produces a structured envelope
@@ -5209,6 +5192,34 @@ impl Agent {
             .iter()
             .filter(|r| matches!(r.event, SessionEvent::SubagentSpawned { .. }))
             .count())
+    }
+
+    /// Close a spawn whose child could not be woken and bound.
+    ///
+    /// The `SubagentSpawned` row is already on this chain, so the
+    /// failure is recorded as its `SubagentResult`, and the model gets
+    /// an `error` envelope for the call while the turn goes on. The
+    /// child never ran. Only a failure to write that row to this
+    /// agent's own chain is returned as an error.
+    fn close_unstarted_spawn(
+        &self,
+        child_session_id: &str,
+        err: &AgentError,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        let envelope = envelope_result(
+            child_session_id,
+            "error",
+            &format!("factory.wake_subagent failed: {err}"),
+        );
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::SubagentResult {
+                child_session_id: child_session_id.to_string(),
+                output: envelope.output.clone(),
+                status: wirken_audit::SubagentStatus::Error,
+            },
+        )?;
+        Ok(envelope)
     }
 
     fn rebuild_system_prompt(&mut self) {
