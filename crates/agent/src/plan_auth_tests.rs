@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A loopback HTTP server standing in for the provider: one handler,
@@ -195,7 +194,226 @@ pub(crate) mod stub {
     }
 }
 
+/// An RSA signing key standing in for the provider's, and a second one
+/// that signs under the same key id but is not published.
+pub(crate) mod keys {
+    use aws_lc_rs::rsa::{KeyPair, KeySize};
+    use aws_lc_rs::signature::KeyPair as _;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use std::sync::OnceLock;
+
+    fn published() -> &'static KeyPair {
+        static PAIR: OnceLock<KeyPair> = OnceLock::new();
+        PAIR.get_or_init(|| KeyPair::generate(KeySize::Rsa2048).unwrap())
+    }
+
+    fn unpublished() -> &'static KeyPair {
+        static PAIR: OnceLock<KeyPair> = OnceLock::new();
+        PAIR.get_or_init(|| KeyPair::generate(KeySize::Rsa2048).unwrap())
+    }
+
+    /// The modulus and exponent of a DER `RSAPublicKey` (RFC 8017):
+    /// `SEQUENCE { INTEGER n, INTEGER e }`.
+    fn components(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        fn element(der: &[u8], tag: u8) -> (&[u8], &[u8]) {
+            assert_eq!(der[0], tag);
+            let (len, start) = if der[1] & 0x80 == 0 {
+                (der[1] as usize, 2)
+            } else {
+                let n = (der[1] & 0x7f) as usize;
+                let len = der[2..2 + n]
+                    .iter()
+                    .fold(0usize, |acc, b| (acc << 8) | *b as usize);
+                (len, 2 + n)
+            };
+            (&der[start..start + len], &der[start + len..])
+        }
+        let (body, _) = element(der, 0x30);
+        let (n, rest) = element(body, 0x02);
+        let (e, _) = element(rest, 0x02);
+        (n.to_vec(), e.to_vec())
+    }
+
+    pub fn jwks() -> serde_json::Value {
+        let (n, e) = components(published().public_key().as_ref());
+        serde_json::json!({"keys": [{
+            "kty": "RSA",
+            "kid": "k1",
+            "alg": "RS256",
+            "use": "sig",
+            "n": URL_SAFE_NO_PAD.encode(&n),
+            "e": URL_SAFE_NO_PAD.encode(&e),
+        }]})
+    }
+
+    fn sign_with(pair: &KeyPair, claims: &serde_json::Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(
+            serde_json::json!({"alg": "RS256", "kid": "k1", "typ": "JWT"})
+                .to_string()
+                .as_bytes(),
+        );
+        let payload = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+        let input = format!("{header}.{payload}");
+        let mut signature = vec![0u8; pair.public_modulus_len()];
+        pair.sign(
+            &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+            &aws_lc_rs::rand::SystemRandom::new(),
+            input.as_bytes(),
+            &mut signature,
+        )
+        .unwrap();
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature))
+    }
+
+    pub fn sign(claims: &serde_json::Value) -> String {
+        sign_with(published(), claims)
+    }
+
+    pub fn sign_unpublished(claims: &serde_json::Value) -> String {
+        sign_with(unpublished(), claims)
+    }
+}
+
 use stub::{Handler, Reply, Request};
+
+const HOST_ID: &str = "urn:uuid:00000000-0000-4000-8000-000000000001";
+
+fn discovery(base: &str) -> Reply {
+    Reply::json(
+        200,
+        serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}{AUTHORIZE_PATH}"),
+            "token_endpoint": format!("{base}{TOKEN_PATH}"),
+            "jwks_uri": format!("{base}/jwks"),
+            "revocation_endpoint": format!("{base}/revoke"),
+        }),
+    )
+}
+
+/// What the stub provider puts in the ID token and the token response
+/// of a code exchange.
+#[derive(Clone)]
+struct Issue {
+    nonce: String,
+    sub: String,
+    email: Option<String>,
+    scope: Option<String>,
+    iss: Option<String>,
+    aud: Option<String>,
+    exp_offset: i64,
+    unpublished_key: bool,
+}
+
+impl Default for Issue {
+    fn default() -> Self {
+        Self {
+            nonce: String::new(),
+            sub: "user-1".into(),
+            email: Some("user@example.com".into()),
+            scope: Some(SCOPES.join(" ")),
+            iss: None,
+            aud: None,
+            exp_offset: 3600,
+            unpublished_key: false,
+        }
+    }
+}
+
+fn id_token(base: &str, client_id: &str, issue: &Issue) -> String {
+    let claims = serde_json::json!({
+        "iss": issue.iss.clone().unwrap_or_else(|| base.to_string()),
+        "sub": issue.sub,
+        "aud": issue.aud.clone().unwrap_or_else(|| client_id.to_string()),
+        "exp": (unix_now() as i64 + issue.exp_offset),
+        "iat": unix_now(),
+        "nonce": issue.nonce,
+        "email": issue.email,
+    });
+    if issue.unpublished_key {
+        keys::sign_unpublished(&claims)
+    } else {
+        keys::sign(&claims)
+    }
+}
+
+/// The stub provider for sign-in: discovery, keys, and a token endpoint
+/// that answers a code exchange from `issue`.
+async fn provider(issue: Arc<Mutex<Issue>>) -> stub::Stub {
+    stub::serve(move |base| -> Handler {
+        Arc::new(move |req: &Request| match req.path.as_str() {
+            DISCOVERY_PATH => discovery(&base),
+            "/jwks" => Reply::json(200, keys::jwks()),
+            TOKEN_PATH => {
+                let form = req.form();
+                let issue = issue.lock().unwrap().clone();
+                let client_id = form.get("client_id").cloned().unwrap_or_default();
+                let mut body = serde_json::json!({
+                    "access_token": "at-1",
+                    "refresh_token": "rt-1",
+                    "id_token": id_token(&base, &client_id, &issue),
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                });
+                if let Some(scope) = &issue.scope {
+                    body["scope"] = scope.clone().into();
+                }
+                Reply::json(200, body)
+            }
+            _ => Reply::empty(404),
+        })
+    })
+    .await
+}
+
+/// Drive one sign-in against `idp`: start it, have the "browser" return
+/// to the callback with what `callback` builds from the authorize
+/// parameters, and finish.
+async fn sign_in_with(
+    idp: &stub::Stub,
+    issue: &Arc<Mutex<Issue>>,
+    saved: Option<OAuthCredential>,
+    callback: impl FnOnce(&HashMap<String, String>) -> Vec<(String, String)>,
+) -> (HashMap<String, String>, Result<SignedIn, PlanAuthError>) {
+    let pending = PendingSignIn::start_at(
+        Endpoints::stub(&idp.base),
+        SignInRequest {
+            host_id: HOST_ID.into(),
+            saved,
+            port: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let url = url::Url::parse(pending.authorize_url()).unwrap();
+    assert_eq!(url.path(), AUTHORIZE_PATH);
+    let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    issue.lock().unwrap().nonce = params["nonce"].clone();
+    let redirect = pending.redirect_uri().to_string();
+    let finish = tokio::spawn(pending.finish(Duration::from_secs(10)));
+
+    let mut back = url::Url::parse(&redirect).unwrap();
+    back.query_pairs_mut().extend_pairs(callback(&params));
+    // The browser asks for something else first; that gets a 404 and
+    // the attempt keeps listening.
+    let mut other = url::Url::parse(&redirect).unwrap();
+    other.set_path("/favicon.ico");
+    let _ = reqwest::get(other).await;
+    let _ = reqwest::get(back).await;
+    (params, finish.await.unwrap())
+}
+
+fn returning(params: &HashMap<String, String>, client_id: Option<&str>) -> Vec<(String, String)> {
+    let mut q = vec![
+        ("code".to_string(), "code-1".to_string()),
+        ("state".to_string(), params["state"].clone()),
+    ];
+    if let Some(id) = client_id {
+        q.push(("client_id".into(), id.into()));
+    }
+    q
+}
 
 fn saved_account() -> OAuthCredential {
     OAuthCredential {
@@ -213,6 +431,318 @@ fn saved_account() -> OAuthCredential {
 }
 
 // ---------------------------------------------------------------------------
+// Sign-in
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_first_sign_in_registers_and_keeps_the_issued_client_id() {
+    let issue = Arc::new(Mutex::new(Issue::default()));
+    let idp = provider(issue.clone()).await;
+    let (params, result) =
+        sign_in_with(&idp, &issue, None, |p| returning(p, Some("oaiapp_issued"))).await;
+
+    assert_eq!(params["client_id"], "dynamic_agent_client");
+    assert_eq!(params["agent_name_hint"], APP_NAME);
+    assert_eq!(params["ext_agent_host_id"], HOST_ID);
+    assert_eq!(params["response_type"], "code");
+    assert_eq!(params["resource"], RESOURCE);
+    assert_eq!(params["scope"], SCOPES.join(" "));
+    assert_eq!(params["code_challenge_method"], "S256");
+    assert!(!params.contains_key("id_token_hint"));
+    assert!(!params.contains_key("prompt"));
+    let redirect = &params["redirect_uri"];
+    assert!(
+        redirect.starts_with("http://127.0.0.1:") && redirect.ends_with(CALLBACK_PATH),
+        "{redirect}"
+    );
+
+    let signed = result.expect("sign-in completes");
+    assert!(signed.registered);
+    assert!(signed.plan_granted());
+    let cred = &signed.credential;
+    assert_eq!(cred.client_id.as_deref(), Some("oaiapp_issued"));
+    assert_eq!(cred.subject.as_deref(), Some("user-1"));
+    assert_eq!(cred.email.as_deref(), Some("user@example.com"));
+    assert_eq!(cred.issuer.as_deref(), Some(idp.base.as_str()));
+    assert_eq!(cred.refresh_token, "rt-1");
+    assert!(is_plan_credential(cred));
+
+    // The exchange used the issued id, the same redirect, the PKCE
+    // verifier behind the challenge, and the resource.
+    let exchanges = idp.requests_to(TOKEN_PATH);
+    assert_eq!(exchanges.len(), 1);
+    let form = exchanges[0].form();
+    assert_eq!(form["grant_type"], "authorization_code");
+    assert_eq!(form["client_id"], "oaiapp_issued");
+    assert_eq!(form["code"], "code-1");
+    assert_eq!(&form["redirect_uri"], redirect);
+    assert_eq!(form["resource"], RESOURCE);
+    assert_eq!(
+        pkce_challenge(&form["code_verifier"]),
+        params["code_challenge"]
+    );
+    assert!(!form.contains_key("client_secret"));
+}
+
+#[tokio::test]
+async fn a_reauthorization_sends_the_issued_id_and_hints_and_no_name_hint() {
+    let issue = Arc::new(Mutex::new(Issue::default()));
+    let idp = provider(issue.clone()).await;
+    // The callback leaves the client id out: the pending one is kept.
+    let (params, result) =
+        sign_in_with(&idp, &issue, Some(saved_account()), |p| returning(p, None)).await;
+
+    assert_eq!(params["client_id"], "oaiapp_saved");
+    assert_eq!(params["id_token_hint"], "saved.id.token");
+    assert_eq!(params["login_hint"], "user@example.com");
+    assert_eq!(params["ext_agent_host_id"], HOST_ID);
+    assert!(!params.contains_key("agent_name_hint"));
+
+    let signed = result.expect("reauthorization completes");
+    assert!(!signed.registered);
+    assert_eq!(signed.credential.client_id.as_deref(), Some("oaiapp_saved"));
+    assert_eq!(
+        idp.requests_to(TOKEN_PATH)[0].form()["client_id"],
+        "oaiapp_saved"
+    );
+}
+
+#[tokio::test]
+async fn a_reauthorization_after_a_declined_grant_asks_for_consent_again() {
+    let issue = Arc::new(Mutex::new(Issue::default()));
+    let idp = provider(issue.clone()).await;
+    let mut declined = without_tokens(&saved_account());
+    declined.scope = "openid profile email".into();
+    let (params, _) = sign_in_with(&idp, &issue, Some(declined), |p| returning(p, None)).await;
+    assert_eq!(params["prompt"], "consent");
+}
+
+#[tokio::test]
+async fn a_callback_naming_a_different_client_id_is_refused_before_any_exchange() {
+    let issue = Arc::new(Mutex::new(Issue::default()));
+    let idp = provider(issue.clone()).await;
+    let (_, result) = sign_in_with(&idp, &issue, Some(saved_account()), |p| {
+        returning(p, Some("oaiapp_someone_else"))
+    })
+    .await;
+    assert!(
+        matches!(result, Err(PlanAuthError::ClientMismatch { .. })),
+        "{:?}",
+        result.err()
+    );
+    assert!(idp.requests_to(TOKEN_PATH).is_empty());
+}
+
+#[tokio::test]
+async fn a_registration_callback_without_an_issued_id_is_incomplete() {
+    let issue = Arc::new(Mutex::new(Issue::default()));
+    let idp = provider(issue.clone()).await;
+    for client in [None, Some("dynamic_agent_client")] {
+        let (_, result) = sign_in_with(&idp, &issue, None, |p| returning(p, client)).await;
+        assert!(
+            matches!(result, Err(PlanAuthError::RegistrationIncomplete)),
+            "{:?}",
+            result.err()
+        );
+    }
+    assert!(idp.requests_to(TOKEN_PATH).is_empty());
+}
+
+#[tokio::test]
+async fn a_state_mismatch_or_a_declined_consent_stops_without_an_exchange() {
+    let issue = Arc::new(Mutex::new(Issue::default()));
+    let idp = provider(issue.clone()).await;
+
+    let (_, result) = sign_in_with(&idp, &issue, None, |_| {
+        vec![
+            ("code".into(), "code-1".into()),
+            ("state".into(), "forged".into()),
+            ("client_id".into(), "oaiapp_issued".into()),
+        ]
+    })
+    .await;
+    assert!(matches!(result, Err(PlanAuthError::StateMismatch)));
+
+    let (_, result) = sign_in_with(&idp, &issue, None, |p| {
+        vec![
+            ("error".into(), "access_denied".into()),
+            ("state".into(), p["state"].clone()),
+        ]
+    })
+    .await;
+    assert!(matches!(result, Err(PlanAuthError::Declined)));
+
+    // An error with the wrong state is a state mismatch first.
+    let (_, result) = sign_in_with(&idp, &issue, None, |_| {
+        vec![
+            ("error".into(), "access_denied".into()),
+            ("state".into(), "forged".into()),
+        ]
+    })
+    .await;
+    assert!(matches!(result, Err(PlanAuthError::StateMismatch)));
+
+    assert!(idp.requests_to(TOKEN_PATH).is_empty());
+}
+
+#[tokio::test]
+async fn an_id_token_that_fails_any_check_is_refused() {
+    type Spoil = fn(&mut Issue);
+    let cases: [(&str, Spoil); 5] = [
+        ("bad signature", |i| i.unpublished_key = true),
+        ("wrong issuer", |i| {
+            i.iss = Some("https://elsewhere.example".into())
+        }),
+        ("wrong audience", |i| i.aud = Some("oaiapp_other".into())),
+        ("expired", |i| i.exp_offset = -600),
+        ("wrong nonce", |_| {}),
+    ];
+    for (what, spoil) in cases {
+        let issue = Arc::new(Mutex::new(Issue::default()));
+        let idp = provider(issue.clone()).await;
+        let wrong_nonce = what == "wrong nonce";
+        let (_, result) = sign_in_with(&idp, &issue, None, |p| {
+            let mut i = issue.lock().unwrap();
+            spoil(&mut i);
+            if wrong_nonce {
+                i.nonce = "not-this-attempt".into();
+            }
+            returning(p, Some("oaiapp_issued"))
+        })
+        .await;
+        assert!(
+            matches!(result, Err(PlanAuthError::IdToken(_))),
+            "{what}: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_reauthorization_that_returns_another_account_replaces_nothing() {
+    let issue = Arc::new(Mutex::new(Issue {
+        sub: "user-2".into(),
+        ..Default::default()
+    }));
+    let idp = provider(issue.clone()).await;
+    let (_, result) =
+        sign_in_with(&idp, &issue, Some(saved_account()), |p| returning(p, None)).await;
+    assert!(
+        matches!(result, Err(PlanAuthError::AccountMismatch)),
+        "{:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+async fn plan_usage_is_off_when_the_scope_is_missing_or_omitted() {
+    for scope in [Some("openid profile email offline_access"), None] {
+        let issue = Arc::new(Mutex::new(Issue {
+            scope: scope.map(String::from),
+            ..Default::default()
+        }));
+        let idp = provider(issue.clone()).await;
+        let (_, result) =
+            sign_in_with(&idp, &issue, None, |p| returning(p, Some("oaiapp_issued"))).await;
+        let signed = result.expect("the sign-in itself is valid");
+        assert!(!signed.plan_granted(), "scope {scope:?}");
+        assert_eq!(signed.credential.scope, scope.unwrap_or(""));
+        assert!(unusable_reason(&signed.credential, "e").is_some());
+    }
+}
+
+#[test]
+fn the_id_token_checks_hold_on_their_own() {
+    let jwks: Vec<Jwk> = serde_json::from_value(keys::jwks()["keys"].clone()).unwrap();
+    let now = unix_now();
+    let claims = |nonce: &str| {
+        serde_json::json!({
+            "iss": "https://issuer.example", "sub": "s", "aud": ["oaiapp_x", "other"],
+            "azp": "oaiapp_x", "exp": now + 60, "nonce": nonce,
+        })
+    };
+    let good = keys::sign(&claims("n1"));
+    assert!(
+        validate_id_token(
+            &good,
+            &jwks,
+            "https://issuer.example",
+            "oaiapp_x",
+            "n1",
+            now
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_id_token(
+            &good,
+            &jwks,
+            "https://issuer.example",
+            "oaiapp_x",
+            "n2",
+            now
+        )
+        .is_err()
+    );
+    let mut tampered = good.clone();
+    tampered.push('A');
+    assert!(
+        validate_id_token(
+            &tampered,
+            &jwks,
+            "https://issuer.example",
+            "oaiapp_x",
+            "n1",
+            now
+        )
+        .is_err()
+    );
+    // An unsigned token is never accepted.
+    let none = format!(
+        "{}.{}.",
+        URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#),
+        URL_SAFE_NO_PAD.encode(claims("n1").to_string())
+    );
+    assert!(
+        validate_id_token(
+            &none,
+            &jwks,
+            "https://issuer.example",
+            "oaiapp_x",
+            "n1",
+            now
+        )
+        .is_err()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Host id
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_host_id_is_created_once_owner_only_and_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = host_id(dir.path()).unwrap();
+    assert!(first.starts_with("urn:uuid:"), "{first}");
+    assert_eq!(host_id(dir.path()).unwrap(), first);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join(HOST_ID_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    std::fs::write(dir.path().join(HOST_ID_FILE), "user@example.com").unwrap();
+    assert!(
+        host_id(dir.path()).is_err(),
+        "a malformed id is not replaced"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Token source
 // ---------------------------------------------------------------------------
@@ -242,8 +772,9 @@ async fn token_endpoint(
     count: Arc<AtomicUsize>,
     reply: impl Fn(&HashMap<String, String>) -> Reply + Send + Sync + 'static,
 ) -> stub::Stub {
-    stub::serve(move |_| -> Handler {
+    stub::serve(move |base| -> Handler {
         Arc::new(move |req: &Request| match req.path.as_str() {
+            DISCOVERY_PATH => discovery(&base),
             TOKEN_PATH => {
                 let form = req.form();
                 assert_eq!(form["grant_type"], "refresh_token");
@@ -458,6 +989,171 @@ fn a_source_refuses_an_entry_it_cannot_use() {
     assert!(open().contains("new sign-in"));
 }
 
+/// The plan endpoints are fixed outside this crate's tests: whatever a
+/// configuration says the base URL is, the client and the sign-in use
+/// the provider's own.
+#[test]
+fn the_plan_endpoints_cannot_be_redirected_by_configuration() {
+    let pinned = Endpoints::pinned();
+    assert_eq!(pinned.api_base(), API_BASE);
+    assert_eq!(pinned.issuer(), AUTH_BASE);
+    assert_eq!(pinned.token_url(), format!("{AUTH_BASE}{TOKEN_PATH}"));
+    assert!(pinned.on_auth_origin(&format!("{AUTH_BASE}/.well-known/jwks.json")));
+    assert!(!pinned.on_auth_origin("https://auth.openai.com.evil.example/jwks"));
+
+    for base_url in ["http://127.0.0.1:9/v1", "https://evil.example/v1"] {
+        let config = crate::llm::LlmConfig {
+            base_url: base_url.into(),
+            ..crate::llm::LlmConfig::plan("m")
+        };
+        let client = crate::llm::LlmClient::new(config).unwrap();
+        assert_eq!(client.plan_endpoints(), &pinned, "{base_url}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Revocation and sign-out
+// ---------------------------------------------------------------------------
+
+async fn revocation_endpoint(statuses: Vec<u16>) -> (stub::Stub, Arc<AtomicUsize>) {
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let stub = stub::serve(move |base| -> Handler {
+        Arc::new(move |req: &Request| match req.path.as_str() {
+            DISCOVERY_PATH => discovery(&base),
+            "/revoke" => {
+                let form = req.form();
+                assert_eq!(form["token"], "rt-1");
+                assert_eq!(form["token_type_hint"], "refresh_token");
+                assert_eq!(form["client_id"], "oaiapp_saved");
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                Reply::empty(*statuses.get(n).unwrap_or(statuses.last().unwrap()))
+            }
+            _ => Reply::empty(404),
+        })
+    })
+    .await;
+    (stub, count)
+}
+
+#[tokio::test]
+async fn revocation_retries_a_5xx_and_confirms_on_200() {
+    let (idp, count) = revocation_endpoint(vec![503, 502, 200]).await;
+    let zero = [Duration::ZERO; 3];
+    let got = revoke_at(&Endpoints::stub(&idp.base), &stored(0), &zero).await;
+    assert_eq!(got, Revocation::Confirmed);
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn revocation_gives_up_after_the_backoff_and_says_it_was_not_confirmed() {
+    let (idp, count) = revocation_endpoint(vec![503]).await;
+    let zero = [Duration::ZERO; 2];
+    let got = revoke_at(&Endpoints::stub(&idp.base), &stored(0), &zero).await;
+    assert!(
+        matches!(got, Revocation::Unconfirmed(ref r) if r.contains("503")),
+        "{got:?}"
+    );
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        3,
+        "the first try and one per wait"
+    );
+
+    // A 4xx is an answer, not an outage: no retry.
+    let (idp, count) = revocation_endpoint(vec![400]).await;
+    let got = revoke_at(&Endpoints::stub(&idp.base), &stored(0), &zero).await;
+    assert!(matches!(got, Revocation::Unconfirmed(_)));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+
+    // Nothing listening: a network error each time, then unconfirmed.
+    let gone = Endpoints::stub("http://127.0.0.1:1");
+    assert!(matches!(
+        revoke_at(&gone, &stored(0), &zero).await,
+        Revocation::Unconfirmed(_)
+    ));
+    assert_eq!(
+        revoke_at(&gone, &without_tokens(&stored(0)), &zero).await,
+        Revocation::NothingToRevoke
+    );
+}
+
+#[tokio::test]
+async fn sign_out_clears_the_tokens_keeps_the_registration_and_reports_the_revocation() {
+    let (idp, _) = revocation_endpoint(vec![500]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vault.db");
+    store_plan(&vault_at(&db), "plan", &stored(unix_now() + 3600)).unwrap();
+    let got = sign_out_at(
+        Endpoints::stub(&idp.base),
+        Arc::new(Mutex::new(vault_at(&db))),
+        dir.path(),
+        "plan",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(matches!(got, Revocation::Unconfirmed(_)), "{got:?}");
+    let after = read_back(&db, "plan");
+    assert!(after.access_token.is_empty() && after.refresh_token.is_empty());
+    assert_eq!(after.id_token.as_deref(), Some("saved.id.token"));
+    assert_eq!(after.client_id.as_deref(), Some("oaiapp_saved"));
+    assert_eq!(after.subject.as_deref(), Some("user-1"));
+}
+
+/// The tokens are cleared before the revocation goes out, and the
+/// revocation runs with no vault transaction open: when the request
+/// reaches the provider, the entry is already cleared and another
+/// connection can write to the vault.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sign_out_clears_first_and_revokes_outside_the_vault_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vault.db");
+    store_plan(&vault_at(&db), "plan", &stored(unix_now() + 3600)).unwrap();
+    vault_at(&db)
+        .store(
+            "other",
+            "test",
+            &VaultSecret::new("other-value".into()),
+            None,
+            None,
+        )
+        .unwrap();
+    let observed: Arc<Mutex<Option<(String, bool)>>> = Arc::new(Mutex::new(None));
+    let seen = observed.clone();
+    let db_in = db.clone();
+    let idp = stub::serve(move |base| -> Handler {
+        Arc::new(move |req: &Request| match req.path.as_str() {
+            DISCOVERY_PATH => discovery(&base),
+            "/revoke" => {
+                let other = vault_at(&db_in);
+                let cleared = read_back(&db_in, "plan").refresh_token;
+                let wrote = other.retrieve("other").is_ok();
+                *seen.lock().unwrap() = Some((cleared, wrote));
+                Reply::empty(200)
+            }
+            _ => Reply::empty(404),
+        })
+    })
+    .await;
+    let got = sign_out_at(
+        Endpoints::stub(&idp.base),
+        Arc::new(Mutex::new(vault_at(&db))),
+        dir.path(),
+        "plan",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(got, Revocation::Confirmed);
+    let (refresh_at_revocation, other_writer_ok) = observed.lock().unwrap().clone().unwrap();
+    assert!(refresh_at_revocation.is_empty(), "cleared before revoking");
+    assert!(
+        other_writer_ok,
+        "the vault is not locked during the revocation"
+    );
+}
+
 /// A refresh holds the entry's lock file across its request to the
 /// provider, but no vault transaction: while the provider stalls, a
 /// write from another connection (retrieve bumps `last_used_at`) goes
@@ -577,6 +1273,23 @@ async fn every_entry_has_its_own_owner_only_lock_file_in_the_data_dir() {
     assert!(other.try_lock().is_ok());
 }
 
+/// 2.3.0 builds `LlmConfig::from_provider(provider, base_url, model)`
+/// from a `provider.json` (`wirken run`, `wirken ask`) and from an agent
+/// row (`llm_config_for_agent`), and its `LlmClient::new`, unchanged for
+/// key mode, refuses an endpoint that is neither HTTPS nor loopback.
+/// The marker a plan file and row carry fails that check, so a
+/// downgraded binary stops before any request instead of sending to a
+/// default endpoint.
+#[test]
+fn a_build_that_predates_plan_mode_refuses_the_plan_base_url() {
+    let config = crate::llm::LlmConfig::from_provider("openai", PLAN_BASE_URL, "m");
+    let err = crate::llm::LlmClient::new(config).err().expect("refused");
+    assert!(err.to_string().contains("must use HTTPS"), "{err}");
+    // This build never reads it as an endpoint.
+    let plan = crate::llm::LlmClient::new(crate::llm::LlmConfig::plan("m")).unwrap();
+    assert_eq!(plan.plan_endpoints(), &Endpoints::pinned());
+}
+
 #[test]
 fn granted_scopes_are_only_what_the_response_said() {
     assert_eq!(granted_scopes(None), "");
@@ -590,23 +1303,4 @@ fn granted_scopes_are_only_what_the_response_said() {
         Some("refresh_token_reused")
     );
     assert_eq!(error_code("not json"), None);
-}
-
-/// The plan endpoints are fixed outside this crate's tests: whatever a
-/// configuration says the base URL is, the client uses the provider's
-/// own.
-#[test]
-fn the_plan_endpoints_cannot_be_redirected_by_configuration() {
-    let pinned = Endpoints::pinned();
-    assert_eq!(pinned.api_base(), API_BASE);
-    assert_eq!(pinned.token_url(), format!("{AUTH_BASE}{TOKEN_PATH}"));
-
-    for base_url in ["http://127.0.0.1:9/v1", "https://evil.example/v1"] {
-        let config = crate::llm::LlmConfig {
-            base_url: base_url.into(),
-            ..crate::llm::LlmConfig::plan("m")
-        };
-        let client = crate::llm::LlmClient::new(config).unwrap();
-        assert_eq!(client.plan_endpoints(), &pinned, "{base_url}");
-    }
 }

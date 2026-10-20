@@ -161,6 +161,7 @@ mod tests {
             tools_enabled: None,
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         }
     }
 

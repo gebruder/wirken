@@ -480,3 +480,17 @@ async fn the_models_listing_keeps_listed_models_in_server_order() {
     );
     assert!(parse_plan_models(&serde_json::json!({"data": [{"id": "x"}]})).is_empty());
 }
+
+#[test]
+fn a_plan_call_is_never_priced() {
+    let usage = Some(Usage {
+        input_tokens: 1000,
+        output_tokens: 1000,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+    });
+    let attribution = crate::runtime::attribute_call_usage(&LlmConfig::plan("gpt-4o"), usage);
+    assert_eq!(attribution.input_tokens, 1000);
+    assert_eq!(attribution.total_cost_usd_micros, None);
+    assert_eq!(attribution.input_cost_usd_micros, None);
+}

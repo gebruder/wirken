@@ -2020,6 +2020,7 @@ mod wake {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         );
@@ -2078,6 +2079,7 @@ mod wake {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         )]);
@@ -2596,6 +2598,7 @@ mod wake {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         );
@@ -2669,6 +2672,7 @@ mod subagent {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         );
@@ -2688,6 +2692,7 @@ mod subagent {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         );
@@ -3406,6 +3411,7 @@ mod subagent {
                     sandbox: Default::default(),
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
+                    plan_token_source: None,
                     channel_egress: Default::default(),
                 },
             );
@@ -3791,6 +3797,7 @@ mod subagent_bound_at_wake {
             sandbox: Default::default(),
             extra_interceptors: vec![],
             zirkel_db_path: None,
+            plan_token_source: None,
             channel_egress: Default::default(),
         };
         HashMap::from([
@@ -7921,6 +7928,7 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         );
@@ -8070,6 +8078,7 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         );
@@ -8233,6 +8242,7 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         );
@@ -8359,6 +8369,7 @@ mod org_tool_policy {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
             },
         );
@@ -10417,6 +10428,64 @@ mod budget_enforcement {
             })
             .collect();
         assert_eq!(tools, vec![None]);
+    }
+
+    /// A plan-mode call has no per-token price, so a block budget could
+    /// never stop one. The call is refused before its request row, with
+    /// an error naming the budget, and the block is on the chain. An
+    /// alert budget is not a refusal.
+    #[tokio::test]
+    async fn a_block_budget_refuses_a_plan_agent_naming_the_budget() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut agent = Agent::new(
+            "planned".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::plan("m"),
+            None,
+            None,
+            log.clone(),
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        agent.set_budget(
+            Some(budget(BudgetMode::Block, 500_000)),
+            Some(store.clone()),
+        );
+        agent.set_budget_name("the budget.json budget agents.planned");
+
+        let err = agent
+            .process_message("hi", "in-1".into())
+            .await
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            err.contains("the budget.json budget agents.planned")
+                && err.contains("cannot be priced"),
+            "{err}"
+        );
+        let rows = events(&log, "planned");
+        assert!(
+            rows.iter().any(|e| matches!(
+                e,
+                SessionEvent::BudgetExceeded {
+                    action: BudgetAction::Blocked,
+                    ..
+                }
+            )),
+            "the block is recorded"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|e| matches!(e, SessionEvent::LlmRequest { .. })),
+            "no request row for a refused call"
+        );
+
+        agent.set_budget(Some(budget(BudgetMode::Alert, 500_000)), Some(store));
+        assert!(agent.test_check_budget_for_tool(None).unwrap().is_none());
     }
 
     // Synthetic non-compliant agent: an over-budget agent must be
@@ -14367,6 +14436,7 @@ mod leak_detection {
             sandbox: Default::default(),
             extra_interceptors: vec![],
             zirkel_db_path: None,
+            plan_token_source: None,
             channel_egress: Default::default(),
         };
         let ceiling = SubagentCeiling {

@@ -1,13 +1,21 @@
-//! Token refresh for plan mode (`"auth": "plan"` on the [`PROVIDER`]
-//! provider).
+//! Sign-in, token refresh and revocation for plan mode
+//! (`"auth": "plan"` on the [`PROVIDER`] provider).
 //!
 //! In this mode an agent's requests run on the operator's own plan at
-//! the provider rather than on an API key. The grant is an OAuth token
-//! set: an access token that lives an hour and a refresh token that
-//! lives thirty days and rotates on every use.
+//! the provider rather than on an API key. The provider runs it as an
+//! OAuth flow for public clients: the app registers itself on the first
+//! sign-in (there is no client secret; the callback carries the client
+//! id the provider issued), the operator consents to plan usage in the
+//! browser, and the grant comes back as an access token that lives an
+//! hour, a refresh token that lives thirty days and rotates on every
+//! use, and an OpenID ID token naming the account.
 //!
 //! What lives here:
 //!
+//! - [`PendingSignIn`]: one authorization attempt, from the loopback
+//!   listener to a validated credential. The ID token is checked against
+//!   the provider's published keys before anything is kept, and a
+//!   reauthorization has to come back as the account it started from.
 //! - [`PlanTokenSource`]: the bearer for each model call. One per vault
 //!   entry per process. Across processes, a refresh holds the entry's
 //!   lock file ([`entry_lock_path`]) from read to write, so a rotating
@@ -16,15 +24,20 @@
 //!   stored refresh token is the one the refresh started from
 //!   ([`wirken_vault::CredentialStore::update_exclusive`]). No network
 //!   call is made while the vault's write lock is held.
+//! - [`revoke`] and [`sign_out`]: end the renewable session.
+//! - [`host_id`]: the per-host identifier every authorization carries.
 //!
 //! Every endpoint is fixed ([`AUTH_BASE`], [`API_BASE`]). Nothing in a
 //! configuration file or the environment moves them: [`Endpoints::pinned`]
 //! is the only constructor outside this crate's tests.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use wirken_gateway::leak::LeakMatcher;
@@ -33,22 +46,30 @@ use wirken_vault::{CredentialKind, CredentialStore, VaultSecret};
 
 use crate::error::AgentError;
 
-/// The provider's authorization server, whose token endpoint refreshes
-/// the grant.
+/// The provider's authorization server: authorize, token, discovery
+/// and the keys and revocation endpoint discovery names.
 pub const AUTH_BASE: &str = "https://auth.openai.com";
 /// The API the plan's tokens are issued for, and where `/responses`
 /// and `/models` are called.
 pub const API_BASE: &str = "https://api.openai.com/v1";
-/// Sent as `resource` on refresh.
+/// Sent as `resource` on authorization, code exchange and refresh.
 pub const RESOURCE: &str = "https://api.openai.com/v1";
+/// The `base_url` a plan-mode `provider.json` and agent row carry. Not
+/// an endpoint, and never used as one here: the plan endpoints are
+/// fixed. A build that predates plan mode reads `base_url` as the
+/// endpoint and refuses this value (it is neither HTTPS nor loopback)
+/// when it builds the client, so a downgrade fails before any request
+/// rather than sending one to a default endpoint.
+pub const PLAN_BASE_URL: &str = "plan-sign-in";
 /// `OAuthCredential::provider` on a plan entry: the provider id the
 /// agent runs as.
 pub const PROVIDER: &str = "openai";
-/// The vault entry a plan sign-in is kept under when none is named.
+/// The vault entry a sign-in writes when none is named.
 pub const DEFAULT_ENTRY: &str = "openai-plan";
-/// The scope that permits plan usage. A grant without it runs nothing.
+/// The scope that permits plan usage. A grant without it signs the
+/// account in and runs nothing.
 pub const PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
-/// Every scope a plan grant carries: identity, the refresh token, and
+/// Every scope a sign-in asks for: identity, the refresh token, and
 /// plan usage.
 pub const SCOPES: [&str; 6] = [
     "openid",
@@ -58,10 +79,24 @@ pub const SCOPES: [&str; 6] = [
     "resource.invoke",
     PLAN_SCOPE,
 ];
+/// The loopback callback path. Only the port may differ between
+/// sign-ins.
+pub const CALLBACK_PATH: &str = "/auth/callback";
+/// The name the provider shows the operator for this app on its first
+/// registration.
+pub const APP_NAME: &str = "Wirken";
 /// Where the operator reviews usage and sets this app's limit.
 pub const USAGE_URL: &str = "https://chatgpt.com/settings/usage";
+/// The file under the data directory that holds this host's id.
+pub const HOST_ID_FILE: &str = "plan-host-id";
 
+/// The client id a first sign-in sends to ask the provider to register
+/// this app. Never stored, and never sent anywhere but the authorize
+/// request.
+const REGISTRATION_CLIENT_ID: &str = "dynamic_agent_client";
+const AUTHORIZE_PATH: &str = "/api/accounts/authorize";
 const TOKEN_PATH: &str = "/api/accounts/oauth/token";
+const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
 
 /// Refresh codes after which the refresh token cannot be used again.
 const TERMINAL_REFRESH_CODES: [&str; 6] = [
@@ -78,19 +113,31 @@ const REFRESH_LEAD_SECS: u64 = 300;
 /// An access token closer than this to expiry is not sent: the request
 /// would reach the provider after the token did.
 const EXPIRY_MARGIN_SECS: u64 = 60;
+/// Clock leeway on the ID token's `exp`.
+const ID_TOKEN_LEEWAY_SECS: u64 = 60;
 /// Timeout on each request to the authorization server.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a short vault write waits on another connection's write.
 /// No network call is ever made while the vault's write lock is held,
 /// so this is the store's ordinary wait.
 const VAULT_WAIT: Duration = Duration::from_secs(5);
-/// How long a refresh waits for another process to release the entry's
-/// lock file. Longer than any one holder keeps it.
+/// How long a refresh or sign-out waits for another process to release
+/// the entry's lock file. Longer than a sign-out's revocation retries
+/// (three requests at [`HTTP_TIMEOUT`] plus [`REVOKE_BACKOFF`]).
 const ENTRY_LOCK_WAIT: Duration = Duration::from_secs(90);
 /// How often a waiting process tries the entry's lock file again.
 const ENTRY_LOCK_POLL: Duration = Duration::from_millis(50);
+/// The waits between revocation attempts after a network error or a
+/// 5xx.
+pub const REVOKE_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+/// How long a sign-in waits for the browser to come back.
+pub const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// The endpoints a refresh and a plan-mode call talk to.
+/// The endpoints one sign-in, refresh or revocation talks to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoints {
     auth_base: String,
@@ -120,8 +167,30 @@ impl Endpoints {
         &self.api_base
     }
 
+    /// The issuer an ID token must name, which is also what discovery
+    /// must report.
+    pub fn issuer(&self) -> &str {
+        &self.auth_base
+    }
+
+    fn authorize_url(&self) -> String {
+        format!("{}{AUTHORIZE_PATH}", self.auth_base)
+    }
+
     fn token_url(&self) -> String {
         format!("{}{TOKEN_PATH}", self.auth_base)
+    }
+
+    fn discovery_url(&self) -> String {
+        format!("{}{DISCOVERY_PATH}", self.auth_base)
+    }
+
+    /// Whether a URL the discovery document names is on the
+    /// authorization server's own origin. Keys and revocation are not
+    /// fetched from anywhere else.
+    fn on_auth_origin(&self, url: &str) -> bool {
+        url.strip_prefix(self.auth_base.as_str())
+            .is_some_and(|rest| rest.starts_with('/'))
     }
 }
 
@@ -137,12 +206,72 @@ pub(crate) fn http_client(endpoints: &Endpoints) -> Result<reqwest::Client, Stri
         .map_err(|e| format!("http client: {e}"))
 }
 
+/// Why a sign-in did not produce a credential. Nothing is stored on
+/// any of these.
+#[derive(Debug, thiserror::Error)]
+pub enum PlanAuthError {
+    #[error("{0}")]
+    Local(String),
+    #[error("consent was declined at the provider (access_denied); nothing was exchanged")]
+    Declined,
+    #[error(
+        "the sign-in callback's state did not match this attempt; nothing was exchanged. \
+         Start the sign-in again."
+    )]
+    StateMismatch,
+    #[error("the provider ended the sign-in with error '{0}'; nothing was exchanged")]
+    Provider(String),
+    #[error(
+        "registration did not complete: the callback carried no issued client id. Start the \
+         sign-in again."
+    )]
+    RegistrationIncomplete,
+    #[error(
+        "the callback carried client id '{returned}', not the one this account registered \
+         ('{saved}'); refused, and the saved registration is unchanged"
+    )]
+    ClientMismatch { saved: String, returned: String },
+    #[error("the ID token was refused: {0}")]
+    IdToken(String),
+    #[error(
+        "the provider signed in a different account than the one this entry belongs to; \
+         nothing was replaced. Sign in with the same account, or use another entry name."
+    )]
+    AccountMismatch,
+    #[error("code exchange failed: {0}")]
+    Exchange(String),
+    #[error("timed out waiting for the browser to return to the sign-in callback")]
+    Timeout,
+}
+
 /// Seconds since the epoch.
 pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Equality that does not stop at the first differing byte, for the
+/// state and nonce comparisons.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// `bytes` random bytes, base64url without padding.
+fn random_token(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut buf);
+    URL_SAFE_NO_PAD.encode(buf)
+}
+
+/// The S256 challenge for a PKCE verifier.
+fn pkce_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +374,64 @@ fn secret_of(cred: &OAuthCredential) -> VaultSecret {
 }
 
 // ---------------------------------------------------------------------------
+// Host id
+// ---------------------------------------------------------------------------
+
+/// This host's `ext_agent_host_id`: a `urn:uuid:` around a random v4
+/// UUID, created the first time it is asked for and kept in
+/// [`HOST_ID_FILE`] under `data_dir`, owner-only. It identifies the
+/// host, not the operator, and is not a credential, so it lives outside
+/// the vault: a credential copied to another host does not carry it.
+///
+/// A file that holds anything else is an error rather than replaced,
+/// since replacing it would make this host a different one to the
+/// provider.
+pub fn host_id(data_dir: &Path) -> Result<String, PlanAuthError> {
+    let path = data_dir.join(HOST_ID_FILE);
+    let read = |path: &Path| -> Result<String, PlanAuthError> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| PlanAuthError::Local(format!("read {}: {e}", path.display())))?;
+        let id = raw.trim();
+        let valid = id
+            .strip_prefix("urn:uuid:")
+            .is_some_and(|u| uuid::Uuid::parse_str(u).is_ok());
+        if valid {
+            Ok(id.to_string())
+        } else {
+            Err(PlanAuthError::Local(format!(
+                "{} does not hold a urn:uuid host id; restore it or remove it to create a new one",
+                path.display()
+            )))
+        }
+    };
+    if path.exists() {
+        return read(&path);
+    }
+    let id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(id.as_bytes())
+                .map_err(|e| PlanAuthError::Local(format!("write {}: {e}", path.display())))?;
+            Ok(id)
+        }
+        // Another process created it first; its id is this host's.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read(&path),
+        Err(e) => Err(PlanAuthError::Local(format!(
+            "create {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Token endpoint
 // ---------------------------------------------------------------------------
 
@@ -254,6 +441,8 @@ struct TokenResponse {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default)]
+    id_token: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
     #[serde(default)]
@@ -377,6 +566,673 @@ pub(crate) async fn request_refresh(
         },
         ..cred.clone()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Discovery and the ID token
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct DiscoveryDocument {
+    issuer: String,
+    jwks_uri: String,
+    #[serde(default)]
+    revocation_endpoint: Option<String>,
+}
+
+/// What the discovery document names, checked: the issuer it reports
+/// is the one expected, and the endpoints are on the authorization
+/// server's origin.
+struct Discovery {
+    jwks_uri: String,
+    revocation_endpoint: Option<String>,
+}
+
+async fn discover(http: &reqwest::Client, endpoints: &Endpoints) -> Result<Discovery, String> {
+    let response = http
+        .get(endpoints.discovery_url())
+        .send()
+        .await
+        .map_err(|e| format!("discovery document: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("discovery document: HTTP {}", status.as_u16()));
+    }
+    let doc: DiscoveryDocument = response
+        .json()
+        .await
+        .map_err(|e| format!("discovery document: {e}"))?;
+    if doc.issuer != endpoints.issuer() {
+        return Err(format!(
+            "discovery names issuer '{}', expected '{}'",
+            doc.issuer,
+            endpoints.issuer()
+        ));
+    }
+    if !endpoints.on_auth_origin(&doc.jwks_uri) {
+        return Err(format!(
+            "discovery names keys at '{}', off the authorization server",
+            doc.jwks_uri
+        ));
+    }
+    let revocation_endpoint = match doc.revocation_endpoint {
+        Some(url) if !endpoints.on_auth_origin(&url) => {
+            return Err(format!(
+                "discovery names revocation at '{url}', off the authorization server"
+            ));
+        }
+        other => other,
+    };
+    Ok(Discovery {
+        jwks_uri: doc.jwks_uri,
+        revocation_endpoint,
+    })
+}
+
+/// One key from the provider's JWKS.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct Jwk {
+    kty: String,
+    #[serde(default)]
+    kid: Option<String>,
+    #[serde(default)]
+    alg: Option<String>,
+    #[serde(default, rename = "use")]
+    usage: Option<String>,
+    #[serde(default)]
+    n: Option<String>,
+    #[serde(default)]
+    e: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JwkSet {
+    keys: Vec<Jwk>,
+}
+
+async fn fetch_keys(http: &reqwest::Client, jwks_uri: &str) -> Result<Vec<Jwk>, String> {
+    let response = http
+        .get(jwks_uri)
+        .send()
+        .await
+        .map_err(|e| format!("signing keys: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("signing keys: HTTP {}", status.as_u16()));
+    }
+    let set: JwkSet = response
+        .json()
+        .await
+        .map_err(|e| format!("signing keys: {e}"))?;
+    Ok(set.keys)
+}
+
+#[derive(Deserialize)]
+struct JwtHeader {
+    alg: String,
+    #[serde(default)]
+    kid: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct IdTokenClaims {
+    iss: String,
+    sub: String,
+    aud: serde_json::Value,
+    exp: u64,
+    #[serde(default)]
+    nonce: Option<String>,
+    #[serde(default)]
+    azp: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// The identity a validated ID token carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdIdentity {
+    pub sub: String,
+    pub email: Option<String>,
+}
+
+fn b64url(segment: &str, what: &str) -> Result<Vec<u8>, String> {
+    URL_SAFE_NO_PAD
+        .decode(segment)
+        .map_err(|e| format!("{what} is not base64url: {e}"))
+}
+
+/// Validate an ID token: an RS256 signature by one of `keys`, the
+/// expected issuer, the issued client id among its audiences, an
+/// expiry in the future, and the nonce saved for this attempt.
+pub(crate) fn validate_id_token(
+    token: &str,
+    keys: &[Jwk],
+    issuer: &str,
+    client_id: &str,
+    nonce: &str,
+    now: u64,
+) -> Result<IdIdentity, String> {
+    let mut parts = token.split('.');
+    let (Some(header_b64), Some(payload_b64), Some(signature_b64), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err("not a three-part JWS".into());
+    };
+    let header: JwtHeader = serde_json::from_slice(&b64url(header_b64, "header")?)
+        .map_err(|e| format!("header: {e}"))?;
+    if header.alg != "RS256" {
+        return Err(format!("algorithm '{}' is not accepted", header.alg));
+    }
+    let candidates: Vec<&Jwk> = keys
+        .iter()
+        .filter(|k| k.kty == "RSA")
+        .filter(|k| k.usage.as_deref().is_none_or(|u| u == "sig"))
+        .filter(|k| k.alg.as_deref().is_none_or(|a| a == "RS256"))
+        .collect();
+    let key = match &header.kid {
+        Some(kid) => candidates
+            .iter()
+            .find(|k| k.kid.as_deref() == Some(kid.as_str()))
+            .ok_or_else(|| format!("no published key has id '{kid}'"))?,
+        None if candidates.len() == 1 => &candidates[0],
+        None => return Err("the token names no key id and the key set is not one key".into()),
+    };
+    let strip = |v: Vec<u8>| -> Vec<u8> {
+        let start = v.iter().position(|b| *b != 0).unwrap_or(v.len());
+        v.into_iter().skip(start).collect()
+    };
+    let n = strip(b64url(key.n.as_deref().unwrap_or(""), "key modulus")?);
+    let e = strip(b64url(key.e.as_deref().unwrap_or(""), "key exponent")?);
+    let signature = b64url(signature_b64, "signature")?;
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    aws_lc_rs::signature::RsaPublicKeyComponents { n: &n, e: &e }
+        .verify(
+            &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA256,
+            signing_input.as_bytes(),
+            &signature,
+        )
+        .map_err(|_| "the signature does not verify".to_string())?;
+
+    let claims: IdTokenClaims = serde_json::from_slice(&b64url(payload_b64, "payload")?)
+        .map_err(|e| format!("claims: {e}"))?;
+    if claims.iss != issuer {
+        return Err(format!("issuer '{}' is not '{issuer}'", claims.iss));
+    }
+    let audiences: Vec<&str> = match &claims.aud {
+        serde_json::Value::String(a) => vec![a.as_str()],
+        serde_json::Value::Array(list) => list.iter().filter_map(|a| a.as_str()).collect(),
+        _ => Vec::new(),
+    };
+    if !audiences.contains(&client_id) {
+        return Err(format!(
+            "audience does not include the client id '{client_id}'"
+        ));
+    }
+    if audiences.len() > 1 && claims.azp.as_deref() != Some(client_id) {
+        return Err("several audiences and the authorized party is not this client".into());
+    }
+    if claims.exp + ID_TOKEN_LEEWAY_SECS <= now {
+        return Err("expired".into());
+    }
+    match &claims.nonce {
+        Some(got) if same(got, nonce) => {}
+        Some(_) => return Err("nonce does not match this sign-in attempt".into()),
+        None => return Err("no nonce".into()),
+    }
+    if claims.sub.is_empty() {
+        return Err("no subject".into());
+    }
+    Ok(IdIdentity {
+        sub: claims.sub,
+        email: claims.email.filter(|e| !e.is_empty()),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Sign-in
+// ---------------------------------------------------------------------------
+
+/// What a sign-in starts from.
+pub struct SignInRequest {
+    /// This host's id ([`host_id`]), created before the first sign-in.
+    pub host_id: String,
+    /// The account's saved registration, for a reauthorization. `None`
+    /// registers a new client.
+    pub saved: Option<OAuthCredential>,
+    /// The loopback port to listen on; 0 picks a free one.
+    pub port: u16,
+}
+
+/// What a sign-in produced. The credential is validated; whether it may
+/// be used for model calls is [`Self::plan_granted`].
+pub struct SignedIn {
+    pub credential: OAuthCredential,
+    /// Whether this sign-in registered a new client rather than reusing
+    /// a saved one.
+    pub registered: bool,
+}
+
+impl SignedIn {
+    /// Whether the token response granted plan usage.
+    pub fn plan_granted(&self) -> bool {
+        plan_granted(&self.credential)
+    }
+}
+
+/// One authorization attempt: listening, with its state, nonce and PKCE
+/// verifier fixed, until [`Self::finish`] reads the callback.
+pub struct PendingSignIn {
+    endpoints: Endpoints,
+    http: reqwest::Client,
+    listener: tokio::net::TcpListener,
+    redirect_uri: String,
+    authorize_url: String,
+    state: String,
+    nonce: String,
+    verifier: String,
+    /// The saved issued client id on a reauthorization.
+    client_id: Option<String>,
+    saved: Option<OAuthCredential>,
+}
+
+impl PendingSignIn {
+    /// Start listening and build the authorization URL.
+    pub async fn start(request: SignInRequest) -> Result<Self, PlanAuthError> {
+        Self::start_at(Endpoints::pinned(), request).await
+    }
+
+    pub(crate) async fn start_at(
+        endpoints: Endpoints,
+        request: SignInRequest,
+    ) -> Result<Self, PlanAuthError> {
+        let client_id = match &request.saved {
+            Some(saved) if is_plan_credential(saved) => saved.client_id.clone(),
+            Some(_) => {
+                return Err(PlanAuthError::Local(
+                    "the saved entry is not a plan sign-in; choose another entry name".into(),
+                ));
+            }
+            None => None,
+        };
+        let http = http_client(&endpoints).map_err(PlanAuthError::Local)?;
+        // The listener comes first, so the browser cannot return before
+        // anything is there to receive it.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", request.port))
+            .await
+            .map_err(|e| {
+                PlanAuthError::Local(format!(
+                    "listen on 127.0.0.1:{} for the sign-in callback: {e}",
+                    request.port
+                ))
+            })?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| PlanAuthError::Local(format!("callback listener: {e}")))?
+            .port();
+        let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
+        let state = random_token(32);
+        let nonce = random_token(32);
+        let verifier = random_token(64);
+
+        let mut url = url::Url::parse(&endpoints.authorize_url())
+            .map_err(|e| PlanAuthError::Local(format!("authorize url: {e}")))?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("response_type", "code");
+            q.append_pair(
+                "client_id",
+                client_id.as_deref().unwrap_or(REGISTRATION_CLIENT_ID),
+            );
+            q.append_pair("redirect_uri", &redirect_uri);
+            q.append_pair("scope", &SCOPES.join(" "));
+            q.append_pair("resource", RESOURCE);
+            q.append_pair("state", &state);
+            q.append_pair("nonce", &nonce);
+            q.append_pair("code_challenge", &pkce_challenge(&verifier));
+            q.append_pair("code_challenge_method", "S256");
+            q.append_pair("ext_agent_host_id", &request.host_id);
+            match &request.saved {
+                // A first registration names the app; a reauthorization
+                // must not.
+                None => {
+                    q.append_pair("agent_name_hint", APP_NAME);
+                }
+                Some(saved) => {
+                    if let Some(hint) = &saved.id_token {
+                        q.append_pair("id_token_hint", hint);
+                    }
+                    if let Some(email) = &saved.email {
+                        q.append_pair("login_hint", email);
+                    }
+                    // Plan usage was declined last time: ask for consent
+                    // again rather than reusing the earlier answer.
+                    if !plan_granted(saved) {
+                        q.append_pair("prompt", "consent");
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            endpoints,
+            http,
+            listener,
+            redirect_uri,
+            authorize_url: url.to_string(),
+            state,
+            nonce,
+            verifier,
+            client_id,
+            saved: request.saved,
+        })
+    }
+
+    /// The URL the operator opens. Carries the ID token hint on a
+    /// reauthorization, so it is shown to the operator and never logged.
+    pub fn authorize_url(&self) -> &str {
+        &self.authorize_url
+    }
+
+    /// The loopback callback this attempt listens on.
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    /// Wait for the callback, then validate and exchange.
+    ///
+    /// The state is checked before anything else the callback says. A
+    /// declined consent or any other provider error stops here, before
+    /// any exchange. On a first registration the callback must carry the
+    /// issued client id; on a reauthorization it may leave it out, and
+    /// may not name a different one. The ID token is validated against
+    /// the provider's keys and this attempt's nonce, and a
+    /// reauthorization must name the saved account.
+    pub async fn finish(self, timeout: Duration) -> Result<SignedIn, PlanAuthError> {
+        let params = tokio::time::timeout(timeout, accept_callback(&self.listener))
+            .await
+            .map_err(|_| PlanAuthError::Timeout)??;
+
+        let state_ok = params
+            .get("state")
+            .is_some_and(|got| same(got, &self.state));
+        if !state_ok {
+            return Err(PlanAuthError::StateMismatch);
+        }
+        if let Some(error) = params.get("error") {
+            return Err(if error == "access_denied" {
+                PlanAuthError::Declined
+            } else {
+                PlanAuthError::Provider(error.clone())
+            });
+        }
+        let client_id = resolve_client_id(
+            self.client_id.as_deref(),
+            params.get("client_id").map(String::as_str),
+        )?;
+        let code = params
+            .get("code")
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| PlanAuthError::Provider("no code in the callback".into()))?;
+
+        let (status, body) = post_form(
+            &self.http,
+            &self.endpoints.token_url(),
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("redirect_uri", self.redirect_uri.as_str()),
+                ("client_id", client_id.as_str()),
+                ("code_verifier", self.verifier.as_str()),
+                ("resource", RESOURCE),
+            ],
+        )
+        .await
+        .map_err(|e| PlanAuthError::Exchange(e.to_string()))?;
+        if !status.is_success() {
+            return Err(PlanAuthError::Exchange(
+                match error_code(&body).as_deref() {
+                    Some("invalid_grant") => {
+                        "the code was refused (invalid_grant); start the sign-in again".into()
+                    }
+                    Some(code) => format!("HTTP {} {code}", status.as_u16()),
+                    None => format!("HTTP {}", status.as_u16()),
+                },
+            ));
+        }
+        let tokens: TokenResponse = serde_json::from_str(&body)
+            .map_err(|e| PlanAuthError::Exchange(format!("token response: {e}")))?;
+
+        let id_token = tokens
+            .id_token
+            .clone()
+            .ok_or_else(|| PlanAuthError::IdToken("the token response carried none".into()))?;
+        let discovery = discover(&self.http, &self.endpoints)
+            .await
+            .map_err(PlanAuthError::IdToken)?;
+        let keys = fetch_keys(&self.http, &discovery.jwks_uri)
+            .await
+            .map_err(PlanAuthError::IdToken)?;
+        let identity = validate_id_token(
+            &id_token,
+            &keys,
+            self.endpoints.issuer(),
+            &client_id,
+            &self.nonce,
+            unix_now(),
+        )
+        .map_err(PlanAuthError::IdToken)?;
+        if let Some(saved) = &self.saved
+            && saved.subject.as_deref() != Some(identity.sub.as_str())
+        {
+            return Err(PlanAuthError::AccountMismatch);
+        }
+
+        let scope = granted_scopes(tokens.scope.as_deref());
+        let refresh_token = tokens.refresh_token.unwrap_or_default();
+        if refresh_token.is_empty() && scope.split_whitespace().any(|s| s == PLAN_SCOPE) {
+            return Err(PlanAuthError::Exchange(
+                "the token response carried no refresh token".into(),
+            ));
+        }
+        Ok(SignedIn {
+            credential: OAuthCredential {
+                access_token: tokens.access_token,
+                refresh_token,
+                expires_at: unix_now() + tokens.expires_in.unwrap_or(3600),
+                scope,
+                provider: PROVIDER.to_string(),
+                client_id: Some(client_id),
+                issuer: Some(self.endpoints.issuer().to_string()),
+                subject: Some(identity.sub),
+                email: identity.email,
+                id_token: Some(id_token),
+            },
+            registered: self.client_id.is_none(),
+        })
+    }
+}
+
+/// The client id the exchange uses. A first registration takes the
+/// issued id from the callback and has nothing without it. A
+/// reauthorization keeps the saved id; the callback may leave it out
+/// and may not name another.
+fn resolve_client_id(saved: Option<&str>, returned: Option<&str>) -> Result<String, PlanAuthError> {
+    match (saved, returned.filter(|r| !r.is_empty())) {
+        (None, Some(issued)) if issued != REGISTRATION_CLIENT_ID => Ok(issued.to_string()),
+        (None, _) => Err(PlanAuthError::RegistrationIncomplete),
+        (Some(saved), None) => Ok(saved.to_string()),
+        (Some(saved), Some(returned)) if returned == saved => Ok(saved.to_string()),
+        (Some(saved), Some(returned)) => Err(PlanAuthError::ClientMismatch {
+            saved: saved.to_string(),
+            returned: returned.to_string(),
+        }),
+    }
+}
+
+/// Accept connections until one requests [`CALLBACK_PATH`], answer it,
+/// and return its query parameters. Anything else the browser asks for
+/// on the port gets a 404.
+async fn accept_callback(
+    listener: &tokio::net::TcpListener,
+) -> Result<HashMap<String, String>, PlanAuthError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| PlanAuthError::Local(format!("accept callback: {e}")))?;
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        while raw.len() < 16 * 1024 && !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => raw.extend_from_slice(&buf[..n]),
+            }
+        }
+        let request = String::from_utf8_lossy(&raw);
+        let target = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("");
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        if path != CALLBACK_PATH {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            continue;
+        }
+        let mut params = HashMap::new();
+        for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+            params
+                .entry(k.into_owned())
+                .or_insert_with(|| v.into_owned());
+        }
+        let body = "<html><body><h1>Sign-in returned to wirken</h1>\
+                    <p>You can close this tab. The terminal shows the result.</p></body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.flush().await;
+        return Ok(params);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Revocation
+// ---------------------------------------------------------------------------
+
+/// Whether the provider confirmed the end of the renewable session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Revocation {
+    /// The revocation endpoint answered 200.
+    Confirmed,
+    /// The entry held no refresh token; there was nothing to revoke.
+    NothingToRevoke,
+    /// No confirmation, with the last reason.
+    Unconfirmed(String),
+}
+
+/// Revoke `cred`'s refresh token at the revocation endpoint discovery
+/// names. A network error or a 5xx is retried after each wait in
+/// [`REVOKE_BACKOFF`]; any other answer is final.
+pub async fn revoke(cred: &OAuthCredential) -> Revocation {
+    revoke_at(&Endpoints::pinned(), cred, &REVOKE_BACKOFF).await
+}
+
+pub(crate) async fn revoke_at(
+    endpoints: &Endpoints,
+    cred: &OAuthCredential,
+    backoff: &[Duration],
+) -> Revocation {
+    if cred.refresh_token.is_empty() {
+        return Revocation::NothingToRevoke;
+    }
+    let Some(client_id) = cred.client_id.as_deref() else {
+        return Revocation::Unconfirmed("the entry carries no client id".into());
+    };
+    let http = match http_client(endpoints) {
+        Ok(h) => h,
+        Err(e) => return Revocation::Unconfirmed(e),
+    };
+    let mut waits = backoff.iter();
+    loop {
+        let attempt = async {
+            let discovery = discover(&http, endpoints).await.map_err(|e| (true, e))?;
+            let endpoint = discovery
+                .revocation_endpoint
+                .ok_or((false, "discovery names no revocation endpoint".to_string()))?;
+            let (status, _) = post_form(
+                &http,
+                &endpoint,
+                &[
+                    ("token", cred.refresh_token.as_str()),
+                    ("token_type_hint", "refresh_token"),
+                    ("client_id", client_id),
+                ],
+            )
+            .await
+            .map_err(|e| (true, format!("revocation request: {e}")))?;
+            if status.is_success() {
+                Ok(())
+            } else {
+                Err((
+                    status.is_server_error(),
+                    format!("revocation returned HTTP {}", status.as_u16()),
+                ))
+            }
+        };
+        match attempt.await {
+            Ok(()) => return Revocation::Confirmed,
+            Err((true, reason)) => match waits.next() {
+                Some(wait) => tokio::time::sleep(*wait).await,
+                None => return Revocation::Unconfirmed(reason),
+            },
+            Err((false, reason)) => return Revocation::Unconfirmed(reason),
+        }
+    }
+}
+
+/// Sign `entry` out: clear its tokens, keeping the client id, the
+/// account and the ID token for the next sign-in, then revoke the
+/// refresh token it held. The entry's lock file is held throughout, so
+/// no refresh in another process rotates the token in between; the
+/// vault's write lock is held only for the clear, never across the
+/// revocation requests.
+pub async fn sign_out(
+    store: Arc<Mutex<CredentialStore>>,
+    lock_dir: &Path,
+    entry: &str,
+) -> Result<Revocation, String> {
+    sign_out_at(Endpoints::pinned(), store, lock_dir, entry, &REVOKE_BACKOFF).await
+}
+
+pub(crate) async fn sign_out_at(
+    endpoints: Endpoints,
+    store: Arc<Mutex<CredentialStore>>,
+    lock_dir: &Path,
+    entry: &str,
+    backoff: &[Duration],
+) -> Result<Revocation, String> {
+    let _held = lock_entry(entry_lock_path(lock_dir, entry)).await?;
+    let entry_name = entry.to_string();
+    let done = locked_update(store, entry_name.clone(), move |secret| {
+        let cred = match parse_credential(secret, &entry_name) {
+            Ok(c) if is_plan_credential(&c) => c,
+            Ok(_) => return (None, Err(format!("'{entry_name}' is not a plan sign-in"))),
+            Err(e) => return (None, Err(e)),
+        };
+        (Some(secret_of(&without_tokens(&cred))), Ok(cred))
+    })
+    .await?;
+    let cred = done.value?;
+    done.written
+        .map_err(|e| format!("clearing the tokens of '{entry}' failed: {e}"))?;
+    Ok(revoke_at(&endpoints, &cred, backoff).await)
 }
 
 /// Run `decide` on `entry` under the vault's write lock, on a blocking

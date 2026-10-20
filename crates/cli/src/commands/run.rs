@@ -427,8 +427,18 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let base_url = provider_json["base_url"]
         .as_str()
         .unwrap_or("http://localhost:11434/v1");
+    // Plan mode: the default agent runs on a sign-in entry, through a
+    // token source, at the fixed endpoint. `None` for every key mode.
+    let default_plan_entry = super::plan_sign_in::provider_auth(&provider_json)?
+        .is_plan()
+        .then(|| super::plan_sign_in::provider_plan_entry(&provider_json));
 
-    println!("  Provider: {provider}/{model}");
+    match &default_plan_entry {
+        Some(entry) => {
+            println!("  Provider: {provider}/{model} (Using ChatGPT plan, sign-in '{entry}')")
+        }
+        None => println!("  Provider: {provider}/{model}"),
+    }
 
     if provider == "ollama" {
         match super::probe_ollama_version(base_url).await {
@@ -446,7 +456,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // ollama (no vault lookup) and for the failure paths below where
     // the key didn't resolve.
     let mut api_key_credential: Option<String> = None;
-    let api_key = if provider != "ollama" {
+    let api_key = if provider != "ollama" && default_plan_entry.is_none() {
         let keychain = probe_keychain(&cfg.data_dir, || {
             prompt_vault_passphrase(&mut vault_passphrase)
         });
@@ -633,6 +643,10 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // into every waked Agent.
     let router = Arc::new(Router::new());
     let mut static_configs: HashMap<String, AgentStaticConfig> = HashMap::new();
+    // One token source per plan sign-in entry, shared by every agent on
+    // it, so this process has one refresher per entry.
+    let mut plan_sources: HashMap<String, Arc<wirken_agent::plan_auth::PlanTokenSource>> =
+        HashMap::new();
 
     // Load multi-agent configs if available
     let agent_config_path = cfg.agent_config_db_path();
@@ -661,21 +675,46 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             } else {
                 Some(agent_cfg.api_key_credential.clone())
             };
-            let agent_api_key = if !agent_cfg.api_key_credential.is_empty() {
-                vault
-                    .as_ref()
-                    .and_then(|v| v.retrieve(&agent_cfg.api_key_credential).ok())
-                    .map(|(secret, meta)| {
-                        leak_matcher.learn(
-                            &agent_cfg.api_key_credential,
-                            secret.expose(),
-                            meta.kind,
-                        );
-                        secret.expose().to_string()
-                    })
+            // A plan agent's entry is a sign-in read per call through
+            // the entry's shared token source; it is never a key. An
+            // entry that cannot be used stops the start here rather
+            // than at the first turn.
+            let agent_plan_source = if agent_cfg.auth.is_plan() {
+                let entry = super::plan_sign_in::agent_plan_entry(&agent_cfg);
+                let source = plan_source_for(
+                    &mut plan_sources,
+                    &cfg.data_dir,
+                    &entry,
+                    &leak_matcher,
+                    || {
+                        let keychain = probe_keychain(&cfg.data_dir, || {
+                            prompt_vault_passphrase(&mut vault_passphrase)
+                        });
+                        CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                            .context("Failed to open credential store")
+                    },
+                )
+                .with_context(|| format!("agent '{}'", agent_cfg.id))?;
+                Some(source)
             } else {
                 None
             };
+            let agent_api_key =
+                if agent_plan_source.is_none() && !agent_cfg.api_key_credential.is_empty() {
+                    vault
+                        .as_ref()
+                        .and_then(|v| v.retrieve(&agent_cfg.api_key_credential).ok())
+                        .map(|(secret, meta)| {
+                            leak_matcher.learn(
+                                &agent_cfg.api_key_credential,
+                                secret.expose(),
+                                meta.kind,
+                            );
+                            secret.expose().to_string()
+                        })
+                } else {
+                    None
+                };
 
             let llm = super::llm_config_for_agent(&agent_cfg);
             let workspace = cfg.agent_workspace(&agent_cfg.id);
@@ -744,6 +783,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     channel_egress: agent_cfg.channel_egress.clone(),
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
+                    plan_token_source: agent_plan_source,
                 },
             );
         }
@@ -763,7 +803,26 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             vault_passphrase.as_deref().unwrap_or(""),
         )?;
 
-        let mut llm_config = LlmConfig::from_provider(provider, base_url, model);
+        let mut llm_config = match &default_plan_entry {
+            Some(_) => LlmConfig::plan(model),
+            None => LlmConfig::from_provider(provider, base_url, model),
+        };
+        let default_plan_source = match &default_plan_entry {
+            Some(entry) => Some(plan_source_for(
+                &mut plan_sources,
+                &cfg.data_dir,
+                entry,
+                &leak_matcher,
+                || {
+                    let keychain = probe_keychain(&cfg.data_dir, || {
+                        prompt_vault_passphrase(&mut vault_passphrase)
+                    });
+                    CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                        .context("Failed to open credential store")
+                },
+            )?),
+            None => None,
+        };
         // Bedrock: extract region from provider.json or base_url
         if provider == "bedrock" {
             llm_config.region = provider_json["region"]
@@ -833,6 +892,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                 channel_egress: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: default_plan_source,
             },
         );
     }
@@ -6001,6 +6061,14 @@ fn apply_provider_override(
         .unwrap_or("ollama")
         .to_string();
     let switching = over.provider.as_deref().is_some_and(|p| p != stored);
+    let plan = provider_json.get("auth").and_then(|v| v.as_str())
+        == Some(wirken_gateway::agent_config::ProviderAuth::Plan.as_str());
+    if plan && !switching && over.base_url.is_some() {
+        anyhow::bail!(
+            "--base-url does not apply to a plan sign-in, whose endpoint is fixed. To run on \
+             another endpoint, also pass --provider."
+        );
+    }
 
     if let Some(provider) = over.provider.as_deref() {
         if !super::provider_pick::IDS.contains(&provider) {
@@ -6042,7 +6110,10 @@ fn apply_provider_override(
         obj.insert("provider".into(), provider.clone().into());
     }
     if switching {
+        // Region and a plan sign-in belong to the stored provider.
         obj.remove("region");
+        obj.remove("auth");
+        obj.remove("credential");
     }
     if let Some(model) = &over.model {
         obj.insert("model".into(), model.clone().into());
@@ -6117,15 +6188,46 @@ fn resolve_channel_overrides(
         })?;
         let base_url = cfg.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
 
+        // An override carries a static key for the process lifetime. A
+        // plan sign-in expires hourly and is refreshed per call, so an
+        // override cannot run on one; bind the channel to a plan agent.
+        let auth = wirken_gateway::agent_config::ProviderAuth::parse(
+            cfg.get("auth").and_then(|v| v.as_str()),
+        )
+        .map_err(|e| anyhow::anyhow!("channel_overrides['{channel}']: {e}"))?;
+        if auth.is_plan() {
+            anyhow::bail!(
+                "channel_overrides['{channel}'] sets auth 'plan', which an override cannot run \
+                 on. Register an agent on the plan sign-in and bind the channel to it."
+            );
+        }
+
         let (api_key, api_key_credential) = match cfg.get("api_key_name").and_then(|v| v.as_str()) {
             Some(slot) => {
-                let (secret, _) = store.retrieve(slot).with_context(|| {
-                    format!(
-                        "channel '{channel}' needs a key named '{slot}', \
-                         but no key with that name exists. \
-                         Add it with: wirken credentials add {slot}"
-                    )
-                })?;
+                // A plan sign-in is refused by the vault as a key; a
+                // sign-in's JSON stored under another kind is refused
+                // here.
+                let retrieved = store.retrieve(slot);
+                let plan_entry = matches!(retrieved, Err(wirken_vault::VaultError::PlanSignIn(_)));
+                let secret = match retrieved {
+                    Ok((secret, _)) => Some(secret),
+                    Err(_) if plan_entry => None,
+                    Err(e) => {
+                        return Err(anyhow::Error::from(e).context(format!(
+                            "channel '{channel}' needs a key named '{slot}', \
+                             but no key with that name exists. \
+                             Add it with: wirken credentials add {slot}"
+                        )));
+                    }
+                };
+                let secret = match secret {
+                    Some(s) if !super::plan_sign_in::is_plan_secret(s.expose()) => s,
+                    _ => anyhow::bail!(
+                        "channel_overrides['{channel}'] names '{slot}', a plan sign-in, as its \
+                         key. A sign-in is not a key; register an agent on it and bind the \
+                         channel to that agent."
+                    ),
+                };
                 (Some(secret.expose().to_string()), Some(slot.to_string()))
             }
             None => (None, None),
@@ -6142,6 +6244,32 @@ fn resolve_channel_overrides(
         );
     }
     Ok(out)
+}
+
+/// The token source for plan sign-in `entry`: the one already opened in
+/// this process, or a new one over its own vault connection. Every agent
+/// on an entry shares one, which makes it the entry's single refresher
+/// here; across processes it takes the entry's lock file under
+/// `data_dir`. An entry that cannot be used is an error.
+fn plan_source_for(
+    sources: &mut HashMap<String, Arc<wirken_agent::plan_auth::PlanTokenSource>>,
+    data_dir: &std::path::Path,
+    entry: &str,
+    leak_matcher: &Arc<wirken_gateway::leak::LeakMatcher>,
+    open_store: impl FnOnce() -> anyhow::Result<CredentialStore>,
+) -> anyhow::Result<Arc<wirken_agent::plan_auth::PlanTokenSource>> {
+    if let Some(source) = sources.get(entry) {
+        return Ok(source.clone());
+    }
+    let source = wirken_agent::plan_auth::PlanTokenSource::open(
+        open_store()?,
+        data_dir,
+        entry,
+        leak_matcher.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    sources.insert(entry.to_string(), source.clone());
+    Ok(source)
 }
 
 #[cfg(test)]
@@ -6210,6 +6338,56 @@ mod channel_overrides_tests {
         let signal = out.get("signal").expect("signal override resolved");
         assert_eq!(signal.llm_config.model, "kimi-k2.5");
         assert_eq!(signal.api_key.as_deref(), Some("pm-secret"));
+    }
+
+    /// An override holds a static key for the process lifetime; a plan
+    /// sign-in is refreshed per call. Naming one, or setting plan auth
+    /// on an override, stops the start.
+    #[test]
+    fn an_override_refuses_a_plan_sign_in() {
+        let plan = serde_json::json!({
+            "access_token": "at-live-token",
+            "refresh_token": "rt-live-token",
+            "expires_at": 1,
+            "scope": "chatgpt.tokens.use.direct",
+            "provider": "openai",
+            "client_id": "oaiapp_x",
+            "subject": "user-1",
+        });
+        let (tmp, vault_path) = vault_with("openai-plan", &plan.to_string());
+        let named = serde_json::json!({
+            "provider": "anthropic",
+            "model": "base-model",
+            "channel_overrides": {
+                "signal": {"provider": "openai", "model": "m", "api_key_name": "openai-plan"}
+            }
+        });
+        let err = resolve_channel_overrides(&named, tmp.path(), &vault_path, "test-passphrase")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("a plan sign-in"), "{err}");
+
+        // Stored as a sign-in proper, sealed under its kind.
+        let keychain = AgeFileKeychain::new(tmp.path().join("keychain"), "test-passphrase".into());
+        let store = CredentialStore::open(&vault_path, &keychain).unwrap();
+        let cred: wirken_mcp_proxy::OAuthCredential = serde_json::from_value(plan.clone()).unwrap();
+        wirken_agent::plan_auth::store_plan(&store, "openai-plan", &cred).unwrap();
+        let err = resolve_channel_overrides(&named, tmp.path(), &vault_path, "test-passphrase")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("a plan sign-in"), "{err}");
+
+        let mode = serde_json::json!({
+            "provider": "anthropic",
+            "model": "base-model",
+            "channel_overrides": {
+                "signal": {"provider": "openai", "model": "m", "auth": "plan"}
+            }
+        });
+        let err = resolve_channel_overrides(&mode, tmp.path(), &vault_path, "test-passphrase")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auth 'plan'"), "{err}");
     }
 
     #[test]
@@ -6312,6 +6490,34 @@ mod provider_override_tests {
         assert_eq!(out["model"], "vendor.model-v3");
         assert_eq!(out["base_url"], stored()["base_url"]);
         assert_eq!(out["region"], "eu-west-1");
+    }
+
+    /// A plan sign-in's endpoint is fixed: --base-url cannot move it.
+    /// Switching provider leaves plan mode entirely.
+    #[test]
+    fn a_plan_default_refuses_a_base_url_and_switching_drops_plan_mode() {
+        let plan = json!({"provider": "openai", "auth": "plan", "credential": "openai-plan", "model": "m"});
+        let moved = ProviderOverride {
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            ..Default::default()
+        };
+        assert!(apply_provider_override(plan.clone(), &moved).is_err());
+
+        let model = ProviderOverride {
+            model: Some("m2".into()),
+            ..Default::default()
+        };
+        let out = apply_provider_override(plan.clone(), &model).unwrap();
+        assert_eq!(out["auth"], "plan");
+        assert!(out.get("base_url").is_none());
+
+        let switch = ProviderOverride {
+            provider: Some("ollama".into()),
+            model: Some("llama".into()),
+            base_url: None,
+        };
+        let out = apply_provider_override(plan, &switch).unwrap();
+        assert!(out.get("auth").is_none() && out.get("credential").is_none());
     }
 
     #[test]
@@ -7042,6 +7248,7 @@ mod scripted_model {
                 channel_overrides: std::collections::HashMap::new(),
                 api_key: None,
                 api_key_credential: None,
+                plan_token_source: None,
                 skills: vec![],
                 mcp_client: None,
                 identity: None,

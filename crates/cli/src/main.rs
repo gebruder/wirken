@@ -576,8 +576,17 @@ enum AgentCommands {
         channels: Option<String>,
         /// Read the API key from this environment variable rather than
         /// prompting. The value never appears on the command line.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "credential")]
         api_key_env: Option<String>,
+        /// How the agent authenticates: `key` (default) or `plan`, a
+        /// plan sign-in (`wirken credentials authorize`) in place of an
+        /// API key, with no --base-url.
+        #[arg(long)]
+        auth: Option<String>,
+        /// With --auth plan: the vault entry holding the sign-in
+        /// (default openai-plan)
+        #[arg(long)]
+        credential: Option<String>,
     },
     /// List all configured agents
     List,
@@ -1030,8 +1039,52 @@ enum CredentialCommands {
         #[arg(long, conflicts_with = "stdin")]
         value_file: Option<std::path::PathBuf>,
     },
+    /// Sign in to plan mode in the browser and
+    /// keep the sign-in in the vault. The first sign-in registers this
+    /// app with the provider; later ones reuse the registration.
+    Authorize {
+        /// Vault entry to keep the sign-in under
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// Loopback port for the sign-in callback (default: any free
+        /// port)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the sign-in URL instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Sign out of a plan sign-in: revoke the session at the provider,
+    /// clear the tokens, and keep the registration for the next
+    /// sign-in.
+    SignOut {
+        /// Vault entry holding the sign-in
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+    },
+    /// Write a plan sign-in to a new owner-only file for another host
+    /// (a headless or self-hosted machine) and clear its tokens here.
+    ExportPlan {
+        /// Vault entry holding the sign-in
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// File to create; it must not exist
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Store a plan sign-in exported on another host. This host keeps
+    /// its own host id.
+    ImportPlan {
+        /// Vault entry to store the sign-in under
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// The exported file
+        #[arg(long)]
+        from: std::path::PathBuf,
+    },
     /// Remove a credential by name. The encrypted row is deleted from
-    /// the vault. Errors if no credential with that name exists.
+    /// the vault. Errors if no credential with that name exists. A plan
+    /// sign-in's session is revoked at the provider first.
     Remove {
         /// Credential name
         name: String,
@@ -1447,6 +1500,18 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            CredentialCommands::Authorize {
+                entry,
+                port,
+                no_browser,
+            } => commands::plan_sign_in::authorize(&entry, port, !no_browser).await,
+            CredentialCommands::SignOut { entry } => commands::plan_sign_in::sign_out(&entry).await,
+            CredentialCommands::ExportPlan { entry, out } => {
+                commands::plan_sign_in::export(&entry, &out).await
+            }
+            CredentialCommands::ImportPlan { entry, from } => {
+                commands::plan_sign_in::import(&entry, &from).await
+            }
             CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
             CredentialCommands::Show { name } => commands::credential::show(&name).await,
             CredentialCommands::Rescope {
@@ -1609,6 +1674,8 @@ async fn main() -> Result<()> {
                 base_url,
                 channels,
                 api_key_env,
+                auth,
+                credential,
             } => {
                 commands::agents::add(commands::agents::AddArgs {
                     id,
@@ -1618,6 +1685,8 @@ async fn main() -> Result<()> {
                     base_url,
                     channels,
                     api_key_env,
+                    auth,
+                    credential,
                 })
                 .await
             }
@@ -1816,6 +1885,85 @@ mod tests {
             Commands::Chat { agent } => assert_eq!(agent.as_deref(), Some("alice")),
             _ => panic!("expected Chat"),
         }
+    }
+
+    /// `credentials authorize` defaults its entry and takes a port and
+    /// --no-browser; `agents add --auth plan --credential` parses, and
+    /// --credential excludes --api-key-env.
+    #[test]
+    fn plan_sign_in_commands_parse() {
+        let cli = parse(&["wirken", "credentials", "authorize"]);
+        match cli.command {
+            Commands::Credentials(CredentialCommands::Authorize {
+                entry,
+                port,
+                no_browser,
+            }) => {
+                assert_eq!(entry, "openai-plan");
+                assert_eq!(port, None);
+                assert!(!no_browser);
+            }
+            _ => panic!("parsed into another command"),
+        }
+        let cli = parse(&[
+            "wirken",
+            "credentials",
+            "authorize",
+            "work",
+            "--port",
+            "1455",
+            "--no-browser",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Commands::Credentials(CredentialCommands::Authorize { ref entry, port: Some(1455), no_browser: true }) if entry == "work"
+        ));
+        assert!(matches!(
+            parse(&["wirken", "credentials", "sign-out"]).command,
+            Commands::Credentials(CredentialCommands::SignOut { ref entry }) if entry == "openai-plan"
+        ));
+        let cli = parse(&[
+            "wirken",
+            "agents",
+            "add",
+            "--id",
+            "p",
+            "--provider",
+            "openai",
+            "--model",
+            "m",
+            "--auth",
+            "plan",
+            "--credential",
+            "openai-plan",
+        ]);
+        match cli.command {
+            Commands::Agents(AgentCommands::Add {
+                auth, credential, ..
+            }) => {
+                assert_eq!(auth.as_deref(), Some("plan"));
+                assert_eq!(credential.as_deref(), Some("openai-plan"));
+            }
+            _ => panic!("parsed into another command"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "wirken",
+                "agents",
+                "add",
+                "--id",
+                "p",
+                "--provider",
+                "openai",
+                "--model",
+                "m",
+                "--credential",
+                "c",
+                "--api-key-env",
+                "K",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

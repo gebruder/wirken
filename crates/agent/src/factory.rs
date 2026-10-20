@@ -187,6 +187,11 @@ pub struct AgentStaticConfig {
     /// tool for the agent (the tool returns a clear error if invoked
     /// without the path bound).
     pub zirkel_db_path: Option<PathBuf>,
+    /// For an agent in plan mode: the token source over its sign-in
+    /// entry, shared by every agent on that entry. Attached to every
+    /// waked Agent that runs on the agent-wide defaults. A channel
+    /// override never gets it, so an override cannot run on the plan.
+    pub plan_token_source: Option<Arc<crate::plan_auth::PlanTokenSource>>,
 }
 
 /// Cache mode resolved at factory construction time. Tests pass it
@@ -872,6 +877,11 @@ impl AgentFactory {
         // woken as a different config carries that config's id and is
         // checked against its own grants rather than its caller's.
         agent.set_agent_id(agent_id);
+        if override_for_channel.is_none()
+            && let Some(source) = &cfg.plan_token_source
+        {
+            agent.set_plan_token_source(source.clone());
+        }
         // Before the skills: a skill is checked against it as it loads.
         agent.set_leak_matcher(self.leak_matcher.read().unwrap().clone());
         // Inject the per-agent shared resources.
@@ -941,6 +951,11 @@ impl AgentFactory {
             // global default; an explicit per-agent off opts out.
             let effective = bw.config.resolve(agent_id);
             agent.set_budget(effective, Some(bw.store.clone()));
+            agent.set_budget_name(if bw.config.agents.contains_key(agent_id) {
+                format!("the budget.json budget agents.{agent_id}")
+            } else {
+                "the budget.json default budget".to_string()
+            });
         }
         if let Some(gate) = self.approval_gate_for(session_id) {
             agent.set_approval_gate(gate);

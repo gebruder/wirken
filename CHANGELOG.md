@@ -22,6 +22,18 @@ tagged.
   agents and conversations with search. Without a terminal it points to
   `wirken ask`; without a running gateway it points to `wirken run`. Bare
   `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
+- Plan sign-in for the `openai` provider: an agent can run on a ChatGPT
+  plan the operator has, through OpenAI's sign-in for open-source and
+  locally run apps, with no API key. `wirken credentials authorize`
+  signs in and registers this install with OpenAI, `wirken setup` and
+  `wirken agents add --auth plan` select it, and `wirken credentials
+  sign-out` revokes and clears the tokens. Requests go to the Responses
+  API at `api.openai.com`, which is pinned. Tokens live in the vault
+  under their own kind, bound into the entry's encryption, so a binary
+  that predates plan sign-in cannot read the entry as a key. Refreshes
+  are serialized per entry across processes. Plan requests are not
+  priced, so a block-mode budget refuses a plan agent. See
+  docs/credentials.md. Proposed by Tanmay Maka (@maka-tanmay).
 
 ### Fixed
 

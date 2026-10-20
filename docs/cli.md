@@ -184,6 +184,7 @@ Per-channel prompts, vault entries and limits: [channels.md](channels.md).
 
 ```bash
 wirken agents add                        # wizard, or --id/--provider/--model for scripted use
+wirken agents add --id ID --provider openai --model SLUG --auth plan [--credential ENTRY]
 wirken agents list
 wirken agents remove <ID>
 wirken agents bind <AGENT> <CHANNEL>
@@ -193,6 +194,12 @@ wirken agents allow-subagent <PARENT> <CHILD> [--tools T] [--max-tier tier1|tier
                                               [--max-rounds N] [--max-runtime S]
 wirken agents deny-subagent <PARENT> <CHILD>
 ```
+
+An agent in plan mode (`--auth plan`) runs on a sign-in stored by `wirken
+credentials authorize`, named by `--credential` (default `openai-plan`). It
+takes no `--api-key-env` or `--base-url`, and `agents set` refuses `--api-key`
+and `--base-url` on it; `agents set --model list` lists the signed-in
+account's models.
 
 `--api-key` prompts for the value rather than taking it on the command line,
 so it does not reach shell history or the process table. Defaults for
@@ -353,7 +360,17 @@ wirken credentials rotate <NAME> [--stdin | --value-file FILE]
 wirken credentials show <NAME>
 wirken credentials remove <NAME>
 wirken credentials rescope <NAME> [--scope ID]... | [--no-scopes] | [--all-scopes]
+wirken credentials authorize [ENTRY] [--port P] [--no-browser]   # plan sign-in, ENTRY defaults to openai-plan
+wirken credentials sign-out [ENTRY]
+wirken credentials export-plan [ENTRY] --out FILE
+wirken credentials import-plan [ENTRY] --from FILE
 ```
+
+`authorize` signs in to the `openai` provider's plan mode in the browser and
+stores the sign-in; `sign-out` clears its tokens and revokes the session, keeping the
+registration; `export-plan` and `import-plan` move it to a host without a
+browser. `remove` on a plan entry revokes it first, and `rescope` on one signs
+in again. See [credentials.md](credentials.md#plan-sign-in-openai).
 
 Every verb takes the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` when set
 and prompts only when it is not, so `add` and `rotate` complete with no

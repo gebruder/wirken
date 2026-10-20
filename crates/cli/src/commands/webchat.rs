@@ -722,6 +722,27 @@ function addRefusal(text) {
 function addAgentError(text) {
   return addBlock('error', 'The agent stopped', '✕', text, null);
 }
+// A plan's usage limit: the limit is the operator's, set at the
+// provider, so the one action offered is the page that shows it. The
+// page carries no URL of its own; the status payload names it.
+const USAGE_LIMIT_CODE = 'subscription_sharing_usage_limit_exceeded';
+function manageUsageLink() {
+  const url = ((status && status.agent) || {}).manage_usage_url;
+  if (!url) return el('span', null, 'Manage usage');
+  const a = el('a', null, 'Manage usage');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  return a;
+}
+function addUsageLimit() {
+  const box = addBlock('error', 'Usage limit reached', '✕',
+    "Review your plan or this app's limit in ChatGPT settings.", null);
+  const foot = el('div', 'block-foot');
+  foot.appendChild(manageUsageLink());
+  box.appendChild(foot);
+  return box;
+}
 function addDecision(text, glyph) {
   const line = el('div', 'decision');
   const g = glyph || '✓';
@@ -1098,6 +1119,7 @@ async function send() {
             terminal = true;
             const msg = String(event.text || '');
             if (msg.startsWith(REFUSAL_PREFIX)) addRefusal(msg.slice(REFUSAL_PREFIX.length));
+            else if (msg.includes(USAGE_LIMIT_CODE)) addUsageLimit();
             else addAgentError(msg);
           } else if (event.type === 'approval_request') {
             // What the agent says after the decision is a new paragraph
@@ -2144,6 +2166,12 @@ function renderStatusValues() {
   const ag = el('span', null, agent.id || 'default');
   if (agent.model) ag.appendChild(el('span', 'yield-3', ' · ' + agent.model));
   items.push({ node: ag, yield: 0 });
+  // Where the model is named: requests are on the operator's plan.
+  if (agent.plan) {
+    const p = el('span', null, 'Using ChatGPT plan ');
+    p.appendChild(manageUsageLink());
+    items.push({ node: p, yield: 0 });
+  }
   const sandbox = status.sandbox || {};
   if (sandbox.mode) {
     const sb = el('span', null, sandbox.mode + ' ');
@@ -3472,8 +3500,7 @@ pub async fn status_snapshot(
             .and_then(|store| store.get("default").ok());
     let (agent, egress) = match registered {
         Some(a) => {
-            let llm =
-                wirken_agent::llm::LlmConfig::from_provider(&a.provider, &a.base_url, &a.model);
+            let llm = super::llm_config_for_agent(&a);
             let webchat_egress = a.channel_egress.get("webchat");
             let mode = webchat_egress
                 .map(|e| {
@@ -3493,6 +3520,8 @@ pub async fn status_snapshot(
                     "provider": a.provider,
                     "model": a.model,
                     "api_key_credential": a.api_key_credential,
+                    "plan": a.auth.is_plan(),
+                    "manage_usage_url": a.auth.is_plan().then_some(wirken_agent::plan_auth::USAGE_URL),
                     "context_window": llm.context_window,
                     "effective_context_budget": wirken_agent::context::effective_budget(llm.context_window),
                     "tools_enabled": a.tools_enabled,
@@ -3521,14 +3550,27 @@ pub async fn status_snapshot(
                     let provider = pj["provider"].as_str().unwrap_or("ollama").to_string();
                     let model = pj["model"].as_str().unwrap_or("llama3").to_string();
                     let base_url = pj["base_url"].as_str().unwrap_or("").to_string();
-                    let llm =
-                        wirken_agent::llm::LlmConfig::from_provider(&provider, &base_url, &model);
+                    let plan = super::plan_sign_in::provider_auth(&pj)
+                        .map(|a| a.is_plan())
+                        .unwrap_or(false);
+                    let llm = if plan {
+                        wirken_agent::llm::LlmConfig::plan(&model)
+                    } else {
+                        wirken_agent::llm::LlmConfig::from_provider(&provider, &base_url, &model)
+                    };
+                    let credential = if plan {
+                        Some(super::plan_sign_in::provider_plan_entry(&pj))
+                    } else {
+                        pj["api_key_name"].as_str().map(String::from)
+                    };
                     (
                         json!({
                             "id": "default",
                             "provider": provider,
                             "model": model,
-                            "api_key_credential": pj["api_key_name"].as_str(),
+                            "api_key_credential": credential,
+                            "plan": plan,
+                            "manage_usage_url": plan.then_some(wirken_agent::plan_auth::USAGE_URL),
                             "context_window": llm.context_window,
                             "effective_context_budget": wirken_agent::context::effective_budget(llm.context_window),
                             "tools_enabled": Value::Null,
@@ -3540,7 +3582,7 @@ pub async fn status_snapshot(
                     )
                 }
                 None => (
-                    json!({ "id": "default", "provider": Value::Null, "model": Value::Null, "api_key_credential": Value::Null,
+                    json!({ "id": "default", "provider": Value::Null, "model": Value::Null, "api_key_credential": Value::Null, "plan": false,
                             "context_window": Value::Null, "effective_context_budget": Value::Null, "tools_enabled": Value::Null, "source": Value::Null }),
                     json!({ "channel": "webchat", "mode": Value::Null, "domains": [], "effective_network_mode": Value::Null }),
                 ),
@@ -5712,6 +5754,40 @@ mod tests {
         assert!(adapter["state_recorded_at"].is_string(), "{adapter}");
     }
 
+    /// A plan-mode default agent is marked as such, with the usage page
+    /// the strip links to, its sign-in entry as the credential, and the
+    /// fixed plan context window. A key-mode agent carries no link.
+    #[tokio::test]
+    async fn status_snapshot_marks_a_plan_agent_with_its_usage_page() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("provider.json"),
+            r#"{"provider":"openai","auth":"plan","credential":"work-plan","model":"m"}"#,
+        )
+        .unwrap();
+        let cfg = cfg_at(dir.path());
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        assert_eq!(snap["agent"]["plan"], true);
+        assert_eq!(
+            snap["agent"]["manage_usage_url"],
+            wirken_agent::plan_auth::USAGE_URL
+        );
+        assert_eq!(snap["agent"]["api_key_credential"], "work-plan");
+        assert_eq!(
+            snap["agent"]["context_window"],
+            wirken_agent::llm::PLAN_CONTEXT_WINDOW
+        );
+
+        std::fs::write(
+            dir.path().join("provider.json"),
+            r#"{"provider":"openai","model":"m","base_url":"https://api.openai.com/v1"}"#,
+        )
+        .unwrap();
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        assert_eq!(snap["agent"]["plan"], false);
+        assert!(snap["agent"]["manage_usage_url"].is_null());
+    }
+
     /// A value the gateway does not hold is null, never a default that
     /// reads as an answer. On an empty data directory the snapshot
     /// says exactly what is there: a sandbox file, and nothing else.
@@ -7448,6 +7524,7 @@ mod tests {
                 channel_egress: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
             },
         );
         let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
@@ -8473,6 +8550,7 @@ mod tests {
                     channel_egress: Default::default(),
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
+                    plan_token_source: None,
                 },
             );
             let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
