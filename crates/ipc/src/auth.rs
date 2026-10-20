@@ -175,6 +175,9 @@ where
 ///
 /// `verify_adapter` is called with (adapter_id, public_key_bytes) and should
 /// return Ok(()) if the adapter is registered and the public key matches.
+///
+/// Accepts adapters only; [`perform_gateway_peer_handshake`] also
+/// accepts the terminal channel.
 pub async fn perform_gateway_handshake<R, W, F>(
     reader: &mut FrameReader<R>,
     writer: &mut FrameWriter<W>,
@@ -184,6 +187,87 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
     F: FnOnce(&str, &[u8; 32]) -> Result<(), HandshakeError>,
+{
+    // With no operator key the terminal answer is refused as a
+    // protocol error, so only an adapter comes back.
+    match perform_gateway_peer_handshake(reader, writer, None, verify_adapter, |_| Ok(())).await? {
+        GatewayPeer::Adapter {
+            adapter_id,
+            public_key,
+        } => Ok((adapter_id, public_key)),
+        GatewayPeer::Terminal { .. } => {
+            Err(HandshakeError::Protocol("expected AuthResponse".into()))
+        }
+    }
+}
+
+/// Who completed the handshake on the gateway socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayPeer {
+    /// A registered adapter: the id it signed for and its key.
+    Adapter {
+        adapter_id: String,
+        public_key: [u8; 32],
+    },
+    /// The terminal channel, `wirken chat`, holding the operator key.
+    Terminal {
+        /// [`crate::operator::key_id`] of the operator key.
+        key_id: String,
+        public_key: [u8; 32],
+        /// The agent asked for, empty for the router's choice. Already
+        /// accepted by the caller's `verify_agent`.
+        agent: String,
+    },
+}
+
+/// The answer to the challenge, before it is checked.
+enum Answer {
+    Adapter {
+        adapter_id: String,
+        public_key: [u8; 32],
+        signature: [u8; 64],
+    },
+    Terminal {
+        public_key: [u8; 32],
+        signature: [u8; 64],
+        agent: String,
+    },
+}
+
+fn key_and_signature(pk: &[u8], sig: &[u8]) -> Result<([u8; 32], [u8; 64]), HandshakeError> {
+    let public_key: [u8; 32] = pk.try_into().map_err(|_| {
+        HandshakeError::Protocol(format!("public key must be 32 bytes, got {}", pk.len()))
+    })?;
+    let signature: [u8; 64] = sig.try_into().map_err(|_| {
+        HandshakeError::Protocol(format!("signature must be 64 bytes, got {}", sig.len()))
+    })?;
+    Ok((public_key, signature))
+}
+
+/// Gateway side of the handshake on the gateway socket, for adapters
+/// and for the terminal channel.
+///
+/// The challenge is the same for both. An adapter answers with
+/// `AuthResponse` and is checked as in [`perform_gateway_handshake`].
+/// The terminal answers with `TerminalAuthResponse`, signed with the
+/// operator key under the operator handshake's domain for
+/// [`crate::operator::TERMINAL_SOCKET`]; it is accepted only when
+/// `operator_key` is given, only for that key, and only if
+/// `verify_agent` accepts the agent it asks for. A terminal that is
+/// refused is told why in the `AuthResult`, so `wirken chat` can say
+/// it; an adapter that is refused is not, as before.
+pub async fn perform_gateway_peer_handshake<R, W, F, G>(
+    reader: &mut FrameReader<R>,
+    writer: &mut FrameWriter<W>,
+    operator_key: Option<&VerifyingKey>,
+    verify_adapter: F,
+    verify_agent: G,
+) -> Result<GatewayPeer, HandshakeError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnOnce(&str, &[u8; 32]) -> Result<(), HandshakeError>,
+    G: FnOnce(&str) -> Result<(), HandshakeError>,
 {
     // 1. Generate and send challenge
     let mut nonce = [0u8; CHALLENGE_NONCE_SIZE];
@@ -209,7 +293,7 @@ where
         .get_root::<frame::Reader<'_>>()
         .map_err(|e| HandshakeError::Protocol(format!("parse response frame: {e}")))?;
 
-    let (adapter_id, pub_key_bytes, sig_bytes) = match response_reader
+    let answer = match response_reader
         .which()
         .map_err(|e| HandshakeError::Protocol(format!("response frame variant: {e}")))?
     {
@@ -222,47 +306,101 @@ where
             let sig = r
                 .get_signature()
                 .map_err(|e| HandshakeError::Protocol(format!("get signature: {e}")))?;
-            let id = r
+            let adapter_id = r
                 .get_adapter_id()
                 .map_err(|e| HandshakeError::Protocol(format!("get adapter id: {e}")))?
                 .to_string()
                 .map_err(|e| HandshakeError::Protocol(format!("adapter id not utf8: {e}")))?;
-
-            let mut pk_arr = [0u8; 32];
-            if pk.len() != 32 {
-                return Err(HandshakeError::Protocol(format!(
-                    "public key must be 32 bytes, got {}",
-                    pk.len()
-                )));
+            let (public_key, signature) = key_and_signature(pk, sig)?;
+            Answer::Adapter {
+                adapter_id,
+                public_key,
+                signature,
             }
-            pk_arr.copy_from_slice(pk);
-
-            let mut sig_arr = [0u8; 64];
-            if sig.len() != 64 {
-                return Err(HandshakeError::Protocol(format!(
-                    "signature must be 64 bytes, got {}",
-                    sig.len()
-                )));
+        }
+        frame::TerminalAuthResponse(response) if operator_key.is_some() => {
+            let r =
+                response.map_err(|e| HandshakeError::Protocol(format!("read response: {e}")))?;
+            let pk = r
+                .get_public_key()
+                .map_err(|e| HandshakeError::Protocol(format!("get public key: {e}")))?;
+            let sig = r
+                .get_signature()
+                .map_err(|e| HandshakeError::Protocol(format!("get signature: {e}")))?;
+            let agent = r
+                .get_agent()
+                .map_err(|e| HandshakeError::Protocol(format!("get agent: {e}")))?
+                .to_string()
+                .map_err(|e| HandshakeError::Protocol(format!("agent not utf8: {e}")))?;
+            let (public_key, signature) = key_and_signature(pk, sig)?;
+            Answer::Terminal {
+                public_key,
+                signature,
+                agent,
             }
-            sig_arr.copy_from_slice(sig);
-
-            (id, pk_arr, sig_arr)
         }
         _ => return Err(HandshakeError::Protocol("expected AuthResponse".into())),
     };
+    drop(response_msg);
 
-    // 3. Verify the adapter is registered
-    verify_adapter(&adapter_id, &pub_key_bytes)?;
+    let peer = match answer {
+        Answer::Adapter {
+            adapter_id,
+            public_key,
+            signature,
+        } => {
+            // 3. Verify the adapter is registered
+            verify_adapter(&adapter_id, &public_key)?;
 
-    // 4. Verify the signature over (domain || adapter_id || nonce).
-    //    See `signed_payload` for rationale.
-    let verifying_key =
-        VerifyingKey::from_bytes(&pub_key_bytes).map_err(|_| HandshakeError::InvalidSignature)?;
-    let signature = Signature::from_bytes(&sig_bytes);
-    let payload = signed_payload(&adapter_id, &nonce);
-    verifying_key
-        .verify_strict(&payload, &signature)
-        .map_err(|_| HandshakeError::InvalidSignature)?;
+            // 4. Verify the signature over (domain || adapter_id || nonce).
+            //    See `signed_payload` for rationale.
+            let verifying_key = VerifyingKey::from_bytes(&public_key)
+                .map_err(|_| HandshakeError::InvalidSignature)?;
+            let payload = signed_payload(&adapter_id, &nonce);
+            verifying_key
+                .verify_strict(&payload, &Signature::from_bytes(&signature))
+                .map_err(|_| HandshakeError::InvalidSignature)?;
+            GatewayPeer::Adapter {
+                adapter_id,
+                public_key,
+            }
+        }
+        Answer::Terminal {
+            public_key,
+            signature,
+            agent,
+        } => {
+            // The match arm above admits this answer only with a key.
+            let Some(expected) = operator_key else {
+                return Err(HandshakeError::Protocol("expected AuthResponse".into()));
+            };
+            let checked = crate::operator::verify_challenge(
+                expected,
+                &public_key,
+                &signature,
+                crate::operator::TERMINAL_SOCKET,
+                &nonce,
+            )
+            .map_err(|e| match e {
+                crate::operator::OperatorHandshakeError::UnknownKey => {
+                    HandshakeError::NotOperatorKey
+                }
+                _ => HandshakeError::InvalidSignature,
+            })
+            .and_then(|key_id| verify_agent(&agent).map(|()| key_id));
+            match checked {
+                Ok(key_id) => GatewayPeer::Terminal {
+                    key_id,
+                    public_key,
+                    agent,
+                },
+                Err(e) => {
+                    let _ = send_rejection(writer, &e.to_string()).await;
+                    return Err(e);
+                }
+            }
+        }
+    };
 
     // 5. Send success
     let mut result_msg = capnp::message::Builder::new_default();
@@ -277,7 +415,79 @@ where
         .await
         .map_err(|e| HandshakeError::Protocol(format!("write result: {e}")))?;
 
-    Ok((adapter_id, pub_key_bytes))
+    Ok(peer)
+}
+
+/// Terminal side of the handshake: answer the gateway's challenge with
+/// the operator key, asking for `agent` (empty for the router's
+/// choice). A refusal comes back as [`HandshakeError::Rejected`]
+/// carrying the gateway's reason.
+pub async fn perform_terminal_handshake<R, W>(
+    reader: &mut FrameReader<R>,
+    writer: &mut FrameWriter<W>,
+    key: &crate::operator::OperatorKey,
+    agent: &str,
+) -> Result<(), HandshakeError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let challenge_msg = reader
+        .read_message()
+        .await
+        .map_err(|e| HandshakeError::Protocol(format!("read challenge: {e}")))?;
+    let nonce = match challenge_msg
+        .get_root::<frame::Reader<'_>>()
+        .map_err(|e| HandshakeError::Protocol(format!("parse challenge frame: {e}")))?
+        .which()
+        .map_err(|e| HandshakeError::Protocol(format!("challenge frame variant: {e}")))?
+    {
+        frame::AuthChallenge(challenge) => challenge
+            .and_then(|c| c.get_nonce())
+            .map_err(|e| HandshakeError::Protocol(format!("get nonce: {e}")))?
+            .to_vec(),
+        _ => return Err(HandshakeError::Protocol("expected AuthChallenge".into())),
+    };
+
+    let signature = key.sign_challenge(crate::operator::TERMINAL_SOCKET, &nonce);
+    let mut response_msg = capnp::message::Builder::new_default();
+    {
+        let frame_builder = response_msg.init_root::<frame::Builder<'_>>();
+        let mut resp = frame_builder.init_terminal_auth_response();
+        resp.set_public_key(&key.verifying_key().to_bytes());
+        resp.set_signature(&signature.to_bytes());
+        resp.set_agent(agent);
+    }
+    writer
+        .write_message(&response_msg)
+        .await
+        .map_err(|e| HandshakeError::Protocol(format!("write response: {e}")))?;
+
+    let result_msg = reader
+        .read_message()
+        .await
+        .map_err(|e| HandshakeError::Protocol(format!("read result: {e}")))?;
+    match result_msg
+        .get_root::<frame::Reader<'_>>()
+        .map_err(|e| HandshakeError::Protocol(format!("parse result frame: {e}")))?
+        .which()
+        .map_err(|e| HandshakeError::Protocol(format!("result frame variant: {e}")))?
+    {
+        frame::AuthResult(result) => {
+            let r = result.map_err(|e| HandshakeError::Protocol(format!("read result: {e}")))?;
+            if r.get_accepted() {
+                Ok(())
+            } else {
+                let reason = r
+                    .get_reason()
+                    .map_err(|e| HandshakeError::Protocol(format!("get reason: {e}")))?
+                    .to_string()
+                    .unwrap_or_default();
+                Err(HandshakeError::Rejected(reason))
+            }
+        }
+        _ => Err(HandshakeError::Protocol("expected AuthResult".into())),
+    }
 }
 
 /// Send a rejection result (gateway helper).
@@ -722,6 +932,234 @@ mod hook_handshake_tests {
                 .verify_strict(&hook_payload, &adapter_sig)
                 .is_err(),
             "adapter-domain signature must not verify against hook-domain payload"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terminal_handshake_tests {
+    use super::*;
+    use crate::operator::{ORCHESTRATOR_SOCKET, OperatorKey, TERMINAL_SOCKET};
+    use crate::transport::{FrameReader, FrameWriter};
+    use tokio::io::{DuplexStream, ReadHalf, WriteHalf, duplex};
+
+    type Ends = (
+        FrameReader<ReadHalf<DuplexStream>>,
+        FrameWriter<WriteHalf<DuplexStream>>,
+    );
+
+    fn pipe() -> (Ends, Ends) {
+        let (client, server) = duplex(4096);
+        let (cr, cw) = tokio::io::split(client);
+        let (sr, sw) = tokio::io::split(server);
+        (
+            (FrameReader::new(cr), FrameWriter::new(cw)),
+            (FrameReader::new(sr), FrameWriter::new(sw)),
+        )
+    }
+
+    /// Run `wirken chat`'s side with `key` against a gateway pinned to
+    /// `pinned` that knows the agents in `agents`.
+    async fn terminal_against(
+        key: &OperatorKey,
+        agent: &str,
+        pinned: Option<&VerifyingKey>,
+        agents: &[&str],
+    ) -> (
+        Result<(), HandshakeError>,
+        Result<GatewayPeer, HandshakeError>,
+    ) {
+        let ((mut cr, mut cw), (mut sr, mut sw)) = pipe();
+        tokio::join!(
+            perform_terminal_handshake(&mut cr, &mut cw, key, agent),
+            perform_gateway_peer_handshake(
+                &mut sr,
+                &mut sw,
+                pinned,
+                |id, _| Err(HandshakeError::UnknownAdapter(id.into())),
+                |a| {
+                    if a.is_empty() || agents.contains(&a) {
+                        Ok(())
+                    } else {
+                        Err(HandshakeError::UnknownAgent(a.into()))
+                    }
+                },
+            ),
+        )
+    }
+
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+    #[tokio::test]
+    async fn the_operator_key_opens_the_terminal_channel_for_the_agent_asked() {
+        let key = OperatorKey::generate();
+        let (client, gateway) =
+            terminal_against(&key, "alice", Some(&key.verifying_key()), &["alice"]).await;
+        client.unwrap();
+        assert_eq!(
+            gateway.unwrap(),
+            GatewayPeer::Terminal {
+                key_id: key.key_id(),
+                public_key: key.verifying_key().to_bytes(),
+                agent: "alice".into(),
+            }
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+    #[tokio::test]
+    async fn another_key_is_refused_and_told_so() {
+        let key = OperatorKey::generate();
+        let pinned = OperatorKey::generate().verifying_key();
+        let (client, gateway) = terminal_against(&key, "", Some(&pinned), &[]).await;
+        assert!(
+            matches!(gateway, Err(HandshakeError::NotOperatorKey)),
+            "{gateway:?}"
+        );
+        assert!(
+            matches!(client, Err(HandshakeError::Rejected(ref r)) if r.contains("operator key")),
+            "{client:?}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+    #[tokio::test]
+    async fn an_agent_the_gateway_does_not_know_is_refused() {
+        let key = OperatorKey::generate();
+        let (client, gateway) =
+            terminal_against(&key, "mallory", Some(&key.verifying_key()), &["alice"]).await;
+        assert!(
+            matches!(gateway, Err(HandshakeError::UnknownAgent(ref a)) if a == "mallory"),
+            "{gateway:?}"
+        );
+        assert!(
+            matches!(client, Err(HandshakeError::Rejected(ref r)) if r.contains("mallory")),
+            "{client:?}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+    #[tokio::test]
+    async fn a_gateway_without_an_operator_key_takes_no_terminal() {
+        let key = OperatorKey::generate();
+        let ((mut cr, mut cw), (mut sr, mut sw)) = pipe();
+        let (_client, gateway) = tokio::join!(
+            perform_terminal_handshake(&mut cr, &mut cw, &key, ""),
+            async move {
+                let r = perform_gateway_peer_handshake(
+                    &mut sr,
+                    &mut sw,
+                    None,
+                    |_, _| Ok(()),
+                    |_| Ok(()),
+                )
+                .await;
+                // As the gateway does: the connection ends here.
+                drop((sr, sw));
+                r
+            },
+        );
+        assert!(
+            matches!(gateway, Err(HandshakeError::Protocol(_))),
+            "{gateway:?}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+    #[tokio::test]
+    async fn the_adapter_only_handshake_takes_no_terminal() {
+        let key = OperatorKey::generate();
+        let ((mut cr, mut cw), (mut sr, mut sw)) = pipe();
+        let (_client, gateway) = tokio::join!(
+            perform_terminal_handshake(&mut cr, &mut cw, &key, ""),
+            async move {
+                let r = perform_gateway_handshake(&mut sr, &mut sw, |_, _| Ok(())).await;
+                drop((sr, sw));
+                r
+            },
+        );
+        assert!(
+            matches!(gateway, Err(HandshakeError::Protocol(_))),
+            "{gateway:?}"
+        );
+    }
+
+    /// A signature the operator key made for another socket does not
+    /// open this one, though the key is the right one.
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+    #[tokio::test]
+    async fn a_signature_for_another_socket_is_refused() {
+        let key = OperatorKey::generate();
+        let ((mut cr, mut cw), (mut sr, mut sw)) = pipe();
+        let client = async {
+            let msg = cr.read_message().await.unwrap();
+            let nonce = match msg
+                .get_root::<frame::Reader<'_>>()
+                .unwrap()
+                .which()
+                .unwrap()
+            {
+                frame::AuthChallenge(c) => c.unwrap().get_nonce().unwrap().to_vec(),
+                _ => panic!("expected a challenge"),
+            };
+            assert_ne!(ORCHESTRATOR_SOCKET, TERMINAL_SOCKET);
+            let signature = key.sign_challenge(ORCHESTRATOR_SOCKET, &nonce);
+            let mut answer = capnp::message::Builder::new_default();
+            {
+                let mut r = answer
+                    .init_root::<frame::Builder<'_>>()
+                    .init_terminal_auth_response();
+                r.set_public_key(&key.verifying_key().to_bytes());
+                r.set_signature(&signature.to_bytes());
+                r.set_agent("");
+            }
+            cw.write_message(&answer).await.unwrap();
+        };
+        let pinned = key.verifying_key();
+        let (_, gateway) = tokio::join!(
+            client,
+            perform_gateway_peer_handshake(
+                &mut sr,
+                &mut sw,
+                Some(&pinned),
+                |_, _| Ok(()),
+                |_| Ok(()),
+            ),
+        );
+        assert!(
+            matches!(gateway, Err(HandshakeError::InvalidSignature)),
+            "{gateway:?}"
+        );
+    }
+
+    /// An adapter still completes the handshake on a gateway that takes
+    /// the terminal too.
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+    #[tokio::test]
+    async fn an_adapter_is_unchanged_beside_the_terminal() {
+        let identity = AdapterIdentity::generate("telegram");
+        let expected = identity.public_key_bytes();
+        let operator = OperatorKey::generate().verifying_key();
+        let ((mut cr, mut cw), (mut sr, mut sw)) = pipe();
+        let (client, gateway) = tokio::join!(
+            perform_adapter_handshake(&mut cr, &mut cw, &identity),
+            perform_gateway_peer_handshake(
+                &mut sr,
+                &mut sw,
+                Some(&operator),
+                |id, pk| {
+                    assert_eq!((id, pk), ("telegram", &expected));
+                    Ok(())
+                },
+                |_| panic!("an adapter names no agent"),
+            ),
+        );
+        client.unwrap();
+        assert_eq!(
+            gateway.unwrap(),
+            GatewayPeer::Adapter {
+                adapter_id: "telegram".into(),
+                public_key: expected,
+            }
         );
     }
 }

@@ -3145,6 +3145,13 @@ async fn run_turn(turn: AcceptedTurn, stream: &mut tokio::net::TcpStream, shared
                                     )
                                 }
                                 wirken_agent::llm_stream::StreamEvent::Done(_) => break,
+                                // The page reads tool activity off the
+                                // chain, as it did before the turn
+                                // streamed it.
+                                wirken_agent::llm_stream::StreamEvent::ToolCall { .. }
+                                | wirken_agent::llm_stream::StreamEvent::ToolResult { .. } => {
+                                    continue
+                                }
                                 wirken_agent::llm_stream::StreamEvent::Error(e) => {
                                     format!(
                                         "data: {}\n\n",
@@ -4480,7 +4487,7 @@ const INTERCEPTED_TOOLS: &[&str] = &["spawn_subagent", "wirken_enter_phase", "wi
 
 /// One row of the tool table: the tier the gate would compute for a
 /// call with no arguments, or the rule when the arguments decide it.
-fn tool_tier_entry(name: &str, description: &str) -> serde_json::Value {
+pub(crate) fn tool_tier_entry(name: &str, description: &str) -> serde_json::Value {
     use serde_json::{Value, json};
     if let Some((_, rule)) = ARGUMENT_DEPENDENT_TOOLS.iter().find(|(n, _)| *n == name) {
         return json!({

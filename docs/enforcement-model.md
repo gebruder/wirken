@@ -309,3 +309,11 @@ handshake, and a decision's actor carries the key id. The handshake is for
 attribution and for refusing a same-UID process that does not hold the key,
 not confidentiality: a process running as the gateway's user can read the key
 file and sign.
+
+`wirken chat` takes the same handshake on `gateway.sock`, carried in the
+socket's Cap'n Proto frames and signed for the socket name `terminal`, so a
+signature made for one socket does not open another. An adapter answers the
+gateway's challenge with its registered adapter key; the chat answers with
+the operator key, and the gateway pins the connection to the `terminal`
+channel. Its messages then go through the same message loop as an adapter's,
+recorded against the operator key's id.

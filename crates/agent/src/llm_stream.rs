@@ -40,6 +40,21 @@ pub enum StreamEvent {
     Done(LlmResponse),
     /// An error during streaming.
     Error(String),
+    /// A tool call the model asked for, sent by the streaming turn once
+    /// the `AssistantToolCalls` row recording it is on the chain. The
+    /// arguments are the ones that row records.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// A tool call finished, sent once its `ToolResult` row is on the
+    /// chain.
+    ToolResult {
+        id: String,
+        name: String,
+        success: bool,
+    },
 }
 
 impl LlmClient {

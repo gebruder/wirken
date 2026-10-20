@@ -3407,6 +3407,17 @@ impl Agent {
                             sender_id: self.current_inbound.sender_id.clone(),
                         },
                     )?;
+                    // After the row, so a client shown a call can find
+                    // it on the chain.
+                    for call in &calls {
+                        let _ = tx
+                            .send(StreamEvent::ToolCall {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                                arguments: call.arguments.clone(),
+                            })
+                            .await;
+                    }
 
                     for call in &calls {
                         // Both dispatch paths (streaming and
@@ -3428,6 +3439,13 @@ impl Agent {
                             TrustLevel::Tool,
                             self.tool_result_row(&call.id, &call.name, &result),
                         )?;
+                        let _ = tx
+                            .send(StreamEvent::ToolResult {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                                success: result.success,
+                            })
+                            .await;
                     }
                 }
                 LlmResponse::Empty => {

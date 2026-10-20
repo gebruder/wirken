@@ -89,6 +89,16 @@ pub(crate) fn channel_from_session_id(session_id: &str) -> Option<&str> {
     Some(channel)
 }
 
+/// The session a sub-agent session was spawned from, through every
+/// level: `{parent}#sub-N#sub-M` gives `{parent}`. Any other id is its
+/// own root. A surface that reaches its client by the session the
+/// client's turn runs on finds a sub-agent's request by this.
+pub fn root_session_id(session_id: &str) -> &str {
+    session_id
+        .split_once(SUBAGENT_SESSION_MARKER)
+        .map_or(session_id, |(root, _)| root)
+}
+
 /// Paired LLM config + API key selected for a specific channel. A
 /// provider and its credential are always chosen together, so the
 /// factory treats them as one record rather than two parallel maps
@@ -342,6 +352,11 @@ pub struct AgentFactory {
     /// no per-user allowlist: anything that can reach the loopback
     /// port is treated as the owner.
     sse_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
+    /// Channel-specific approval gate for terminal sessions
+    /// (`{agent}/terminal/{conv}`), the `wirken chat` client of a
+    /// running gateway. Installed by `wirken run`; `None` elsewhere,
+    /// and the factory falls back to `approval_gate`.
+    terminal_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
     /// Budget enforcement wiring (spend store + global default),
     /// shared across every waked Agent. `None` until the CLI calls
     /// [`Self::attach_budget`]; absent means the budget gate is a
@@ -472,6 +487,7 @@ impl AgentFactory {
             telegram_approval_gate: std::sync::RwLock::new(None),
             signal_approval_gate: std::sync::RwLock::new(None),
             sse_approval_gate: std::sync::RwLock::new(None),
+            terminal_approval_gate: std::sync::RwLock::new(None),
             budget_wiring: std::sync::RwLock::new(None),
             purpose,
             cache: StdMutex::new(LruCache::new(capacity)),
@@ -518,6 +534,12 @@ impl AgentFactory {
         *self.sse_approval_gate.write().unwrap() = Some(gate);
     }
 
+    /// Install the terminal approval gate. Sessions whose id parses
+    /// with channel `"terminal"` route through this gate.
+    pub fn attach_terminal_approval_gate(&self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
+        *self.terminal_approval_gate.write().unwrap() = Some(gate);
+    }
+
     /// Pick the right gate for a session id. Channel-specific
     /// gates win when installed for the session's channel;
     /// everything else falls back to the default gate. `None`
@@ -540,6 +562,11 @@ impl AgentFactory {
             }
             Some("webchat") => {
                 if let Some(g) = self.sse_approval_gate.read().unwrap().clone() {
+                    return Some(g);
+                }
+            }
+            Some("terminal") => {
+                if let Some(g) = self.terminal_approval_gate.read().unwrap().clone() {
                     return Some(g);
                 }
             }
@@ -642,6 +669,51 @@ impl AgentFactory {
     /// List the agent ids known to this factory.
     pub fn known_agent_ids(&self) -> Vec<String> {
         self.static_configs.keys().cloned().collect()
+    }
+
+    /// The model and sandbox settings `agent_id` runs with, for a
+    /// surface that reports them. `None` for an agent this factory does
+    /// not know.
+    pub fn agent_settings(
+        &self,
+        agent_id: &str,
+    ) -> Option<(LlmConfig, crate::sandbox::SandboxConfig)> {
+        self.static_configs
+            .get(agent_id)
+            .map(|c| (c.llm_config.clone(), c.sandbox.clone()))
+    }
+
+    /// The budget in force for `agent_id`, with what it has spent in the
+    /// current window when the ledger can be read. `None` when no budget
+    /// applies.
+    pub fn budget_state(
+        &self,
+        agent_id: &str,
+    ) -> Option<(wirken_gateway::budget::AgentBudget, Option<u64>)> {
+        let wiring = self.budget_wiring.read().ok()?;
+        let wiring = wiring.as_ref()?;
+        let budget = wiring.config.resolve(agent_id)?;
+        let start = budget
+            .window
+            .window_start(wirken_gateway::budget::now_unix_secs());
+        let spent = wiring
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| s.window_spend(agent_id, start).ok());
+        Some((budget, spent))
+    }
+
+    /// The grants the permission store holds for `agent_id`. `None` when
+    /// this factory gates with no store or the store cannot be read.
+    pub fn stored_grants(
+        &self,
+        agent_id: &str,
+    ) -> Option<Vec<wirken_gateway::permissions::Approval>> {
+        match &self.permissions {
+            ToolGate::Store(store) => store.lock().ok()?.list(agent_id).ok(),
+            ToolGate::ReplayOnly => None,
+        }
     }
 
     /// Whether this factory has a static config for `agent_id`.
@@ -1226,6 +1298,22 @@ mod replay_tests {
         let path = tmp.into_temp_path();
         let perm_path = path.keep().unwrap();
         Arc::new(StdMutex::new(PermissionStore::open(&perm_path).unwrap()))
+    }
+
+    #[test]
+    fn a_sub_agents_root_is_the_session_it_was_spawned_from() {
+        assert_eq!(
+            root_session_id("default/terminal/c1"),
+            "default/terminal/c1"
+        );
+        assert_eq!(
+            root_session_id("default/terminal/c1#sub-0"),
+            "default/terminal/c1"
+        );
+        assert_eq!(
+            root_session_id("default/terminal/c1#sub-0#sub-3"),
+            "default/terminal/c1"
+        );
     }
 
     fn make_log() -> Arc<dyn SessionLog> {

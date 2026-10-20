@@ -47,6 +47,12 @@ pub enum HandshakeError {
     #[error("timeout")]
     Timeout,
 
+    #[error("the key is not the operator key")]
+    NotOperatorKey,
+
+    #[error("unknown agent: {0}")]
+    UnknownAgent(String),
+
     #[error("protocol error: {0}")]
     Protocol(String),
 }

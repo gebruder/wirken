@@ -317,6 +317,22 @@ struct ApprovalRequest {
   # host as <user>"). Empty for other tools. An adapter that does not
   # read it is unaffected.
   execLocation @8 :Text;
+  # The arguments the model sent for the call, verbatim, and what it
+  # said in the same message. Filled by the terminal channel's gate,
+  # whose card shows them; empty from the other gates. An adapter that
+  # does not read them is unaffected.
+  arguments @9 :Text;
+  assistantText @10 :Text;
+  # How long the gateway waits for a decision, in seconds, so the
+  # surface can close the request before the gateway records it as
+  # timed out. Zero when the gate does not say.
+  timeoutSecs @11 :UInt32;
+  # The container runtime the exec runs under if approved, from the
+  # gateway's sandbox settings for the agent: `gvisor` (Docker's
+  # `runsc` runtime), `docker` (Docker's default runtime) or `host`
+  # (no container). Empty for other tools. Filled by the terminal
+  # channel's gate.
+  execRuntime @12 :Text;
 }
 
 struct ApprovalDecisionKind {
@@ -371,6 +387,72 @@ struct ApprovalRequestFailed {
   reason @1 :Text;
 }
 
+# --- Terminal channel ---
+#
+# `wirken chat` connects to the gateway socket as the `terminal`
+# channel. It is not a process the gateway spawns, so it holds no
+# registered adapter key. It answers the gateway's AuthChallenge with
+# the operator key instead, signed under the operator handshake's
+# domain for the socket name `terminal` (crates/ipc/src/operator.rs).
+# The gateway routes the connection by which response variant arrives,
+# as it does for hooks.
+
+struct TerminalAuthResponse {
+  publicKey @0 :Data;
+  # 32-byte Ed25519 public key: the operator key.
+  signature @1 :Data;
+  # 64-byte Ed25519 signature over the operator handshake payload for
+  # the `terminal` socket and the challenge nonce.
+  agent @2 :Text;
+  # The agent this connection talks to, from `wirken chat --agent`.
+  # Empty leaves the choice to the router, as on any channel. Carried
+  # in the handshake rather than on each message so routing stays
+  # handshake-derived; an agent the gateway does not know refuses the
+  # handshake.
+}
+
+struct ToolActivity {
+  # Gateway -> terminal. A tool call in the turn in flight, sent once
+  # the row recording it is on the session chain.
+  callId @0 :Text;
+  toolName @1 :Text;
+  union {
+    call @2 :Text;
+    # The model asked for the call. The arguments as the
+    # AssistantToolCalls row records them.
+    result @3 :Bool;
+    # The call finished, after its ToolResult row. True when it
+    # succeeded.
+  }
+}
+
+struct TerminalRequest {
+  # Terminal -> gateway. What the chat's panels and sidebar show, and
+  # the check of a conversation's chain. Answered with a TerminalReply
+  # carrying the same requestId. The gateway answers only on the
+  # terminal channel, and only about terminal conversations.
+  requestId @0 :Text;
+  conversationId @1 :Text;
+  union {
+    status @2 :Void;
+    # The panels for the conversation: environment, context, cost,
+    # audit, approvals, tools.
+    verify @3 :Void;
+    # Verify the conversation's session chain and its signed heads.
+    conversations @4 :Void;
+    # The agents and their terminal conversations.
+    history @5 :Void;
+    # The conversation's messages, to resume it.
+  }
+}
+
+struct TerminalReply {
+  requestId @0 :Text;
+  body @1 :Text;
+  # JSON. The shape follows the request; see
+  # crates/cli/src/commands/terminal_queries.rs.
+}
+
 # --- Top-level frame ---
 #
 # Every message on the wire is a Frame. The tag determines
@@ -395,7 +477,9 @@ struct Frame {
     outboundResult @7 :OutboundResult;
     sessionView @8 :SessionView;
 
-    # LLM streaming (gateway → agent, bidirectional)
+    # LLM streaming (gateway → agent, bidirectional). The terminal
+    # channel receives a turn's reply text on it as the model writes
+    # it; the outbound frame still carries the reply as recorded.
     llmChunk @9 :LlmChunk;
 
     # Hook handshake. authChallenge / authResult are reused; the
@@ -422,5 +506,14 @@ struct Frame {
     # the LLM conversation. Twin of veto on the return path.
     egressRequest @18 :EgressRequest;
     egressResponse @19 :EgressResponse;
+
+    # Terminal channel. The handshake answer signed with the operator
+    # key (authChallenge / authResult are reused), and the tool
+    # activity of a turn, which the terminal shows beside the reply
+    # streamed on llmChunk.
+    terminalAuthResponse @20 :TerminalAuthResponse;
+    toolActivity @21 :ToolActivity;
+    terminalRequest @22 :TerminalRequest;
+    terminalReply @23 :TerminalReply;
   }
 }

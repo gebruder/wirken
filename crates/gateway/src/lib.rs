@@ -31,6 +31,7 @@ pub mod session;
 pub mod skill_registry;
 pub mod sse_approval_registry;
 pub mod sshsig;
+pub mod terminal_sessions;
 
 #[cfg(test)]
 mod tests;

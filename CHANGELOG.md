@@ -32,6 +32,16 @@ tagged.
 - `WIRKEN_CHATGPT_OAUTH_BASE`, a loopback-only base for the ChatGPT sign-in
   and token endpoints, for the integration test's stub; refused for any
   other host.
+- `wirken chat [--agent NAME]` opens a full-screen chat in the terminal.
+  It is a channel of the running gateway, `terminal`, so its messages
+  take the same path as any adapter's: injection scan, audit rows, router,
+  tier gate and session chain. It signs in with the operator key, asks
+  approvals on a card in the chat, and shows panels for the environment
+  (including the sandbox runtime the gateway reports), context, cost and
+  tokens, audit with a chain check, approvals and tools, plus a sidebar of
+  agents and conversations with search. Without a terminal it points to
+  `wirken ask`; without a running gateway it points to `wirken run`. Bare
+  `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
 
 ### Changed
 
@@ -58,6 +68,11 @@ tagged.
   call returns an error result, the parent's chain records the spawn's
   `SubagentResult` as an error, and the child does not run. Single and
   parallel spawns behave the same; siblings in a parallel spawn run on.
+- An approval answered in the chat whose message raised it now reaches
+  the gate. Each adapter connection's frames are read while a turn runs,
+  so a Telegram or Signal decision sent on that connection resolves the
+  request instead of waiting until the gate timed out and refused. Turns
+  on a connection still run one at a time and in order.
 
 ## [2.3.0] - 2026-10-18
 
