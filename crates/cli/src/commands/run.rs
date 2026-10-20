@@ -2860,7 +2860,7 @@ async fn handle_adapter_connection(
     message_loop(
         &adapter_id,
         &authenticated_channel,
-        &mut reader,
+        reader,
         writer.clone(),
         factory,
         audit.clone(),
@@ -3609,6 +3609,39 @@ async fn send_reply_then_record<A: capnp::message::Allocator>(
     Ok(())
 }
 
+/// What [`message_loop`]'s handlers share for one connection.
+struct Conn<'a> {
+    adapter_id: &'a str,
+    authenticated_channel: &'a AuthenticatedChannel,
+    writer: &'a Arc<Mutex<IpcFrameWriter>>,
+    factory: &'a AgentFactory,
+    audit: &'a AuditWriter,
+    sessions: &'a Mutex<SessionStore>,
+    router: &'a Router,
+    detector: &'a InjectionDetector,
+    pending_approvals: &'a wirken_gateway::pending_approvals::PendingApprovalQueue,
+    approver_registry: &'a wirken_gateway::approver_registry::ApproverRegistry,
+    dispatcher: &'a OutboundDispatcher,
+}
+
+/// Frames read off the socket ahead of the loop.
+const FRAMES_AHEAD: usize = 16;
+
+/// Messages held while a turn runs. Past this the loop stops reading,
+/// and the socket holds the rest as it did before frames were read
+/// ahead.
+const MESSAGES_WAITING: usize = 32;
+
+/// Aborts the task it holds when dropped, so the reader stops with the
+/// loop on every exit path, an abort at shutdown included.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Main message loop: read inbound from adapter, route to agent, send response back.
 ///
 /// `authenticated_channel` is the channel string the adapter is
@@ -3618,11 +3651,19 @@ async fn send_reply_then_record<A: capnp::message::Allocator>(
 /// and audited. Without that check, a compromised adapter could
 /// claim any other channel in the frame payload and hijack that
 /// channel's session state, routing, and permission context.
+///
+/// Messages are handled one at a time, in the order they arrived. The
+/// other frames are handled as they arrive, also while a turn runs: an
+/// approval decision for the turn in flight comes back on the same
+/// connection, and it has to be read while the turn waits for it.
+/// Before, the loop read nothing while a turn ran, so a decision sent
+/// on the connection whose turn asked for it sat unread until the gate
+/// timed out.
 #[allow(clippy::too_many_arguments)]
 async fn message_loop(
     adapter_id: &str,
     authenticated_channel: &AuthenticatedChannel,
-    reader: &mut IpcFrameReader,
+    reader: IpcFrameReader,
     writer: Arc<Mutex<IpcFrameWriter>>,
     factory: Arc<AgentFactory>,
     audit: Arc<AuditWriter>,
@@ -3633,614 +3674,704 @@ async fn message_loop(
     approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
     dispatcher: Arc<OutboundDispatcher>,
 ) -> Result<()> {
+    let conn = Conn {
+        adapter_id,
+        authenticated_channel,
+        writer: &writer,
+        factory: &factory,
+        audit: &audit,
+        sessions: &sessions,
+        router: &router,
+        detector: &detector,
+        pending_approvals: &pending_approvals,
+        approver_registry: &approver_registry,
+        dispatcher: &dispatcher,
+    };
+
+    let (frames_tx, mut frames) = tokio::sync::mpsc::channel(FRAMES_AHEAD);
+    let _reader = AbortOnDrop(tokio::spawn(read_frames(
+        reader,
+        adapter_id.to_string(),
+        frames_tx,
+    )));
+
+    let mut waiting: std::collections::VecDeque<InboundAction> = std::collections::VecDeque::new();
+    let mut turn: Option<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>,
+    > = None;
+    // How the connection ended, once it has. Returned when the messages
+    // already read have run.
+    let mut ended: Option<Result<()>> = None;
+
     loop {
-        let msg = match reader.read_message().await {
-            Ok(msg) => msg,
+        if turn.is_none() {
+            if let Some(next) = waiting.pop_front() {
+                turn = Some(Box::pin(handle_action(&conn, next)));
+            } else if let Some(end) = ended.take() {
+                return end;
+            }
+        }
+        tokio::select! {
+            result = async { turn.as_mut().expect("guarded by the precondition").await },
+                if turn.is_some() =>
+            {
+                turn = None;
+                result?;
+            }
+            frame = frames.recv(), if ended.is_none() && waiting.len() < MESSAGES_WAITING => {
+                match frame {
+                    Some(Ok(action @ InboundAction::Message { .. })) => waiting.push_back(action),
+                    Some(Ok(action)) => handle_action(&conn, action).await?,
+                    Some(Err(e)) => ended = Some(Err(e)),
+                    None => ended = Some(Ok(())),
+                }
+            }
+            else => return ended.take().unwrap_or(Ok(())),
+        }
+    }
+}
+
+/// Read frames off the socket and hand them to [`message_loop`] in
+/// owned form. Stops at the end of the connection, which the loop sees
+/// as its channel closing, or after the first error, which it passes
+/// on.
+async fn read_frames(
+    mut reader: IpcFrameReader,
+    adapter_id: String,
+    frames: tokio::sync::mpsc::Sender<Result<InboundAction>>,
+) {
+    loop {
+        let item = match reader.read_message().await {
+            Ok(msg) => parse_frame(&msg),
             Err(wirken_ipc::IpcError::ConnectionClosed) => {
                 tracing::info!("Adapter '{adapter_id}' connection closed");
-                return Ok(());
+                return;
             }
             Err(e) => {
                 tracing::error!("IPC read error from '{adapter_id}': {e}");
-                return Err(e.into());
+                Err(e.into())
             }
         };
-
-        // Extract fields before any .await (Cap'n Proto readers are not Send)
-        let action = {
-            let frame_reader = msg
-                .get_root::<frame::Reader<'_>>()
-                .context("Failed to parse frame")?;
-
-            match frame_reader.which()? {
-                frame::Inbound(inbound) => {
-                    let m = inbound?;
-                    let text = m
-                        .get_text()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("text not utf8: {e}"))?
-                        .to_string();
-                    let sender_id = m
-                        .get_sender_id()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("sender_id not utf8: {e}"))?
-                        .to_string();
-                    let sender_name = m
-                        .get_sender_name()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("sender_name not utf8: {e}"))?
-                        .to_string();
-                    let channel = m
-                        .get_channel()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("channel not utf8: {e}"))?
-                        .to_string();
-                    let conversation_id = m
-                        .get_conversation_id()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("conversation_id not utf8: {e}"))?
-                        .to_string();
-                    let msg_id = m
-                        .get_id()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("id not utf8: {e}"))?
-                        .to_string();
-                    // Carry the inbound's reply_to_id (Slack's
-                    // thread_ts; Telegram's reply_to_message_id; etc.)
-                    // through to the outbound construction below so
-                    // the bot's reply lands in the same thread as the
-                    // inbound when one was specified, and at the
-                    // channel root otherwise. Empty string means "no
-                    // thread / no reply target" — explicitly NOT the
-                    // inbound's own message id, which would auto-
-                    // thread every root message.
-                    let reply_to_id = m
-                        .get_reply_to_id()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("reply_to_id not utf8: {e}"))?
-                        .to_string();
-
-                    // The platform's own time for this message, in
-                    // epoch millis. Zero means the adapter set none;
-                    // the field defaults to zero on the wire and no
-                    // real message predates the epoch, so the two are
-                    // not worth distinguishing.
-                    let platform_ts_millis = m.get_timestamp();
-
-                    InboundAction::Message {
-                        id: msg_id,
-                        text,
-                        sender_id,
-                        sender_name,
-                        platform_ts_millis,
-                        channel,
-                        conversation_id,
-                        reply_to_id,
-                    }
-                }
-                frame::Heartbeat(hb) => {
-                    let seq = hb?.get_seq();
-                    InboundAction::Heartbeat(seq)
-                }
-                frame::OutboundResult(r) => {
-                    let r = r?;
-                    let success = r.get_success();
-                    let msg_id = r.get_message_id()?.to_str().unwrap_or_default().to_string();
-                    let error = r.get_error()?.to_str().unwrap_or_default().to_string();
-                    let correlation_id = r
-                        .get_correlation_id()?
-                        .to_str()
-                        .unwrap_or_default()
-                        .to_string();
-                    InboundAction::DeliveryResult {
-                        success,
-                        msg_id,
-                        error,
-                        correlation_id,
-                    }
-                }
-                frame::ApprovalDecision(d) => {
-                    let d = d?;
-                    let request_id = d
-                        .get_request_id()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("approval request_id not utf8: {e}"))?
-                        .to_string();
-                    let user_id = d
-                        .get_actor_user_id()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("actor_user_id not utf8: {e}"))?
-                        .to_string();
-                    let user_display = d
-                        .get_actor_display()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("actor_display not utf8: {e}"))?
-                        .to_string();
-                    let decision = match d.get_decision()?.which()? {
-                        wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {
-                            ApprovalDecisionKind::Allow
-                        }
-                        wirken_ipc::wirken_capnp::approval_decision_kind::Deny(reason) => {
-                            let reason_text = reason?
-                                .to_str()
-                                .map_err(|e| anyhow::anyhow!("deny reason not utf8: {e}"))?
-                                .to_string();
-                            let reason = if reason_text.is_empty() {
-                                None
-                            } else {
-                                Some(reason_text)
-                            };
-                            ApprovalDecisionKind::Deny { reason }
-                        }
-                    };
-                    InboundAction::ApprovalDecision {
-                        request_id,
-                        decision,
-                        user_id,
-                        user_display,
-                    }
-                }
-                frame::ApprovalRequestFailed(f) => {
-                    let f = f?;
-                    let request_id = f
-                        .get_request_id()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("approval request_id not utf8: {e}"))?
-                        .to_string();
-                    let reason = f
-                        .get_reason()?
-                        .to_str()
-                        .map_err(|e| anyhow::anyhow!("failure reason not utf8: {e}"))?
-                        .to_string();
-                    InboundAction::ApprovalRequestFailed { request_id, reason }
-                }
-                _ => InboundAction::Unknown,
-            }
-        };
-        // msg dropped — safe to .await
-
-        match action {
-            InboundAction::Message {
-                id,
-                text,
-                sender_id,
-                sender_name,
-                platform_ts_millis,
-                channel,
-                conversation_id,
-                reply_to_id,
-            } => {
-                // Reject any inbound that claims a channel the
-                // authenticated adapter is not responsible for. See
-                // `AuthenticatedChannel::require_match`. The frame's
-                // `channel` field is attacker-influenced; the
-                // adapter's channel was authenticated by the
-                // handshake + registry lookup.
-                if let Err(mismatch) = authenticated_channel.require_match(&channel) {
-                    tracing::warn!(
-                        "Adapter '{adapter_id}' rejected cross-channel frame: {mismatch}"
-                    );
-                    let _ = audit
-                        .log(
-                            AuditEvent::new(
-                                ActorKind::Service,
-                                adapter_id,
-                                "adapter.channel_mismatch",
-                                mismatch.to_string(),
-                            )
-                            .with_channel(authenticated_channel.as_str())
-                            .with_detail(serde_json::json!({
-                                "authenticated_channel": mismatch.authenticated,
-                                "claimed_channel": mismatch.claimed,
-                                "conversation_id": conversation_id,
-                                "sender_id": sender_id,
-                                "message_id": id,
-                            })),
-                        )
-                        .await;
-                    continue;
-                }
-
-                tracing::info!(
-                    "[{}] {} ({}): {}",
-                    channel,
-                    sender_name,
-                    sender_id,
-                    truncate(&text, 80),
-                );
-
-                // Audit inbound. `target` carries the stable resource
-                // id `<channel>:<platform-msg-id>`; the message body
-                // lives under `detail.content` so downstream consumers
-                // can correlate without parsing a free-text field.
-                let inbound_target = format!("{channel}:{id}");
-                let mut inbound_detail = serde_json::json!({ "content": &text });
-                // Recorded beside the raw platform id already on the
-                // target, so a reader can compare the two without
-                // knowing how a given platform spells a timestamp.
-                // Omitted rather than written as zero when the adapter
-                // set none.
-                if platform_ts_millis > 0
-                    && let Some(obj) = inbound_detail.as_object_mut()
-                {
-                    obj.insert(
-                        "platform_ts_millis".into(),
-                        serde_json::Value::from(platform_ts_millis),
-                    );
-                }
-
-                // Scan for prompt injection patterns. Caught, so
-                // this returns whatever the detector does; the rule
-                // and its reasoning are shared with the webchat chat
-                // route in `super::inbound_scan`.
-                let threat_detail = super::inbound_scan::scan_catching_panics(
-                    &detector,
-                    &text,
-                    &format!("'{sender_id}' on '{channel}'"),
-                );
-
-                // A finding, or a scanner that failed, merges into the
-                // inbound row's detail and also lands as its own
-                // `message.threat_flagged` row for SIEM visibility.
-                //
-                // The scan runs before the row is written, which is
-                // only safe because it is caught: a detector panic
-                // used to unwind past this write and leave no trace of
-                // the message that caused it. It returns now, so the
-                // row is written either way and carries the verdict
-                // rather than having to be joined to a sibling row.
-                if let Some(ref threat) = threat_detail
-                    && let (Some(obj), Some(threat_obj)) =
-                        (inbound_detail.as_object_mut(), threat.as_object())
-                {
-                    for (k, v) in threat_obj {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
-
-                let inbound_event = AuditEvent::new(
-                    ActorKind::User,
-                    &sender_id,
-                    "message.inbound",
-                    &inbound_target,
-                )
-                .with_channel(&channel)
-                .with_session(&conversation_id)
-                .with_detail(inbound_detail.clone());
-
-                if threat_detail.is_some() {
-                    let _ = audit
-                        .log(
-                            AuditEvent::new(
-                                ActorKind::User,
-                                &sender_id,
-                                "message.threat_flagged",
-                                &inbound_target,
-                            )
-                            .with_channel(&channel)
-                            .with_session(&conversation_id)
-                            .with_detail(inbound_detail),
-                        )
-                        .await;
-                }
-
-                audit.log(inbound_event).await?;
-
-                // Resolve session
-                let session = {
-                    let s = sessions.lock().await;
-                    s.get_or_create(&channel, &conversation_id)?
-                };
-                {
-                    let s = sessions.lock().await;
-                    s.record_message(&session.id)?;
-                }
-
-                // Route to agent
-                let agent_id = router
-                    .resolve(&channel, &conversation_id)
-                    .unwrap_or_else(|_| "default".into());
-
-                // Wake the agent for THIS conversation: each
-                // (agent, channel, conversation_id) pair gets its own
-                // session. The platform
-                // message id (msg `id` field on the capnp frame) is the
-                // inbound_id used for crash-recovery dedup.
-                let resolved_agent = if factory.has_agent(&agent_id) {
-                    agent_id.clone()
-                } else {
-                    tracing::error!("No agent '{agent_id}' found, trying default");
-                    "default".into()
-                };
-                let session_id = session_id_for(&resolved_agent, &channel, &conversation_id);
-
-                let inbound_ctx = wirken_agent::InboundContext {
-                    adapter_id: Some(adapter_id.to_string()),
-                    sender_id: Some(sender_id.clone()),
-                    // Routing channel, not the adapter id: this is
-                    // the key `AgentConfig::channel_egress` and the
-                    // router are both keyed by.
-                    channel: Some(channel.clone()),
-                };
-                let (response, denials) = match factory.wake(&resolved_agent, &session_id) {
-                    Ok(agent_mutex) => {
-                        let mut ag = agent_mutex.lock().await;
-                        match ag.process_inbound(&text, id.clone(), inbound_ctx).await {
-                            Ok(result) => (result.response, result.denials),
-                            Err(e) => {
-                                // The full error stays in operator logs
-                                // and the audit trail. The outbound
-                                // reply is a generic apology — raw
-                                // error strings can leak operator-side
-                                // internals (database paths, session
-                                // log locks, provider stack traces)
-                                // to an allowlisted contact over
-                                // whatever channel they reached us on.
-                                tracing::error!("Agent '{resolved_agent}' error: {e}");
-                                (
-                                    "Sorry, I hit an internal error and could not process \
-                                     that message. The operator has been notified."
-                                        .into(),
-                                    Vec::new(),
-                                )
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("factory.wake('{resolved_agent}') failed: {e}");
-                        (
-                            "No agent available to process this message.".into(),
-                            Vec::new(),
-                        )
-                    }
-                };
-                let agent_id = resolved_agent;
-
-                // Log permission denials to audit
-                for denial in &denials {
-                    let detail = serde_json::json!({
-                        "tool": denial.tool_name,
-                        "action": denial.action.to_string(),
-                        "action_key": denial.action.approval_key(),
-                        "requested_tier": denial.requested_tier.label(),
-                        "agent_id": denial.agent_id,
-                        "trigger_message": denial.trigger_message,
-                    });
-                    let _ = audit
-                        .log(
-                            AuditEvent::new(
-                                ActorKind::User,
-                                &denial.agent_id,
-                                "permission.denied",
-                                &denial.tool_name,
-                            )
-                            .with_channel(&channel)
-                            .with_session(&conversation_id)
-                            .with_detail(detail),
-                        )
-                        .await;
-                }
-
-                tracing::info!("[{}] -> {}", channel, truncate(&response, 80));
-
-                // Audit outbound. No platform-assigned id at emit time
-                // (the adapter assigns one on send and returns it via
-                // `OutboundResult`); synthesize a per-event id so the
-                // `target` field stays a stable resource handle and the
-                // body lives under `detail.content`.
-                let outbound_target = format!("{channel}:out:{}", uuid::Uuid::new_v4());
-                let outbound_event = AuditEvent::new(
-                    ActorKind::Agent,
-                    &agent_id,
-                    "message.outbound",
-                    &outbound_target,
-                )
-                .with_channel(&channel)
-                .with_session(&conversation_id)
-                .with_detail(serde_json::json!({ "content": &response }));
-
-                // Send response back to adapter. `reply_to_id`
-                // carries the inbound's thread root (Slack's
-                // thread_ts, Telegram's reply_to_message_id, etc.) —
-                // not the inbound's own message id. Setting it to
-                // the inbound's id would auto-thread every root
-                // message; passing the inbound's reply_to_id
-                // through preserves the conversation thread when
-                // one existed and leaves the reply at the channel
-                // root otherwise.
-                let mut reply = capnp::message::Builder::new_default();
-                {
-                    let fb = reply.init_root::<frame::Builder<'_>>();
-                    let mut outbound = fb.init_outbound();
-                    outbound.set_conversation_id(&conversation_id);
-                    outbound.set_text(&response);
-                    outbound.set_reply_to_id(&reply_to_id);
-                    outbound.set_metadata("{}");
-                    // The audit row's own target. The adapter echoes
-                    // it on `OutboundResult`, which is what lets the
-                    // delivery row name the row it belongs to without
-                    // the gateway holding per-send state, and the MAC
-                    // is what stops an adapter naming a row itself.
-                    outbound.set_correlation_id(mint_delivery_handle(
-                        delivery_mac_key(),
-                        authenticated_channel.as_str(),
-                        &conversation_id,
-                        &outbound_target,
-                    ));
-                }
-
-                send_reply_then_record(&writer, &audit, &reply, outbound_event).await?;
-            }
-
-            InboundAction::Heartbeat(seq) => {
-                tracing::trace!("Heartbeat from '{adapter_id}': seq={seq}");
-                // Echo heartbeat back
-                let mut hb = capnp::message::Builder::new_default();
-                {
-                    let fb = hb.init_root::<frame::Builder<'_>>();
-                    fb.init_heartbeat().set_seq(seq);
-                }
-                let mut w = writer.lock().await;
-                let _ = w.write_message(&hb).await;
-            }
-
-            InboundAction::DeliveryResult {
-                success,
-                msg_id,
-                error,
-                correlation_id,
-            } => {
-                // Appended beside the `message.outbound` row, never
-                // over it: that row records what the gateway sent,
-                // this one what the platform did with it.
-                // Shape, MAC and channel all have to hold. A handle
-                // failing any of them is one this gateway did not
-                // mint, or one minted for a different adapter, so the
-                // delivery goes unrecorded rather than onto a chain
-                // chosen by the process that returned it.
-                let Some((session, target)) = verify_delivery_handle(
-                    delivery_mac_key(),
-                    &correlation_id,
-                    authenticated_channel.as_str(),
-                ) else {
-                    tracing::warn!(
-                        adapter_id,
-                        "delivery result carried an unverifiable correlation handle; not recorded",
-                    );
-                    continue;
-                };
-                let (event, status) = if success {
-                    tracing::debug!("Delivery confirmed: {msg_id}");
-                    (
-                        wirken_audit::SessionEvent::DeliveryConfirmed {
-                            target: target.clone(),
-                            message_id: msg_id.clone(),
-                            adapter_id: Some(adapter_id.to_string()),
-                        },
-                        DeliveryStatus::Delivered { message_id: msg_id },
-                    )
-                } else {
-                    tracing::warn!("Delivery failed for adapter '{adapter_id}': {error}");
-                    (
-                        wirken_audit::SessionEvent::DeliveryFailed {
-                            target: target.clone(),
-                            error: error.clone(),
-                            adapter_id: Some(adapter_id.to_string()),
-                        },
-                        DeliveryStatus::Failed { error },
-                    )
-                };
-                let log = factory.session_log();
-                let handle = log.handle_for(wirken_audit::SessionId::new(session));
-                if let Err(e) = log.append(&handle, wirken_audit::TrustLevel::System, event) {
-                    tracing::warn!(error = %e, "failed to append delivery row");
-                }
-                // After the row, so a push told its result can find
-                // it on the chain.
-                dispatcher.resolve_delivery(&target, status);
-            }
-
-            InboundAction::ApprovalDecision {
-                request_id,
-                decision,
-                user_id,
-                user_display,
-            } => {
-                // Centralized authorization: validate the actor
-                // against `approver_registry` BEFORE resolving the
-                // queue. The queue stays open until timeout or until
-                // an authorized action arrives, so the attempt
-                // changes nothing; the row is what lets a detection
-                // count attempts, which is the interesting number.
-                if !approver_registry.verify(adapter_id, &user_id) {
-                    tracing::warn!(
-                        adapter_id = adapter_id,
-                        user_id = %user_id,
-                        request_id = %request_id,
-                        "channel approval: unauthorized actor sent approve/deny; dropping"
-                    );
-                    wirken_gateway::permissions::emit_approval_refused(
-                        factory.session_log().as_ref(),
-                        &pending_approvals,
-                        &request_id,
-                        &user_id,
-                        wirken_audit::ApprovalRefusalReason::UnauthorizedActor,
-                        Some(adapter_id),
-                    );
-                    continue;
-                }
-                // Prefer the wire-supplied display name; fall back
-                // to the registry's stored display, then to the
-                // user id as a last resort. The chosen value lands
-                // on the audit row's `approved_by` / actor field.
-                let actor = if !user_display.is_empty() {
-                    user_display
-                } else {
-                    approver_registry
-                        .display_name(adapter_id, &user_id)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| user_id.clone())
-                };
-                let pending = match decision {
-                    ApprovalDecisionKind::Allow => {
-                        wirken_gateway::pending_approvals::PendingDecision::Allow {
-                            actor: Some(actor),
-                        }
-                    }
-                    ApprovalDecisionKind::Deny { reason } => {
-                        wirken_gateway::pending_approvals::PendingDecision::Deny {
-                            reason,
-                            actor: Some(actor),
-                        }
-                    }
-                };
-                let result = pending_approvals.resolve(&request_id, pending);
-                match result {
-                    wirken_gateway::pending_approvals::ResolveResult::Accepted => {
-                        tracing::info!(
-                            adapter_id = adapter_id,
-                            request_id = %request_id,
-                            "channel approval resolved"
-                        );
-                    }
-                    wirken_gateway::pending_approvals::ResolveResult::UnknownKey => {
-                        tracing::warn!(
-                            adapter_id = adapter_id,
-                            request_id = %request_id,
-                            "channel approval: unknown or already-resolved request id; \
-                             agent timeout may have fired or another action won the race"
-                        );
-                    }
-                }
-            }
-
-            InboundAction::ApprovalRequestFailed { request_id, reason } => {
-                // Adapter could not deliver the outbound approval
-                // message. Resolve the queue with Deny carrying the
-                // delivery-failure reason so the agent's audit row
-                // records the failure rather than a generic timeout.
-                let denial_reason = format!("approval delivery failed: {reason}");
-                let result = pending_approvals.resolve(
-                    &request_id,
-                    wirken_gateway::pending_approvals::PendingDecision::Deny {
-                        reason: Some(denial_reason),
-                        actor: None,
-                    },
-                );
-                tracing::warn!(
-                    adapter_id = adapter_id,
-                    request_id = %request_id,
-                    reason = %reason,
-                    result = ?result,
-                    "channel approval delivery failed; queue entry resolved with denial"
-                );
-            }
-
-            InboundAction::Unknown => {
-                tracing::warn!("Unknown frame from '{adapter_id}'");
-            }
+        let last = item.is_err();
+        if frames.send(item).await.is_err() || last {
+            return;
         }
     }
+}
+
+/// Extract an owned action from one frame (Cap'n Proto readers are not
+/// Send, so nothing of the frame crosses an `.await`).
+fn parse_frame(
+    msg: &capnp::message::Reader<capnp::serialize::OwnedSegments>,
+) -> Result<InboundAction> {
+    let action = {
+        let frame_reader = msg
+            .get_root::<frame::Reader<'_>>()
+            .context("Failed to parse frame")?;
+
+        match frame_reader.which()? {
+            frame::Inbound(inbound) => {
+                let m = inbound?;
+                let text = m
+                    .get_text()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("text not utf8: {e}"))?
+                    .to_string();
+                let sender_id = m
+                    .get_sender_id()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("sender_id not utf8: {e}"))?
+                    .to_string();
+                let sender_name = m
+                    .get_sender_name()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("sender_name not utf8: {e}"))?
+                    .to_string();
+                let channel = m
+                    .get_channel()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("channel not utf8: {e}"))?
+                    .to_string();
+                let conversation_id = m
+                    .get_conversation_id()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("conversation_id not utf8: {e}"))?
+                    .to_string();
+                let msg_id = m
+                    .get_id()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("id not utf8: {e}"))?
+                    .to_string();
+                // Carry the inbound's reply_to_id (Slack's
+                // thread_ts; Telegram's reply_to_message_id; etc.)
+                // through to the outbound construction below so
+                // the bot's reply lands in the same thread as the
+                // inbound when one was specified, and at the
+                // channel root otherwise. Empty string means "no
+                // thread / no reply target", explicitly NOT the
+                // inbound's own message id, which would auto-
+                // thread every root message.
+                let reply_to_id = m
+                    .get_reply_to_id()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("reply_to_id not utf8: {e}"))?
+                    .to_string();
+
+                // The platform's own time for this message, in
+                // epoch millis. Zero means the adapter set none;
+                // the field defaults to zero on the wire and no
+                // real message predates the epoch, so the two are
+                // not worth distinguishing.
+                let platform_ts_millis = m.get_timestamp();
+
+                InboundAction::Message {
+                    id: msg_id,
+                    text,
+                    sender_id,
+                    sender_name,
+                    platform_ts_millis,
+                    channel,
+                    conversation_id,
+                    reply_to_id,
+                }
+            }
+            frame::Heartbeat(hb) => {
+                let seq = hb?.get_seq();
+                InboundAction::Heartbeat(seq)
+            }
+            frame::OutboundResult(r) => {
+                let r = r?;
+                let success = r.get_success();
+                let msg_id = r.get_message_id()?.to_str().unwrap_or_default().to_string();
+                let error = r.get_error()?.to_str().unwrap_or_default().to_string();
+                let correlation_id = r
+                    .get_correlation_id()?
+                    .to_str()
+                    .unwrap_or_default()
+                    .to_string();
+                InboundAction::DeliveryResult {
+                    success,
+                    msg_id,
+                    error,
+                    correlation_id,
+                }
+            }
+            frame::ApprovalDecision(d) => {
+                let d = d?;
+                let request_id = d
+                    .get_request_id()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("approval request_id not utf8: {e}"))?
+                    .to_string();
+                let user_id = d
+                    .get_actor_user_id()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("actor_user_id not utf8: {e}"))?
+                    .to_string();
+                let user_display = d
+                    .get_actor_display()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("actor_display not utf8: {e}"))?
+                    .to_string();
+                let decision = match d.get_decision()?.which()? {
+                    wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {
+                        ApprovalDecisionKind::Allow
+                    }
+                    wirken_ipc::wirken_capnp::approval_decision_kind::Deny(reason) => {
+                        let reason_text = reason?
+                            .to_str()
+                            .map_err(|e| anyhow::anyhow!("deny reason not utf8: {e}"))?
+                            .to_string();
+                        let reason = if reason_text.is_empty() {
+                            None
+                        } else {
+                            Some(reason_text)
+                        };
+                        ApprovalDecisionKind::Deny { reason }
+                    }
+                };
+                InboundAction::ApprovalDecision {
+                    request_id,
+                    decision,
+                    user_id,
+                    user_display,
+                }
+            }
+            frame::ApprovalRequestFailed(f) => {
+                let f = f?;
+                let request_id = f
+                    .get_request_id()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("approval request_id not utf8: {e}"))?
+                    .to_string();
+                let reason = f
+                    .get_reason()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("failure reason not utf8: {e}"))?
+                    .to_string();
+                InboundAction::ApprovalRequestFailed { request_id, reason }
+            }
+            _ => InboundAction::Unknown,
+        }
+    };
+    Ok(action)
+}
+
+/// One frame's action. A message runs a whole turn: the channel
+/// check, the scan, the inbound row, the session, the route, the turn,
+/// the denials and the reply.
+async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
+    let Conn {
+        adapter_id,
+        authenticated_channel,
+        writer,
+        factory,
+        audit,
+        sessions,
+        router,
+        detector,
+        pending_approvals,
+        approver_registry,
+        dispatcher,
+    } = *conn;
+    match action {
+        InboundAction::Message {
+            id,
+            text,
+            sender_id,
+            sender_name,
+            platform_ts_millis,
+            channel,
+            conversation_id,
+            reply_to_id,
+        } => {
+            // Reject any inbound that claims a channel the
+            // authenticated adapter is not responsible for. See
+            // `AuthenticatedChannel::require_match`. The frame's
+            // `channel` field is attacker-influenced; the
+            // adapter's channel was authenticated by the
+            // handshake + registry lookup.
+            if let Err(mismatch) = authenticated_channel.require_match(&channel) {
+                tracing::warn!("Adapter '{adapter_id}' rejected cross-channel frame: {mismatch}");
+                let _ = audit
+                    .log(
+                        AuditEvent::new(
+                            ActorKind::Service,
+                            adapter_id,
+                            "adapter.channel_mismatch",
+                            mismatch.to_string(),
+                        )
+                        .with_channel(authenticated_channel.as_str())
+                        .with_detail(serde_json::json!({
+                            "authenticated_channel": mismatch.authenticated,
+                            "claimed_channel": mismatch.claimed,
+                            "conversation_id": conversation_id,
+                            "sender_id": sender_id,
+                            "message_id": id,
+                        })),
+                    )
+                    .await;
+                return Ok(());
+            }
+
+            tracing::info!(
+                "[{}] {} ({}): {}",
+                channel,
+                sender_name,
+                sender_id,
+                truncate(&text, 80),
+            );
+
+            // Audit inbound. `target` carries the stable resource
+            // id `<channel>:<platform-msg-id>`; the message body
+            // lives under `detail.content` so downstream consumers
+            // can correlate without parsing a free-text field.
+            let inbound_target = format!("{channel}:{id}");
+            let mut inbound_detail = serde_json::json!({ "content": &text });
+            // Recorded beside the raw platform id already on the
+            // target, so a reader can compare the two without
+            // knowing how a given platform spells a timestamp.
+            // Omitted rather than written as zero when the adapter
+            // set none.
+            if platform_ts_millis > 0
+                && let Some(obj) = inbound_detail.as_object_mut()
+            {
+                obj.insert(
+                    "platform_ts_millis".into(),
+                    serde_json::Value::from(platform_ts_millis),
+                );
+            }
+
+            // Scan for prompt injection patterns. Caught, so
+            // this returns whatever the detector does; the rule
+            // and its reasoning are shared with the webchat chat
+            // route in `super::inbound_scan`.
+            let threat_detail = super::inbound_scan::scan_catching_panics(
+                detector,
+                &text,
+                &format!("'{sender_id}' on '{channel}'"),
+            );
+
+            // A finding, or a scanner that failed, merges into the
+            // inbound row's detail and also lands as its own
+            // `message.threat_flagged` row for SIEM visibility.
+            //
+            // The scan runs before the row is written, which is
+            // only safe because it is caught: a detector panic
+            // used to unwind past this write and leave no trace of
+            // the message that caused it. It returns now, so the
+            // row is written either way and carries the verdict
+            // rather than having to be joined to a sibling row.
+            if let Some(ref threat) = threat_detail
+                && let (Some(obj), Some(threat_obj)) =
+                    (inbound_detail.as_object_mut(), threat.as_object())
+            {
+                for (k, v) in threat_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+
+            let inbound_event = AuditEvent::new(
+                ActorKind::User,
+                &sender_id,
+                "message.inbound",
+                &inbound_target,
+            )
+            .with_channel(&channel)
+            .with_session(&conversation_id)
+            .with_detail(inbound_detail.clone());
+
+            if threat_detail.is_some() {
+                let _ = audit
+                    .log(
+                        AuditEvent::new(
+                            ActorKind::User,
+                            &sender_id,
+                            "message.threat_flagged",
+                            &inbound_target,
+                        )
+                        .with_channel(&channel)
+                        .with_session(&conversation_id)
+                        .with_detail(inbound_detail),
+                    )
+                    .await;
+            }
+
+            audit.log(inbound_event).await?;
+
+            // Resolve session
+            let session = {
+                let s = sessions.lock().await;
+                s.get_or_create(&channel, &conversation_id)?
+            };
+            {
+                let s = sessions.lock().await;
+                s.record_message(&session.id)?;
+            }
+
+            // Route to agent
+            let agent_id = router
+                .resolve(&channel, &conversation_id)
+                .unwrap_or_else(|_| "default".into());
+
+            // Wake the agent for THIS conversation: each
+            // (agent, channel, conversation_id) pair gets its own
+            // session. The platform
+            // message id (msg `id` field on the capnp frame) is the
+            // inbound_id used for crash-recovery dedup.
+            let resolved_agent = if factory.has_agent(&agent_id) {
+                agent_id.clone()
+            } else {
+                tracing::error!("No agent '{agent_id}' found, trying default");
+                "default".into()
+            };
+            let session_id = session_id_for(&resolved_agent, &channel, &conversation_id);
+
+            let inbound_ctx = wirken_agent::InboundContext {
+                adapter_id: Some(adapter_id.to_string()),
+                sender_id: Some(sender_id.clone()),
+                // Routing channel, not the adapter id: this is
+                // the key `AgentConfig::channel_egress` and the
+                // router are both keyed by.
+                channel: Some(channel.clone()),
+            };
+            let (response, denials) = match factory.wake(&resolved_agent, &session_id) {
+                Ok(agent_mutex) => {
+                    let mut ag = agent_mutex.lock().await;
+                    match ag.process_inbound(&text, id.clone(), inbound_ctx).await {
+                        Ok(result) => (result.response, result.denials),
+                        Err(e) => {
+                            // The full error stays in operator logs
+                            // and the audit trail. The outbound
+                            // reply is a generic apology: raw
+                            // error strings can leak operator-side
+                            // internals (database paths, session
+                            // log locks, provider stack traces)
+                            // to an allowlisted contact over
+                            // whatever channel they reached us on.
+                            tracing::error!("Agent '{resolved_agent}' error: {e}");
+                            (
+                                "Sorry, I hit an internal error and could not process \
+                                     that message. The operator has been notified."
+                                    .into(),
+                                Vec::new(),
+                            )
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("factory.wake('{resolved_agent}') failed: {e}");
+                    (
+                        "No agent available to process this message.".into(),
+                        Vec::new(),
+                    )
+                }
+            };
+            let agent_id = resolved_agent;
+
+            // Log permission denials to audit
+            for denial in &denials {
+                let detail = serde_json::json!({
+                    "tool": denial.tool_name,
+                    "action": denial.action.to_string(),
+                    "action_key": denial.action.approval_key(),
+                    "requested_tier": denial.requested_tier.label(),
+                    "agent_id": denial.agent_id,
+                    "trigger_message": denial.trigger_message,
+                });
+                let _ = audit
+                    .log(
+                        AuditEvent::new(
+                            ActorKind::User,
+                            &denial.agent_id,
+                            "permission.denied",
+                            &denial.tool_name,
+                        )
+                        .with_channel(&channel)
+                        .with_session(&conversation_id)
+                        .with_detail(detail),
+                    )
+                    .await;
+            }
+
+            tracing::info!("[{}] -> {}", channel, truncate(&response, 80));
+
+            // Audit outbound. No platform-assigned id at emit time
+            // (the adapter assigns one on send and returns it via
+            // `OutboundResult`); synthesize a per-event id so the
+            // `target` field stays a stable resource handle and the
+            // body lives under `detail.content`.
+            let outbound_target = format!("{channel}:out:{}", uuid::Uuid::new_v4());
+            let outbound_event = AuditEvent::new(
+                ActorKind::Agent,
+                &agent_id,
+                "message.outbound",
+                &outbound_target,
+            )
+            .with_channel(&channel)
+            .with_session(&conversation_id)
+            .with_detail(serde_json::json!({ "content": &response }));
+
+            // Send response back to adapter. `reply_to_id`
+            // carries the inbound's thread root (Slack's
+            // thread_ts, Telegram's reply_to_message_id, etc.),
+            // not the inbound's own message id. Setting it to
+            // the inbound's id would auto-thread every root
+            // message; passing the inbound's reply_to_id
+            // through preserves the conversation thread when
+            // one existed and leaves the reply at the channel
+            // root otherwise.
+            let mut reply = capnp::message::Builder::new_default();
+            {
+                let fb = reply.init_root::<frame::Builder<'_>>();
+                let mut outbound = fb.init_outbound();
+                outbound.set_conversation_id(&conversation_id);
+                outbound.set_text(&response);
+                outbound.set_reply_to_id(&reply_to_id);
+                outbound.set_metadata("{}");
+                // The audit row's own target. The adapter echoes
+                // it on `OutboundResult`, which is what lets the
+                // delivery row name the row it belongs to without
+                // the gateway holding per-send state, and the MAC
+                // is what stops an adapter naming a row itself.
+                outbound.set_correlation_id(mint_delivery_handle(
+                    delivery_mac_key(),
+                    authenticated_channel.as_str(),
+                    &conversation_id,
+                    &outbound_target,
+                ));
+            }
+
+            send_reply_then_record(writer, audit, &reply, outbound_event).await?;
+        }
+
+        InboundAction::Heartbeat(seq) => {
+            tracing::trace!("Heartbeat from '{adapter_id}': seq={seq}");
+            // Echo heartbeat back
+            let mut hb = capnp::message::Builder::new_default();
+            {
+                let fb = hb.init_root::<frame::Builder<'_>>();
+                fb.init_heartbeat().set_seq(seq);
+            }
+            let mut w = writer.lock().await;
+            let _ = w.write_message(&hb).await;
+        }
+
+        InboundAction::DeliveryResult {
+            success,
+            msg_id,
+            error,
+            correlation_id,
+        } => {
+            // Appended beside the `message.outbound` row, never
+            // over it: that row records what the gateway sent,
+            // this one what the platform did with it.
+            // Shape, MAC and channel all have to hold. A handle
+            // failing any of them is one this gateway did not
+            // mint, or one minted for a different adapter, so the
+            // delivery goes unrecorded rather than onto a chain
+            // chosen by the process that returned it.
+            let Some((session, target)) = verify_delivery_handle(
+                delivery_mac_key(),
+                &correlation_id,
+                authenticated_channel.as_str(),
+            ) else {
+                tracing::warn!(
+                    adapter_id,
+                    "delivery result carried an unverifiable correlation handle; not recorded",
+                );
+                return Ok(());
+            };
+            let (event, status) = if success {
+                tracing::debug!("Delivery confirmed: {msg_id}");
+                (
+                    wirken_audit::SessionEvent::DeliveryConfirmed {
+                        target: target.clone(),
+                        message_id: msg_id.clone(),
+                        adapter_id: Some(adapter_id.to_string()),
+                    },
+                    DeliveryStatus::Delivered { message_id: msg_id },
+                )
+            } else {
+                tracing::warn!("Delivery failed for adapter '{adapter_id}': {error}");
+                (
+                    wirken_audit::SessionEvent::DeliveryFailed {
+                        target: target.clone(),
+                        error: error.clone(),
+                        adapter_id: Some(adapter_id.to_string()),
+                    },
+                    DeliveryStatus::Failed { error },
+                )
+            };
+            let log = factory.session_log();
+            let handle = log.handle_for(wirken_audit::SessionId::new(session));
+            if let Err(e) = log.append(&handle, wirken_audit::TrustLevel::System, event) {
+                tracing::warn!(error = %e, "failed to append delivery row");
+            }
+            // After the row, so a push told its result can find
+            // it on the chain.
+            dispatcher.resolve_delivery(&target, status);
+        }
+
+        InboundAction::ApprovalDecision {
+            request_id,
+            decision,
+            user_id,
+            user_display,
+        } => {
+            // Centralized authorization: validate the actor
+            // against `approver_registry` BEFORE resolving the
+            // queue. The queue stays open until timeout or until
+            // an authorized action arrives, so the attempt
+            // changes nothing; the row is what lets a detection
+            // count attempts, which is the interesting number.
+            if !approver_registry.verify(adapter_id, &user_id) {
+                tracing::warn!(
+                    adapter_id = adapter_id,
+                    user_id = %user_id,
+                    request_id = %request_id,
+                    "channel approval: unauthorized actor sent approve/deny; dropping"
+                );
+                wirken_gateway::permissions::emit_approval_refused(
+                    factory.session_log().as_ref(),
+                    pending_approvals,
+                    &request_id,
+                    &user_id,
+                    wirken_audit::ApprovalRefusalReason::UnauthorizedActor,
+                    Some(adapter_id),
+                );
+                return Ok(());
+            }
+            // Prefer the wire-supplied display name; fall back
+            // to the registry's stored display, then to the
+            // user id as a last resort. The chosen value lands
+            // on the audit row's `approved_by` / actor field.
+            let actor = if !user_display.is_empty() {
+                user_display
+            } else {
+                approver_registry
+                    .display_name(adapter_id, &user_id)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| user_id.clone())
+            };
+            let pending = match decision {
+                ApprovalDecisionKind::Allow => {
+                    wirken_gateway::pending_approvals::PendingDecision::Allow { actor: Some(actor) }
+                }
+                ApprovalDecisionKind::Deny { reason } => {
+                    wirken_gateway::pending_approvals::PendingDecision::Deny {
+                        reason,
+                        actor: Some(actor),
+                    }
+                }
+            };
+            let result = pending_approvals.resolve(&request_id, pending);
+            match result {
+                wirken_gateway::pending_approvals::ResolveResult::Accepted => {
+                    tracing::info!(
+                        adapter_id = adapter_id,
+                        request_id = %request_id,
+                        "channel approval resolved"
+                    );
+                }
+                wirken_gateway::pending_approvals::ResolveResult::UnknownKey => {
+                    tracing::warn!(
+                        adapter_id = adapter_id,
+                        request_id = %request_id,
+                        "channel approval: unknown or already-resolved request id; \
+                         agent timeout may have fired or another action won the race"
+                    );
+                }
+            }
+        }
+
+        InboundAction::ApprovalRequestFailed { request_id, reason } => {
+            // Adapter could not deliver the outbound approval
+            // message. Resolve the queue with Deny carrying the
+            // delivery-failure reason so the agent's audit row
+            // records the failure rather than a generic timeout.
+            let denial_reason = format!("approval delivery failed: {reason}");
+            let result = pending_approvals.resolve(
+                &request_id,
+                wirken_gateway::pending_approvals::PendingDecision::Deny {
+                    reason: Some(denial_reason),
+                    actor: None,
+                },
+            );
+            tracing::warn!(
+                adapter_id = adapter_id,
+                request_id = %request_id,
+                reason = %reason,
+                result = ?result,
+                "channel approval delivery failed; queue entry resolved with denial"
+            );
+        }
+
+        InboundAction::Unknown => {
+            tracing::warn!("Unknown frame from '{adapter_id}'");
+        }
+    }
+    Ok(())
 }
 
 enum InboundAction {
@@ -6325,5 +6456,283 @@ mod gateway_start_row_tests {
         assert_eq!(d["version"], crate::build_info::VERSION);
         assert_eq!(d["commit"], crate::build_info::COMMIT);
         assert_eq!(d["dirty"], crate::build_info::DIRTY);
+    }
+}
+
+/// A model on a loopback port for tests that drive a whole turn
+/// through the gateway's connection handler.
+#[cfg(all(test, unix))]
+mod scripted_model {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// An OpenAI-compatible model that answers each request with the
+    /// next scripted body, in order: a streamed one for a body of SSE
+    /// lines, a JSON completion otherwise. Returns the base URL.
+    pub(super) async fn serve(bodies: Vec<String>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for body in bodies {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                // The whole request, so the client is not cut off
+                // mid-send: headers, then the body they announce.
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 8192];
+                let header_end = loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    seen.extend_from_slice(&buf[..n]);
+                    if let Some(i) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&seen[..header_end]).to_ascii_lowercase();
+                let length: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map(|v| v.trim().parse().unwrap())
+                    .unwrap_or(0);
+                while seen.len() < header_end + length {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                let kind = if body.starts_with("data:") {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\n\
+                     Connection: close\r\n\r\n{body}"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    /// A whole reply, not streamed.
+    pub(super) fn text_completion(text: &str) -> String {
+        serde_json::json!({"choices": [{"index": 0, "finish_reason": "stop",
+            "message": {"role": "assistant", "content": text}}]})
+        .to_string()
+    }
+
+    /// One call to `name` with `arguments`, not streamed.
+    pub(super) fn tool_call_completion(name: &str, arguments: &str) -> String {
+        serde_json::json!({"choices": [{"index": 0, "finish_reason": "tool_calls",
+        "message": {"role": "assistant", "content": null, "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": name, "arguments": arguments}}
+        ]}}]})
+        .to_string()
+    }
+
+    /// The default agent's static config, talking to `model`.
+    pub(super) fn default_agent(
+        model: String,
+        workspace: std::path::PathBuf,
+    ) -> std::collections::HashMap<String, wirken_agent::AgentStaticConfig> {
+        let mut configs = std::collections::HashMap::new();
+        configs.insert(
+            "default".to_string(),
+            wirken_agent::AgentStaticConfig {
+                agent_id: "default".into(),
+                workspace,
+                llm_config: wirken_agent::llm::LlmConfig {
+                    provider: "custom".into(),
+                    model: "scripted".into(),
+                    base_url: model,
+                    max_tokens: 256,
+                    temperature: 0.0,
+                    region: None,
+                    tools_enabled: true,
+                    context_window: 32_000,
+                },
+                channel_overrides: std::collections::HashMap::new(),
+                api_key: None,
+                api_key_credential: None,
+                skills: vec![],
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: Default::default(),
+                sandbox: Default::default(),
+                channel_egress: Default::default(),
+                extra_interceptors: vec![],
+                zirkel_db_path: None,
+            },
+        );
+        configs
+    }
+}
+
+/// An adapter's approval decision comes back on the same connection as
+/// the message whose turn asked for it. The message loop has to read it
+/// while that turn waits on the gate; a loop that reads nothing during a
+/// turn leaves it unread until the gate times out.
+#[cfg(all(test, unix))]
+mod same_connection_approval_tests {
+    use super::*;
+    use std::time::Duration;
+    use wirken_audit::{SessionLog, SqliteSessionLog};
+    use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, test_pair};
+
+    /// Far longer than the test waits, so only a decision that was read
+    /// can end the turn in time.
+    const GATE_TIMEOUT: Duration = Duration::from_secs(60);
+    const TURN_DEADLINE: Duration = Duration::from_secs(15);
+
+    #[tokio::test]
+    async fn a_decision_on_the_asking_connection_resolves_the_gate_while_the_turn_waits() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let model = super::scripted_model::serve(vec![
+            super::scripted_model::tool_call_completion("exec", r#"{"command":"ls"}"#),
+            super::scripted_model::text_completion("Done."),
+        ])
+        .await;
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("sessions.db")).unwrap());
+        let factory = AgentFactory::new(
+            super::scripted_model::default_agent(model, workspace),
+            log.clone(),
+            Arc::new(std::sync::Mutex::new(
+                wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
+                    ":memory:",
+                ))
+                .unwrap(),
+            )),
+        );
+
+        // A Signal adapter, its approval group, and one approver in it.
+        let identity = AdapterIdentity::generate("signal");
+        let registry = AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap();
+        registry
+            .register("signal", &identity.public_key_bytes(), "signal")
+            .unwrap();
+        let approvers = Arc::new(
+            wirken_gateway::approver_registry::ApproverRegistry::open(
+                &tmp.path().join("approvers.db"),
+            )
+            .unwrap(),
+        );
+        approvers
+            .set_approval_conversation("signal", "group-1")
+            .unwrap();
+        approvers.register("signal", "U1", "davi").unwrap();
+        let queue = Arc::new(wirken_gateway::pending_approvals::PendingApprovalQueue::new());
+        let dispatcher = Arc::new(OutboundDispatcher::new());
+        factory.attach_signal_approval_gate(Arc::new(
+            wirken_agent::signal_approval_gate::SignalApprovalGate::with_timeout(
+                queue.clone(),
+                approvers.clone(),
+                dispatcher.clone(),
+                GATE_TIMEOUT,
+            ),
+        ));
+
+        let (audit, audit_task) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
+        let audit = Arc::new(audit);
+        let (gateway_end, adapter_end) = test_pair().unwrap();
+        let connection = tokio::spawn(handle_adapter_connection(
+            gateway_end,
+            Arc::new(Mutex::new(registry)),
+            factory,
+            audit.clone(),
+            Arc::new(Mutex::new(
+                SessionStore::open(&tmp.path().join("store.db"), 3600).unwrap(),
+            )),
+            Arc::new(Router::new()),
+            Arc::new(InjectionDetector::new()),
+            dispatcher,
+            queue.clone(),
+            approvers,
+            Arc::new(HashMap::new()),
+            super::super::connection_tasks::AdapterIdSlot::default(),
+            log.clone(),
+        ));
+
+        let (mut reader, mut writer) = split_stream(adapter_end);
+        perform_adapter_handshake(&mut reader, &mut writer, &identity)
+            .await
+            .unwrap();
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut m = msg.init_root::<frame::Builder<'_>>().init_inbound();
+            m.set_id("m-1");
+            m.set_sender_id("U1");
+            m.set_sender_name("davi");
+            m.set_channel("signal");
+            m.set_conversation_id("dm-1");
+            m.set_text("list the files");
+            m.set_metadata("{}");
+        }
+        writer.write_message(&msg).await.unwrap();
+
+        // The adapter's side: answer the approval request on this same
+        // connection, then wait for the turn's reply.
+        let adapter = async {
+            loop {
+                let msg = reader.read_message().await.unwrap();
+                let request_id = match msg
+                    .get_root::<frame::Reader<'_>>()
+                    .unwrap()
+                    .which()
+                    .unwrap()
+                {
+                    frame::ApprovalRequest(r) => r.unwrap().get_request_id().unwrap().to_string(),
+                    frame::Outbound(o) => {
+                        return o.unwrap().get_text().unwrap().to_string().unwrap();
+                    }
+                    _ => continue,
+                };
+                let mut decision = capnp::message::Builder::new_default();
+                {
+                    let mut d = decision
+                        .init_root::<frame::Builder<'_>>()
+                        .init_approval_decision();
+                    d.set_request_id(request_id.unwrap());
+                    d.set_actor_user_id("U1");
+                    d.set_actor_display("davi");
+                    d.init_decision().set_allow(());
+                }
+                writer.write_message(&decision).await.unwrap();
+            }
+        };
+        let reply = tokio::time::timeout(TURN_DEADLINE, adapter)
+            .await
+            .expect("the decision was read while the turn waited, well before the gate timed out");
+        assert_eq!(reply, "Done.");
+        assert!(queue.is_empty(), "the gate was resolved, not timed out");
+
+        let handle = log.handle_for(SessionId::new("default/signal/dm-1"));
+        let lane: Vec<SessionEvent> = log
+            .get_since(&handle, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        assert!(
+            lane.iter().any(|e| matches!(e,
+                SessionEvent::PermissionApproved { approved_via, approved_by, .. }
+                    if *approved_via == Some(wirken_audit::ApprovalSource::ChannelAdapter {
+                        channel: "signal".into()
+                    }) && approved_by == "davi")),
+            "{lane:?}"
+        );
+
+        drop((reader, writer));
+        tokio::time::timeout(Duration::from_secs(15), connection)
+            .await
+            .expect("the connection handler returns")
+            .unwrap()
+            .unwrap();
+        drop(audit);
+        audit_task.await.unwrap();
     }
 }

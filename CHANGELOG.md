@@ -27,6 +27,11 @@ tagged.
   call returns an error result, the parent's chain records the spawn's
   `SubagentResult` as an error, and the child does not run. Single and
   parallel spawns behave the same; siblings in a parallel spawn run on.
+- An approval answered in the chat whose message raised it now reaches
+  the gate. Each adapter connection's frames are read while a turn runs,
+  so a Telegram or Signal decision sent on that connection resolves the
+  request instead of waiting until the gate timed out and refused. Turns
+  on a connection still run one at a time and in order.
 
 ## [2.3.0] - 2026-10-18
 
