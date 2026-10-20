@@ -302,13 +302,17 @@ fn query_param(url: &str, key: &str) -> Option<String> {
 }
 
 /// Plays the browser: GETs the callback the command listens on.
+///
+/// The request goes out in one write, as a browser sends it. The
+/// listener reads once and closes after its reply; `write!` would send
+/// each formatted piece separately, and a socket closed with bytes
+/// still unread is reset on Linux, losing the reply.
 fn follow_redirect(port: u16, state: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(
-        stream,
+    let request = format!(
         "GET /auth/callback?code=code-1&state={state}&client_id={ISSUED_CLIENT_ID} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
+    );
+    stream.write_all(request.as_bytes()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
