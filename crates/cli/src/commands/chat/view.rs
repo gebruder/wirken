@@ -120,7 +120,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     } else if app.busy {
         " waiting for the reply "
     } else {
-        " message "
+        " message · /help for commands "
     };
     let rows: Vec<Line<'_>> = input_rows
         .iter()

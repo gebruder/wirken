@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::panels::{Directory, History, SideItem, Status, Verified, side_items, verified_line};
+use super::slash::{self, Command};
 use super::text::{Answer, next_boundary, parse_answer, prev_boundary, sanitize};
 use super::wire::{ApprovalAsk, Query, ServerEvent};
 
@@ -88,6 +89,9 @@ pub(crate) struct App {
     /// What the gateway last said about this conversation.
     pub status: Option<Status>,
     pub verified: Option<Verified>,
+    /// Panels a command asked for, noted when the gateway's next status
+    /// answer comes, so they say what it says now. `None` is every panel.
+    notes_due: Vec<Option<&'static str>>,
     pub directory: Directory,
     pub show_sidebar: bool,
     pub show_panels: bool,
@@ -127,6 +131,7 @@ impl App {
             conversation,
             status: None,
             verified: None,
+            notes_due: Vec::new(),
             directory: Directory::default(),
             show_sidebar: true,
             show_panels: true,
@@ -240,14 +245,28 @@ impl App {
     /// Take in the gateway's answer to `query`.
     pub fn on_answer(&mut self, query: Query, body: serde_json::Value) {
         match query {
-            Query::Status => {
-                if let Ok(status) = serde_json::from_value::<Status>(body) {
+            Query::Status => match serde_json::from_value::<Status>(body) {
+                Ok(status) => {
                     if !status.agent.is_empty() {
                         self.agent = status.agent.clone();
                     }
+                    for title in std::mem::take(&mut self.notes_due) {
+                        self.entries.push(Entry::Note(slash::panel_note(
+                            &status,
+                            self.verified.as_ref(),
+                            title,
+                        )));
+                    }
                     self.status = Some(status);
                 }
-            }
+                Err(_) if !self.notes_due.is_empty() => {
+                    self.notes_due.clear();
+                    self.entries.push(Entry::Note(
+                        "The gateway's status answer could not be read.".into(),
+                    ));
+                }
+                Err(_) => {}
+            },
             Query::Verify => {
                 let verified = serde_json::from_value::<Verified>(body).unwrap_or_default();
                 self.entries.push(Entry::Note(verified_line(&verified)));
@@ -298,6 +317,7 @@ impl App {
         self.scroll = 0;
         self.status = None;
         self.verified = None;
+        self.notes_due.clear();
         self.searching = false;
         if let Some(a) = &agent {
             self.agent = a.clone();
@@ -510,6 +530,14 @@ impl App {
 
         match key.code {
             KeyCode::Enter => {
+                // A chat command runs here, during a turn too; it is
+                // never sent.
+                if let Some(command) = slash::parse(&self.draft) {
+                    self.draft.clear();
+                    self.cursor = 0;
+                    self.scroll = 0;
+                    return self.command(command);
+                }
                 if self.busy || self.draft.trim().is_empty() {
                     return None;
                 }
@@ -544,6 +572,22 @@ impl App {
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.draft.len(),
             _ => {}
+        }
+        None
+    }
+
+    fn command(&mut self, command: Command) -> Option<Outgoing> {
+        match command {
+            Command::Help => self.entries.push(Entry::Note(slash::help())),
+            Command::Panel(title) => {
+                self.notes_due.push(title);
+                return Some(Outgoing::Ask(Query::Status));
+            }
+            Command::Verify => return Some(Outgoing::Ask(Query::Verify)),
+            Command::Clear => {
+                return self.open(self.requested_agent.clone(), new_conversation_id(), false);
+            }
+            Command::Quit => self.quit = true,
         }
         None
     }
@@ -840,6 +884,79 @@ mod tests {
         app.on_server(ask("r1", 0), now);
         app.on_key(ctrl('c'), now);
         assert!(app.quit);
+    }
+
+    fn entered(app: &mut App, draft: &str, now: Instant) -> Option<Outgoing> {
+        typed(app, draft, now);
+        app.on_key(key(KeyCode::Enter), now)
+    }
+
+    #[test]
+    fn a_panel_command_notes_what_the_gateway_says_next() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_answer(Query::Status, serde_json::json!({"cost": {"calls": 1}}));
+        assert_eq!(
+            entered(&mut app, "/cost", now),
+            Some(Outgoing::Ask(Query::Status))
+        );
+        assert!(app.draft.is_empty());
+        assert!(app.entries.is_empty(), "nothing sent, nothing noted yet");
+        app.on_answer(Query::Status, serde_json::json!({"cost": {"calls": 4}}));
+        let [Entry::Note(note)] = app.entries.as_slice() else {
+            panic!("{:?}", app.entries);
+        };
+        assert!(note.starts_with("Cost and tokens\n  4 calls"), "{note}");
+        // The next status answer, one the chat asked for itself, notes
+        // nothing.
+        app.on_answer(Query::Status, serde_json::json!({}));
+        assert_eq!(app.entries.len(), 1);
+    }
+
+    #[test]
+    fn commands_run_during_a_turn_and_only_a_message_waits() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        entered(&mut app, "hi", now);
+        assert!(app.busy);
+        assert_eq!(
+            entered(&mut app, "/verify", now),
+            Some(Outgoing::Ask(Query::Verify))
+        );
+        assert_eq!(entered(&mut app, "/help", now), None);
+        assert!(matches!(app.entries.last(), Some(Entry::Note(n)) if n.contains("/approvals")));
+        assert_eq!(entered(&mut app, "/clear", now), None, "as Ctrl+N is");
+        assert_eq!(app.conversation, "c-1");
+        entered(&mut app, "/exit", now);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn clear_starts_a_new_conversation_with_the_same_agent() {
+        let now = Instant::now();
+        let mut app = App::new(Some("research".into()), "c-1".into());
+        assert!(matches!(
+            entered(&mut app, "/clear", now),
+            Some(Outgoing::Open { agent: Some(a), resume: false, .. }) if a == "research"
+        ));
+        assert_ne!(app.conversation, "c-1");
+    }
+
+    /// A skill, or any `/word` the chat does not own, is a message for
+    /// the gateway, sent as typed.
+    #[test]
+    fn any_other_slash_word_is_sent_as_typed() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        assert_eq!(
+            entered(&mut app, "/summarise this week", now),
+            Some(Outgoing::Message("/summarise this week".into()))
+        );
+        app.on_server(ServerEvent::Reply("ok".into()), now);
+        assert_eq!(
+            entered(&mut app, "/HELP", now),
+            Some(Outgoing::Message("/HELP".into()))
+        );
     }
 
     #[test]

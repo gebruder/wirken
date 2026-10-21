@@ -166,6 +166,25 @@ gateway over the terminal connection.
 | Ctrl+K | Verify this conversation's chain |
 | Ctrl+C | Leave the chat |
 
+The chat's own commands are typed in the message and run on Enter, during a
+turn too; none is sent to the model. A command counts only at the start of
+the message and by its exact lowercase name, and text after it is ignored.
+Any other `/word` is sent to the gateway as typed, where a known skill is
+expanded and an unknown one refused, so a skill never shadows a command.
+The panel commands ask the gateway for the panels and write the one named as
+a note in the transcript, so they work on a terminal too narrow to show the
+panels.
+
+| Command | Action |
+|---------|--------|
+| `/help` | The commands and the keys |
+| `/status` | Every panel |
+| `/context`, `/cost`, `/tools` | The Context, Cost and tokens, or Tools panel |
+| `/approvals`, `/audit` | The Approvals or Audit panel |
+| `/verify` | Verify this conversation's chain, as Ctrl+K |
+| `/clear` | New conversation with the same agent, as Ctrl+N |
+| `/quit`, `/exit` | Leave the chat, as Ctrl+C |
+
 Log output written while the screen is up is held and printed to stderr when
 the chat exits. The chat is not available on Windows.
 

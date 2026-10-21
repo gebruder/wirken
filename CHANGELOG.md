@@ -22,6 +22,14 @@ tagged.
   agents and conversations with search. Without a terminal it points to
   `wirken ask`; without a running gateway it points to `wirken run`. Bare
   `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
+- `wirken chat` takes its own slash commands: `/help`; `/status`,
+  `/context`, `/cost`, `/tools`, `/approvals` and `/audit`, which ask the
+  gateway for the panels and write them as a note, so they show on a
+  terminal too narrow for the panels; and `/verify`, `/clear`, `/quit` and
+  `/exit` for Ctrl+K, Ctrl+N and Ctrl+C. Only the exact lowercase name at
+  the start of the message is a command; any other `/word` still goes to
+  the gateway as typed, so skills work as before. Proposed by Tanmay Maka
+  (@maka-tanmay).
 - Plan sign-in for the `openai` provider: an agent can run on a ChatGPT
   plan the operator has, through OpenAI's sign-in for open-source and
   locally run apps, with no API key. `wirken credentials authorize`
