@@ -51,7 +51,7 @@ pub enum SignalError {
          JSON-RPC over a Unix socket. Run signal-cli with `daemon --socket \
          /tmp/signal-cli.sock` and set the endpoint to the socket path \
          (e.g. /tmp/signal-cli.sock or unix:///tmp/signal-cli.sock). See \
-         docs/channels/signal.md"
+         docs/channels.md"
     )]
     HttpEndpointRejected(String),
 }

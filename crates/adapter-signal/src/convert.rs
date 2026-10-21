@@ -53,7 +53,7 @@ pub struct OutboundFields {
 ///
 /// An empty allowlist drops every message (fail-closed). This is deliberate:
 /// without an explicit list, any Signal contact who knows the linked number
-/// can drive the agent, which is rarely the intent. See `docs/channels/signal.md`.
+/// can drive the agent, which is rarely the intent. See `docs/channels.md`.
 #[derive(Debug, Clone, Default)]
 pub struct SignalAllowlist {
     entries: HashSet<String>,
