@@ -17,8 +17,9 @@ compromised one can reach.
 It ships as a single static Rust binary, so it runs wherever your controls
 require: a locked-down workstation, a server inside your network, or an
 air-gapped host. Its model connection is provider-agnostic: frontier APIs,
-local weights through Ollama, TEEs for encrypted processing, or Swiss- and
-EU-hosted endpoints, all interchangeable. Each agent runs the model you assign
+local weights through Ollama, TEEs for encrypted processing, Swiss- and
+EU-hosted endpoints, or a ChatGPT plan the operator has, all
+interchangeable. Each agent runs the model you assign
 it, capped by a per-agent spend budget. MIT licensed.
 
 ## How it works
@@ -98,7 +99,8 @@ All local services bind to 127.0.0.1. Wirken never instructs you to bind
 inference servers, WebChat, or any local endpoint to 0.0.0.0.
 
 **Running modes.** Interactive (`wirken run` in the foreground), browser (the
-same command serves WebChat), as a service (`wirken setup --install-service`
+same command serves WebChat), in the terminal (`wirken chat`, a channel of
+the running gateway), as a service (`wirken setup --install-service`
 installs a systemd user unit or launchd agent), or scheduled (`wirken preset
 schedule <name>` runs preset agents on a cron schedule with no human in the
 loop, under the same permission and audit controls). Service and scheduled
@@ -163,7 +165,7 @@ The message path, inbound to outbound:
 
 ```mermaid
 graph TD
-    Channels["Telegram · Discord · Slack · Teams · Matrix · WhatsApp · Signal · Google Chat · iMessage"]
+    Channels["Telegram · Discord · Slack · Teams · Matrix · WhatsApp · Signal · Google Chat · iMessage · Terminal"]
     Channels -- "UDS · Ed25519 · Cap'n Proto" --> Registry[Adapter Registry]
 
     subgraph Wirken
