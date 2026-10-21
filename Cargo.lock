@@ -6422,7 +6422,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
  "wirken-audit",

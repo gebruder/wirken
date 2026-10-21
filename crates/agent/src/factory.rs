@@ -1109,6 +1109,18 @@ fn replay_session_scoped_approvals(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Live wakes on this thread that found a sub-agent lane with no
+    /// binding row, the case [`replay_subagent_binding`] logs at ERROR.
+    /// Tests read this
+    /// rather than capturing that line: tracing caches each callsite's
+    /// interest process-wide, so a scoped capture in one test thread
+    /// can miss events another thread's activity has made it skip.
+    pub(crate) static MISSING_BINDING_WAKES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Re-apply a `SubagentSessionBound` row to the freshly woken agent.
 ///
 /// The row is written on the child's own chain at spawn and carries
@@ -1182,6 +1194,8 @@ fn replay_subagent_binding(
                          because that ceiling is not recorded on this session. Respawn the \
                          child from its parent."
                     );
+                    #[cfg(test)]
+                    MISSING_BINDING_WAKES.with(|n| n.set(n.get() + 1));
                     agent.set_subagent_runtime(
                         depth,
                         wirken_gateway::permissions::PermissionTier::Tier1,

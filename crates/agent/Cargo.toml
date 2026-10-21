@@ -67,4 +67,3 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
-tracing-subscriber = { workspace = true }

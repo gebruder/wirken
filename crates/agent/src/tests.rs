@@ -3743,7 +3743,7 @@ mod subagent {
 mod subagent_bound_at_wake {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::ops::Range;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use tempfile::TempDir;
     use wirken_audit::{
@@ -3759,8 +3759,6 @@ mod subagent_bound_at_wake {
     use crate::runtime::{Agent, SPAWN_SUBAGENT_TOOL, VerifyOptions};
 
     const PARENT: &str = "parent/test/c1";
-    /// What the missing-binding log line says, at either level.
-    const MISSING_BINDING: &str = "has no binding row";
 
     fn child_session(n: usize) -> String {
         format!("{PARENT}#sub-{n}")
@@ -4085,65 +4083,37 @@ mod subagent_bound_at_wake {
         }
     }
 
-    /// A buffer a scoped subscriber writes formatted events into.
-    #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+    fn missing_binding_wakes() -> usize {
+        crate::factory::MISSING_BINDING_WAKES.with(|n| n.get())
     }
 
-    impl Captured {
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-        }
-
-        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-            let writer = self.clone();
-            tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_max_level(tracing::Level::TRACE)
-                .finish()
-        }
-    }
-
-    /// Spawning a child logs nothing about a missing binding: the
-    /// child is bound as it is woken, so no wake finds it unbound.
+    /// Spawning a child never wakes it unbound: the child is bound as it
+    /// is woken, so no wake takes the missing-binding branch, the one
+    /// that logs at ERROR.
     ///
-    /// The control afterwards wakes a child-shaped lane that really has
-    /// no row, through the same capture, and the line is there. Without
-    /// it a capture that saw nothing would pass this test.
+    /// The count is per thread, and this runtime runs every wake on the
+    /// test's thread. The control afterwards wakes a child-shaped lane
+    /// that really has no row and the count moves, so a count that could
+    /// not move would not pass this test.
     #[tokio::test]
     async fn spawning_a_child_logs_no_missing_binding() {
-        use tracing::instrument::WithSubscriber;
-
         for path in PATHS {
             let tmp = TempDir::new().unwrap();
             let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
-            let captured = Captured::default();
 
-            let (factory, _, _) = spawn_on(path, &tmp, log.clone())
-                .with_subscriber(captured.subscriber())
-                .await;
-            assert!(
-                !captured.text().contains(MISSING_BINDING),
-                "{path:?}: a spawn logged a missing binding:\n{}",
-                captured.text(),
+            let before = missing_binding_wakes();
+            let (factory, _, _) = spawn_on(path, &tmp, log.clone()).await;
+            assert_eq!(
+                missing_binding_wakes(),
+                before,
+                "{path:?}: a spawn woke a child with no binding row",
             );
 
-            async { factory.wake("child", &child_session(99)).unwrap() }
-                .with_subscriber(captured.subscriber())
-                .await;
-            assert!(
-                captured.text().contains(MISSING_BINDING),
-                "{path:?}: the capture did not see the control",
+            factory.wake("child", &child_session(99)).unwrap();
+            assert_eq!(
+                missing_binding_wakes(),
+                before + 1,
+                "{path:?}: the control did not take the missing-binding branch",
             );
         }
     }
