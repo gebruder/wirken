@@ -579,6 +579,56 @@ mod turn_tools {
     }
 }
 
+/// What a turn's tool calls came to, for the reply the turn ends with
+/// when the model returns nothing. One per turn; a call is noted at
+/// each dispatch site once its result is in hand.
+#[derive(Debug, Default)]
+struct TurnCalls {
+    /// Tools with a call that did not run: refused or timed out at the
+    /// gate, denied by policy, or refused on arrival for a stored
+    /// secret. Each named once, in call order.
+    refused: Vec<String>,
+    /// Tools with a call that ran and failed. Each named once.
+    failed: Vec<String>,
+}
+
+impl TurnCalls {
+    /// Note one call's result. `refused` says the call did not run;
+    /// the gate's refusals reach the turn's denial list, so a site
+    /// passes whether that list grew across the call.
+    fn note(&mut self, tool: &str, result: &crate::tool::ToolResult, refused: bool) {
+        let list = if refused {
+            &mut self.refused
+        } else if !result.success {
+            &mut self.failed
+        } else {
+            return;
+        };
+        if !list.iter().any(|t| t == tool) {
+            list.push(tool.to_string());
+        }
+    }
+
+    /// The reply in place of a model's empty one: why the turn stopped,
+    /// as far as its own calls say. A refused call comes before a
+    /// failed one, since a refusal is what the operator did.
+    fn empty_reply(&self) -> String {
+        if !self.refused.is_empty() {
+            format!(
+                "(no response: the model stopped after {} was refused)",
+                self.refused.join(", ")
+            )
+        } else if !self.failed.is_empty() {
+            format!(
+                "(no response: the model stopped after {} failed)",
+                self.failed.join(", ")
+            )
+        } else {
+            "(no response: the model returned nothing)".to_string()
+        }
+    }
+}
+
 /// The chain row for one tool result.
 ///
 /// One builder for all three dispatch sites. They wrote the same
@@ -2905,6 +2955,7 @@ impl Agent {
         self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
             .await?;
 
+        let mut turn_calls = TurnCalls::default();
         let mut rounds = 0;
         let mut denials = Vec::new();
 
@@ -3057,6 +3108,7 @@ impl Agent {
 
                     for call in calls.iter().filter(|c| refused.contains_key(&c.id)) {
                         let result = refused_tool_result(&refused[&call.id]);
+                        turn_calls.note(&call.name, &result, true);
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
                         self.log_event(
@@ -3076,7 +3128,9 @@ impl Agent {
 
                     // Phase 1: execute regular tool calls sequentially.
                     for call in &regular_calls {
+                        let denied_before = denials.len();
                         let result = self.execute_and_record_tool(call, &mut denials).await?;
+                        turn_calls.note(&call.name, &result, denials.len() > denied_before);
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
                         self.log_event(
@@ -3092,6 +3146,7 @@ impl Agent {
                     if !spawn_calls.is_empty() {
                         let results = self.fan_out_spawns(&spawn_calls).await?;
                         for (call, result) in spawn_calls.iter().zip(results) {
+                            turn_calls.note(&call.name, &result, false);
                             self.conversation
                                 .add_tool_result(&call.id, &call.name, &result.output);
                             self.log_event(
@@ -3104,7 +3159,7 @@ impl Agent {
                     // Continue loop
                 }
                 LlmResponse::Empty => {
-                    let fallback = "(no response)".to_string();
+                    let fallback = turn_calls.empty_reply();
                     self.conversation.add_assistant_message(&fallback);
                     self.log_event(
                         TrustLevel::System,
@@ -3255,6 +3310,7 @@ impl Agent {
         self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
             .await?;
 
+        let mut turn_calls = TurnCalls::default();
         let mut rounds = 0;
         let mut denials = Vec::new();
 
@@ -3448,10 +3504,16 @@ impl Agent {
                         // exactly one place. This site used to
                         // inline the catch, which is how the two
                         // surfaces drifted apart.
+                        let denied_before = denials.len();
                         let result = match refused.get(&call.id) {
                             Some(credential) => refused_tool_result(credential),
                             None => self.execute_and_record_tool(call, &mut denials).await?,
                         };
+                        turn_calls.note(
+                            &call.name,
+                            &result,
+                            refused.contains_key(&call.id) || denials.len() > denied_before,
+                        );
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
@@ -3469,7 +3531,7 @@ impl Agent {
                     }
                 }
                 LlmResponse::Empty => {
-                    let fallback = "(no response)".to_string();
+                    let fallback = turn_calls.empty_reply();
                     self.conversation.add_assistant_message(&fallback);
                     self.log_event(
                         TrustLevel::System,

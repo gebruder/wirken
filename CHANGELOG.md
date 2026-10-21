@@ -55,6 +55,12 @@ tagged.
   call returns an error result, the parent's chain records the spawn's
   `SubagentResult` as an error, and the child does not run. Single and
   parallel spawns behave the same; siblings in a parallel spawn run on.
+- A turn the model ends without text now replies with why, on every
+  channel: `(no response: the model stopped after exec was refused)`,
+  `(no response: the model stopped after read_file failed)`, or
+  `(no response: the model returned nothing)`, naming the tools of the
+  turn. The reply was `(no response)` whatever had happened. The same
+  text is the turn's `AssistantMessage` row.
 - An approval answered in the chat whose message raised it now reaches
   the gate. Each adapter connection's frames are read while a turn runs,
   so a Telegram or Signal decision sent on that connection resolves the
