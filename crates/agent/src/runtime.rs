@@ -246,10 +246,6 @@ pub struct Agent {
     /// `provider.json`, env-var override, tests). Never the secret
     /// itself.
     api_key_credential: Option<String>,
-    /// Asked for the bearer before each model call, for a provider
-    /// whose credential expires and is refreshed by the gateway. When
-    /// set it replaces [`Self::api_key`] for every call.
-    token_source: Option<Arc<dyn crate::llm::ProviderTokenSource>>,
     /// What every dispatched tool call passes. There is no ungated
     /// shape: see [`ToolGate`].
     permissions: ToolGate,
@@ -355,6 +351,10 @@ pub struct Agent {
     /// `None` for agents constructed without a store (tests,
     /// standalone runs).
     budget_ledger: Option<Arc<std::sync::Mutex<BudgetStore>>>,
+    /// Where [`Self::budget`] is configured, for an error that has to
+    /// name it (`budget.json` `agents.<id>`, or its `default`). `None`
+    /// where nothing said.
+    budget_name: Option<String>,
     /// Once-per-session guard for the uncosted-provider warning: set
     /// after the first LLM response whose provider emitted no cost
     /// while a budget is active, so the operator sees the control is
@@ -690,7 +690,6 @@ impl Agent {
             system_prompt,
             api_key,
             api_key_credential,
-            token_source: None,
             permissions: ToolGate::Store(permissions),
             org_permissions: None,
             current_trigger: None,
@@ -714,6 +713,7 @@ impl Agent {
             auto_deny_above_tier: None,
             budget: None,
             budget_ledger: None,
+            budget_name: None,
             budget_uncosted_warned: false,
             restrict_tools: None,
             effective_permissions: crate::skill_perms::PhasedEffective::default(),
@@ -796,7 +796,6 @@ impl Agent {
             system_prompt,
             api_key,
             api_key_credential,
-            token_source: None,
             permissions,
             org_permissions: None,
             current_trigger: None,
@@ -820,6 +819,7 @@ impl Agent {
             auto_deny_above_tier: None,
             budget: None,
             budget_ledger: None,
+            budget_name: None,
             budget_uncosted_warned: false,
             restrict_tools: None,
             effective_permissions: crate::skill_perms::PhasedEffective::default(),
@@ -1670,6 +1670,27 @@ impl Agent {
         if !budget.is_active() {
             return Ok(None);
         }
+        // A plan-mode request carries no per-token price, so a block
+        // budget could never stop one: every call would pass as
+        // uncosted. Refused instead, before the request row.
+        if budget.mode == BudgetMode::Block && self.llm.config().auth.is_plan() {
+            self.emit_budget_exceeded(
+                0,
+                budget.ceiling_usd_micros,
+                budget.window.label(),
+                BudgetAction::Blocked,
+                tool,
+            )?;
+            let name = self
+                .budget_name
+                .clone()
+                .unwrap_or_else(|| format!("the budget for agent '{}'", self.budget_key()));
+            return Err(AgentError::Llm(format!(
+                "refused: {name} is in block mode, and requests on a plan sign-in cannot be \
+                 priced, so the budget cannot be enforced against them. Set that budget to \
+                 alert or off, or run this agent on an API key."
+            )));
+        }
         let Some(store) = self.budget_ledger.clone() else {
             return Ok(None);
         };
@@ -1934,6 +1955,20 @@ impl Agent {
         self.budget_ledger = store;
     }
 
+    /// Name where this agent's budget is configured, for the error that
+    /// refuses a plan-mode call under a block-mode budget.
+    pub fn set_budget_name(&mut self, name: impl Into<String>) {
+        self.budget_name = Some(name.into());
+    }
+
+    /// Take the bearer for every model call from `source`, the plan
+    /// entry's token source, and stamp the entry on the call rows as
+    /// the credential.
+    pub fn set_plan_token_source(&mut self, source: Arc<crate::plan_auth::PlanTokenSource>) {
+        self.api_key_credential = Some(source.entry().to_string());
+        self.llm.set_plan_token_source(source);
+    }
+
     /// Set this child Agent's nesting depth and headless ceilings
     /// before its `process_message` is invoked.
     /// Called by [`Self::bind_as_subagent`] when a spawn wakes the
@@ -2023,22 +2058,6 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn llm_config_for_test(&self) -> &LlmConfig {
         self.llm.config()
-    }
-
-    /// Take the bearer for every model call from `source` instead of
-    /// the static key, and stamp its credential name on the rows.
-    pub fn set_token_source(&mut self, source: Arc<dyn crate::llm::ProviderTokenSource>) {
-        self.api_key_credential = Some(source.credential_name().to_string());
-        self.token_source = Some(source);
-    }
-
-    /// The bearer this call sends: the token source's current one when
-    /// a source is attached, else the static key.
-    async fn bearer_for_call(&self) -> Result<Option<String>, AgentError> {
-        match &self.token_source {
-            Some(source) => source.bearer().await.map(Some),
-            None => Ok(self.api_key.clone()),
-        }
     }
 
     /// Test-only accessor returning the api_key this agent was
@@ -2233,6 +2252,11 @@ impl Agent {
             tool_calls: None,
         }];
 
+        // This call runs before the turn's budget gate. A plan-mode call
+        // under a block budget is refused here as the turn would be.
+        if self.llm.config().auth.is_plan() {
+            self.check_budget(None)?;
+        }
         self.check_inference_or_deny()?;
         // On the chain like any other call, so every byte of the
         // session that reaches the provider is accounted for there.
@@ -2252,10 +2276,10 @@ impl Agent {
             ),
         )?;
         let started = std::time::Instant::now();
-        let result = match self.bearer_for_call().await {
-            Ok(bearer) => self.llm.complete(&messages, &[], bearer.as_deref()).await,
-            Err(e) => Err(e),
-        };
+        let result = self
+            .llm
+            .complete(&messages, &[], self.api_key.as_deref())
+            .await;
         let result = match result {
             Ok((response, usage)) => {
                 let (row, total_cost_usd_micros) = side_call_response(
@@ -2945,13 +2969,13 @@ impl Agent {
 
             self.check_inference_or_deny()?;
             let started = std::time::Instant::now();
-            let bearer = self
-                .bearer_for_call()
-                .await
-                .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let (response, usage) = self
                 .llm
-                .complete(self.conversation.messages(), &tool_defs, bearer.as_deref())
+                .complete(
+                    self.conversation.messages(),
+                    &tool_defs,
+                    self.api_key.as_deref(),
+                )
                 .await
                 .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let latency_ms = started.elapsed().as_millis() as u64;
@@ -2963,7 +2987,7 @@ impl Agent {
                 input_cost_usd_micros,
                 output_cost_usd_micros,
                 total_cost_usd_micros,
-            } = attribute_llm_usage(&self.llm.config().provider, &self.llm.config().model, usage);
+            } = attribute_call_usage(self.llm.config(), usage);
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmResponse {
@@ -3295,15 +3319,11 @@ impl Agent {
             self.check_inference_or_deny()?;
             // Spawn streaming in background, forward text deltas to caller
             let started = std::time::Instant::now();
-            let bearer = self
-                .bearer_for_call()
-                .await
-                .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let (response, usage) = {
                 let stream_future = self.llm.complete_stream(
                     self.conversation.messages(),
                     &tool_defs,
-                    bearer.as_deref(),
+                    self.api_key.as_deref(),
                     round_tx,
                 );
 
@@ -3337,7 +3357,7 @@ impl Agent {
                 input_cost_usd_micros,
                 output_cost_usd_micros,
                 total_cost_usd_micros,
-            } = attribute_llm_usage(&self.llm.config().provider, &self.llm.config().model, usage);
+            } = attribute_call_usage(self.llm.config(), usage);
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmResponse {
@@ -6121,7 +6141,7 @@ pub fn side_call_response(
         input_cost_usd_micros,
         output_cost_usd_micros,
         total_cost_usd_micros,
-    } = attribute_llm_usage(&config.provider, &config.model, usage);
+    } = attribute_call_usage(config, usage);
     (
         SessionEvent::LlmResponse {
             request_id: request_id.to_string(),
@@ -6236,6 +6256,29 @@ pub(crate) struct LlmResponseAttribution {
     pub input_cost_usd_micros: Option<u64>,
     pub output_cost_usd_micros: Option<u64>,
     pub total_cost_usd_micros: Option<u64>,
+}
+
+/// [`attribute_llm_usage`] for a call made under `config`. A plan-mode
+/// call has no per-token price: its tokens are recorded and its cost
+/// fields stay `None`, rather than taking the API price the pricing
+/// table lists for the same provider and model.
+pub(crate) fn attribute_call_usage(
+    config: &LlmConfig,
+    usage: Option<crate::llm::Usage>,
+) -> LlmResponseAttribution {
+    if !config.auth.is_plan() {
+        return attribute_llm_usage(&config.provider, &config.model, usage);
+    }
+    let u = usage.unwrap_or_default();
+    LlmResponseAttribution {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        cache_creation_input_tokens: u.cache_creation_input_tokens,
+        cache_read_input_tokens: u.cache_read_input_tokens,
+        input_cost_usd_micros: None,
+        output_cost_usd_micros: None,
+        total_cost_usd_micros: None,
+    }
 }
 
 pub(crate) fn attribute_llm_usage(

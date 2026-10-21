@@ -12,26 +12,6 @@ tagged.
 
 ### Added
 
-- `chatgpt` as an LLM provider: an agent runs on the operator's ChatGPT plan
-  through Sign in with ChatGPT, under OpenAI's program for open-source and
-  locally run apps, with no API key. `wirken setup` offers it, and
-  `wirken credentials authorize chatgpt` signs in on its own: a public OAuth
-  client that registers itself on the first sign-in, keeps the grant in the
-  vault under `chatgpt-plan` with the issued client id, and refuses to store
-  a grant that does not permit plan usage. The gateway reads the grant before
-  each call and refreshes it in process, serialised per entry, writing the
-  rotated tokens back to the vault and to leak detection. Inference goes
-  through the Responses API as the plan requires: streaming, `store: false`,
-  the system prompt as `instructions`, no `temperature` or output cap; the
-  non-streaming callers assemble the stream. A usage-limit refusal is never
-  retried. `wirken agents add --provider chatgpt --credential <name>` runs a
-  named agent on it, `wirken credentials remove` revokes the grant at the
-  provider first, and `wirken credentials rescope` signs in again. Cost is
-  uncosted, and a `channel_overrides` entry cannot name the provider. See
-  [docs/credentials.md](docs/credentials.md#chatgpt-plan-sign-in-with-chatgpt).
-- `WIRKEN_CHATGPT_OAUTH_BASE`, a loopback-only base for the ChatGPT sign-in
-  and token endpoints, for the integration test's stub; refused for any
-  other host.
 - `wirken chat [--agent NAME]` opens a full-screen chat in the terminal.
   It is a channel of the running gateway, `terminal`, so its messages
   take the same path as any adapter's: injection scan, audit rows, router,
@@ -42,14 +22,18 @@ tagged.
   agents and conversations with search. Without a terminal it points to
   `wirken ask`; without a running gateway it points to `wirken run`. Bare
   `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
-
-### Changed
-
-- The OAuth provider table in `wirken-mcp-proxy` carries where a client id
-  comes from (an environment variable, or dynamic registration), a callback
-  path, a `resource` and a discovery URL, and a stored `OAuthCredential` may
-  carry the issued `client_id`. Entries stored before the field existed read
-  unchanged.
+- Plan sign-in for the `openai` provider: an agent can run on a ChatGPT
+  plan the operator has, through OpenAI's sign-in for open-source and
+  locally run apps, with no API key. `wirken credentials authorize`
+  signs in and registers this install with OpenAI, `wirken setup` and
+  `wirken agents add --auth plan` select it, and `wirken credentials
+  sign-out` revokes and clears the tokens. Requests go to the Responses
+  API at `api.openai.com`, which is pinned. Tokens live in the vault
+  under their own kind, bound into the entry's encryption, so a binary
+  that predates plan sign-in cannot read the entry as a key. Refreshes
+  are serialized per entry across processes. Plan requests are not
+  priced, so a block-mode budget refuses a plan agent. See
+  docs/credentials.md. Proposed by Tanmay Maka (@maka-tanmay).
 
 ### Fixed
 

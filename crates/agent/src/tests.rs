@@ -2020,8 +2020,8 @@ mod wake {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         );
         (
@@ -2079,8 +2079,8 @@ mod wake {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         )]);
         let factory = AgentFactory::for_verify(configs, log.clone());
@@ -2598,8 +2598,8 @@ mod wake {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -2672,8 +2672,8 @@ mod subagent {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         );
         configs.insert(
@@ -2692,8 +2692,8 @@ mod subagent {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         );
         (
@@ -3411,8 +3411,8 @@ mod subagent {
                     sandbox: Default::default(),
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
+                    plan_token_source: None,
                     channel_egress: Default::default(),
-                    token_source: None,
                 },
             );
         }
@@ -3743,7 +3743,7 @@ mod subagent {
 mod subagent_bound_at_wake {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::ops::Range;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use tempfile::TempDir;
     use wirken_audit::{
@@ -3759,8 +3759,6 @@ mod subagent_bound_at_wake {
     use crate::runtime::{Agent, SPAWN_SUBAGENT_TOOL, VerifyOptions};
 
     const PARENT: &str = "parent/test/c1";
-    /// What the missing-binding log line says, at either level.
-    const MISSING_BINDING: &str = "has no binding row";
 
     fn child_session(n: usize) -> String {
         format!("{PARENT}#sub-{n}")
@@ -3797,8 +3795,8 @@ mod subagent_bound_at_wake {
             sandbox: Default::default(),
             extra_interceptors: vec![],
             zirkel_db_path: None,
+            plan_token_source: None,
             channel_egress: Default::default(),
-            token_source: None,
         };
         HashMap::from([
             (
@@ -4085,65 +4083,37 @@ mod subagent_bound_at_wake {
         }
     }
 
-    /// A buffer a scoped subscriber writes formatted events into.
-    #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+    fn missing_binding_wakes() -> usize {
+        crate::factory::MISSING_BINDING_WAKES.with(|n| n.get())
     }
 
-    impl Captured {
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-        }
-
-        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-            let writer = self.clone();
-            tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_max_level(tracing::Level::TRACE)
-                .finish()
-        }
-    }
-
-    /// Spawning a child logs nothing about a missing binding: the
-    /// child is bound as it is woken, so no wake finds it unbound.
+    /// Spawning a child never wakes it unbound: the child is bound as it
+    /// is woken, so no wake takes the missing-binding branch, the one
+    /// that logs at ERROR.
     ///
-    /// The control afterwards wakes a child-shaped lane that really has
-    /// no row, through the same capture, and the line is there. Without
-    /// it a capture that saw nothing would pass this test.
+    /// The count is per thread, and this runtime runs every wake on the
+    /// test's thread. The control afterwards wakes a child-shaped lane
+    /// that really has no row and the count moves, so a count that could
+    /// not move would not pass this test.
     #[tokio::test]
     async fn spawning_a_child_logs_no_missing_binding() {
-        use tracing::instrument::WithSubscriber;
-
         for path in PATHS {
             let tmp = TempDir::new().unwrap();
             let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
-            let captured = Captured::default();
 
-            let (factory, _, _) = spawn_on(path, &tmp, log.clone())
-                .with_subscriber(captured.subscriber())
-                .await;
-            assert!(
-                !captured.text().contains(MISSING_BINDING),
-                "{path:?}: a spawn logged a missing binding:\n{}",
-                captured.text(),
+            let before = missing_binding_wakes();
+            let (factory, _, _) = spawn_on(path, &tmp, log.clone()).await;
+            assert_eq!(
+                missing_binding_wakes(),
+                before,
+                "{path:?}: a spawn woke a child with no binding row",
             );
 
-            async { factory.wake("child", &child_session(99)).unwrap() }
-                .with_subscriber(captured.subscriber())
-                .await;
-            assert!(
-                captured.text().contains(MISSING_BINDING),
-                "{path:?}: the capture did not see the control",
+            factory.wake("child", &child_session(99)).unwrap();
+            assert_eq!(
+                missing_binding_wakes(),
+                before + 1,
+                "{path:?}: the control did not take the missing-binding branch",
             );
         }
     }
@@ -7928,8 +7898,8 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -8078,8 +8048,8 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -8242,8 +8212,8 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -8369,8 +8339,8 @@ mod org_tool_policy {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                plan_token_source: None,
                 channel_egress: Default::default(),
-                token_source: None,
             },
         );
         let factory = AgentFactory::with_options(
@@ -9822,6 +9792,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: true,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
         let messages = vec![Message {
@@ -9888,6 +9859,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: true,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
         let messages = vec![Message {
@@ -9964,6 +9936,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: false,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
 
@@ -10053,6 +10026,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: false,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
 
@@ -10145,6 +10119,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: false,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
 
@@ -10258,6 +10233,7 @@ mod openai_compat_stub {
             region: None,
             tools_enabled: false,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let client = LlmClient::new(config).unwrap();
 
@@ -10422,6 +10398,64 @@ mod budget_enforcement {
             })
             .collect();
         assert_eq!(tools, vec![None]);
+    }
+
+    /// A plan-mode call has no per-token price, so a block budget could
+    /// never stop one. The call is refused before its request row, with
+    /// an error naming the budget, and the block is on the chain. An
+    /// alert budget is not a refusal.
+    #[tokio::test]
+    async fn a_block_budget_refuses_a_plan_agent_naming_the_budget() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut agent = Agent::new(
+            "planned".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::plan("m"),
+            None,
+            None,
+            log.clone(),
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        agent.set_budget(
+            Some(budget(BudgetMode::Block, 500_000)),
+            Some(store.clone()),
+        );
+        agent.set_budget_name("the budget.json budget agents.planned");
+
+        let err = agent
+            .process_message("hi", "in-1".into())
+            .await
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            err.contains("the budget.json budget agents.planned")
+                && err.contains("cannot be priced"),
+            "{err}"
+        );
+        let rows = events(&log, "planned");
+        assert!(
+            rows.iter().any(|e| matches!(
+                e,
+                SessionEvent::BudgetExceeded {
+                    action: BudgetAction::Blocked,
+                    ..
+                }
+            )),
+            "the block is recorded"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|e| matches!(e, SessionEvent::LlmRequest { .. })),
+            "no request row for a refused call"
+        );
+
+        agent.set_budget(Some(budget(BudgetMode::Alert, 500_000)), Some(store));
+        assert!(agent.test_check_budget_for_tool(None).unwrap().is_none());
     }
 
     // Synthetic non-compliant agent: an over-budget agent must be
@@ -12744,6 +12778,7 @@ mod approved_unknown_tool {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -12864,6 +12899,7 @@ mod unanswered_approval {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -13181,6 +13217,7 @@ mod memory_is_not_policy {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -13510,6 +13547,7 @@ mod http_request_after_a_restricting_read {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -13689,6 +13727,7 @@ mod exec_location_reaches_the_gate {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -13935,6 +13974,7 @@ mod webchat_approval_reaches_the_page {
                 region: None,
                 tools_enabled: true,
                 context_window: 32_000,
+                auth: Default::default(),
             },
             Some("unused".into()),
             None,
@@ -14180,6 +14220,7 @@ mod leak_detection {
             region: None,
             tools_enabled: true,
             context_window: 32_000,
+            auth: Default::default(),
         }
     }
 
@@ -14365,8 +14406,8 @@ mod leak_detection {
             sandbox: Default::default(),
             extra_interceptors: vec![],
             zirkel_db_path: None,
+            plan_token_source: None,
             channel_egress: Default::default(),
-            token_source: None,
         };
         let ceiling = SubagentCeiling {
             tool_allowlist: vec![],

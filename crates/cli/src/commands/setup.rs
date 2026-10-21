@@ -130,15 +130,27 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             model,
             base_url,
             region,
+            auth,
+            credential,
             ..
         } = choice;
 
-        // Save provider config
-        let mut provider_config = serde_json::json!({
-            "provider": provider_name,
-            "model": model,
-            "base_url": base_url,
-        });
+        // Save provider config. Plan mode names its sign-in entry and
+        // no base_url: its endpoint is fixed.
+        let mut provider_config = if auth.is_plan() {
+            super::plan_sign_in::provider_json_for_plan(
+                credential
+                    .as_deref()
+                    .unwrap_or(super::plan_sign_in::DEFAULT_ENTRY),
+                &model,
+            )
+        } else {
+            serde_json::json!({
+                "provider": provider_name,
+                "model": model,
+                "base_url": base_url,
+            })
+        };
         if let Some(ref r) = region {
             provider_config["region"] = serde_json::Value::String(r.clone());
         }

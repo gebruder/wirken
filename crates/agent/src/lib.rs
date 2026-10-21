@@ -25,6 +25,7 @@ pub mod llm_stream;
 pub mod mcp;
 pub mod memory_tool;
 pub mod persona;
+pub mod plan_auth;
 pub mod preset;
 pub mod rate_limit;
 pub mod recovery;

@@ -155,6 +155,7 @@ pub fn register_agent(data_dir: &Path, id: &str, model: &ScriptedModel) {
             tools_enabled: None,
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         })
         .unwrap();
 }

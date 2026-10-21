@@ -140,11 +140,6 @@ pub struct AgentStaticConfig {
     /// [`ChannelOverride::api_key_credential`]; same role at the
     /// agent-wide-default level.
     pub api_key_credential: Option<String>,
-    /// For a provider whose credential expires: asked for the bearer
-    /// before each call instead of `api_key`. Attached to every waked
-    /// Agent that runs on the agent-wide defaults; a channel override
-    /// carries its own static key and is left as it is.
-    pub token_source: Option<Arc<dyn crate::llm::ProviderTokenSource>>,
     pub skills: Vec<Skill>,
     /// Long-lived MCP proxy connection shared across every waked
     /// Agent for this agent_id. Concurrent waked Agents serialize
@@ -192,6 +187,11 @@ pub struct AgentStaticConfig {
     /// tool for the agent (the tool returns a clear error if invoked
     /// without the path bound).
     pub zirkel_db_path: Option<PathBuf>,
+    /// For an agent in plan mode: the token source over its sign-in
+    /// entry, shared by every agent on that entry. Attached to every
+    /// waked Agent that runs on the agent-wide defaults. A channel
+    /// override never gets it, so an override cannot run on the plan.
+    pub plan_token_source: Option<Arc<crate::plan_auth::PlanTokenSource>>,
 }
 
 /// Cache mode resolved at factory construction time. Tests pass it
@@ -872,16 +872,16 @@ impl AgentFactory {
             cfg.sandbox.clone(),
             self.permissions.clone(),
         )?;
-        if override_for_channel.is_none()
-            && let Some(source) = &cfg.token_source
-        {
-            agent.set_token_source(source.clone());
-        }
         // Name the agent before anything can gate on it. `agent_id`
         // is the key this config was looked up under, so a sub-agent
         // woken as a different config carries that config's id and is
         // checked against its own grants rather than its caller's.
         agent.set_agent_id(agent_id);
+        if override_for_channel.is_none()
+            && let Some(source) = &cfg.plan_token_source
+        {
+            agent.set_plan_token_source(source.clone());
+        }
         // Before the skills: a skill is checked against it as it loads.
         agent.set_leak_matcher(self.leak_matcher.read().unwrap().clone());
         // Inject the per-agent shared resources.
@@ -951,6 +951,11 @@ impl AgentFactory {
             // global default; an explicit per-agent off opts out.
             let effective = bw.config.resolve(agent_id);
             agent.set_budget(effective, Some(bw.store.clone()));
+            agent.set_budget_name(if bw.config.agents.contains_key(agent_id) {
+                format!("the budget.json budget agents.{agent_id}")
+            } else {
+                "the budget.json default budget".to_string()
+            });
         }
         if let Some(gate) = self.approval_gate_for(session_id) {
             agent.set_approval_gate(gate);
@@ -1104,6 +1109,18 @@ fn replay_session_scoped_approvals(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Live wakes on this thread that found a sub-agent lane with no
+    /// binding row, the case [`replay_subagent_binding`] logs at ERROR.
+    /// Tests read this
+    /// rather than capturing that line: tracing caches each callsite's
+    /// interest process-wide, so a scoped capture in one test thread
+    /// can miss events another thread's activity has made it skip.
+    pub(crate) static MISSING_BINDING_WAKES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Re-apply a `SubagentSessionBound` row to the freshly woken agent.
 ///
 /// The row is written on the child's own chain at spawn and carries
@@ -1177,6 +1194,8 @@ fn replay_subagent_binding(
                          because that ceiling is not recorded on this session. Respawn the \
                          child from its parent."
                     );
+                    #[cfg(test)]
+                    MISSING_BINDING_WAKES.with(|n| n.set(n.get() + 1));
                     agent.set_subagent_runtime(
                         depth,
                         wirken_gateway::permissions::PermissionTier::Tier1,

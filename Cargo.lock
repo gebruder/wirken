@@ -6398,6 +6398,7 @@ name = "wirken-agent"
 version = "2.3.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "base64 0.23.1",
  "bollard",
  "cap-std",
@@ -6421,7 +6422,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
  "wirken-audit",
@@ -6429,6 +6429,7 @@ dependencies = [
  "wirken-ipc",
  "wirken-mcp-proxy",
  "wirken-sandbox",
+ "wirken-vault",
 ]
 
 [[package]]
@@ -6468,6 +6469,7 @@ dependencies = [
  "hmac 0.13.0",
  "indexmap 2.14.2",
  "libc",
+ "open",
  "openssl",
  "rand 0.10.3",
  "ratatui",

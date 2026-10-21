@@ -19,6 +19,13 @@ pub enum CredentialKind {
     Secret,
     /// A value that may appear in messages: an address, a number, a URL.
     Identifier,
+    /// A plan sign-in: an OAuth entry a plan token source reads, and no
+    /// key path. It is a secret to leak detection. Its kind is bound
+    /// into the row's AEAD associated data ([`crate::store::row_aad`]),
+    /// so a build that predates the kind, which decrypts every row
+    /// under its name alone, fails to decrypt it rather than handing
+    /// the entry to a provider as a key.
+    PlanSignIn,
 }
 
 impl CredentialKind {
@@ -27,14 +34,16 @@ impl CredentialKind {
         match self {
             Self::Secret => "secret",
             Self::Identifier => "identifier",
+            Self::PlanSignIn => "plan_sign_in",
         }
     }
 
-    /// The kind a column value names. Anything but `identifier`, an
-    /// absent value included, is a secret.
+    /// The kind a column value names. Anything but `identifier` and
+    /// `plan_sign_in`, an absent value included, is a secret.
     pub(crate) fn from_column(value: Option<&str>) -> Self {
         match value {
             Some("identifier") => Self::Identifier,
+            Some("plan_sign_in") => Self::PlanSignIn,
             _ => Self::Secret,
         }
     }
@@ -77,8 +86,9 @@ pub const MIN_MATCH_BYTES: usize = 8;
 /// The parts of a stored secret that can appear on their own in model
 /// content.
 ///
-/// - An OAuth credential is stored as JSON; its `access_token` and
-///   `refresh_token` are matched, not the JSON around them.
+/// - An OAuth credential is stored as JSON; its `access_token`,
+///   `refresh_token` and, where a sign-in kept one, `id_token` are
+///   matched, not the JSON around them.
 /// - A Bedrock key is `access_key_id:secret_access_key[:session_token]`;
 ///   the secret access key and the session token are matched. The key
 ///   id names the key and is not itself secret.
@@ -131,8 +141,10 @@ fn oauth_parts(value: &str) -> Option<Vec<Zeroizing<String>>> {
     let parsed: serde_json::Value = serde_json::from_str(&json).ok()?;
     let access = parsed.get("access_token")?.as_str()?;
     let mut parts = vec![Zeroizing::new(access.to_string())];
-    if let Some(refresh) = parsed.get("refresh_token").and_then(|r| r.as_str()) {
-        parts.push(Zeroizing::new(refresh.to_string()));
+    for field in ["refresh_token", "id_token"] {
+        if let Some(token) = parsed.get(field).and_then(|r| r.as_str()) {
+            parts.push(Zeroizing::new(token.to_string()));
+        }
     }
     parts.retain(|p| !p.is_empty());
     Some(parts)

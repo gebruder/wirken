@@ -17,11 +17,9 @@ compromised one can reach.
 It ships as a single static Rust binary, so it runs wherever your controls
 require: a locked-down workstation, a server inside your network, or an
 air-gapped host. Its model connection is provider-agnostic: frontier APIs,
-local weights through Ollama, TEEs for encrypted processing, Swiss- and
-EU-hosted endpoints, or a ChatGPT plan through Sign in with ChatGPT
-([docs/credentials.md](docs/credentials.md#chatgpt-plan-sign-in-with-chatgpt)),
-all interchangeable. Each agent runs the model you assign it, capped by a
-per-agent spend budget. MIT licensed.
+local weights through Ollama, TEEs for encrypted processing, or Swiss- and
+EU-hosted endpoints, all interchangeable. Each agent runs the model you assign
+it, capped by a per-agent spend budget. MIT licensed.
 
 ## How it works
 

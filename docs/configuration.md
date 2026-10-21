@@ -33,7 +33,6 @@ moves every process at once.
 | `tool_policy.json` | Org allow and deny tool lists | `wirken setup --org` |
 | `org.url` | Organization config endpoint | `wirken setup --org` |
 | `registry-root.pub` | Operator skill-registry root (mode 0o644) | `wirken skills trust-root` |
-| `chatgpt-host-id` | The host identifier a ChatGPT plan sign-in attributes usage to; an opaque label, not a credential | `wirken credentials authorize chatgpt` |
 | `signing-key.hex` | Per-author skill and MCP signing seed | `wirken skills sign` |
 | `keychain/` | age-encrypted device key when the OS keychain is unavailable | `wirken setup` |
 | `skills/` | Installed skills | `wirken skills install` or setup |
@@ -55,16 +54,9 @@ a loose 0o755 left by an earlier run or a permissive umask converges back.
 ```
 
 Values `wirken setup` writes: `openai`, `anthropic`, `gemini`, `bedrock`,
-`ollama`, `tinfoil`, `infomaniak`, `hetzner`, `custom`, `chatgpt`. Privatemode
-is saved as `openai` pointed at its loopback proxy (`http://localhost:8080/v1`
-by default), and NIM as `custom`, which covers any OpenAI-compatible endpoint.
-
-`chatgpt` is a ChatGPT plan, used through Sign in with ChatGPT rather than an
-API key: no `<provider>-api-key` entry exists; the gateway reads the OAuth
-grant the sign-in stored under `chatgpt-plan` and refreshes it before each
-call. The route is the Responses API at `https://api.openai.com/v1`, which is
-the only `base_url` the plan accepts. See
-[credentials.md](credentials.md#chatgpt-plan-sign-in-with-chatgpt).
+`ollama`, `tinfoil`, `infomaniak`, `hetzner`, `custom`. Privatemode is saved
+as `openai` pointed at its loopback proxy (`http://localhost:8080/v1` by
+default), and NIM as `custom`, which covers any OpenAI-compatible endpoint.
 
 Bedrock adds a `region` field:
 
@@ -76,6 +68,34 @@ Bedrock adds a `region` field:
     "region": "us-east-1"
 }
 ```
+
+The `openai` provider also runs on the operator's own plan at OpenAI instead
+of an API key ("Continue with ChatGPT" in `wirken setup`):
+
+```json
+{
+    "provider": "openai",
+    "auth": "plan",
+    "credential": "openai-plan",
+    "model": "<slug from the signed-in account's model list>",
+    "base_url": "plan-sign-in"
+}
+```
+
+`auth` is `key` (the default when absent) or `plan`. `credential` names the
+vault entry `wirken credentials authorize` wrote, `openai-plan` when absent.
+Plan mode has a fixed endpoint: requests go to
+`https://api.openai.com/v1/responses` and sign-in to
+`https://auth.openai.com`. `base_url` is absent or `plan-sign-in`, which is
+not an endpoint: a Wirken release from before plan mode reads `base_url` as
+the endpoint and refuses this value before making any request. Any other
+`base_url` is refused at start. A plan agent row in `agent_config.db`
+carries the same `base_url`. `auth: plan` on any provider other than `openai` is
+refused. A `channel_overrides` entry cannot use plan mode, by `auth` or by
+naming a plan entry as its `api_key_name`; register an agent on the plan and
+bind the channel to it. The plan's models have no documented context window,
+so Wirken assumes a fixed 128,000 tokens for all of them. Sign-in, refresh and
+sign-out: [credentials.md](credentials.md#plan-sign-in-openai).
 
 The API key is resolved from the vault entry `<provider>-api-key`. The model
 an agent runs is operator configuration, not a chat setting: there is no
@@ -199,8 +219,10 @@ or `week`; `ceiling_usd_micros` is USD micros (1 USD = 1,000,000). Resolution
 for an agent is its per-agent entry, else the global `default`, else off. A
 per-agent entry fully replaces the default rather than merging, and an
 explicit per-agent `"mode": "off"` opts that agent out even under a global
-default. Enforcement behaviour, fail-closed handling and the uncosted-provider
-gap: [cost-monitoring.md](cost-monitoring.md#enforcement).
+default. A block-mode budget refuses every call of an agent in plan mode,
+since plan requests carry no per-token price. Enforcement behaviour,
+fail-closed handling and the uncosted-provider gap:
+[cost-monitoring.md](cost-monitoring.md#enforcement).
 
 ## mcp.json
 
@@ -247,7 +269,6 @@ variable. See [mcp.md](mcp.md).
 | `WIRKEN_ASK_APPROVAL_TIMEOUT_S` | Deadline on the `wirken ask` approval prompt. Default: `60` |
 | `WIRKEN_VETO_BUDGET_MS` / `WIRKEN_EGRESS_BUDGET_MS` | Cumulative hook-dispatch budget. Default `1000` each, per-hook ceiling 500ms |
 | `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES` | Flush cycles between continuous verification passes. Default: `100` |
-| `WIRKEN_CHATGPT_OAUTH_BASE` | Loopback base the ChatGPT sign-in and token requests go to instead of `auth.openai.com`, for a test stub. A base that is not loopback is refused; warns at every use |
 | `RUST_LOG` | Log verbosity, e.g. `RUST_LOG=wirken=debug` |
 
 Per-adapter port and token overrides (`WIRKEN_TEAMS_PORT`,

@@ -184,6 +184,7 @@ Per-channel prompts, vault entries and limits: [channels.md](channels.md).
 
 ```bash
 wirken agents add                        # wizard, or --id/--provider/--model for scripted use
+wirken agents add --id ID --provider openai --model SLUG --auth plan [--credential ENTRY]
 wirken agents list
 wirken agents remove <ID>
 wirken agents bind <AGENT> <CHANNEL>
@@ -194,13 +195,14 @@ wirken agents allow-subagent <PARENT> <CHILD> [--tools T] [--max-tier tier1|tier
 wirken agents deny-subagent <PARENT> <CHILD>
 ```
 
+An agent in plan mode (`--auth plan`) runs on a sign-in stored by `wirken
+credentials authorize`, named by `--credential` (default `openai-plan`). It
+takes no `--api-key-env` or `--base-url`, and `agents set` refuses `--api-key`
+and `--base-url` on it; `agents set --model list` lists the signed-in
+account's models.
+
 `--api-key` prompts for the value rather than taking it on the command line,
-so it does not reach shell history or the process table. `add --provider
-chatgpt` takes `--credential <NAME>` (default `chatgpt-plan`) in place of
-`--api-key-env`: the agent runs on a grant that `wirken credentials authorize
-chatgpt` stored. On such an agent `set --model list` lists the plan's models
-and `set --api-key` is refused, since a typed key would overwrite the grant;
-`wirken credentials rescope <NAME>` signs in again. Defaults for
+so it does not reach shell history or the process table. Defaults for
 `allow-subagent`: no tools, `tier1`, 5 rounds, 30s. See
 [multi-agent.md](multi-agent.md) and [egress.md](egress.md#sandbox-egress).
 
@@ -354,20 +356,21 @@ unique to one row. Which keys are storable, and the grant window:
 ```bash
 wirken credentials list
 wirken credentials add <NAME> [--channel C] [--stdin | --value-file FILE] [--host HOST]...
-wirken credentials authorize chatgpt [--name NAME] [--port N] [--no-browser]
 wirken credentials rotate <NAME> [--stdin | --value-file FILE]
 wirken credentials show <NAME>
 wirken credentials remove <NAME>
 wirken credentials rescope <NAME> [--scope ID]... | [--no-scopes] | [--all-scopes]
+wirken credentials authorize [ENTRY] [--port P] [--no-browser]   # plan sign-in, ENTRY defaults to openai-plan
+wirken credentials sign-out [ENTRY]
+wirken credentials export-plan [ENTRY] --out FILE
+wirken credentials import-plan [ENTRY] --from FILE
 ```
 
-`authorize chatgpt` runs Sign in with ChatGPT and keeps the grant under
-`chatgpt-plan` (or `--name`); it refuses to store a grant that does not
-allow plan usage. `--port` fixes the loopback callback port so an SSH port
-forward can carry the browser's redirect to a headless host; `--no-browser`
-prints the URL instead of opening one. `remove` on such a grant revokes it
-at the provider first; `rescope` on one signs in again. See
-[credentials.md](credentials.md#chatgpt-plan-sign-in-with-chatgpt).
+`authorize` signs in to the `openai` provider's plan mode in the browser and
+stores the sign-in; `sign-out` clears its tokens and revokes the session, keeping the
+registration; `export-plan` and `import-plan` move it to a host without a
+browser. `remove` on a plan entry revokes it first, and `rescope` on one signs
+in again. See [credentials.md](credentials.md#plan-sign-in-openai).
 
 Every verb takes the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` when set
 and prompts only when it is not, so `add` and `rotate` complete with no

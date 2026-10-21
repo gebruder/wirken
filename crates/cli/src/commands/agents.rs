@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use dialoguer::Input;
 
-use wirken_gateway::agent_config::{AgentConfig, AgentConfigStore, ChannelEgress, SubagentCeiling};
+use wirken_gateway::agent_config::{
+    AgentConfig, AgentConfigStore, ChannelEgress, ProviderAuth, SubagentCeiling,
+};
 use wirken_gateway::permissions::PermissionTier;
 use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
@@ -19,7 +21,9 @@ pub struct AddArgs {
     pub base_url: Option<String>,
     pub channels: Option<String>,
     pub api_key_env: Option<String>,
-    /// A stored grant the agent runs on instead of a typed key.
+    /// `key` or `plan`.
+    pub auth: Option<String>,
+    /// The plan sign-in entry, with `--auth plan`.
     pub credential: Option<String>,
 }
 
@@ -38,6 +42,7 @@ impl AddArgs {
             || self.model.is_some()
             || self.base_url.is_some()
             || self.api_key_env.is_some()
+            || self.auth.is_some()
             || self.credential.is_some()
             || self.channels.is_some()
             || self.name.is_some()
@@ -73,14 +78,19 @@ pub async fn add(args: AddArgs) -> Result<()> {
         model,
         base_url,
         key,
+        auth,
+        credential,
         ..
     } = choice;
 
     // The agent keeps its own copy of the key, stored or typed, under
     // its own name: `agents set --api-key` replaces the key under that
     // name, which must not reach the key another agent or the default
-    // one runs on.
-    let api_key_credential = if let Some(key) = key {
+    // one runs on. A plan agent names the sign-in entry instead, which
+    // every agent on that account shares.
+    let api_key_credential = if auth.is_plan() {
+        credential.unwrap_or_else(|| super::plan_sign_in::DEFAULT_ENTRY.to_string())
+    } else if let Some(key) = key {
         let cred_name = format!("{id}-{provider}-key");
         let pp = super::cached_vault_passphrase()?;
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
@@ -95,10 +105,6 @@ pub async fn add(args: AddArgs) -> Result<()> {
 
         println!("  API key encrypted as '{cred_name}'.");
         cred_name
-    } else if provider == super::chatgpt_plan::PROVIDER {
-        // The sign-in the picker ran stored the grant; the agent runs
-        // on that entry.
-        super::chatgpt_plan::DEFAULT_CREDENTIAL.to_string()
     } else {
         String::new()
     };
@@ -148,6 +154,7 @@ pub async fn add(args: AddArgs) -> Result<()> {
         // explicitly per channel; a newly registered agent starts
         // with none.
         channel_egress: Default::default(),
+        auth,
     };
 
     agent_store
@@ -202,6 +209,23 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
         );
     }
 
+    let auth =
+        ProviderAuth::parse(args.auth.as_deref()).map_err(|e| anyhow::anyhow!("--auth: {e}"))?;
+    if auth.is_plan() {
+        let rest = AddArgs {
+            name: args.name,
+            base_url: args.base_url,
+            channels: args.channels,
+            api_key_env: args.api_key_env,
+            credential: args.credential,
+            ..Default::default()
+        };
+        return add_plan_noninteractive(&cfg, id, provider, model, rest).await;
+    }
+    if args.credential.is_some() {
+        anyhow::bail!("--credential names a plan sign-in and applies only with --auth plan");
+    }
+
     let base_url = match args.base_url {
         Some(url) => url,
         None => super::provider_pick::default_base_url(&provider)
@@ -217,20 +241,9 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
 
     // The key arrives through the environment, never as an argument:
     // arguments are visible in the process table to every other user
-    // on the machine. A plan provider has no key: `--credential` names
-    // the grant a sign-in stored, or the default entry stands in.
-    let api_key_credential = match (args.api_key_env, args.credential) {
-        (Some(_), _) if provider == super::chatgpt_plan::PROVIDER => {
-            anyhow::bail!(
-                "--api-key-env does not apply to provider '{provider}': its grant comes from \
-                 `wirken credentials authorize chatgpt`; pass --credential to name the entry"
-            );
-        }
-        (None, Some(name)) => name,
-        (None, None) if provider == super::chatgpt_plan::PROVIDER => {
-            super::chatgpt_plan::DEFAULT_CREDENTIAL.to_string()
-        }
-        (Some(var), _) => {
+    // on the machine.
+    let api_key_credential = match args.api_key_env {
+        Some(var) => {
             let api_key = std::env::var(&var).map_err(|_| {
                 anyhow::anyhow!("--api-key-env named '{var}', which is not set in this environment")
             })?;
@@ -255,7 +268,7 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
             println!("  API key encrypted as '{cred_name}'.");
             cred_name
         }
-        (None, None) => String::new(),
+        None => String::new(),
     };
 
     let channels: Vec<String> = args
@@ -286,6 +299,7 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
         // Same posture as the interactive path: no sandbox egress for
         // any channel until an operator grants it per channel.
         channel_egress: Default::default(),
+        auth,
     };
 
     agent_store
@@ -303,6 +317,79 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
         println!("  Channels: {}", channels.join(", "));
     }
 
+    Ok(())
+}
+
+/// `agents add --auth plan` without prompts. The sign-in must already
+/// be stored (`wirken credentials authorize`); its name is checked
+/// without the vault passphrase. A plan agent takes no key and no base
+/// URL.
+async fn add_plan_noninteractive(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    id: String,
+    provider: String,
+    model: String,
+    args: AddArgs,
+) -> Result<()> {
+    if provider != wirken_agent::plan_auth::PROVIDER {
+        anyhow::bail!("--auth plan applies to --provider openai only");
+    }
+    if args.api_key_env.is_some() {
+        anyhow::bail!(
+            "--api-key-env does not apply with --auth plan: the agent runs on the sign-in named \
+             by --credential"
+        );
+    }
+    if args.base_url.is_some() {
+        anyhow::bail!("--base-url does not apply with --auth plan: the endpoint is fixed");
+    }
+    let entry = args
+        .credential
+        .unwrap_or_else(|| super::plan_sign_in::DEFAULT_ENTRY.to_string());
+    let names = CredentialStore::names(&cfg.vault_db_path()).unwrap_or_default();
+    if !names.iter().any(|n| n == &entry) {
+        anyhow::bail!(
+            "no sign-in is stored as '{entry}'. Run `wirken credentials authorize {entry}` first."
+        );
+    }
+    let name = args.name.unwrap_or_else(|| id.clone());
+    let channels: Vec<String> = args
+        .channels
+        .map(|c| {
+            c.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let agent_store = AgentConfigStore::open(&cfg.agent_config_db_path())
+        .context("Failed to open agent config store")?;
+    agent_store
+        .register(&AgentConfig {
+            id: id.clone(),
+            name: name.clone(),
+            provider,
+            model: model.clone(),
+            base_url: wirken_agent::plan_auth::PLAN_BASE_URL.to_string(),
+            api_key_credential: entry.clone(),
+            channels: channels.clone(),
+            allowed_subagents: Default::default(),
+            tools_enabled: None,
+            preset: None,
+            channel_egress: Default::default(),
+            auth: ProviderAuth::Plan,
+        })
+        .context(format!("Failed to register agent '{id}'"))?;
+    std::fs::create_dir_all(cfg.agent_workspace(&id))?;
+    std::fs::create_dir_all(cfg.agent_skills_dir(&id))?;
+    println!("  Agent '{name}' ({id}) registered.");
+    println!("  Model: {model} (plan sign-in '{entry}')");
+    if channels.is_empty() {
+        println!("  Channels: none (bind with `wirken agents bind {id} <channel>`)");
+    } else {
+        println!("  Channels: {}", channels.join(", "));
+    }
     Ok(())
 }
 
@@ -343,7 +430,12 @@ pub async fn list() -> Result<()> {
             "  {:12}  {:16}  {:20}  {}",
             agent.id,
             agent.name,
-            format!("{}/{}", agent.provider, agent.model),
+            format!(
+                "{}/{}{}",
+                agent.provider,
+                agent.model,
+                if agent.auth.is_plan() { " (plan)" } else { "" }
+            ),
             channels,
         );
         // Only channels with a granted egress policy are listed. A
@@ -497,6 +589,23 @@ pub async fn set(
 
     let mut changed = false;
 
+    // A plan agent has no key to replace and a fixed endpoint; a typed
+    // key would overwrite its sign-in with a value it cannot use.
+    if existing.auth.is_plan() {
+        let entry = super::plan_sign_in::agent_plan_entry(&existing);
+        if replace_api_key {
+            anyhow::bail!(
+                "agent '{id}' runs on the plan sign-in '{entry}', which has no API key. To sign \
+                 in again, run `wirken credentials authorize {entry}`."
+            );
+        }
+        if base_url.is_some() {
+            anyhow::bail!(
+                "agent '{id}' runs in plan mode, whose endpoint is fixed; --base-url does not apply"
+            );
+        }
+    }
+
     // Model, base url and key live on the agent row and had no route
     // to them: an operator whose provider retired a model, or who
     // rotated a key, had to remove the agent and add it back, losing
@@ -509,14 +618,20 @@ pub async fn set(
         if let Some(m) = model {
             // `--model list` asks the provider rather than taking the
             // literal word as an id.
-            updated.model = if m == "list" {
-                // A plan agent lists with its grant's current bearer,
-                // not the stored entry, which is an OAuth record.
-                let key = if existing.provider == super::chatgpt_plan::PROVIDER {
-                    resolve_plan_bearer(&cfg, plan_credential_name(&existing)).await
-                } else {
-                    resolve_api_key(&cfg, &existing.api_key_credential)
-                };
+            updated.model = if m == "list" && existing.auth.is_plan() {
+                // The signed-in account's catalogue, read with the
+                // entry's current bearer through a token source, so a
+                // refresh here is serialized with the gateway's.
+                let entry = super::plan_sign_in::agent_plan_entry(&existing);
+                let models = super::plan_sign_in::models(&cfg, &entry)
+                    .await
+                    .unwrap_or_else(|e| {
+                        println!("  Models could not be listed: {e}");
+                        Vec::new()
+                    });
+                super::plan_sign_in::pick_plan_model(models)?
+            } else if m == "list" {
+                let key = resolve_api_key(&cfg, &existing.api_key_credential);
                 let models = super::provider_pick::list_models(
                     &updated.provider,
                     &updated.base_url,
@@ -539,16 +654,6 @@ pub async fn set(
     }
 
     if replace_api_key {
-        // A typed key would overwrite the plan's OAuth grant with a
-        // value the gateway cannot use; signing in again is the way
-        // to replace that grant.
-        if existing.provider == super::chatgpt_plan::PROVIDER {
-            anyhow::bail!(
-                "agent '{id}' runs on a ChatGPT plan, which has no API key. To sign in again, \
-                 run `wirken credentials rescope {}`.",
-                plan_credential_name(&existing)
-            );
-        }
         let api_key = super::read_secret("  New API key: ")?;
         // Reuse the credential name already on the row when there is
         // one, so the vault entry the gateway resolves is the entry
@@ -622,37 +727,6 @@ pub async fn set(
 /// credential all yield `None`, and the listing then comes back empty
 /// and the operator types the id. Not being able to list is not a
 /// reason to refuse the command.
-/// The vault entry a plan agent's grant lives under: the row's
-/// credential, or the default entry when the row names none.
-fn plan_credential_name(agent: &AgentConfig) -> &str {
-    if agent.api_key_credential.is_empty() {
-        super::chatgpt_plan::DEFAULT_CREDENTIAL
-    } else {
-        agent.api_key_credential.as_str()
-    }
-}
-
-/// The current bearer of a ChatGPT plan grant, refreshed when it is
-/// about to expire, for the same listing convenience as
-/// [`resolve_api_key`]: `None` when the vault cannot be opened without
-/// a prompt or the grant is unusable, and the operator types the id.
-async fn resolve_plan_bearer(
-    cfg: &wirken_gateway::config::GatewayConfig,
-    credential: &str,
-) -> Option<String> {
-    use wirken_agent::llm::ProviderTokenSource;
-    let pp = super::vault_passphrase_source().unwrap_or_default();
-    let keychain = probe_keychain(&cfg.data_dir, move || pp);
-    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok()?;
-    let source = super::chatgpt_plan::VaultOAuthTokenSource::open(
-        std::sync::Arc::new(std::sync::Mutex::new(store)),
-        credential,
-        std::sync::Arc::new(wirken_gateway::leak::LeakMatcher::new()),
-    )
-    .ok()?;
-    source.bearer().await.ok()
-}
-
 fn resolve_api_key(
     cfg: &wirken_gateway::config::GatewayConfig,
     credential: &str,
@@ -858,6 +932,10 @@ mod tests {
             },
             AddArgs {
                 api_key_env: Some("VAR".into()),
+                ..Default::default()
+            },
+            AddArgs {
+                auth: Some("plan".into()),
                 ..Default::default()
             },
         ] {

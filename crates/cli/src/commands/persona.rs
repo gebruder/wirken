@@ -84,6 +84,7 @@ pub async fn create(
         tools_enabled: None,
         preset: preset.map(String::from),
         channel_egress: Default::default(),
+        auth: Default::default(),
     };
 
     store
@@ -485,6 +486,7 @@ mod tests {
             tools_enabled: None,
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         }
     }
 

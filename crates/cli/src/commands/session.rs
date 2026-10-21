@@ -483,7 +483,7 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             channel_egress: Default::default(),
             extra_interceptors: vec![],
             zirkel_db_path: None,
-            token_source: None,
+            plan_token_source: None,
         },
     );
     let factory = AgentFactory::for_verify(configs, session_log.clone());

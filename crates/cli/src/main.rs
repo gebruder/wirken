@@ -578,9 +578,13 @@ enum AgentCommands {
         /// prompting. The value never appears on the command line.
         #[arg(long, conflicts_with = "credential")]
         api_key_env: Option<String>,
-        /// Vault entry the agent runs on, for a provider whose grant a
-        /// sign-in stored rather than a typed key: `chatgpt`, default
-        /// `chatgpt-plan`
+        /// How the agent authenticates: `key` (default) or `plan`, a
+        /// plan sign-in (`wirken credentials authorize`) in place of an
+        /// API key, with no --base-url.
+        #[arg(long)]
+        auth: Option<String>,
+        /// With --auth plan: the vault entry holding the sign-in
+        /// (default openai-plan)
         #[arg(long)]
         credential: Option<String>,
     },
@@ -1021,24 +1025,6 @@ enum CredentialCommands {
         #[arg(long)]
         identifier: bool,
     },
-    /// Sign in to a provider that grants plan usage over OAuth and keep
-    /// the grant in the vault. `chatgpt` is that provider: Sign in with
-    /// ChatGPT, under OpenAI's program for open-source apps, so agents
-    /// run on your ChatGPT plan with no API key.
-    Authorize {
-        /// The provider: `chatgpt`
-        provider: String,
-        /// Vault entry to keep the grant under (default: chatgpt-plan)
-        #[arg(long)]
-        name: Option<String>,
-        /// Fixed loopback port for the sign-in callback, so an SSH port
-        /// forward can carry the browser's redirect to a headless host
-        #[arg(long)]
-        port: Option<u16>,
-        /// Print the sign-in URL instead of opening a browser
-        #[arg(long)]
-        no_browser: bool,
-    },
     /// Rotate a credential's value. Prompts for the new value on
     /// stderr unless --stdin or --value-file supplies it.
     Rotate {
@@ -1053,8 +1039,52 @@ enum CredentialCommands {
         #[arg(long, conflicts_with = "stdin")]
         value_file: Option<std::path::PathBuf>,
     },
+    /// Sign in to plan mode in the browser and
+    /// keep the sign-in in the vault. The first sign-in registers this
+    /// app with the provider; later ones reuse the registration.
+    Authorize {
+        /// Vault entry to keep the sign-in under
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// Loopback port for the sign-in callback (default: any free
+        /// port)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the sign-in URL instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Sign out of a plan sign-in: revoke the session at the provider,
+    /// clear the tokens, and keep the registration for the next
+    /// sign-in.
+    SignOut {
+        /// Vault entry holding the sign-in
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+    },
+    /// Write a plan sign-in to a new owner-only file for another host
+    /// (a headless or self-hosted machine) and clear its tokens here.
+    ExportPlan {
+        /// Vault entry holding the sign-in
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// File to create; it must not exist
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Store a plan sign-in exported on another host. This host keeps
+    /// its own host id.
+    ImportPlan {
+        /// Vault entry to store the sign-in under
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// The exported file
+        #[arg(long)]
+        from: std::path::PathBuf,
+    },
     /// Remove a credential by name. The encrypted row is deleted from
-    /// the vault. Errors if no credential with that name exists.
+    /// the vault. Errors if no credential with that name exists. A plan
+    /// sign-in's session is revoked at the provider first.
     Remove {
         /// Credential name
         name: String,
@@ -1471,13 +1501,16 @@ async fn main() -> Result<()> {
                 .await
             }
             CredentialCommands::Authorize {
-                provider,
-                name,
+                entry,
                 port,
                 no_browser,
-            } => {
-                commands::chatgpt_plan::authorize(&provider, name.as_deref(), port, !no_browser)
-                    .await
+            } => commands::plan_sign_in::authorize(&entry, port, !no_browser).await,
+            CredentialCommands::SignOut { entry } => commands::plan_sign_in::sign_out(&entry).await,
+            CredentialCommands::ExportPlan { entry, out } => {
+                commands::plan_sign_in::export(&entry, &out).await
+            }
+            CredentialCommands::ImportPlan { entry, from } => {
+                commands::plan_sign_in::import(&entry, &from).await
             }
             CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
             CredentialCommands::Show { name } => commands::credential::show(&name).await,
@@ -1641,6 +1674,7 @@ async fn main() -> Result<()> {
                 base_url,
                 channels,
                 api_key_env,
+                auth,
                 credential,
             } => {
                 commands::agents::add(commands::agents::AddArgs {
@@ -1651,6 +1685,7 @@ async fn main() -> Result<()> {
                     base_url,
                     channels,
                     api_key_env,
+                    auth,
                     credential,
                 })
                 .await
@@ -1825,83 +1860,6 @@ mod tests {
         Cli::try_parse_from(args).expect("clap parse failed")
     }
 
-    /// `credentials authorize chatgpt` takes a name, a fixed port and
-    /// the no-browser switch; `agents add --credential` names a stored
-    /// grant and excludes `--api-key-env`.
-    #[test]
-    fn credentials_authorize_and_agents_add_credential_parse() {
-        let cli = parse(&[
-            "wirken",
-            "credentials",
-            "authorize",
-            "chatgpt",
-            "--name",
-            "plan",
-            "--port",
-            "1455",
-            "--no-browser",
-        ]);
-        match cli.command {
-            Commands::Credentials(CredentialCommands::Authorize {
-                provider,
-                name,
-                port,
-                no_browser,
-            }) => {
-                assert_eq!(provider, "chatgpt");
-                assert_eq!(name.as_deref(), Some("plan"));
-                assert_eq!(port, Some(1455));
-                assert!(no_browser);
-            }
-            _ => panic!("parsed into another command"),
-        }
-
-        let cli = parse(&[
-            "wirken",
-            "agents",
-            "add",
-            "--id",
-            "plan",
-            "--provider",
-            "chatgpt",
-            "--model",
-            "gpt-test",
-            "--credential",
-            "chatgpt-plan",
-        ]);
-        match cli.command {
-            Commands::Agents(AgentCommands::Add {
-                credential,
-                api_key_env,
-                ..
-            }) => {
-                assert_eq!(credential.as_deref(), Some("chatgpt-plan"));
-                assert_eq!(api_key_env, None);
-            }
-            _ => panic!("parsed into another command"),
-        }
-
-        assert!(
-            Cli::try_parse_from([
-                "wirken",
-                "agents",
-                "add",
-                "--id",
-                "x",
-                "--provider",
-                "chatgpt",
-                "--model",
-                "m",
-                "--credential",
-                "c",
-                "--api-key-env",
-                "K",
-            ])
-            .is_err(),
-            "--credential and --api-key-env exclude each other"
-        );
-    }
-
     /// Bare `wirken` still prints help and fails: the chat is a
     /// subcommand, not the default.
     #[test]
@@ -1927,6 +1885,85 @@ mod tests {
             Commands::Chat { agent } => assert_eq!(agent.as_deref(), Some("alice")),
             _ => panic!("expected Chat"),
         }
+    }
+
+    /// `credentials authorize` defaults its entry and takes a port and
+    /// --no-browser; `agents add --auth plan --credential` parses, and
+    /// --credential excludes --api-key-env.
+    #[test]
+    fn plan_sign_in_commands_parse() {
+        let cli = parse(&["wirken", "credentials", "authorize"]);
+        match cli.command {
+            Commands::Credentials(CredentialCommands::Authorize {
+                entry,
+                port,
+                no_browser,
+            }) => {
+                assert_eq!(entry, "openai-plan");
+                assert_eq!(port, None);
+                assert!(!no_browser);
+            }
+            _ => panic!("parsed into another command"),
+        }
+        let cli = parse(&[
+            "wirken",
+            "credentials",
+            "authorize",
+            "work",
+            "--port",
+            "1455",
+            "--no-browser",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Commands::Credentials(CredentialCommands::Authorize { ref entry, port: Some(1455), no_browser: true }) if entry == "work"
+        ));
+        assert!(matches!(
+            parse(&["wirken", "credentials", "sign-out"]).command,
+            Commands::Credentials(CredentialCommands::SignOut { ref entry }) if entry == "openai-plan"
+        ));
+        let cli = parse(&[
+            "wirken",
+            "agents",
+            "add",
+            "--id",
+            "p",
+            "--provider",
+            "openai",
+            "--model",
+            "m",
+            "--auth",
+            "plan",
+            "--credential",
+            "openai-plan",
+        ]);
+        match cli.command {
+            Commands::Agents(AgentCommands::Add {
+                auth, credential, ..
+            }) => {
+                assert_eq!(auth.as_deref(), Some("plan"));
+                assert_eq!(credential.as_deref(), Some("openai-plan"));
+            }
+            _ => panic!("parsed into another command"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "wirken",
+                "agents",
+                "add",
+                "--id",
+                "p",
+                "--provider",
+                "openai",
+                "--model",
+                "m",
+                "--credential",
+                "c",
+                "--api-key-env",
+                "K",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

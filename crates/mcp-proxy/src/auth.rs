@@ -275,7 +275,7 @@ mod handed_tests {
             expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
             scope: String::new(),
             provider: "linear".into(),
-            client_id: None,
+            ..Default::default()
         };
         let credentials = handed(&[("linear-oauth", &serde_json::to_string(&cred).unwrap())]);
         let mut auth = OAuth2Auth::new(

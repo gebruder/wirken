@@ -3,7 +3,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::crypto::{decrypt, encrypt, generate_key};
+use crate::crypto::{decrypt_aad, encrypt, encrypt_aad, generate_key};
 use crate::error::VaultError;
 use crate::keychain::Keychain;
 use crate::kind::{
@@ -53,6 +53,22 @@ impl CredentialMetadata {
             .map(|due| Utc::now() > due)
             .unwrap_or(false)
     }
+}
+
+/// How long a statement waits on another connection's write lock
+/// before failing. SQLite's own default as rusqlite sets it on open;
+/// [`CredentialStore::update_exclusive`] widens it for one call and
+/// puts this back.
+const DEFAULT_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What [`CredentialStore::update_exclusive`] did.
+pub struct ExclusiveUpdate<T> {
+    /// What `decide` returned beside its replacement.
+    pub value: T,
+    /// `Ok(true)` when a replacement was written, `Ok(false)` when
+    /// `decide` returned none, and the error when the write or its
+    /// commit failed, in which case the stored value is unchanged.
+    pub written: Result<bool, VaultError>,
 }
 
 /// SQLite-backed credential store with encrypted values.
@@ -238,7 +254,7 @@ impl CredentialStore {
         allowed_hosts: &[String],
         kind: CredentialKind,
     ) -> Result<(), VaultError> {
-        let encrypted = encrypt(name, secret, &self.device_key)?;
+        let encrypted = encrypt_aad(&row_aad(name, kind), secret, &self.device_key)?;
         let now = Utc::now().to_rfc3339();
         let hosts_json = if allowed_hosts.is_empty() {
             None
@@ -320,6 +336,12 @@ impl CredentialStore {
         if meta.is_expired() {
             return Err(VaultError::Expired(name.to_string()));
         }
+        // Every caller of `retrieve` uses what it gets as a key or a
+        // token. A plan sign-in is neither; its token source reads it
+        // through `peek`.
+        if meta.kind == CredentialKind::PlanSignIn {
+            return Err(VaultError::PlanSignIn(name.to_string()));
+        }
 
         // Update last_used_at
         let now = Utc::now().to_rfc3339();
@@ -328,7 +350,7 @@ impl CredentialStore {
             params![now, name],
         )?;
 
-        let secret = decrypt(name, &encrypted, &self.device_key)?;
+        let secret = decrypt_aad(&row_aad(name, meta.kind), &encrypted, &self.device_key)?;
         Ok((secret, meta))
     }
 
@@ -393,7 +415,7 @@ impl CredentialStore {
             return Err(VaultError::Expired(name.to_string()));
         }
 
-        let secret = decrypt(name, &encrypted, &self.device_key)?;
+        let secret = decrypt_aad(&row_aad(name, meta.kind), &encrypted, &self.device_key)?;
         Ok((secret, meta))
     }
 
@@ -497,7 +519,7 @@ impl CredentialStore {
             if kind == CredentialKind::Identifier {
                 continue;
             }
-            match decrypt(&name, &encrypted, &self.device_key) {
+            match decrypt_aad(&row_aad(&name, kind), &encrypted, &self.device_key) {
                 Ok(secret) => out.extend(matchable_secret(&name, secret.expose(), kind)),
                 Err(e) => tracing::warn!(
                     credential = %name,
@@ -520,10 +542,15 @@ impl CredentialStore {
         // Verify credential exists
         let mut stmt = self
             .conn
-            .prepare("SELECT channel FROM credentials WHERE name = ?1")?;
-        let _channel: String = stmt
+            .prepare("SELECT kind FROM credentials WHERE name = ?1")?;
+        let kind: Option<String> = stmt
             .query_row(params![name], |row| row.get(0))
             .map_err(|_| VaultError::NotFound(name.to_string()))?;
+        // A plan sign-in is replaced by signing in again, never by a
+        // typed value.
+        if CredentialKind::from_column(kind.as_deref()) == CredentialKind::PlanSignIn {
+            return Err(VaultError::PlanSignIn(name.to_string()));
+        }
 
         let encrypted = encrypt(name, new_secret, &self.device_key)?;
         let now = Utc::now().to_rfc3339();
@@ -544,6 +571,96 @@ impl CredentialStore {
         )?;
 
         Ok(())
+    }
+
+    /// Decide the replacement for `name` while holding the store's write
+    /// lock, so no other connection, in this process or another, can
+    /// change the entry between the read `decide` is given and the
+    /// write it asks for.
+    ///
+    /// The lock is SQLite's: an `IMMEDIATE` transaction, taken before
+    /// the entry is read and released after the write. A second caller
+    /// waits for it up to `wait`, then reads whatever the first one
+    /// wrote. That is what makes this a compare-and-swap: `decide` sees
+    /// the value as it is now, compares it with the one its caller read
+    /// earlier, and returns a replacement only when they still match.
+    /// Readers are not blocked (the database runs in WAL mode); other
+    /// writers are, for as long as `decide` takes.
+    ///
+    /// Only the value changes. Name, channel, dates, host binding and
+    /// kind stay as they were.
+    pub fn update_exclusive<T>(
+        &self,
+        name: &str,
+        wait: std::time::Duration,
+        decide: impl FnOnce(&VaultSecret) -> (Option<VaultSecret>, T),
+    ) -> Result<ExclusiveUpdate<T>, VaultError> {
+        self.conn.busy_timeout(wait)?;
+        let begun = self.conn.execute_batch("BEGIN IMMEDIATE");
+        self.conn.busy_timeout(DEFAULT_BUSY_TIMEOUT)?;
+        begun?;
+
+        let (current, aad) = match self.read_for_update(name) {
+            Ok(read) => read,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        };
+        let (replacement, value) = decide(&current);
+        let written = match replacement {
+            None => self
+                .conn
+                .execute_batch("ROLLBACK")
+                .map(|()| false)
+                .map_err(VaultError::from),
+            Some(new_secret) => {
+                let result =
+                    encrypt_aad(&aad, &new_secret, &self.device_key).and_then(|encrypted| {
+                        self.conn.execute(
+                            "UPDATE credentials SET encrypted_value = ?1 WHERE name = ?2",
+                            params![encrypted, name],
+                        )?;
+                        self.conn.execute_batch("COMMIT")?;
+                        Ok(true)
+                    });
+                if result.is_err() {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                }
+                result
+            }
+        };
+        Ok(ExclusiveUpdate { value, written })
+    }
+
+    /// The decrypted value of `name`, inside the transaction
+    /// [`Self::update_exclusive`] holds, with the associated data its
+    /// replacement is sealed under, so the row keeps its kind binding.
+    /// Same refusals as [`Self::peek`]: a missing or expired entry is an
+    /// error.
+    fn read_for_update(&self, name: &str) -> Result<(VaultSecret, Vec<u8>), VaultError> {
+        let (encrypted, expires_at, kind) = self
+            .conn
+            .query_row(
+                "SELECT encrypted_value, expires_at, kind FROM credentials WHERE name = ?1",
+                params![name],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .map_err(|_| VaultError::NotFound(name.to_string()))?;
+        if let Some(exp) = expires_at.as_deref().map(parse_datetime).transpose()?
+            && Utc::now() > exp
+        {
+            return Err(VaultError::Expired(name.to_string()));
+        }
+        let aad = row_aad(name, CredentialKind::from_column(kind.as_deref()));
+        let secret = decrypt_aad(&aad, &encrypted, &self.device_key)?;
+        Ok((secret, aad))
     }
 
     /// Write an encrypted credential to a file descriptor for adapter process spawning.
@@ -568,6 +685,20 @@ impl CredentialStore {
     // on (`export_encrypted` above, returning bytes) stays. If an
     // fd-write path is needed later, restore the function with the
     // safety contract documented at each caller.
+}
+
+/// The AEAD associated data a row is sealed under: its name, as every
+/// row has always been, or for a plan sign-in its name followed by a
+/// NUL and the kind. A build that predates the kind decrypts every row
+/// under its name alone, so it fails on a plan sign-in instead of
+/// reading it as a key. Every other row is sealed exactly as before.
+pub(crate) fn row_aad(name: &str, kind: CredentialKind) -> Vec<u8> {
+    let mut aad = name.as_bytes().to_vec();
+    if kind == CredentialKind::PlanSignIn {
+        aad.push(0);
+        aad.extend_from_slice(kind.as_str().as_bytes());
+    }
+    aad
 }
 
 fn parse_datetime(s: &str) -> Result<DateTime<Utc>, VaultError> {

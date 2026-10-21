@@ -36,10 +36,11 @@ wirken setup
 Six steps, about a minute:
 
 1. **Provider.** Ollama, NIM, Anthropic, OpenAI, Gemini, Bedrock, Tinfoil,
-   Privatemode, Infomaniak, Hetzner, a custom OpenAI-compatible endpoint, or
-   your ChatGPT plan through Sign in with ChatGPT (no API key; see
-   [credentials.md](credentials.md#chatgpt-plan-sign-in-with-chatgpt)).
-   Your API key is encrypted immediately.
+   Privatemode, Infomaniak, Hetzner, or a custom OpenAI-compatible endpoint.
+   Your API key is encrypted immediately. OpenAI can also run on a ChatGPT
+   plan you have instead of a key: "Continue with ChatGPT" signs in through
+   the browser and stores the sign-in in the vault
+   ([credentials.md](credentials.md#plan-sign-in-openai)).
 2. **Channels.** Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat,
    iMessage, WhatsApp. Each token is encrypted separately into the vault.
 3. **Credentials recap.** What is now in the vault.

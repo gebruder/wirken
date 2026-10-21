@@ -63,7 +63,14 @@ pub async fn list() -> Result<()> {
             match load_oauth_public(&store, &cred.name) {
                 Ok(public) => {
                     let n = public.scopes.len();
-                    format!("{n} scope{}", if n == 1 { "" } else { "s" })
+                    let scopes = format!("{n} scope{}", if n == 1 { "" } else { "s" });
+                    // A sign-in that validated an identity names its
+                    // account, and says so when it is signed out.
+                    match (&public.account, public.signed_in) {
+                        (Some(account), true) => format!("{scopes}, {account}"),
+                        (Some(account), false) => format!("{scopes}, {account} (signed out)"),
+                        (None, _) => scopes,
+                    }
                 }
                 Err(_) => "?".to_string(),
             }
@@ -140,6 +147,17 @@ pub async fn show(name: &str) -> Result<()> {
         let public = load_oauth_public(&store, name)
             .map_err(|e| anyhow!("read OAuth credential '{name}': {e}"))?;
         println!("    provider:       {}", public.provider);
+        if let Some(account) = &public.account {
+            println!("    account:        {account}");
+            println!(
+                "    session:        {}",
+                if public.signed_in {
+                    "signed in"
+                } else {
+                    "signed out (registration kept)"
+                }
+            );
+        }
         if public.scopes.is_empty() {
             println!("    granted scopes: (none)");
         } else {
@@ -198,17 +216,18 @@ pub async fn rescope(
     let public = load_oauth_public(&store, name)
         .map_err(|e| anyhow!("read OAuth credential '{name}': {e}"))?;
 
-    // A ChatGPT grant has one scope set and no picker: rescoping it
-    // is signing in again, which is also the way back from a refresh
-    // token the provider no longer accepts.
-    if public.provider == super::chatgpt_plan::PROVIDER {
+    // A plan sign-in has one fixed scope set and no picker: rescoping
+    // it is signing in again.
+    if public.provider == wirken_agent::plan_auth::PROVIDER && public.account.is_some() {
         if !scope.is_empty() || no_scopes || all_scopes {
             anyhow::bail!(
-                "credential '{name}' is a ChatGPT sign-in; its scope set is fixed, so \
-                 --scope, --no-scopes and --all-scopes do not apply"
+                "credential '{name}' is a plan sign-in; its scopes are fixed, so --scope, \
+                 --no-scopes and --all-scopes do not apply. Run `wirken credentials authorize \
+                 {name}`."
             );
         }
-        super::chatgpt_plan::sign_in(&cfg, &store, name, None, true).await?;
+        drop(store);
+        super::plan_sign_in::sign_in(&cfg, name, None, true).await?;
         return Ok(());
     }
 
@@ -468,9 +487,9 @@ pub async fn remove(name: &str) -> Result<()> {
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
-    // A ChatGPT grant is revoked at the provider first, best effort;
-    // the entry goes whatever the provider answered.
-    super::chatgpt_plan::revoke_before_remove(&store, name).await;
+    // A plan sign-in's session is revoked at the provider before the
+    // entry goes, and the result reported; nothing else is affected.
+    let store = super::plan_sign_in::revoke_before_remove(store, name).await?;
 
     store
         .delete(name)

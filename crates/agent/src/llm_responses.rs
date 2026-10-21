@@ -1,21 +1,24 @@
-//! The OpenAI Responses API, as the `chatgpt` provider speaks it.
+//! The Responses API, as an agent in plan mode speaks it.
 //!
-//! A ChatGPT plan token (Sign in with ChatGPT, see
-//! `wirken_mcp_proxy::oauth`) is accepted on `POST /v1/responses` and
-//! nowhere else, under rules the route enforces
-//! (<https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations>):
-//! every request streams, stores nothing, carries its history as an
-//! `input` array, puts the system prompt in `instructions` (a system
-//! item is rejected), and may not set `temperature`, `max_output_tokens`
-//! or a handful of other fields. Function tools are allowed, which is
-//! all the agent's tool loop needs.
+//! A plan token is accepted on `POST /v1/responses` under rules the
+//! route enforces: every request streams and stores nothing, history
+//! travels as the `input` array, the system prompt goes in
+//! `instructions` (a system item is refused), and a list of fields the
+//! route does not take is left out entirely. Function tools are grouped
+//! in one namespace. The route is pinned with the rest of the plan
+//! endpoints ([`crate::plan_auth::API_BASE`]); the agent's `base_url`
+//! does not reach it.
 //!
 //! One path serves both of the client's entry points: `complete_stream`
-//! forwards text deltas as they arrive, and `complete` runs the same
-//! stream into a dropped channel and returns the assembled response, so
-//! the adapters, cron and `wirken ask` get the non-streaming shape they
-//! expect. A request is a success only once `response.completed` has
-//! been seen; a stream that ends before it is an error, not a reply.
+//! forwards text deltas as they arrive, and `complete` reads the same
+//! stream to its end, so adapters, cron and `wirken ask` get the whole
+//! reply. A request succeeds only on `response.completed`; a stream
+//! that stops before it is an error, never a partial reply.
+//!
+//! Errors keep the HTTP status, the error code and the provider's
+//! `x-request-id`, in [`PlanRouteError`] and so in the failed call's
+//! audit row. A usage limit is never retried; a 503 is retried a
+//! bounded number of times. Only this path reads a 429's body.
 
 use futures_util::StreamExt;
 
@@ -25,30 +28,223 @@ use crate::conversation::{
 use crate::error::AgentError;
 use crate::llm::{LlmClient, LlmConfig, LlmResponse, Usage};
 use crate::llm_stream::{StreamEvent, sse_field};
+use crate::plan_auth::{PlanTokenSource, USAGE_URL};
+use crate::recovery::{MAX_RATE_LIMIT_RETRIES, RetryDecision, classify_429};
 use crate::tool::ToolDef;
 
-/// The provider name the client dispatches on.
-pub const PROVIDER: &str = "chatgpt";
+/// The namespace every function tool is grouped under.
+pub const TOOL_NAMESPACE: &str = "agent";
+/// The namespace's description, which the route requires and shows the
+/// model.
+pub const TOOL_NAMESPACE_DESCRIPTION: &str = "Tools this agent can call.";
 
-/// The error code the route answers once the plan, or the weekly cap
-/// the user set for this app, is used up. A request that got it must
-/// not be retried: the limit resets on the user's schedule, not ours,
-/// and every retry spends attention the user capped on purpose.
-pub const USAGE_LIMIT_CODE: &str = "subscription_sharing_usage_limit_exceeded";
+/// The waits between attempts after a 503 (usage availability or
+/// account information temporarily unavailable, or the route itself).
+pub const UNAVAILABLE_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+];
 
-/// Where the user manages the app's share of their plan.
-pub const MANAGE_USAGE: &str = "chatgpt.com/settings/usage";
-
-/// Same cap as the chat-completions stream: a response that grows past
-/// it without an event boundary is a runaway, not a reply.
+/// Same cap as the chat-completions stream: an event that grows past it
+/// without a boundary is a runaway, not a reply.
 const MAX_SSE_BUFFER_BYTES: usize = 1024 * 1024;
 
-/// The JSON body of one request. The conversation maps onto the
-/// route's `input` items; the first system message is the
-/// `instructions`; a compaction summary is a developer message, since
-/// the route rejects system items and developer carries the same
-/// precedence; nothing the route refuses is sent.
-pub(crate) fn build_responses_request_body(
+/// What the provider said about a failed plan request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanFailure {
+    /// The HTTP status. `None` for a failure inside a stream that
+    /// opened with 200.
+    pub status: Option<u16>,
+    /// The error code, when the body or event carried one.
+    pub code: Option<String>,
+    /// The request field the error names.
+    pub param: Option<String>,
+    /// The provider's `x-request-id`.
+    pub request_id: Option<String>,
+    /// The provider's message or `detail`, as diagnostic text.
+    pub message: Option<String>,
+}
+
+impl std::fmt::Display for PlanFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(status) = self.status {
+            parts.push(format!("HTTP {status}"));
+        }
+        if let Some(code) = &self.code {
+            parts.push(format!("code {code}"));
+        }
+        if let Some(param) = &self.param {
+            parts.push(format!("param {param}"));
+        }
+        if let Some(id) = &self.request_id {
+            parts.push(format!("request id {id}"));
+        }
+        write!(f, "[{}]", parts.join(", "))?;
+        if let Some(message) = &self.message {
+            let short: String = message.chars().take(300).collect();
+            write!(f, " {short}")?;
+        }
+        Ok(())
+    }
+}
+
+/// A failed request on the plan route, one variant per recovery the
+/// provider documents.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PlanRouteError {
+    /// `subscription_sharing_usage_limit_exceeded`. Never retried.
+    #[error(
+        "Usage limit reached. Review your plan or this app's limit in ChatGPT settings. \
+         Manage usage: {USAGE_URL}. Not retried. {0}"
+    )]
+    UsageLimitExceeded(PlanFailure),
+    /// `subscription_sharing_usage_unavailable`.
+    #[error("plan usage could not be checked; the credential is kept, try again later. {0}")]
+    UsageUnavailable(PlanFailure),
+    /// `subscription_sharing_user_not_eligible`.
+    #[error(
+        "plan usage is not available for this account, workspace or policy; the request is not \
+         repeated. {0}"
+    )]
+    UserNotEligible(PlanFailure),
+    /// `subscription_sharing_unsupported_capability`.
+    #[error(
+        "the plan route does not support part of this request (see param); it is not retried \
+         unchanged. {0}"
+    )]
+    UnsupportedCapability(PlanFailure),
+    /// `subscription_sharing_route_not_supported`.
+    #[error("the plan route does not serve this method and endpoint. {0}")]
+    RouteNotSupported(PlanFailure),
+    /// `subscription_sharing_invalid_user`.
+    #[error(
+        "the provider could not validate the signed-in account; if it persists, sign in again \
+         with `wirken credentials authorize`. {0}"
+    )]
+    InvalidUser(PlanFailure),
+    /// `subscription_sharing_user_unavailable`.
+    #[error("account information is temporarily unavailable; the credential is kept. {0}")]
+    UserUnavailable(PlanFailure),
+    /// `chatpass_v2_scope_not_authorized`,
+    /// `chatpass_v2_invalid_authorization_context`.
+    #[error(
+        "the signed permission does not authorize this request; check the sign-in's client and \
+         grant. {0}"
+    )]
+    PermissionContext(PlanFailure),
+    /// A refusal before the request started, with a `detail` body and
+    /// no error code.
+    #[error("the request was not admitted to the plan route. {0}")]
+    Admission(PlanFailure),
+    /// `response.incomplete`.
+    #[error("the response did not complete ({reason}). {failure}")]
+    Incomplete {
+        reason: String,
+        failure: PlanFailure,
+    },
+    /// The stream ended without `response.completed`.
+    #[error("the stream ended before response.completed; the reply is not used. {0}")]
+    StreamCut(PlanFailure),
+    /// Anything else the route refused.
+    #[error("plan request failed. {0}")]
+    Failed(PlanFailure),
+}
+
+impl PlanRouteError {
+    /// The variant for `failure`'s error code.
+    pub fn classify(failure: PlanFailure) -> Self {
+        match failure.code.as_deref() {
+            Some("subscription_sharing_usage_limit_exceeded") => Self::UsageLimitExceeded(failure),
+            Some("subscription_sharing_usage_unavailable") => Self::UsageUnavailable(failure),
+            Some("subscription_sharing_user_not_eligible") => Self::UserNotEligible(failure),
+            Some("subscription_sharing_unsupported_capability") => {
+                Self::UnsupportedCapability(failure)
+            }
+            Some("subscription_sharing_route_not_supported") => Self::RouteNotSupported(failure),
+            Some("subscription_sharing_invalid_user") => Self::InvalidUser(failure),
+            Some("subscription_sharing_user_unavailable") => Self::UserUnavailable(failure),
+            Some(code) if code.starts_with("chatpass_v2_") => Self::PermissionContext(failure),
+            _ => Self::Failed(failure),
+        }
+    }
+
+    /// The provider's details, whichever variant.
+    pub fn failure(&self) -> &PlanFailure {
+        match self {
+            Self::UsageLimitExceeded(f)
+            | Self::UsageUnavailable(f)
+            | Self::UserNotEligible(f)
+            | Self::UnsupportedCapability(f)
+            | Self::RouteNotSupported(f)
+            | Self::InvalidUser(f)
+            | Self::UserUnavailable(f)
+            | Self::PermissionContext(f)
+            | Self::Admission(f)
+            | Self::StreamCut(f)
+            | Self::Failed(f) => f,
+            Self::Incomplete { failure, .. } => failure,
+        }
+    }
+
+    /// Whether this is the usage limit.
+    pub fn is_usage_limit(&self) -> bool {
+        matches!(self, Self::UsageLimitExceeded(_))
+    }
+}
+
+/// The error for a non-2xx answer: the API's error object when the body
+/// carries one, a `detail` body as a refusal before the request
+/// started, anything else as text.
+pub(crate) fn http_failure(status: u16, body: &str, request_id: Option<String>) -> PlanRouteError {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    let text = |v: Option<&serde_json::Value>| v.and_then(|s| s.as_str()).map(String::from);
+    if let Some(error) = parsed
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .filter(|e| e.is_object())
+    {
+        return PlanRouteError::classify(PlanFailure {
+            status: Some(status),
+            code: text(error.get("code")),
+            param: text(error.get("param")),
+            request_id,
+            message: text(error.get("message")),
+        });
+    }
+    if let Some(detail) = parsed.as_ref().and_then(|v| v.get("detail")) {
+        return PlanRouteError::Admission(PlanFailure {
+            status: Some(status),
+            request_id,
+            message: Some(
+                detail
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| detail.to_string()),
+            ),
+            ..Default::default()
+        });
+    }
+    PlanRouteError::Failed(PlanFailure {
+        status: Some(status),
+        request_id,
+        message: (!body.is_empty()).then(|| body.to_string()),
+        ..Default::default()
+    })
+}
+
+/// The JSON body of one request.
+///
+/// System messages become `instructions`, joined in order; nothing is
+/// sent with the system role. A compaction summary is a developer
+/// message, fenced as the other providers fence it. Assistant turns
+/// carry their text and then their function calls; tool results are
+/// `function_call_output` items. `store` is false and `stream` true on
+/// every request, and none of the fields the route refuses is set:
+/// no temperature, output cap, `top_p`, user, metadata or previous
+/// response id.
+pub fn build_plan_request_body(
     config: &LlmConfig,
     messages: &[Message],
     tools: &[ToolDef],
@@ -72,15 +268,17 @@ pub(crate) fn build_responses_request_body(
             Role::Assistant => {
                 if !msg.content.is_empty() {
                     input.push(serde_json::json!({
-                        "type": "message",
                         "role": "assistant",
-                        "content": [{ "type": "output_text", "text": msg.content }],
+                        "content": msg.content,
                     }));
                 }
+                // Every tool this client offers is in one namespace,
+                // and a replayed call names it beside the plain name.
                 for call in msg.tool_calls.iter().flatten() {
                     input.push(serde_json::json!({
                         "type": "function_call",
                         "call_id": call.id,
+                        "namespace": TOOL_NAMESPACE,
                         "name": call.name,
                         "arguments": call.arguments,
                     }));
@@ -104,7 +302,7 @@ pub(crate) fn build_responses_request_body(
         body["instructions"] = serde_json::Value::String(instructions.join("\n\n"));
     }
     if !tools.is_empty() {
-        let tools_json: Vec<serde_json::Value> = tools
+        let functions: Vec<serde_json::Value> = tools
             .iter()
             .map(|t| {
                 serde_json::json!({
@@ -116,61 +314,42 @@ pub(crate) fn build_responses_request_body(
                 })
             })
             .collect();
-        body["tools"] = serde_json::Value::Array(tools_json);
+        body["tools"] = serde_json::json!([{
+            "type": "namespace",
+            "name": TOOL_NAMESPACE,
+            "description": TOOL_NAMESPACE_DESCRIPTION,
+            "tools": functions,
+        }]);
     }
     body
 }
 
-/// The error for a body that names the plan usage limit, or `None`.
-/// Read by the retry loop so the limit short-circuits a 429 that
-/// would otherwise be retried as a rate limit.
-pub(crate) fn plan_usage_limit(body: &str) -> Option<AgentError> {
-    body.contains(USAGE_LIMIT_CODE).then(|| {
-        AgentError::Llm(format!(
-            "ChatGPT plan usage limit reached ({USAGE_LIMIT_CODE}); the request was not retried. \
-             The plan, or the weekly cap set for this app, resets on its own schedule: see \
-             {MANAGE_USAGE}."
-        ))
-    })
-}
-
-/// The error for a non-success status, naming the route's error code
-/// and message when the body carries them.
-fn http_error(status: reqwest::StatusCode, body: &str) -> AgentError {
-    if let Some(err) = plan_usage_limit(body) {
-        return err;
-    }
-    let (code, message) = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            let err = v.get("error")?;
-            Some((
-                err.get("code")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                err.get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ))
-        })
-        .unwrap_or_default();
-    if code.is_empty() && message.is_empty() {
-        AgentError::Llm(format!("HTTP {status}: {body}"))
-    } else {
-        AgentError::Llm(format!("HTTP {status} {code}: {message}"))
-    }
-}
-
-/// A function call the stream is still filling in, keyed by the
-/// output item that carries it.
+/// A function call the stream is still filling in, keyed by the output
+/// item (`fc_...`) that carries it. Argument deltas name the item, not
+/// the call id.
 #[derive(Default)]
 struct PartialCall {
     item_id: String,
     call_id: String,
     name: String,
     arguments: String,
+}
+
+/// The tool name a function call item names, without the namespace
+/// qualifier when the item carries one.
+fn call_name(item: &serde_json::Value) -> Option<String> {
+    let name = item.get("name").and_then(|n| n.as_str())?;
+    // The route sends the plain name and the namespace in its own
+    // field. A name qualified with the namespace is read as the plain
+    // one too.
+    let namespace = item
+        .get("namespace")
+        .and_then(|n| n.as_str())
+        .unwrap_or(TOOL_NAMESPACE);
+    let plain = name
+        .strip_prefix(namespace)
+        .and_then(|rest| rest.strip_prefix('.'));
+    Some(plain.unwrap_or(name).to_string())
 }
 
 /// Token usage off a completed response.
@@ -189,68 +368,165 @@ fn usage_of(response: &serde_json::Value) -> Option<Usage> {
     })
 }
 
-/// The `code: message` of an error object, for a failed response.
-fn error_text(error: Option<&serde_json::Value>) -> String {
-    let code = error
-        .and_then(|e| e.get("code"))
-        .and_then(|c| c.as_str())
-        .unwrap_or("unknown");
-    let message = error
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())
-        .unwrap_or("");
-    format!("{code}: {message}")
+/// The failure an error object inside the stream describes.
+fn stream_failure(error: Option<&serde_json::Value>, request_id: &Option<String>) -> PlanFailure {
+    let text = |key: &str| {
+        error
+            .and_then(|e| e.get(key))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+    PlanFailure {
+        status: None,
+        code: text("code"),
+        param: text("param"),
+        request_id: request_id.clone(),
+        message: text("message"),
+    }
+}
+
+/// The models the signed-in account may use, as `/models` lists them
+/// for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanModel {
+    /// What a request's `model` takes.
+    pub slug: String,
+    /// What a picker shows.
+    pub display_name: String,
+}
+
+/// The models a `/models` body lists for display: the `models` array's
+/// entries with `visibility` `"list"`, in the order the server gave.
+pub fn parse_plan_models(body: &serde_json::Value) -> Vec<PlanModel> {
+    body.get("models")
+        .and_then(|m| m.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter(|m| m.get("visibility").and_then(|v| v.as_str()) == Some("list"))
+                .filter_map(|m| {
+                    let slug = m.get("slug").and_then(|s| s.as_str())?.to_string();
+                    let display_name = m
+                        .get("display_name")
+                        .and_then(|d| d.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| slug.clone());
+                    Some(PlanModel { slug, display_name })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The signed-in account's model catalogue, read with `source`'s
+/// current bearer.
+pub async fn list_plan_models(source: &PlanTokenSource) -> Result<Vec<PlanModel>, String> {
+    let bearer = source.bearer().await.map_err(|e| e.to_string())?;
+    let http = crate::plan_auth::http_client(source.endpoints())?;
+    let response = http
+        .get(format!("{}/models", source.endpoints().api_base()))
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .map_err(|e| format!("models: {e}"))?;
+    let status = response.status();
+    let request_id = header(&response, "x-request-id");
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(http_failure(status.as_u16(), &body, request_id).to_string());
+    }
+    let body: serde_json::Value = response.json().await.map_err(|e| format!("models: {e}"))?;
+    Ok(parse_plan_models(&body))
+}
+
+fn header(response: &reqwest::Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
 }
 
 impl LlmClient {
-    /// One turn on the plan route, assembled from its stream. The
-    /// deltas go nowhere; `complete_stream` is the entry point that
-    /// forwards them.
-    pub(crate) async fn complete_responses(
+    /// One turn on the plan route. Text deltas go to `tx` when there is
+    /// one; the assembled response is returned once the stream has
+    /// completed.
+    pub(crate) async fn complete_plan(
         &self,
         messages: &[Message],
         tools: &[ToolDef],
-        api_key: Option<&str>,
+        tx: Option<&tokio::sync::mpsc::Sender<StreamEvent>>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        drop(rx);
-        self.stream_responses(messages, tools, api_key, &tx).await
+        let source = self.plan_source().ok_or_else(|| {
+            AgentError::Llm(
+                "this agent runs in plan mode and has no plan credential attached; nothing was \
+                 sent"
+                    .into(),
+            )
+        })?;
+        let url = format!("{}/responses", self.plan_endpoints().api_base());
+        let body = build_plan_request_body(self.config(), messages, tools);
+
+        let mut attempt: u32 = 1;
+        let mut unavailable: usize = 0;
+        loop {
+            let bearer = source.bearer().await?;
+            let response = self
+                .http_client()
+                .post(&url)
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .bearer_auth(&bearer)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| AgentError::Http(format!("plan request: {e}")))?;
+            let status = response.status();
+            let request_id = header(&response, "x-request-id");
+            if status.is_success() {
+                return self.read_plan_stream(response, request_id, tx).await;
+            }
+            let retry_after = header(&response, "retry-after");
+            let text = response.text().await.unwrap_or_default();
+            let error = http_failure(status.as_u16(), &text, request_id);
+            let delay = match status.as_u16() {
+                _ if error.is_usage_limit() => None,
+                429 if attempt < MAX_RATE_LIMIT_RETRIES => {
+                    match classify_429(429, retry_after.as_deref(), attempt) {
+                        RetryDecision::Retry { delay_ms } => {
+                            Some(std::time::Duration::from_millis(delay_ms))
+                        }
+                        RetryDecision::NoRetry => None,
+                    }
+                }
+                503 => {
+                    let wait = self.plan_unavailable_backoff().get(unavailable).copied();
+                    unavailable += 1;
+                    wait
+                }
+                _ => None,
+            };
+            match delay {
+                Some(wait) => {
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        attempt,
+                        "plan request refused ({error}); retrying"
+                    );
+                    tokio::time::sleep(wait).await;
+                    attempt += 1;
+                }
+                None => return Err(AgentError::PlanRoute(Box::new(error))),
+            }
+        }
     }
 
-    /// One turn on the plan route, text deltas forwarded to `tx` as
-    /// they arrive, the assembled response returned once the stream
-    /// has completed.
-    pub(crate) async fn stream_responses(
+    async fn read_plan_stream(
         &self,
-        messages: &[Message],
-        tools: &[ToolDef],
-        api_key: Option<&str>,
-        tx: &tokio::sync::mpsc::Sender<StreamEvent>,
+        response: reqwest::Response,
+        request_id: Option<String>,
+        tx: Option<&tokio::sync::mpsc::Sender<StreamEvent>>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
-        let api_key = api_key.ok_or_else(|| {
-            AgentError::Llm(format!(
-                "{PROVIDER} provider requires a plan token; none was passed to complete()"
-            ))
-        })?;
-        let url = format!("{}/responses", self.config().base_url);
-        let body = build_responses_request_body(self.config(), messages, tools);
-
-        let response = self
-            .send_with_retry(|| {
-                self.http_client()
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", format!("Bearer {api_key}"))
-                    .json(&body)
-            })
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(http_error(status, &text));
-        }
-
+        let fail = |e: PlanRouteError| AgentError::PlanRoute(Box::new(e));
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut full_text = String::new();
@@ -259,19 +535,32 @@ impl LlmClient {
         let mut completed = false;
 
         'stream: while let Some(chunk) = stream.next().await {
-            let bytes = chunk.map_err(|e| AgentError::Http(format!("stream read: {e}")))?;
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(fail(PlanRouteError::StreamCut(PlanFailure {
+                        request_id: request_id.clone(),
+                        message: Some(format!("stream read: {e}")),
+                        ..Default::default()
+                    })));
+                }
+            };
             buffer.push_str(&String::from_utf8_lossy(&bytes));
+            // Normalize CRLF framing so an event boundary is always a
+            // blank line.
+            if buffer.contains('\r') {
+                buffer = buffer.replace("\r\n", "\n");
+            }
             if buffer.len() > MAX_SSE_BUFFER_BYTES {
                 return Err(AgentError::Http(format!(
                     "SSE accumulation exceeded {MAX_SSE_BUFFER_BYTES} bytes without an event \
-                     boundary; refusing to grow further (hostile or buggy upstream?)"
+                     boundary; refusing to grow further"
                 )));
             }
 
             while let Some((block, rest)) = buffer.split_once("\n\n") {
                 let event_block = block.to_string();
                 buffer = rest.to_string();
-
                 for line in event_block.lines() {
                     let Some(data) = sse_field(line, "data") else {
                         continue;
@@ -286,7 +575,10 @@ impl LlmClient {
                                 && !delta.is_empty()
                             {
                                 full_text.push_str(delta);
-                                let _ = tx.send(StreamEvent::TextDelta(delta.to_string())).await;
+                                if let Some(tx) = tx {
+                                    let _ =
+                                        tx.send(StreamEvent::TextDelta(delta.to_string())).await;
+                                }
                             }
                         }
                         "response.output_item.added" | "response.output_item.done" => {
@@ -301,24 +593,26 @@ impl LlmClient {
                                 .and_then(|i| i.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let slot = match calls.iter_mut().find(|c| c.item_id == item_id) {
-                                Some(existing) => existing,
+                            let slot = match calls.iter().position(|c| c.item_id == item_id) {
+                                Some(i) => &mut calls[i],
                                 None => {
                                     calls.push(PartialCall {
                                         item_id,
                                         ..Default::default()
                                     });
-                                    calls.last_mut().expect("just pushed")
+                                    let last = calls.len() - 1;
+                                    &mut calls[last]
                                 }
                             };
                             if let Some(call_id) = item.get("call_id").and_then(|c| c.as_str()) {
                                 slot.call_id = call_id.to_string();
                             }
-                            if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                                slot.name = name.to_string();
+                            if let Some(name) = call_name(item) {
+                                slot.name = name;
                             }
-                            // The done item carries the whole argument
-                            // string; the added one an empty start.
+                            // `added` opens the item with an empty
+                            // argument string; `done` carries the whole
+                            // of it.
                             if kind == "response.output_item.done"
                                 && let Some(args) = item.get("arguments").and_then(|a| a.as_str())
                             {
@@ -350,10 +644,10 @@ impl LlmClient {
                         }
                         "response.failed" => {
                             let error = event.get("response").and_then(|r| r.get("error"));
-                            let text = error_text(error);
-                            return Err(plan_usage_limit(&text).unwrap_or_else(|| {
-                                AgentError::Llm(format!("response failed: {text}"))
-                            }));
+                            return Err(fail(PlanRouteError::classify(stream_failure(
+                                error,
+                                &request_id,
+                            ))));
                         }
                         "response.incomplete" => {
                             let reason = event
@@ -361,14 +655,22 @@ impl LlmClient {
                                 .and_then(|r| r.get("incomplete_details"))
                                 .and_then(|d| d.get("reason"))
                                 .and_then(|r| r.as_str())
-                                .unwrap_or("unknown");
-                            return Err(AgentError::Llm(format!("response incomplete: {reason}")));
+                                .unwrap_or("unknown")
+                                .to_string();
+                            return Err(fail(PlanRouteError::Incomplete {
+                                reason,
+                                failure: PlanFailure {
+                                    request_id: request_id.clone(),
+                                    ..Default::default()
+                                },
+                            }));
                         }
                         "error" => {
-                            return Err(AgentError::Llm(format!(
-                                "stream error: {}",
-                                error_text(Some(&event))
-                            )));
+                            let error = event.get("error").or(Some(&event));
+                            return Err(fail(PlanRouteError::classify(stream_failure(
+                                error,
+                                &request_id,
+                            ))));
                         }
                         _ => {}
                     }
@@ -377,9 +679,10 @@ impl LlmClient {
         }
 
         if !completed {
-            return Err(AgentError::Http(
-                "stream ended before response.completed; the reply is not usable".into(),
-            ));
+            return Err(fail(PlanRouteError::StreamCut(PlanFailure {
+                request_id,
+                ..Default::default()
+            })));
         }
 
         let calls: Vec<ToolCallRequest> = calls
@@ -401,373 +704,13 @@ impl LlmClient {
         } else {
             LlmResponse::Empty
         };
-        let _ = tx.send(StreamEvent::Done(response.clone())).await;
+        if let Some(tx) = tx {
+            let _ = tx.send(StreamEvent::Done(response.clone())).await;
+        }
         Ok((response, usage))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    fn msg(role: Role, content: &str) -> Message {
-        Message {
-            role,
-            content: content.into(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_calls: None,
-        }
-    }
-
-    fn config(base_url: &str) -> LlmConfig {
-        LlmConfig::from_provider(PROVIDER, base_url, "gpt-test")
-    }
-
-    #[test]
-    fn the_request_body_maps_the_conversation_and_sends_nothing_the_route_refuses() {
-        let mut assistant = msg(Role::Assistant, "Reading it.");
-        assistant.tool_calls = Some(vec![ToolCallRequest {
-            id: "call_1".into(),
-            name: "read_file".into(),
-            arguments: r#"{"path":"a.txt"}"#.into(),
-        }]);
-        let mut result = msg(Role::Tool, "contents");
-        result.tool_call_id = Some("call_1".into());
-        let messages = vec![
-            msg(Role::System, "Be brief."),
-            msg(Role::Compaction, "earlier: hello"),
-            msg(Role::User, "read a.txt"),
-            assistant,
-            result,
-        ];
-        let tools = vec![ToolDef {
-            name: "read_file".into(),
-            description: "Read a file".into(),
-            parameters: serde_json::json!({"type":"object"}),
-        }];
-        let cfg = config("https://api.openai.com/v1");
-        let body = build_responses_request_body(&cfg, &messages, &tools);
-
-        assert_eq!(body["model"], "gpt-test");
-        assert_eq!(body["instructions"], "Be brief.");
-        assert_eq!(body["store"], false);
-        assert_eq!(body["stream"], true);
-        for refused in [
-            "temperature",
-            "max_tokens",
-            "max_output_tokens",
-            "top_p",
-            "user",
-            "metadata",
-        ] {
-            assert!(body.get(refused).is_none(), "{refused} must not be sent");
-        }
-        let input = body["input"].as_array().unwrap();
-        assert_eq!(input.len(), 5, "{input:?}");
-        assert_eq!(input[0]["role"], "developer");
-        let fenced = input[0]["content"].as_str().unwrap();
-        assert!(
-            fenced.starts_with(COMPACTION_FENCE_OPEN) && fenced.ends_with(COMPACTION_FENCE_CLOSE)
-        );
-        assert_eq!(
-            input[1],
-            serde_json::json!({"role":"user","content":"read a.txt"})
-        );
-        assert_eq!(input[2]["type"], "message");
-        assert_eq!(input[2]["role"], "assistant");
-        assert_eq!(input[2]["content"][0]["type"], "output_text");
-        assert_eq!(input[2]["content"][0]["text"], "Reading it.");
-        assert_eq!(
-            input[3],
-            serde_json::json!({"type":"function_call","call_id":"call_1","name":"read_file","arguments":r#"{"path":"a.txt"}"#})
-        );
-        assert_eq!(
-            input[4],
-            serde_json::json!({"type":"function_call_output","call_id":"call_1","output":"contents"})
-        );
-        assert!(
-            input.iter().all(|i| i["role"] != "system"),
-            "no system items"
-        );
-        assert_eq!(
-            body["tools"][0],
-            serde_json::json!({"type":"function","name":"read_file","description":"Read a file","parameters":{"type":"object"},"strict":false})
-        );
-    }
-
-    #[test]
-    fn without_tools_or_instructions_the_body_omits_them() {
-        let body =
-            build_responses_request_body(&config("https://x"), &[msg(Role::User, "hi")], &[]);
-        assert!(body.get("tools").is_none());
-        assert!(body.get("instructions").is_none());
-    }
-
-    /// Reads one HTTP request in full, headers and body.
-    async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = stream.read(&mut buf).await.unwrap();
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            let text = String::from_utf8_lossy(&raw);
-            if let Some((head, body)) = text.split_once("\r\n\r\n") {
-                let wanted = head
-                    .lines()
-                    .find_map(|l| {
-                        l.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
-                    })
-                    .unwrap_or(0);
-                if body.len() >= wanted {
-                    break;
-                }
-            }
-        }
-        String::from_utf8_lossy(&raw).to_string()
-    }
-
-    /// A loopback server answering every request with `status` and
-    /// `body`, recording each request it saw.
-    async fn stub(
-        status: &'static str,
-        content_type: &'static str,
-        body: &'static str,
-    ) -> (String, Arc<Mutex<Vec<String>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let record = seen.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let request = read_request(&mut socket).await;
-                record.lock().unwrap().push(request);
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                socket.write_all(response.as_bytes()).await.unwrap();
-                socket.flush().await.unwrap();
-            }
-        });
-        (format!("http://{addr}/v1"), seen)
-    }
-
-    const TEXT_STREAM: &str = "\
-event: response.created\n\
-data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n\
-event: response.output_item.added\n\
-data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\n\
-event: response.output_text.delta\n\
-data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n\
-event: response.output_text.delta\n\
-data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\", world\"}\n\n\
-event: response.output_text.done\n\
-data: {\"type\":\"response.output_text.done\",\"sequence_number\":4,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello, world\"}\n\n\
-event: response.completed\n\
-data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":4},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":17}}}\n\n";
-
-    #[tokio::test]
-    async fn a_streamed_text_reply_is_assembled_and_usage_read_from_completed() {
-        let (base_url, seen) = stub("200 OK", "text/event-stream", TEXT_STREAM).await;
-        let client = LlmClient::new(config(&base_url)).unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(16);
-        let (response, usage) = client
-            .complete_stream(&[msg(Role::User, "hi")], &[], Some("plan-token"), tx)
-            .await
-            .expect("stream completes");
-
-        assert!(
-            matches!(response, LlmResponse::Text(ref t) if t == "Hello, world"),
-            "{response:?}"
-        );
-        let usage = usage.expect("usage on completed");
-        assert_eq!(
-            (
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_read_input_tokens
-            ),
-            (12, 5, 4)
-        );
-        let mut deltas = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            if let StreamEvent::TextDelta(piece) = event {
-                deltas.push(piece);
-            }
-        }
-        assert_eq!(deltas, vec!["Hello", ", world"]);
-
-        let request = seen.lock().unwrap()[0].clone();
-        assert!(request.starts_with("POST /v1/responses "), "{request}");
-        assert!(
-            request.contains("Authorization: Bearer plan-token")
-                || request.contains("authorization: Bearer plan-token"),
-            "{request}"
-        );
-        let (_, body) = request.split_once("\r\n\r\n").unwrap();
-        let body: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["stream"], true);
-        assert_eq!(body["store"], false);
-        assert!(body.get("temperature").is_none());
-    }
-
-    const CALL_STREAM: &str = "\
-data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\"}}\n\n\
-data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n\
-data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Reading two files.\"}\n\n\
-data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"in_progress\",\"call_id\":\"call_a\",\"name\":\"read_file\",\"arguments\":\"\"}}\n\n\
-data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":1,\"delta\":\"{\\\"path\\\":\"}\n\n\
-data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":1,\"delta\":\"\\\"a.txt\\\"}\"}\n\n\
-data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":1,\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}\n\n\
-data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_a\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}\n\n\
-data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_b\",\"name\":\"read_file\",\"arguments\":\"\"}}\n\n\
-data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_b\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"b.txt\\\"}\"}}\n\n\
-data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":30,\"output_tokens\":20,\"total_tokens\":50}}}\n\n";
-
-    #[tokio::test]
-    async fn streamed_function_calls_are_assembled_with_their_call_ids_beside_the_text() {
-        let (base_url, _) = stub("200 OK", "text/event-stream", CALL_STREAM).await;
-        let client = LlmClient::new(config(&base_url)).unwrap();
-        let (response, usage) = client
-            .complete(&[msg(Role::User, "read both")], &[], Some("plan-token"))
-            .await
-            .expect("completes");
-        match response {
-            LlmResponse::ToolCalls { calls, text } => {
-                assert_eq!(text.as_deref(), Some("Reading two files."));
-                assert_eq!(calls.len(), 2);
-                assert_eq!(
-                    (
-                        calls[0].id.as_str(),
-                        calls[0].name.as_str(),
-                        calls[0].arguments.as_str()
-                    ),
-                    ("call_a", "read_file", r#"{"path":"a.txt"}"#)
-                );
-                assert_eq!(
-                    (calls[1].id.as_str(), calls[1].arguments.as_str()),
-                    ("call_b", r#"{"path":"b.txt"}"#)
-                );
-            }
-            other => panic!("expected ToolCalls, got {other:?}"),
-        }
-        let usage = usage.unwrap();
-        assert_eq!(
-            (
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_read_input_tokens
-            ),
-            (30, 20, 0)
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_response_is_an_error_naming_the_code() {
-        const FAILED: &str = "\
-data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_3\"}}\n\n\
-data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_3\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"upstream went away\"}}}\n\n";
-        let (base_url, _) = stub("200 OK", "text/event-stream", FAILED).await;
-        let client = LlmClient::new(config(&base_url)).unwrap();
-        let err = client
-            .complete(&[msg(Role::User, "hi")], &[], Some("t"))
-            .await
-            .unwrap_err();
-        let text = format!("{err}");
-        assert!(
-            text.contains("server_error") && text.contains("upstream went away"),
-            "{text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_usage_limit_mid_stream_is_the_usage_limit_error() {
-        const LIMIT: &str = "\
-data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_4\",\"status\":\"failed\",\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\",\"message\":\"limit\"}}}\n\n";
-        let (base_url, _) = stub("200 OK", "text/event-stream", LIMIT).await;
-        let client = LlmClient::new(config(&base_url)).unwrap();
-        let err = client
-            .complete(&[msg(Role::User, "hi")], &[], Some("t"))
-            .await
-            .unwrap_err();
-        assert!(format!("{err}").contains(MANAGE_USAGE), "{err}");
-    }
-
-    #[tokio::test]
-    async fn a_stream_that_ends_before_completed_is_an_error() {
-        const CUT: &str = "\
-data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_5\"}}\n\n\
-data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":\"partial\"}\n\n";
-        let (base_url, _) = stub("200 OK", "text/event-stream", CUT).await;
-        let client = LlmClient::new(config(&base_url)).unwrap();
-        let err = client
-            .complete(&[msg(Role::User, "hi")], &[], Some("t"))
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{err}").contains("before response.completed"),
-            "{err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_usage_limit_429_is_not_retried_and_names_the_usage_page() {
-        const BODY: &str = r#"{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"You have hit your usage limit","type":"insufficient_quota"}}"#;
-        let (base_url, seen) = stub("429 Too Many Requests", "application/json", BODY).await;
-        let client = LlmClient::new(config(&base_url)).unwrap();
-        let err = client
-            .complete(&[msg(Role::User, "hi")], &[], Some("t"))
-            .await
-            .unwrap_err();
-        let text = format!("{err}");
-        assert!(
-            text.contains(USAGE_LIMIT_CODE) && text.contains(MANAGE_USAGE),
-            "{text}"
-        );
-        assert_eq!(
-            seen.lock().unwrap().len(),
-            1,
-            "a plan limit is never retried"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_http_error_names_the_route_code() {
-        const BODY: &str = r#"{"error":{"code":"subscription_sharing_user_not_eligible","message":"This account cannot share its plan"}}"#;
-        let (base_url, _) = stub("403 Forbidden", "application/json", BODY).await;
-        let client = LlmClient::new(config(&base_url)).unwrap();
-        let err = client
-            .complete(&[msg(Role::User, "hi")], &[], Some("t"))
-            .await
-            .unwrap_err();
-        let text = format!("{err}");
-        assert!(
-            text.contains("403")
-                && text.contains("subscription_sharing_user_not_eligible")
-                && text.contains("cannot share"),
-            "{text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_plan_route_needs_a_token() {
-        let client = LlmClient::new(config("https://api.openai.com/v1")).unwrap();
-        let err = client
-            .complete(&[msg(Role::User, "hi")], &[], None)
-            .await
-            .unwrap_err();
-        assert!(format!("{err}").contains("requires a plan token"), "{err}");
-    }
-}
+#[path = "llm_responses_tests.rs"]
+mod tests;

@@ -20,7 +20,9 @@ pub use kind::{
     matchable_parts, matchable_secret,
 };
 pub use secret::VaultSecret;
-pub use store::{CredentialMetadata, CredentialStore, ResetPlan, reset, reset_plan};
+pub use store::{
+    CredentialMetadata, CredentialStore, ExclusiveUpdate, ResetPlan, reset, reset_plan,
+};
 
 #[cfg(test)]
 mod tests;

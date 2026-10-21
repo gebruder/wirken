@@ -68,14 +68,14 @@ impl LlmClient {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         self.refuse_leaked_request(messages, tools)?;
+        if self.config().auth.is_plan() {
+            return self.complete_plan(messages, tools, Some(&tx)).await;
+        }
         match self.config().provider.as_str() {
             "openai" | "ollama" | "custom" | "infomaniak" | "hetzner" => {
                 self.stream_openai(messages, tools, api_key, &tx).await
             }
             "anthropic" => self.stream_anthropic(messages, tools, api_key, &tx).await,
-            crate::llm_responses::PROVIDER => {
-                self.stream_responses(messages, tools, api_key, &tx).await
-            }
             _ => {
                 // Fall back to non-streaming. Plumbs the underlying
                 // `complete` usage through unchanged so providers

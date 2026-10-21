@@ -1092,3 +1092,240 @@ fn secrets_for_matching_skips_identifiers_splits_and_drops_short_values() {
             .is_none()
     );
 }
+
+// ---------------------------------------------------------------------------
+// update_exclusive: compare-and-swap under the write lock
+// ---------------------------------------------------------------------------
+
+fn store_value(store: &CredentialStore, name: &str, value: &str) {
+    store
+        .store(name, "oauth", &VaultSecret::new(value.into()), None, None)
+        .unwrap();
+}
+
+#[test]
+fn update_exclusive_writes_the_replacement_decide_returns() {
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+    store_value(&store, "entry", "first");
+    let created = store.peek("entry").unwrap().1.created_at;
+
+    let done = store
+        .update_exclusive("entry", std::time::Duration::from_secs(1), |current| {
+            assert_eq!(current.expose(), "first");
+            (Some(VaultSecret::new("second".into())), 7)
+        })
+        .unwrap();
+    assert_eq!(done.value, 7);
+    assert!(done.written.unwrap());
+    let (secret, meta) = store.peek("entry").unwrap();
+    assert_eq!(secret.expose(), "second");
+    assert_eq!(meta.created_at, created, "only the value changes");
+    assert_eq!(meta.channel, "oauth");
+}
+
+#[test]
+fn update_exclusive_leaves_the_entry_when_decide_returns_none() {
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+    store_value(&store, "entry", "kept");
+    let done = store
+        .update_exclusive("entry", std::time::Duration::from_secs(1), |_| (None, ()))
+        .unwrap();
+    assert!(!done.written.unwrap());
+    assert_eq!(store.peek("entry").unwrap().0.expose(), "kept");
+    // The lock was released: an ordinary write goes through.
+    store_value(&store, "entry", "after");
+    assert_eq!(store.peek("entry").unwrap().0.expose(), "after");
+}
+
+#[test]
+fn update_exclusive_refuses_a_missing_entry_and_releases_the_lock() {
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+    let err = store
+        .update_exclusive(
+            "absent",
+            std::time::Duration::from_secs(1),
+            |_| -> (Option<VaultSecret>, ()) { panic!("decide must not run for a missing entry") },
+        )
+        .err()
+        .expect("missing entry");
+    assert!(matches!(err, crate::VaultError::NotFound(_)), "{err}");
+    store_value(&store, "other", "v");
+}
+
+/// Two connections to one file stand for two processes. The second
+/// waits on the first's lock and then reads what the first wrote, so a
+/// caller comparing against the value it read before sees the change.
+#[test]
+fn a_second_connection_waits_for_the_first_and_reads_its_write() {
+    let tmp = TempDir::new().unwrap();
+    let key = generate_key();
+    let db = tmp.path().join("vault.db");
+    let first = CredentialStore::open_with_key(&db, VaultSecret::new(key.expose().into())).unwrap();
+    store_value(&first, "entry", "v1");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        first
+            .update_exclusive("entry", std::time::Duration::from_secs(5), |current| {
+                assert_eq!(current.expose(), "v1");
+                entered_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                (Some(VaultSecret::new("v2".into())), ())
+            })
+            .unwrap()
+            .written
+            .unwrap()
+    });
+    entered_rx.recv().unwrap();
+
+    let second = CredentialStore::open_with_key(&db, key).unwrap();
+    let seen = second
+        .update_exclusive("entry", std::time::Duration::from_secs(5), |current| {
+            (None, current.expose().to_string())
+        })
+        .unwrap();
+    assert!(holder.join().unwrap());
+    assert_eq!(seen.value, "v2", "the waiter reads the holder's write");
+}
+
+// ---------------------------------------------------------------------------
+// Plan sign-in rows: sealed so a build that predates them cannot read
+// them as a key
+// ---------------------------------------------------------------------------
+
+const PLAN_JSON: &str = r#"{"access_token":"at-plan-0001","refresh_token":"rt-plan-0001","expires_at":1,"scope":"s","provider":"openai","client_id":"oaiapp_x","subject":"u"}"#;
+
+fn store_plan_row(store: &CredentialStore, name: &str) {
+    store
+        .store_with_kind(
+            name,
+            "oauth",
+            &VaultSecret::new(PLAN_JSON.into()),
+            None,
+            None,
+            &[],
+            crate::CredentialKind::PlanSignIn,
+        )
+        .unwrap();
+}
+
+/// 2.3.0 reads every row through `decrypt(name, ..)` with the name
+/// alone as associated data, in `retrieve`, `peek` and
+/// `secrets_for_matching`, and treats an unknown kind column as a
+/// secret. `decrypt` here is that function unchanged, so a plan row
+/// that fails it fails every 2.3.0 read path: nothing it could send.
+#[test]
+fn a_plan_row_does_not_decrypt_under_its_name_alone() {
+    let tmp = TempDir::new().unwrap();
+    let key = generate_key();
+    let store = CredentialStore::open_with_key(
+        &tmp.path().join("vault.db"),
+        VaultSecret::new(key.expose().into()),
+    )
+    .unwrap();
+    store_plan_row(&store, "openai-plan");
+    let sealed = store.export_encrypted("openai-plan").unwrap();
+    assert!(matches!(
+        decrypt("openai-plan", &sealed, &key),
+        Err(crate::VaultError::Decryption(_))
+    ));
+    // The kind column reads as a secret to the 2.3.0 rule (anything
+    // but "identifier"); the binding, not the column, is what stops it.
+    let column: String = rusqlite::Connection::open(tmp.path().join("vault.db"))
+        .unwrap()
+        .query_row(
+            "SELECT kind FROM credentials WHERE name = 'openai-plan'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(column, "plan_sign_in");
+
+    // Every other row is sealed as it always was: its name alone.
+    store
+        .store(
+            "openai-api-key",
+            "openai",
+            &VaultSecret::new("sk-key".into()),
+            None,
+            None,
+        )
+        .unwrap();
+    let plain = store.export_encrypted("openai-api-key").unwrap();
+    assert_eq!(
+        decrypt("openai-api-key", &plain, &key).unwrap().expose(),
+        "sk-key"
+    );
+}
+
+/// In this build a plan row is never handed out as a key, reads for
+/// inspection and leak detection, keeps its binding through an
+/// exclusive update, and cannot be rotated to a typed value.
+#[test]
+fn a_plan_row_is_read_only_through_peek_and_keeps_its_binding() {
+    let tmp = TempDir::new().unwrap();
+    let key = generate_key();
+    let store = CredentialStore::open_with_key(
+        &tmp.path().join("vault.db"),
+        VaultSecret::new(key.expose().into()),
+    )
+    .unwrap();
+    store_plan_row(&store, "openai-plan");
+
+    assert!(matches!(
+        store.retrieve("openai-plan"),
+        Err(crate::VaultError::PlanSignIn(_))
+    ));
+    let (secret, meta) = store.peek("openai-plan").unwrap();
+    assert_eq!(secret.expose(), PLAN_JSON);
+    assert_eq!(meta.kind, crate::CredentialKind::PlanSignIn);
+    assert!(meta.last_used_at.is_none());
+
+    let matched = store.secrets_for_matching().unwrap();
+    let parts: Vec<String> = matched
+        .iter()
+        .find(|m| m.name == "openai-plan")
+        .expect("matched as a secret")
+        .parts
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+    assert_eq!(parts, ["at-plan-0001", "rt-plan-0001"]);
+
+    store
+        .update_exclusive("openai-plan", std::time::Duration::from_secs(1), |_| {
+            (
+                Some(VaultSecret::new(PLAN_JSON.replace("0001", "0002"))),
+                (),
+            )
+        })
+        .unwrap()
+        .written
+        .unwrap();
+    let sealed = store.export_encrypted("openai-plan").unwrap();
+    assert!(decrypt("openai-plan", &sealed, &key).is_err());
+    assert!(
+        store
+            .peek("openai-plan")
+            .unwrap()
+            .0
+            .expose()
+            .contains("0002")
+    );
+
+    assert!(matches!(
+        store.rotate("openai-plan", &VaultSecret::new("typed".into()), None),
+        Err(crate::VaultError::PlanSignIn(_))
+    ));
+    assert!(
+        store
+            .peek("openai-plan")
+            .unwrap()
+            .0
+            .expose()
+            .contains("0002")
+    );
+}

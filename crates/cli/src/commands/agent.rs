@@ -102,6 +102,22 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         .as_str()
         .unwrap_or("http://localhost:11434/v1");
 
+    // Plan mode: no key. The bearer comes from the sign-in entry per
+    // call, through a token source attached below.
+    if super::plan_sign_in::provider_auth(&provider_json)?.is_plan() {
+        let entry = super::plan_sign_in::provider_plan_entry(&provider_json);
+        return send_on_plan(
+            message,
+            "default",
+            cfg.data_dir.join("workspace"),
+            LlmConfig::plan(model),
+            &entry,
+            super::skills_for_default_agent(&cfg)?,
+            &cfg,
+        )
+        .await;
+    }
+
     let mut llm_config = LlmConfig::from_provider(provider, base_url, model);
     if provider == "bedrock" {
         llm_config.region = provider_json["region"]
@@ -120,7 +136,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // ollama (no vault lookup) and for the warn-and-continue failure
     // path below.
     let mut api_key_credential: Option<String> = None;
-    let api_key = if provider != "ollama" && provider != super::chatgpt_plan::PROVIDER {
+    let api_key = if provider != "ollama" {
         let pp = super::cached_vault_passphrase()?;
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
@@ -140,7 +156,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         None
     };
 
-    if api_key.is_none() && provider != "ollama" && provider != super::chatgpt_plan::PROVIDER {
+    if api_key.is_none() && provider != "ollama" {
         anyhow::bail!("No API key available for '{provider}'. Run `wirken setup` to configure.");
     }
 
@@ -185,26 +201,14 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // same agent.
     // Every stored secret, set before the skills, which are checked
     // against it as they load.
-    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
-        probe_keychain(&cfg.data_dir, || {
-            super::cached_vault_passphrase().unwrap_or_default()
-        })
-    }));
-    agent.set_leak_matcher(leak_matcher.clone());
-    // On the plan, the bearer is read before each call from the grant
-    // the sign-in stored, as `wirken run` does.
-    if provider == super::chatgpt_plan::PROVIDER {
-        let pp = super::cached_vault_passphrase()?;
-        let keychain = probe_keychain(&cfg.data_dir, move || pp);
-        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
-            .context("Failed to open credential store")?;
-        let source = super::chatgpt_plan::VaultOAuthTokenSource::open(
-            Arc::new(Mutex::new(store)),
-            super::chatgpt_plan::DEFAULT_CREDENTIAL,
-            leak_matcher,
-        )?;
-        agent.set_token_source(source);
-    }
+    agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
+        &cfg.vault_db_path(),
+        || {
+            probe_keychain(&cfg.data_dir, || {
+                super::cached_vault_passphrase().unwrap_or_default()
+            })
+        },
+    )));
     agent
         .attach_skills(super::skills_for_default_agent(&cfg)?)
         .context("attach skills")?;
@@ -245,6 +249,21 @@ async fn send_with_agent_config(
 ) -> Result<()> {
     let llm_config = super::llm_config_for_agent(agent_cfg);
 
+    // A plan agent's entry is a sign-in, not a key: it is read per call
+    // through a token source, never handed to the agent as a key.
+    if agent_cfg.auth.is_plan() {
+        return send_on_plan(
+            message,
+            &agent_cfg.id,
+            cfg.agent_workspace(&agent_cfg.id),
+            llm_config,
+            &super::plan_sign_in::agent_plan_entry(agent_cfg),
+            super::skills_for_agent(cfg, agent_cfg)?,
+            cfg,
+        )
+        .await;
+    }
+
     // Stamp the slot name on `LlmRequest` / `LlmResponse` emits for
     // SIEM correlation. Empty `api_key_credential` on the agent
     // config means no vault lookup, so no slot name to carry.
@@ -253,8 +272,7 @@ async fn send_with_agent_config(
     } else {
         Some(agent_cfg.api_key_credential.clone())
     };
-    let on_plan = agent_cfg.provider == super::chatgpt_plan::PROVIDER;
-    let api_key = if !on_plan && !agent_cfg.api_key_credential.is_empty() {
+    let api_key = if !agent_cfg.api_key_credential.is_empty() {
         let pp = super::cached_vault_passphrase()?;
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
@@ -303,29 +321,14 @@ async fn send_with_agent_config(
     // operator-actionable error, not silent skill absence.
     // Every stored secret, set before the skills, which are checked
     // against it as they load.
-    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
-        probe_keychain(&cfg.data_dir, || {
-            super::cached_vault_passphrase().unwrap_or_default()
-        })
-    }));
-    agent.set_leak_matcher(leak_matcher.clone());
-    if on_plan {
-        let name = if agent_cfg.api_key_credential.is_empty() {
-            super::chatgpt_plan::DEFAULT_CREDENTIAL
-        } else {
-            agent_cfg.api_key_credential.as_str()
-        };
-        let pp = super::cached_vault_passphrase()?;
-        let keychain = probe_keychain(&cfg.data_dir, move || pp);
-        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
-            .context("Failed to open credential store")?;
-        let source = super::chatgpt_plan::VaultOAuthTokenSource::open(
-            Arc::new(Mutex::new(store)),
-            name,
-            leak_matcher,
-        )?;
-        agent.set_token_source(source);
-    }
+    agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
+        &cfg.vault_db_path(),
+        || {
+            probe_keychain(&cfg.data_dir, || {
+                super::cached_vault_passphrase().unwrap_or_default()
+            })
+        },
+    )));
     agent
         .attach_skills(super::skills_for_agent(cfg, agent_cfg)?)
         .context("attach skills")?;
@@ -356,6 +359,76 @@ async fn send_with_agent_config(
         }
     }
 
+    Ok(())
+}
+
+/// One ask for an agent in plan mode. Built as the key paths build
+/// their agent, with no key: the bearer comes per call from a token
+/// source over `entry`, which refreshes under the vault's write lock,
+/// so an ask running beside the gateway never spends a refresh token
+/// the gateway already spent.
+async fn send_on_plan(
+    message: &str,
+    agent_id: &str,
+    workspace: std::path::PathBuf,
+    llm_config: LlmConfig,
+    entry: &str,
+    skills: Vec<wirken_agent::skill::Skill>,
+    cfg: &wirken_gateway::config::GatewayConfig,
+) -> Result<()> {
+    std::fs::create_dir_all(&workspace)?;
+    let session_log_concrete = open_signed_session_log(cfg)?;
+    let session_log: std::sync::Arc<dyn wirken_audit::SessionLog> = session_log_concrete.clone();
+
+    let perms = open_permission_store(cfg)?;
+    let mut agent = Agent::new_with_sandbox(
+        agent_id.to_string(),
+        workspace,
+        llm_config,
+        None,
+        None,
+        session_log,
+        super::load_sandbox_config(&cfg.data_dir),
+        Arc::new(Mutex::new(perms)),
+    )?;
+    agent.set_agent_id(agent_id.to_string());
+    if super::oauth_scope::stdin_is_tty() {
+        agent.set_approval_gate(std::sync::Arc::new(
+            super::stdin_approval::StdinApprovalGate::new(),
+        ));
+    }
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            super::cached_vault_passphrase().unwrap_or_default()
+        })
+    }));
+    agent.set_leak_matcher(leak_matcher.clone());
+
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    let source =
+        wirken_agent::plan_auth::PlanTokenSource::open(store, &cfg.data_dir, entry, leak_matcher)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    agent.set_plan_token_source(source);
+
+    agent.attach_skills(skills).context("attach skills")?;
+
+    println!();
+    let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
+    let outcome = agent.process_message(message, inbound_id).await;
+    seal_session(&session_log_concrete, agent_id);
+    match outcome {
+        Ok(result) => println!(
+            "{}",
+            wirken_agent::ansi::strip_control_sequences(&result.response)
+        ),
+        Err(e) => {
+            eprintln!("  Error: {e}");
+            std::process::exit(1);
+        }
+    }
     Ok(())
 }
 
