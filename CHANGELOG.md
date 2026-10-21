@@ -62,6 +62,15 @@ tagged.
   `(no response: the model returned nothing)`, naming the tools of the
   turn. The reply was `(no response)` whatever had happened. The same
   text is the turn's `AssistantMessage` row.
+- Every approval surface renders the same card: the request with the
+  tier printed once, the action key, the arguments, where an `exec` runs
+  and under which runtime (gVisor, Docker's default runtime, or this
+  host), the message it replies to, and the model's words labeled
+  `model's claim (unverified)`. The nine channel adapters, the `wirken
+  ask` prompt, `wirken permissions pending show`, the WebChat card and
+  the chat card each had their own text; Signal's said `tier tier2` and
+  named no runtime. Every gate now sends the arguments, the model's text
+  and the runtime, so each surface shows them.
 - An approval answered in the chat whose message raised it now reaches
   the gate. Each adapter connection's frames are read while a turn runs,
   so a Telegram or Signal decision sent on that connection resolves the

@@ -433,11 +433,13 @@ fn callback_data_round_trip_through_shared_encoding() {
     assert_eq!(decoded, original);
 }
 
-/// The approval message says where an `exec` runs, from the frame's
-/// `execLocation`, and has no such line when the field is empty.
+/// The approval message is the card every surface renders: the tier
+/// printed once, the arguments, where an `exec` runs and under which
+/// runtime, and the model's words labeled a claim. A frame with no
+/// location has no `runs` line.
 #[test]
-fn the_approval_message_says_where_an_exec_runs() {
-    let build = |location: &str| {
+fn the_approval_message_is_the_shared_card() {
+    let build = |location: &str, runtime: &str| {
         let mut msg = capnp::message::Builder::new_default();
         {
             let fb = msg.init_root::<frame::Builder<'_>>();
@@ -449,18 +451,55 @@ fn the_approval_message_says_where_an_exec_runs() {
             req.set_triggering_agent("default");
             req.set_trigger_message("run ls ~");
             req.set_target_conversation_id("-100123");
+            req.set_arguments(r#"{"command":"ls ~"}"#);
+            req.set_assistant_text("Listing your home directory.");
             req.set_exec_location(location);
+            req.set_exec_runtime(runtime);
         }
         msg
     };
     let reader = serialize_and_read(&build(
         "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)",
+        "docker",
     ));
     let fields = convert::parse_approval_request(&reader).unwrap();
     let text = crate::adapter::approval_text(&fields);
-    assert!(text.contains("\nWhere: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n"), "{text}");
+    assert_eq!(
+        text,
+        "<b>request:</b> agent default requests exec (tier2)\n\
+         <b>action key:</b> <code>shell:ls</code>\n\
+         <b>arguments:</b> <code>{\"command\":\"ls ~\"}</code>\n\
+         <b>runs:</b> runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\
+         <b>runtime:</b> Docker default runtime (runc)\n\
+         <b>in reply to:</b> run ls ~\n\
+         <b>model's claim (unverified):</b> <i>Listing your home directory.</i>"
+    );
 
-    let reader = serialize_and_read(&build(""));
+    // Every value is escaped: a tag in the arguments reaches the chat as
+    // text, not as markup.
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("0f9d3c52-1234-5678-9abc-deadbeef0001");
+        req.set_tool_name("exec");
+        req.set_action_key("shell:echo");
+        req.set_requested_tier("tier2");
+        req.set_triggering_agent("default");
+        req.set_target_conversation_id("-100123");
+        req.set_arguments(r#"{"command":"echo <b>&</b>"}"#);
+    }
+    let reader = serialize_and_read(&msg);
     let fields = convert::parse_approval_request(&reader).unwrap();
-    assert!(!crate::adapter::approval_text(&fields).contains("Where:"));
+    let text = crate::adapter::approval_text(&fields);
+    assert!(
+        text.contains("<code>{\"command\":\"echo &lt;b&gt;&amp;&lt;/b&gt;\"}</code>"),
+        "{text}"
+    );
+
+    let reader = serialize_and_read(&build("", ""));
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    let text = crate::adapter::approval_text(&fields);
+    assert!(!text.contains("runs:"), "{text}");
+    assert!(!text.contains("runtime:"), "{text}");
 }

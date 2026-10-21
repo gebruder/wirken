@@ -13,6 +13,7 @@ wirken-gateway = { path = "../gateway" }
 wirken-mcp-proxy = { path = "../mcp-proxy" }
 wirken-sandbox = { path = "../sandbox" }
 wirken-vault = { path = "../vault" }
+wirken-adapter-core = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 lru = { workspace = true }

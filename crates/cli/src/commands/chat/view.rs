@@ -10,8 +10,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use wirken_adapter_core::approval_card::runtime_words;
+
 use super::app::{App, Entry};
-use super::panels::{SideItem, panels, runtime_words};
+use super::panels::{SideItem, panels};
 use super::text::{layout_input, sanitize, width, wrap};
 
 /// Rows of arguments a card shows before it says the rest is cut.
@@ -452,35 +454,24 @@ fn card_lines(app: &App, width: usize, now: Instant) -> Vec<Line<'static>> {
             ));
         }
     };
-    // What the gateway established, in plain text.
-    field(
-        "request",
-        &format!(
-            "agent {} wants to use {} ({})",
-            ask.agent, ask.tool_name, ask.tier
-        ),
-        CARD_FIELD_ROWS,
-        None,
-    );
-    field("action key", &ask.action_key, CARD_FIELD_ROWS, None);
-    // What will run if approved, exactly as the model sent it.
-    field("arguments", &ask.arguments, CARD_ARGUMENT_ROWS, None);
-    field("runs", &ask.exec_location, CARD_FIELD_ROWS, None);
-    field(
-        "runtime",
-        &runtime_words(&ask.exec_runtime),
-        CARD_FIELD_ROWS,
-        None,
-    );
-    field("in reply to", &ask.trigger, CARD_FIELD_ROWS, None);
-    // The model's own account of the call, set apart: the gateway has
-    // not checked it, and it is not a description of what will run.
-    field(
-        "model's claim (unverified)",
-        &ask.assistant_text,
-        CARD_FIELD_ROWS,
-        Some(claim_style()),
-    );
+    // The card every surface renders, line by line. What the gateway
+    // established is drawn plain; the model's own account of the call
+    // is set apart, since the gateway has not checked it and it is not
+    // a description of what will run. The arguments, which are, get
+    // the most rows.
+    for line in ask.card().lines() {
+        let rows = if line.label == "arguments" {
+            CARD_ARGUMENT_ROWS
+        } else {
+            CARD_FIELD_ROWS
+        };
+        field(
+            line.label,
+            &line.value,
+            rows,
+            line.is_model_claim.then(claim_style),
+        );
+    }
 
     // The two answers, drawn alike.
     lines.push(Line::from(vec![
@@ -614,6 +605,7 @@ mod tests {
         );
         let shown = screen(&app, now);
         for part in [
+            "request: agent default requests exec (tier2)",
             "action key: shell:ls",
             "arguments: {\"command\":\"ls -la\"}",
             "runtime: gVisor (runsc)",

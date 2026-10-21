@@ -3568,18 +3568,23 @@ fn process_permissions_request(
             PermissionsResponse::PendingList { entries }
         }
         PermissionsRequest::PendingShow { request_id } => {
-            let detail = queue.show(&request_id).map(|d| PendingDetail {
-                summary: PendingSummary {
-                    request_id: d.request_id,
-                    agent_id: d.agent_id,
-                    tool_name: d.tool_name,
-                    action_key: d.action_key,
-                    requested_tier: d.requested_tier,
-                    requested_at: d.requested_at.to_rfc3339(),
-                    age_seconds: d.age_seconds,
-                },
-                trigger_message: d.trigger_message,
-                exec_location: d.exec_location,
+            let detail = queue.show(&request_id).map(|d| {
+                Box::new(PendingDetail {
+                    summary: PendingSummary {
+                        request_id: d.request_id,
+                        agent_id: d.agent_id,
+                        tool_name: d.tool_name,
+                        action_key: d.action_key,
+                        requested_tier: d.requested_tier,
+                        requested_at: d.requested_at.to_rfc3339(),
+                        age_seconds: d.age_seconds,
+                    },
+                    trigger_message: d.trigger_message,
+                    arguments: d.arguments,
+                    assistant_text: d.assistant_text,
+                    exec_location: d.exec_location,
+                    exec_runtime: d.exec_runtime,
+                })
             });
             PermissionsResponse::PendingShow { entry: detail }
         }

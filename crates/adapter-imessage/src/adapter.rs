@@ -14,6 +14,7 @@ use wirken_ipc::{
 
 use crate::convert;
 use crate::error::IMessageError;
+use wirken_adapter_core::approval_card::CardStyle;
 use wirken_adapter_core::text_command::{self as commands, CommandKind};
 
 /// Per-process map from 8-hex-char `request_id` prefix to the
@@ -453,6 +454,15 @@ enum FrameAction {
 ///
 /// On failure, emits `ApprovalRequestFailed` with a snake_case
 /// reason label from `classify_send_error`.
+/// The approval message body: the card every surface renders, plain,
+/// then the text commands that decide it.
+pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields, prefix: &str) -> String {
+    format!(
+        "{}\nReply !approve {prefix} to approve or !deny {prefix} [reason] to deny.",
+        fields.card().render(CardStyle::Plain)
+    )
+}
+
 async fn send_approval_request(
     http: &reqwest::Client,
     bluebubbles_url: &str,
@@ -463,23 +473,7 @@ async fn send_approval_request(
 ) {
     let prefix = approval_prefix(&fields.request_id);
 
-    let prompt = format!(
-        "Agent {} requests {} (tier {}).\n\
-         Action: {}\n\
-         Trigger: {}\n\
-         Reply !approve {} to approve or !deny {} [reason] to deny.",
-        fields.triggering_agent,
-        fields.tool_name,
-        fields.requested_tier,
-        fields.action_key,
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            fields.trigger_message.clone()
-        },
-        prefix,
-        prefix,
-    );
+    let prompt = approval_text(&fields, &prefix);
 
     let url = format!("{bluebubbles_url}/api/v1/message/text");
     let body = serde_json::json!({

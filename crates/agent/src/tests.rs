@@ -12656,7 +12656,7 @@ fn bedrock_keeps_the_text_block_beside_the_tool_use() {
 }
 
 /// A message with calls and no text records none, rather than an
-/// empty string that would print as a blank "the model said:".
+/// empty string that would print as a blank claim line on the card.
 #[test]
 fn calls_with_no_text_carry_none() {
     use crate::llm::parse_anthropic_response;

@@ -198,25 +198,28 @@ pub async fn pending_show(request_id: &str) -> Result<()> {
     }
 }
 
-/// What `pending show` prints for one entry.
+/// What `pending show` prints for one entry: the queue's own facts
+/// about it, then the approval card every surface renders.
 fn render_pending_detail(d: &wirken_ipc::permissions::PendingDetail) -> String {
     use std::fmt::Write as _;
+    use wirken_adapter_core::approval_card::{ApprovalCard, CardStyle};
     let mut out = String::new();
     let _ = writeln!(out, "Request ID:    {}", d.summary.request_id);
-    let _ = writeln!(out, "Agent ID:      {}", d.summary.agent_id);
-    let _ = writeln!(out, "Tool:          {}", d.summary.tool_name);
-    let _ = writeln!(out, "Action key:    {}", d.summary.action_key);
-    let _ = writeln!(out, "Required tier: {}", d.summary.requested_tier);
     let _ = writeln!(out, "Requested at:  {}", d.summary.requested_at);
     let _ = writeln!(out, "Age:           {}s", d.summary.age_seconds);
-    if let Some(location) = &d.exec_location {
-        let _ = writeln!(out, "Where:         {location}");
-    }
-    if let Some(msg) = &d.trigger_message {
-        let _ = writeln!(out);
-        let _ = writeln!(out, "Trigger message:");
-        let _ = writeln!(out, "  {msg}");
-    }
+    let _ = writeln!(out);
+    let card = ApprovalCard {
+        agent: d.summary.agent_id.clone(),
+        tool_name: d.summary.tool_name.clone(),
+        tier: d.summary.requested_tier.clone(),
+        action_key: d.summary.action_key.clone(),
+        arguments: d.arguments.clone(),
+        exec_location: d.exec_location.clone(),
+        exec_runtime: d.exec_runtime.clone(),
+        trigger_message: d.trigger_message.clone(),
+        assistant_text: d.assistant_text.clone(),
+    };
+    let _ = writeln!(out, "{}", card.render(CardStyle::Plain));
     out
 }
 
@@ -591,7 +594,7 @@ mod pending_detail_tests {
     use super::render_pending_detail;
     use wirken_ipc::permissions::{PendingDetail, PendingSummary};
 
-    fn detail(exec_location: Option<&str>) -> PendingDetail {
+    fn detail(exec_location: Option<&str>, exec_runtime: Option<&str>) -> PendingDetail {
         PendingDetail {
             summary: PendingSummary {
                 request_id: "985759c5-c480-44f8-9d26-c41b3af51cbf".into(),
@@ -603,25 +606,45 @@ mod pending_detail_tests {
                 age_seconds: 63,
             },
             trigger_message: Some("run ls ~ with the exec tool".into()),
+            arguments: Some(r#"{"command":"ls ~"}"#.into()),
+            assistant_text: Some("Listing your home directory.".into()),
             exec_location: exec_location.map(str::to_string),
+            exec_runtime: exec_runtime.map(str::to_string),
         }
     }
 
+    /// The queue's facts first, then the card every surface renders.
     #[test]
-    fn pending_show_says_where_an_exec_runs() {
-        let shown = render_pending_detail(&detail(Some(
-            "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)",
-        )));
+    fn pending_show_prints_the_card() {
+        let shown = render_pending_detail(&detail(
+            Some(
+                "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)",
+            ),
+            Some("docker"),
+        ));
+        assert!(
+            shown.starts_with("Request ID:    985759c5-c480-44f8-9d26-c41b3af51cbf\n"),
+            "{shown}"
+        );
+        assert!(shown.contains("Age:           63s\n\n"), "{shown}");
         assert!(
             shown.contains(
-                "Where:         runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n"
+                "request: agent slackbot requests exec (tier2)\n\
+                 action key: shell:ls\n\
+                 arguments: {\"command\":\"ls ~\"}\n\
+                 runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\
+                 runtime: Docker default runtime (runc)\n\
+                 in reply to: run ls ~ with the exec tool\n\
+                 model's claim (unverified): Listing your home directory.\n"
             ),
             "{shown}"
         );
     }
 
     #[test]
-    fn pending_show_has_no_where_line_without_one() {
-        assert!(!render_pending_detail(&detail(None)).contains("Where:"));
+    fn pending_show_has_no_runs_line_without_one() {
+        let shown = render_pending_detail(&detail(None, None));
+        assert!(!shown.contains("runs:"), "{shown}");
+        assert!(!shown.contains("runtime:"), "{shown}");
     }
 }

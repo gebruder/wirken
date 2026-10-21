@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use wirken_adapter_core::approval::Decision;
+use wirken_adapter_core::approval_card::CardStyle;
 use wirken_adapter_core::{MatrixFormatter, OutboundFormatter, SignalFormatter};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
@@ -540,6 +541,15 @@ async fn handle_outbound(
 /// posture choice), and Matrix joins Teams and WhatsApp in the
 /// silent-ack-because-platform-absent group from the umbrella
 /// taxonomy.
+/// The approval message body: the card every surface renders, plain,
+/// then the reactions that decide it.
+pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
+    format!(
+        "{}\n\nReact with ✅ to approve or ❌ to deny.",
+        fields.card().render(CardStyle::Plain)
+    )
+}
+
 async fn send_approval_request(
     http: &reqwest::Client,
     homeserver: &str,
@@ -549,21 +559,7 @@ async fn send_approval_request(
     writer: &Arc<Mutex<IpcFrameWriter>>,
     pending: &PendingApprovals,
 ) {
-    let prompt = format!(
-        "Agent {} requests {} (tier {}).\n\
-         Action: {}\n\
-         Trigger: {}\n\n\
-         React with ✅ to approve or ❌ to deny.",
-        fields.triggering_agent,
-        fields.tool_name,
-        fields.requested_tier,
-        fields.action_key,
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            fields.trigger_message.clone()
-        },
-    );
+    let prompt = approval_text(&fields);
 
     let url = format!(
         "{}/_matrix/client/v3/rooms/{}/send/m.room.message/wirken-approval.{}",

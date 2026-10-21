@@ -70,7 +70,7 @@ pub(crate) async fn status(
                 "model": llm.model,
                 "exec": {
                     "mode": mode_word(mode),
-                    "runtime": wirken_agent::terminal_approval_gate::exec_runtime_name(mode),
+                    "runtime": wirken_agent::exec_location::runtime_name(mode),
                 },
             })
         }

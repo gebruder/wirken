@@ -2,6 +2,7 @@
 //! channel, in owned form for the screen.
 
 use capnp::message::{Builder, HeapAllocator};
+use wirken_adapter_core::approval_card::ApprovalCard;
 use wirken_ipc::wirken_capnp::{frame, llm_chunk, tool_activity};
 
 /// The channel name the gateway pins this connection to.
@@ -26,6 +27,25 @@ pub(crate) struct ApprovalAsk {
     /// The runtime the exec would run under, as the gateway names it:
     /// `gvisor`, `docker` or `host`. Empty for other tools.
     pub exec_runtime: String,
+}
+
+impl ApprovalAsk {
+    /// The card every surface renders, from the frame's fields; an
+    /// empty field is a value the ask does not have.
+    pub(crate) fn card(&self) -> ApprovalCard {
+        let present = |s: &String| (!s.is_empty()).then(|| s.clone());
+        ApprovalCard {
+            agent: self.agent.clone(),
+            tool_name: self.tool_name.clone(),
+            tier: self.tier.clone(),
+            action_key: self.action_key.clone(),
+            arguments: present(&self.arguments),
+            exec_location: present(&self.exec_location),
+            exec_runtime: present(&self.exec_runtime),
+            trigger_message: present(&self.trigger),
+            assistant_text: present(&self.assistant_text),
+        }
+    }
 }
 
 /// What the screen asks the gateway about its own state.

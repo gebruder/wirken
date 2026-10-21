@@ -40,9 +40,11 @@ it refused the page's approvals snapshot stayed null, which meant no
 in the rail, and no pending card restored after a reload however many
 decisions were waiting.
 
-The approval card shows the action key, the arguments the model sent,
-what the model said in the same message and, for an `exec`, where it runs
-if approved, all off the `ApprovalRequest` event. See
+The approval card is the one every surface renders: the action key, the
+arguments the model sent, for an `exec` where it runs and under which
+runtime, the message the turn replies to and, set apart, the model's own
+words labeled `model's claim (unverified)`, all off the `ApprovalRequest`
+event. See
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
 
 The About panel draws the capabilities of the conversation it is open on.
@@ -116,10 +118,11 @@ The card takes no keys for its first 0.7 seconds. Only a lone `y` or `yes`
 approves; anything else refuses, and text after `n` or `no`, or anything
 else typed, is recorded as the reason. Enter with nothing typed refuses, and
 the two answers are drawn alike, so approving is never the default. The card
-shows the action key, the arguments that will run, where an `exec` runs, the
-runtime it runs under and the message the turn replies to as the gateway
-established them; what the model said beside the call is drawn apart and
-labeled `model's claim (unverified)`. A draft being typed when a card
+is the one every surface renders, line by line: the request, the action key,
+the arguments that will run, where an `exec` runs, the runtime it runs under
+and the message the turn replies to as the gateway established them; what
+the model said beside the call is drawn apart and labeled `model's claim
+(unverified)`. A draft being typed when a card
 arrives is set aside and comes back once the cards are answered; cards that
 arrive together are asked in order. The decision is recorded with
 `approved_via` / `denied_via` `{"kind":"channel_adapter","channel":"terminal"}`

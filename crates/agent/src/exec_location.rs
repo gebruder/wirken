@@ -11,7 +11,7 @@
 //! time (`sandbox::egress_decision`): a channel policy, when there is
 //! one, decides; without one the legacy `network` flag does.
 
-use wirken_audit::ExecLocation;
+use wirken_audit::{ExecLocation, SandboxModeLabel};
 
 use crate::sandbox::{SandboxConfig, SandboxMode};
 use crate::sandbox_egress::{SandboxEgressMode, SandboxEgressPolicy};
@@ -84,6 +84,22 @@ fn network(config: &SandboxConfig, egress: Option<&SandboxEgressPolicy>) -> Stri
     }
 }
 
+/// The container runtime a sandbox mode runs an `exec` under, as every
+/// approval surface names it. The mode decides it: `gvisor` passes
+/// Docker the `runsc` runtime, `exec-only` passes none, so Docker's
+/// default runtime runs the container, and `off` runs the command on
+/// the host. There is no fallback between them: a `gvisor` mode whose
+/// `runsc` runtime is missing refuses `exec` instead (`crate::tool`),
+/// and every `exec` that ran records the runtime Docker was told to
+/// use on its `ToolResult` row.
+pub fn runtime_name(mode: SandboxModeLabel) -> &'static str {
+    match mode {
+        SandboxModeLabel::Gvisor => "gvisor",
+        SandboxModeLabel::ExecOnly => "docker",
+        SandboxModeLabel::Off => "host",
+    }
+}
+
 /// Who a host `exec` runs as: the user running this process.
 pub fn host_user() -> String {
     std::env::var("USER")
@@ -97,7 +113,6 @@ pub fn host_user() -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use wirken_audit::SandboxModeLabel;
 
     fn config(mode: SandboxMode, network: bool) -> SandboxConfig {
         SandboxConfig {
@@ -138,6 +153,13 @@ mod tests {
         let loc = describe(&config(SandboxMode::Off, false), None, "davi");
         assert_eq!(loc.mode, SandboxModeLabel::Off);
         assert_eq!(loc.text, "runs on this host as davi");
+    }
+
+    #[test]
+    fn each_mode_names_its_runtime() {
+        assert_eq!(runtime_name(SandboxModeLabel::Gvisor), "gvisor");
+        assert_eq!(runtime_name(SandboxModeLabel::ExecOnly), "docker");
+        assert_eq!(runtime_name(SandboxModeLabel::Off), "host");
     }
 
     #[test]

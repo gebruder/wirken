@@ -70,9 +70,11 @@ pub struct PendingRequest {
     /// reload shows what the live one showed.
     pub arguments: Option<String>,
     pub assistant_text: Option<String>,
-    /// Where an `exec` runs if approved, as every surface states it.
-    /// `None` for other tools.
+    /// Where an `exec` runs if approved, as every surface states it,
+    /// and the container runtime it runs under (`gvisor`, `docker` or
+    /// `host`). `None` for other tools.
     pub exec_location: Option<String>,
+    pub exec_runtime: Option<String>,
 }
 
 /// Per-entry shape kept in the queue. The receiver half of the
@@ -112,6 +114,7 @@ pub struct PendingDetail {
     pub arguments: Option<String>,
     pub assistant_text: Option<String>,
     pub exec_location: Option<String>,
+    pub exec_runtime: Option<String>,
     pub requested_at: DateTime<Utc>,
     pub age_seconds: u64,
 }
@@ -269,6 +272,7 @@ impl PendingApprovalQueue {
             arguments: e.request.arguments.clone(),
             assistant_text: e.request.assistant_text.clone(),
             exec_location: e.request.exec_location.clone(),
+            exec_runtime: e.request.exec_runtime.clone(),
             requested_at: e.requested_at,
             age_seconds: now.saturating_duration_since(e.requested_instant).as_secs(),
         })
@@ -297,6 +301,7 @@ mod tests {
             assistant_text: None,
             arguments: None,
             exec_location: None,
+            exec_runtime: None,
             session_id: String::new(),
         }
     }
@@ -456,14 +461,17 @@ mod tests {
     }
 
     #[test]
-    fn show_carries_where_an_exec_runs() {
+    fn show_carries_where_an_exec_runs_and_under_which_runtime() {
         let q = PendingApprovalQueue::new();
         let mut request = req("ls");
         request.exec_location = Some("runs on this host as davi".into());
+        request.exec_runtime = Some("host".into());
         let (id, _rx) = q.register(request);
+        let shown = q.show(&id).unwrap();
         assert_eq!(
-            q.show(&id).unwrap().exec_location.as_deref(),
+            shown.exec_location.as_deref(),
             Some("runs on this host as davi")
         );
+        assert_eq!(shown.exec_runtime.as_deref(), Some("host"));
     }
 }
