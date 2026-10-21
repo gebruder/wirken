@@ -23,6 +23,17 @@ pub fn encrypt(
     plaintext: &VaultSecret,
     key: &VaultSecret,
 ) -> Result<Vec<u8>, VaultError> {
+    encrypt_aad(name.as_bytes(), plaintext, key)
+}
+
+/// [`encrypt`] under explicit additional authenticated data. The store
+/// passes the row's [`crate::store::row_aad`]: the name for every kind
+/// but a plan sign-in, whose kind is bound in beside it.
+pub(crate) fn encrypt_aad(
+    aad: &[u8],
+    plaintext: &VaultSecret,
+    key: &VaultSecret,
+) -> Result<Vec<u8>, VaultError> {
     let key_bytes = Zeroizing::new(
         hex_decode(key.expose())
             .map_err(|e| VaultError::Encryption(format!("invalid hex key: {e}")))?,
@@ -46,7 +57,7 @@ pub fn encrypt(
             &nonce,
             Payload {
                 msg: plaintext.expose().as_bytes(),
-                aad: name.as_bytes(),
+                aad,
             },
         )
         .map_err(|e| VaultError::Encryption(e.to_string()))?;
@@ -65,6 +76,15 @@ pub fn encrypt(
 /// `name` must match the value passed to [`encrypt`] for the same
 /// row. A mismatch fails the AEAD tag check.
 pub fn decrypt(name: &str, encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, VaultError> {
+    decrypt_aad(name.as_bytes(), encrypted, key)
+}
+
+/// [`decrypt`] under explicit additional authenticated data.
+pub(crate) fn decrypt_aad(
+    aad: &[u8],
+    encrypted: &[u8],
+    key: &VaultSecret,
+) -> Result<VaultSecret, VaultError> {
     if encrypted.len() < NONCE_SIZE {
         return Err(VaultError::Decryption(
             "ciphertext too short to contain nonce".into(),
@@ -94,7 +114,7 @@ pub fn decrypt(name: &str, encrypted: &[u8], key: &VaultSecret) -> Result<VaultS
             &nonce,
             Payload {
                 msg: ciphertext,
-                aad: name.as_bytes(),
+                aad,
             },
         )
         .map_err(|e| VaultError::Decryption(e.to_string()))?;

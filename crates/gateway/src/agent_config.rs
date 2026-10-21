@@ -55,6 +55,54 @@ pub struct ChannelEgress {
     pub domains: Vec<String>,
 }
 
+/// How an agent authenticates to its provider.
+///
+/// `Key` is every provider's API key or no credential at all, and the
+/// default, so an agent row or `provider.json` written before this
+/// existed reads as it always did. `Plan` is a sign-in mode one
+/// provider offers: the credential is an OAuth grant on the operator's
+/// plan, refreshed per call, and requests go to the provider's
+/// Responses endpoint at a fixed base URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuth {
+    #[default]
+    Key,
+    Plan,
+}
+
+impl ProviderAuth {
+    /// The value `provider.json` and the agent store carry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderAuth::Key => "key",
+            ProviderAuth::Plan => "plan",
+        }
+    }
+
+    /// Parse a stored value. Absent or empty is `Key`; anything else
+    /// unrecognized is an error rather than a guess, since reading an
+    /// unknown mode as an API key would send a request the operator
+    /// did not configure.
+    pub fn parse(raw: Option<&str>) -> Result<Self, GatewayError> {
+        match raw.unwrap_or("") {
+            "" | "key" => Ok(ProviderAuth::Key),
+            "plan" => Ok(ProviderAuth::Plan),
+            other => Err(GatewayError::Config(format!(
+                "unknown auth mode '{other}'; expected 'key' or 'plan'"
+            ))),
+        }
+    }
+
+    pub fn is_key(&self) -> bool {
+        *self == ProviderAuth::Key
+    }
+
+    pub fn is_plan(&self) -> bool {
+        *self == ProviderAuth::Plan
+    }
+}
+
 /// Persistent configuration for a registered agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -104,6 +152,12 @@ pub struct AgentConfig {
     /// trust boundary an operator reasons about.
     #[serde(default)]
     pub channel_egress: BTreeMap<String, ChannelEgress>,
+    /// How the agent authenticates to its provider. `Key` for every
+    /// row written before the column existed. A `Plan` agent's
+    /// `api_key_credential` names its sign-in entry and its `base_url`
+    /// is not used.
+    #[serde(default, skip_serializing_if = "ProviderAuth::is_key")]
+    pub auth: ProviderAuth,
 }
 
 /// Persistent registry of agent configurations.
@@ -175,6 +229,16 @@ impl AgentConfigStore {
             return Err(e.into());
         }
 
+        // Provider auth mode. Default `''` so every row written before
+        // this column existed reads back as an API-key agent.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE agents ADD COLUMN auth TEXT NOT NULL DEFAULT ''",
+            [],
+        ) && !e.to_string().contains("duplicate column")
+        {
+            return Err(e.into());
+        }
+
         Ok(Self { conn })
     }
 
@@ -188,8 +252,8 @@ impl AgentConfigStore {
         let channel_egress_json = serde_json::to_string(&config.channel_egress)
             .map_err(|e| GatewayError::Config(format!("serialize channel_egress: {e}")))?;
         self.conn.execute(
-            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress, auth)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 config.id,
                 config.name,
@@ -201,6 +265,7 @@ impl AgentConfigStore {
                 tools_enabled_str,
                 config.preset,
                 channel_egress_json,
+                stored_auth(config.auth),
             ],
         )?;
 
@@ -259,7 +324,7 @@ impl AgentConfigStore {
         let row = self
             .conn
             .query_row(
-                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress
+                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress, auth
                  FROM agents WHERE id = ?1",
                 params![agent_id],
                 |row| {
@@ -274,6 +339,7 @@ impl AgentConfigStore {
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
                         row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )
@@ -283,6 +349,8 @@ impl AgentConfigStore {
         let allowed_subagents = parse_allowed_subagents(&row.6)?;
         let tools_enabled = parse_tools_enabled(row.7.as_deref());
         let channel_egress = parse_channel_egress(&row.9, agent_id);
+        let auth = ProviderAuth::parse(Some(&row.10))
+            .map_err(|e| GatewayError::Config(format!("agent '{agent_id}': {e}")))?;
 
         Ok(AgentConfig {
             id: row.0,
@@ -296,13 +364,14 @@ impl AgentConfigStore {
             tools_enabled,
             preset: row.8,
             channel_egress,
+            auth,
         })
     }
 
     /// List all agent configs.
     pub fn list(&self) -> Result<Vec<AgentConfig>, GatewayError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress
+            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress, auth
              FROM agents ORDER BY id",
         )?;
 
@@ -318,6 +387,7 @@ impl AgentConfigStore {
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
             ))
         })?;
 
@@ -334,11 +404,14 @@ impl AgentConfigStore {
                 tools_enabled_raw,
                 preset,
                 channel_egress_json,
+                auth_raw,
             ) = row?;
             let channels = self.get_channels(&id)?;
             let allowed_subagents = parse_allowed_subagents(&allowed_subagents_json)?;
             let tools_enabled = parse_tools_enabled(tools_enabled_raw.as_deref());
             let channel_egress = parse_channel_egress(&channel_egress_json, &id);
+            let auth = ProviderAuth::parse(Some(&auth_raw))
+                .map_err(|e| GatewayError::Config(format!("agent '{id}': {e}")))?;
             agents.push(AgentConfig {
                 id,
                 name,
@@ -351,6 +424,7 @@ impl AgentConfigStore {
                 tools_enabled,
                 preset,
                 channel_egress,
+                auth,
             });
         }
 
@@ -441,7 +515,7 @@ impl AgentConfigStore {
             "UPDATE agents
              SET name = ?2, provider = ?3, model = ?4, base_url = ?5,
                  api_key_credential = ?6, allowed_subagents = ?7,
-                 tools_enabled = ?8, preset = ?9
+                 tools_enabled = ?8, preset = ?9, auth = ?10
              WHERE id = ?1",
             params![
                 config.id,
@@ -453,6 +527,7 @@ impl AgentConfigStore {
                 allowed_subagents_json,
                 tools_enabled_str,
                 config.preset,
+                stored_auth(config.auth),
             ],
         )?;
         if changes == 0 {
@@ -490,6 +565,16 @@ impl AgentConfigStore {
             channels.push(row?);
         }
         Ok(channels)
+    }
+}
+
+/// The `auth` column for `auth`: empty for an API-key agent, the value
+/// every row written before the column existed carries, so the two
+/// read the same.
+fn stored_auth(auth: ProviderAuth) -> &'static str {
+    match auth {
+        ProviderAuth::Key => "",
+        ProviderAuth::Plan => ProviderAuth::Plan.as_str(),
     }
 }
 
@@ -560,6 +645,7 @@ mod tests {
             tools_enabled: None,
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         };
 
         store.register(&config).unwrap();
@@ -605,6 +691,7 @@ mod tests {
             tools_enabled: Some(true),
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         };
         store.register(&config).unwrap();
 
@@ -648,6 +735,7 @@ mod tests {
                 tools_enabled: None,
                 preset: None,
                 channel_egress: Default::default(),
+                auth: Default::default(),
             })
             .unwrap();
 
@@ -664,6 +752,7 @@ mod tests {
                 tools_enabled: None,
                 preset: None,
                 channel_egress: Default::default(),
+                auth: Default::default(),
             })
             .unwrap();
 
@@ -691,6 +780,7 @@ mod tests {
                 tools_enabled: None,
                 preset: None,
                 channel_egress: Default::default(),
+                auth: Default::default(),
             })
             .unwrap();
 
@@ -717,6 +807,7 @@ mod tests {
                 tools_enabled: None,
                 preset: None,
                 channel_egress: Default::default(),
+                auth: Default::default(),
             })
             .unwrap();
         store
@@ -732,6 +823,7 @@ mod tests {
                 tools_enabled: None,
                 preset: None,
                 channel_egress: Default::default(),
+                auth: Default::default(),
             })
             .unwrap();
 
@@ -764,6 +856,7 @@ mod tests {
                     tools_enabled: None,
                     preset: None,
                     channel_egress: Default::default(),
+                    auth: Default::default(),
                 })
                 .unwrap();
         }
@@ -800,6 +893,7 @@ mod tests {
             tools_enabled: None,
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         };
         store.register(&cfg).unwrap();
 
@@ -832,6 +926,7 @@ mod tests {
                 tools_enabled: None,
                 preset: None,
                 channel_egress: Default::default(),
+                auth: Default::default(),
             })
             .unwrap();
         let got = store.get("legacy").unwrap();
@@ -856,6 +951,7 @@ mod tests {
                 tools_enabled: None,
                 preset: None,
                 channel_egress: Default::default(),
+                auth: Default::default(),
             })
             .unwrap();
 
@@ -871,6 +967,7 @@ mod tests {
             tools_enabled: Some(true),
             preset: Some("researcher".into()),
             channel_egress: Default::default(),
+            auth: Default::default(),
         };
         store.update(&updated).unwrap();
 
@@ -898,6 +995,7 @@ mod tests {
             tools_enabled: None,
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         };
         let err = store.update(&cfg).unwrap_err();
         assert!(
@@ -923,6 +1021,7 @@ mod tests {
             tools_enabled: None,
             preset: Some("starter".into()),
             channel_egress: Default::default(),
+            auth: Default::default(),
         };
         store.register(&cfg).unwrap();
         assert_eq!(store.get("bob").unwrap().preset.as_deref(), Some("starter"));
@@ -949,6 +1048,7 @@ mod tests {
                 tools_enabled: None,
                 preset: None,
                 channel_egress: Default::default(),
+                auth: Default::default(),
             })
             .unwrap();
         let mut ceilings = BTreeMap::new();
@@ -980,7 +1080,55 @@ mod tests {
             tools_enabled: None,
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         }
+    }
+
+    /// A row written before the `auth` column existed is an API-key
+    /// agent; a plan agent round-trips through register, update, get
+    /// and list; a value this build does not know is refused rather
+    /// than read as a key.
+    #[test]
+    fn auth_defaults_to_key_round_trips_plan_and_refuses_unknown() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("agents.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agents (
+                     id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,
+                     model TEXT NOT NULL, base_url TEXT NOT NULL,
+                     api_key_credential TEXT NOT NULL DEFAULT ''
+                 );
+                 INSERT INTO agents VALUES ('old', 'old', 'openai', 'm', 'https://x', 'k');",
+            )
+            .unwrap();
+        }
+        let store = AgentConfigStore::open(&path).unwrap();
+        assert_eq!(store.get("old").unwrap().auth, ProviderAuth::Key);
+
+        let mut plan = base_config("p");
+        plan.auth = ProviderAuth::Plan;
+        store.register(&plan).unwrap();
+        assert_eq!(store.get("p").unwrap().auth, ProviderAuth::Plan);
+        let mut back = store.get("p").unwrap();
+        back.auth = ProviderAuth::Key;
+        store.update(&back).unwrap();
+        assert_eq!(store.get("p").unwrap().auth, ProviderAuth::Key);
+        back.auth = ProviderAuth::Plan;
+        store.update(&back).unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(
+            listed.iter().find(|a| a.id == "p").unwrap().auth,
+            ProviderAuth::Plan
+        );
+
+        store
+            .conn
+            .execute("UPDATE agents SET auth = 'other' WHERE id = 'p'", [])
+            .unwrap();
+        assert!(store.get("p").is_err());
+        assert!(store.list().is_err());
     }
 
     #[test]

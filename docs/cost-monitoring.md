@@ -144,6 +144,8 @@ At gateway start the posture is the same. If `budget.db` cannot be opened while 
 
 A call whose (provider, model) pair is absent from the pricing table records no cost, so it does not advance the ledger. This is a blind spot: block mode plus a costless provider is no protection. The first uncosted call in a session with an active budget logs a warning so an operator sees the control is pass-through for that provider. Keep the pricing table current for the models you meter.
 
+An agent in plan mode (`"auth": "plan"`, see [configuration.md](configuration.md#providerjson)) is never priced: its `llm_response` rows carry token counts and null cost fields, whatever the pricing table lists for the same model at the API. A block-mode budget therefore refuses each of its calls before the request row, writes a `budget_exceeded` row with action `blocked`, and returns an error that names the budget (`budget.json` `agents.<id>` or the default) and says plan requests cannot be priced. An alert-mode budget does not refuse it. The plan's own usage limits are set and shown at https://chatgpt.com/settings/usage.
+
 ## Boundary
 
 Wirken meters the LLM traffic it routes through Wirken. It does not meter a vendor's software-as-a-service (SaaS) seat usage, a subscription plan, or spend from calls made outside Wirken. `total_cost_usd_micros` is derived from the baked pricing table (`crates/audit/src/pricing.toml`), so it is an estimate at those rates, not a reconciled invoice. Treat it as an operator-side view of routed-through-Wirken spend, useful for attribution and anomaly detection, not as a billing record.

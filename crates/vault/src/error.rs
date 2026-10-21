@@ -28,6 +28,11 @@ pub enum VaultError {
     #[error("credential expired: {0}")]
     Expired(String),
 
+    /// The entry is a plan sign-in, which only the plan token source
+    /// reads; it is never handed out as a key.
+    #[error("credential '{0}' is a plan sign-in, not a key")]
+    PlanSignIn(String),
+
     #[error("passphrase derivation failed: {0}")]
     Derivation(String),
 

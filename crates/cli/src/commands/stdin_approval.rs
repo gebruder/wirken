@@ -351,8 +351,7 @@ where
     }
 }
 
-/// One decision line, as every local approval surface reads it.
-pub(crate) fn parse_decision(line: &str) -> ApprovalOutcome {
+fn parse_decision(line: &str) -> ApprovalOutcome {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return ApprovalOutcome::Denied {

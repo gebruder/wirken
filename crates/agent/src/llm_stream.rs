@@ -40,6 +40,21 @@ pub enum StreamEvent {
     Done(LlmResponse),
     /// An error during streaming.
     Error(String),
+    /// A tool call the model asked for, sent by the streaming turn once
+    /// the `AssistantToolCalls` row recording it is on the chain. The
+    /// arguments are the ones that row records.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// A tool call finished, sent once its `ToolResult` row is on the
+    /// chain.
+    ToolResult {
+        id: String,
+        name: String,
+        success: bool,
+    },
 }
 
 impl LlmClient {
@@ -53,6 +68,9 @@ impl LlmClient {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         self.refuse_leaked_request(messages, tools)?;
+        if self.config().auth.is_plan() {
+            return self.complete_plan(messages, tools, Some(&tx)).await;
+        }
         match self.config().provider.as_str() {
             "openai" | "ollama" | "custom" | "infomaniak" | "hetzner" => {
                 self.stream_openai(messages, tools, api_key, &tx).await

@@ -12,32 +12,51 @@ tagged.
 
 ### Added
 
-- `wirken chat`, and `wirken` with no subcommand: a full-screen terminal
-  chat. Every configured agent is resolved as `wirken ask` resolves it and
-  woken through one `AgentFactory`, with the permission store, the leak
-  matcher, the org tool policy and budget enforcement, failing closed on a
-  malformed `budget.json` as `wirken run` does; hooks, MCP and the memory
-  stores, which need the daemon, are not attached, and the Safety card names
-  registered hooks. Each conversation is its own audit lane,
-  `{agent}/chat/c-<id>`, sealed when the chat leaves it (also on SIGTERM,
-  SIGHUP, SIGINT and a panic) and never written to when only read. A Tier 2
-  or Tier 3 action shows an approval card with the lines the `ask` prompt
-  shows; only `y` or `yes` alone approves, a draft typed when a card arrives
-  is set aside, and an approval in the card's first 0.7 seconds is not
-  taken. Tool calls are drawn from the chain in the order the model made
-  them. The screen has a sidebar of every agent under its provider and
-  model with its conversations and their delegated runs nested beneath, the
-  conversation with replies laid out as light Markdown by display width, and
-  a panel of cards (Delegations, Environment, Safety, Context, Cost and
-  tokens, Audit, Approvals, Tools) that `/runs`, `/status`, `/safety`,
-  `/context`, `/cost`, `/verify` and `/tools` also reach. An agent allowed
-  sub-agents with `wirken agents allow-subagent` delegates from the chat:
-  each run shows how it stands, its cards say which run asks for which agent
-  and under what ceiling at any depth, a run's lane opens read-only, and
-  finished runs are sealed. `/export` writes under `exports/` in the data
-  directory, never into the agent's workspace. New dependencies `ratatui`
-  and `crossterm` (both MIT), and `unicode-width` and `unicode-segmentation`
-  as direct dependencies (already in the tree through `ratatui`). See [docs/cli.md](docs/cli.md#wirken-chat).
+- `wirken chat [--agent NAME]` opens a full-screen chat in the terminal.
+  It is a channel of the running gateway, `terminal`, so its messages
+  take the same path as any adapter's: injection scan, audit rows, router,
+  tier gate and session chain. It signs in with the operator key, asks
+  approvals on a card in the chat, and shows panels for the environment
+  (including the sandbox runtime the gateway reports), context, cost and
+  tokens, audit with a chain check, approvals and tools, plus a sidebar of
+  agents and conversations with search. Without a terminal it points to
+  `wirken ask`; without a running gateway it points to `wirken run`. Bare
+  `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
+- Plan sign-in for the `openai` provider: an agent can run on a ChatGPT
+  plan the operator has, through OpenAI's sign-in for open-source and
+  locally run apps, with no API key. `wirken credentials authorize`
+  signs in and registers this install with OpenAI, `wirken setup` and
+  `wirken agents add --auth plan` select it, and `wirken credentials
+  sign-out` revokes and clears the tokens. Requests go to the Responses
+  API at `api.openai.com`, which is pinned. Tokens live in the vault
+  under their own kind, bound into the entry's encryption, so a binary
+  that predates plan sign-in cannot read the entry as a key. Refreshes
+  are serialized per entry across processes. Plan requests are not
+  priced, so a block-mode budget refuses a plan agent. See
+  docs/credentials.md. Proposed by Tanmay Maka (@maka-tanmay).
+
+### Fixed
+
+- Sub-agents started by several `spawn_subagent` calls in one turn now
+  write their `SubagentSessionBound` row, as a single spawn always has.
+  Without it, such a child woken again after a crash came back at tier1
+  with no tools instead of its grant, and `wirken sessions verify` could
+  not attest the tools it was offered. Found by Tanmay Maka
+  (@maka-tanmay).
+- Spawning a sub-agent no longer logs "sub-agent session has no binding
+  row" at ERROR. The factory now binds a spawned child before handing it
+  back, so no spawn sees the child's lane without its row. The ERROR
+  remains for a child lane woken later whose row is missing. Found by
+  Tanmay Maka (@maka-tanmay).
+- A sub-agent that cannot be bound no longer ends its parent's turn. The
+  call returns an error result, the parent's chain records the spawn's
+  `SubagentResult` as an error, and the child does not run. Single and
+  parallel spawns behave the same; siblings in a parallel spawn run on.
+- An approval answered in the chat whose message raised it now reaches
+  the gate. Each adapter connection's frames are read while a turn runs,
+  so a Telegram or Signal decision sent on that connection resolves the
+  request instead of waiting until the gate timed out and refused. Turns
+  on a connection still run one at a time and in order.
 
 ## [2.3.0] - 2026-10-18
 

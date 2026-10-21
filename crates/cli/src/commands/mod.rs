@@ -6,6 +6,7 @@ pub mod agents;
 pub mod approvers;
 pub mod audit;
 pub mod channel;
+#[cfg(unix)]
 pub mod chat;
 pub mod connection_tasks;
 pub mod credential;
@@ -27,6 +28,7 @@ pub mod mcp_proxy;
 pub mod oauth_scope;
 pub mod permission;
 pub mod persona;
+pub mod plan_sign_in;
 pub mod preset;
 pub mod provider_pick;
 pub mod run;
@@ -35,6 +37,7 @@ pub mod session;
 pub mod setup;
 pub mod skills;
 pub mod stdin_approval;
+pub mod terminal_queries;
 pub mod ui;
 pub mod update;
 pub mod vault;
@@ -100,11 +103,17 @@ pub(crate) fn unknown_sandbox_keys(val: &serde_json::Value) -> Vec<String> {
 pub fn llm_config_for_agent(
     agent_cfg: &wirken_gateway::agent_config::AgentConfig,
 ) -> wirken_agent::llm::LlmConfig {
-    let mut llm = wirken_agent::llm::LlmConfig::from_provider(
-        &agent_cfg.provider,
-        &agent_cfg.base_url,
-        &agent_cfg.model,
-    );
+    // Plan mode has its own fixed endpoint; the row's base_url is not
+    // read for it.
+    let mut llm = if agent_cfg.auth.is_plan() {
+        wirken_agent::llm::LlmConfig::plan(&agent_cfg.model)
+    } else {
+        wirken_agent::llm::LlmConfig::from_provider(
+            &agent_cfg.provider,
+            &agent_cfg.base_url,
+            &agent_cfg.model,
+        )
+    };
     if agent_cfg.provider == "bedrock" {
         llm.region = agent_cfg
             .base_url
@@ -960,6 +969,7 @@ mod tests {
             tools_enabled: tools,
             preset: None,
             channel_egress: Default::default(),
+            auth: Default::default(),
         }
     }
 

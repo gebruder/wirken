@@ -562,6 +562,7 @@ mod oauth_test {
             expires_at: 1_700_000_000,
             scope: "read write".into(),
             provider: "linear".into(),
+            ..Default::default()
         };
         store_oauth(&store, "linear-oauth", &cred).unwrap();
         let loaded = load_oauth(&store, "linear-oauth").unwrap();
@@ -586,6 +587,7 @@ mod oauth_test {
             expires_at: 1,
             scope: "".into(),
             provider: "linear".into(),
+            ..Default::default()
         };
         store_oauth(&store, "linear-oauth", &v1).unwrap();
 
@@ -595,6 +597,7 @@ mod oauth_test {
             expires_at: 2,
             scope: "".into(),
             provider: "linear".into(),
+            ..Default::default()
         };
         store_oauth(&store, "linear-oauth", &v2).unwrap();
 

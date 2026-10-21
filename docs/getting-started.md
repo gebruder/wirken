@@ -37,7 +37,10 @@ Six steps, about a minute:
 
 1. **Provider.** Ollama, NIM, Anthropic, OpenAI, Gemini, Bedrock, Tinfoil,
    Privatemode, Infomaniak, Hetzner, or a custom OpenAI-compatible endpoint.
-   Your API key is encrypted immediately.
+   Your API key is encrypted immediately. OpenAI can also run on a ChatGPT
+   plan you have instead of a key: "Continue with ChatGPT" signs in through
+   the browser and stores the sign-in in the vault
+   ([credentials.md](credentials.md#plan-sign-in-openai)).
 2. **Channels.** Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat,
    iMessage, WhatsApp. Each token is encrypted separately into the vault.
 3. **Credentials recap.** What is now in the vault.
@@ -48,23 +51,6 @@ Six steps, about a minute:
 6. **Audit log.** Where the hash-chained log lives and when it is created.
 
 16 bundled skills are installed automatically.
-
-## Chat
-
-```bash
-wirken
-```
-
-![The chat on first open: a greeting, the message box, the agent, model and sandbox under it, and three suggestions to start from](img/chat-home.png)
-
-Opens a chat with the default agent in the terminal; `wirken chat` is the
-same. On a first run it walks through setup before the chat opens. Type a
-message and press Enter, or pick one of the suggestions; a tool that needs
-approval shows a card, answered with its buttons or `y` and `n`; `/help` lists the commands and keys, `/quit` leaves.
-Earlier conversations are in the sidebar and reopen with a click.
-Everything the agent does is on the audit chain under this conversation's
-id, which `/status` shows; a run the agent delegates is on its own lane,
-`<id>#sub-N`. See [cli.md](cli.md#wirken-chat).
 
 ## Run
 

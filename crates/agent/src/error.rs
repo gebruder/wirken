@@ -166,4 +166,10 @@ pub enum AgentError {
     /// and emit an empty findings.json so the failure counts.
     #[error("rate limit exhausted after {attempts} attempts")]
     RateLimitExhausted { attempts: u32 },
+
+    /// A plan-mode request the provider refused, with its HTTP status,
+    /// error code and request id. Boxed for the same reason as
+    /// [`Self::PermissionDeniedCtx`].
+    #[error("{0}")]
+    PlanRoute(Box<crate::llm_responses::PlanRouteError>),
 }

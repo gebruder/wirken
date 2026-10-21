@@ -34,7 +34,7 @@
 //! Subsequent callers serialize through the inner `Mutex<Agent>` on
 //! the cached entry, which is the existing single-writer guarantee.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
@@ -46,7 +46,8 @@ use wirken_gateway::agent_config::SubagentCeiling;
 use wirken_gateway::budget::{BudgetConfig, BudgetStore};
 use wirken_gateway::org::OrgPermissions;
 use wirken_gateway::permissions::{
-    PermissionStore, SESSION_CLEAR_REASON_ENDED, emit_session_scoped_approvals_cleared,
+    PermissionStore, PermissionTier, SESSION_CLEAR_REASON_ENDED,
+    emit_session_scoped_approvals_cleared,
 };
 
 use crate::error::AgentError;
@@ -86,6 +87,16 @@ pub(crate) fn channel_from_session_id(session_id: &str) -> Option<&str> {
     // accidentally match.
     parts.next()?;
     Some(channel)
+}
+
+/// The session a sub-agent session was spawned from, through every
+/// level: `{parent}#sub-N#sub-M` gives `{parent}`. Any other id is its
+/// own root. A surface that reaches its client by the session the
+/// client's turn runs on finds a sub-agent's request by this.
+pub fn root_session_id(session_id: &str) -> &str {
+    session_id
+        .split_once(SUBAGENT_SESSION_MARKER)
+        .map_or(session_id, |(root, _)| root)
 }
 
 /// Paired LLM config + API key selected for a specific channel. A
@@ -176,6 +187,11 @@ pub struct AgentStaticConfig {
     /// tool for the agent (the tool returns a clear error if invoked
     /// without the path bound).
     pub zirkel_db_path: Option<PathBuf>,
+    /// For an agent in plan mode: the token source over its sign-in
+    /// entry, shared by every agent on that entry. Attached to every
+    /// waked Agent that runs on the agent-wide defaults. A channel
+    /// override never gets it, so an override cannot run on the plan.
+    pub plan_token_source: Option<Arc<crate::plan_auth::PlanTokenSource>>,
 }
 
 /// Cache mode resolved at factory construction time. Tests pass it
@@ -210,6 +226,39 @@ impl CacheMode {
 struct BudgetWiring {
     store: Arc<StdMutex<BudgetStore>>,
     config: BudgetConfig,
+}
+
+/// The ceiling a parent grants a child it spawns, which
+/// [`AgentFactory::wake_subagent`] applies to the child and records
+/// on the child's own chain as its `SubagentSessionBound` row.
+pub(crate) struct SubagentBinding {
+    /// The child's nesting depth, one more than its parent's.
+    pub(crate) depth: usize,
+    /// The highest tier the child may act at without being refused.
+    pub(crate) max_permission_tier: PermissionTier,
+    /// The tools the child is offered: the ceiling's allowlist,
+    /// narrowed to what the parent asked for when it asked.
+    pub(crate) tools_granted: BTreeSet<String>,
+    pub(crate) parent_session_id: String,
+}
+
+/// Where a newly built agent's sub-agent binding comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingSource {
+    /// The session's own `SubagentSessionBound` row, if it has one.
+    /// Every wake that resumes a session takes this.
+    Replay,
+    /// The spawn that is creating the session, which binds the agent
+    /// once it is built. The lane is empty, so there is nothing to
+    /// replay, and reading its absence as a lost binding would be
+    /// wrong.
+    Spawn,
+}
+
+fn already_woken(child_session_id: &str) -> AgentError {
+    AgentError::SessionLog(format!(
+        "sub-agent session {child_session_id} is already woken; refusing to bind it"
+    ))
 }
 
 /// What a factory is waking agents for.
@@ -303,6 +352,11 @@ pub struct AgentFactory {
     /// no per-user allowlist: anything that can reach the loopback
     /// port is treated as the owner.
     sse_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
+    /// Channel-specific approval gate for terminal sessions
+    /// (`{agent}/terminal/{conv}`), the `wirken chat` client of a
+    /// running gateway. Installed by `wirken run`; `None` elsewhere,
+    /// and the factory falls back to `approval_gate`.
+    terminal_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
     /// Budget enforcement wiring (spend store + global default),
     /// shared across every waked Agent. `None` until the CLI calls
     /// [`Self::attach_budget`]; absent means the budget gate is a
@@ -433,6 +487,7 @@ impl AgentFactory {
             telegram_approval_gate: std::sync::RwLock::new(None),
             signal_approval_gate: std::sync::RwLock::new(None),
             sse_approval_gate: std::sync::RwLock::new(None),
+            terminal_approval_gate: std::sync::RwLock::new(None),
             budget_wiring: std::sync::RwLock::new(None),
             purpose,
             cache: StdMutex::new(LruCache::new(capacity)),
@@ -479,6 +534,12 @@ impl AgentFactory {
         *self.sse_approval_gate.write().unwrap() = Some(gate);
     }
 
+    /// Install the terminal approval gate. Sessions whose id parses
+    /// with channel `"terminal"` route through this gate.
+    pub fn attach_terminal_approval_gate(&self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
+        *self.terminal_approval_gate.write().unwrap() = Some(gate);
+    }
+
     /// Pick the right gate for a session id. Channel-specific
     /// gates win when installed for the session's channel;
     /// everything else falls back to the default gate. `None`
@@ -501,6 +562,11 @@ impl AgentFactory {
             }
             Some("webchat") => {
                 if let Some(g) = self.sse_approval_gate.read().unwrap().clone() {
+                    return Some(g);
+                }
+            }
+            Some("terminal") => {
+                if let Some(g) = self.terminal_approval_gate.read().unwrap().clone() {
                     return Some(g);
                 }
             }
@@ -605,6 +671,51 @@ impl AgentFactory {
         self.static_configs.keys().cloned().collect()
     }
 
+    /// The model and sandbox settings `agent_id` runs with, for a
+    /// surface that reports them. `None` for an agent this factory does
+    /// not know.
+    pub fn agent_settings(
+        &self,
+        agent_id: &str,
+    ) -> Option<(LlmConfig, crate::sandbox::SandboxConfig)> {
+        self.static_configs
+            .get(agent_id)
+            .map(|c| (c.llm_config.clone(), c.sandbox.clone()))
+    }
+
+    /// The budget in force for `agent_id`, with what it has spent in the
+    /// current window when the ledger can be read. `None` when no budget
+    /// applies.
+    pub fn budget_state(
+        &self,
+        agent_id: &str,
+    ) -> Option<(wirken_gateway::budget::AgentBudget, Option<u64>)> {
+        let wiring = self.budget_wiring.read().ok()?;
+        let wiring = wiring.as_ref()?;
+        let budget = wiring.config.resolve(agent_id)?;
+        let start = budget
+            .window
+            .window_start(wirken_gateway::budget::now_unix_secs());
+        let spent = wiring
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| s.window_spend(agent_id, start).ok());
+        Some((budget, spent))
+    }
+
+    /// The grants the permission store holds for `agent_id`. `None` when
+    /// this factory gates with no store or the store cannot be read.
+    pub fn stored_grants(
+        &self,
+        agent_id: &str,
+    ) -> Option<Vec<wirken_gateway::permissions::Approval>> {
+        match &self.permissions {
+            ToolGate::Store(store) => store.lock().ok()?.list(agent_id).ok(),
+            ToolGate::ReplayOnly => None,
+        }
+    }
+
     /// Whether this factory has a static config for `agent_id`.
     pub fn has_agent(&self, agent_id: &str) -> bool {
         self.static_configs.contains_key(agent_id)
@@ -631,7 +742,99 @@ impl AgentFactory {
             return Ok(cached);
         }
 
-        // Build a fresh Agent for this session id.
+        let agent = self.build_agent(agent_id, session_id, BindingSource::Replay)?;
+        let arc = Arc::new(AsyncMutex::new(agent));
+
+        // Insert into cache (cached mode only). Double-checked: if
+        // another thread inserted between our lookup and now, return
+        // theirs and discard ours.
+        if self.cache_mode == CacheMode::Cached {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(existing) = cache.get(session_id).cloned() {
+                return Ok(existing);
+            }
+            cache.put(session_id.to_string(), arc.clone());
+        }
+
+        Ok(arc)
+    }
+
+    /// Wake the child a spawn names, and bind it before anyone can
+    /// use it.
+    ///
+    /// A plain [`Self::wake`] on a child's lane at spawn finds no
+    /// binding row, because the spawn has not written it yet, and
+    /// treats the lane as a child whose binding was lost. Binding
+    /// here, between the build and the return, puts the row on the
+    /// child's chain before any caller holds the agent. The agent is
+    /// cached only once it is bound, so a bind that fails leaves
+    /// nothing behind for a later wake to find clamped but unbound.
+    ///
+    /// Refuses, binding nothing, a lane that already has rows or a
+    /// session id already in the cache. A child's id derives from its
+    /// parent's spawn count, so a new spawn names a lane nothing has
+    /// written to or woken. Either one means the slot is not new, and
+    /// binding over it would put a second ceiling on a chain that may
+    /// already be running under the first.
+    pub(crate) async fn wake_subagent(
+        &self,
+        agent_id: &str,
+        child_session_id: &str,
+        binding: SubagentBinding,
+    ) -> Result<Arc<AsyncMutex<Agent>>, AgentError> {
+        if self.cache_mode == CacheMode::Cached
+            && self.cache.lock().unwrap().contains(child_session_id)
+        {
+            return Err(already_woken(child_session_id));
+        }
+        let handle = self
+            .session_log
+            .handle_for(SessionId::new(child_session_id.to_string()));
+        let last = self
+            .session_log
+            .last_index(&handle)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+        if last.is_some() {
+            return Err(AgentError::SessionLog(format!(
+                "sub-agent session {child_session_id} already has rows; refusing to bind it"
+            )));
+        }
+
+        let mut agent = self.build_agent(agent_id, child_session_id, BindingSource::Spawn)?;
+        agent
+            .bind_as_subagent(
+                binding.depth,
+                binding.max_permission_tier,
+                binding.tools_granted,
+                &binding.parent_session_id,
+            )
+            .await?;
+        let arc = Arc::new(AsyncMutex::new(agent));
+
+        // Unlike `wake`, an entry that appeared while this one was
+        // binding is not handed back. It is another agent on the same
+        // lane, one this call did not bind, so the call refuses.
+        if self.cache_mode == CacheMode::Cached {
+            let mut cache = self.cache.lock().unwrap();
+            if cache.contains(child_session_id) {
+                return Err(already_woken(child_session_id));
+            }
+            cache.put(child_session_id.to_string(), arc.clone());
+        }
+
+        Ok(arc)
+    }
+
+    /// Construct the agent for `session_id` from its session log and
+    /// this factory's configuration. Shared by [`Self::wake`] and
+    /// [`Self::wake_subagent`]; neither the cache nor the sub-agent
+    /// bind is its concern.
+    fn build_agent(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        binding: BindingSource,
+    ) -> Result<Agent, AgentError> {
         let cfg = self
             .static_configs
             .get(agent_id)
@@ -674,6 +877,11 @@ impl AgentFactory {
         // woken as a different config carries that config's id and is
         // checked against its own grants rather than its caller's.
         agent.set_agent_id(agent_id);
+        if override_for_channel.is_none()
+            && let Some(source) = &cfg.plan_token_source
+        {
+            agent.set_plan_token_source(source.clone());
+        }
         // Before the skills: a skill is checked against it as it loads.
         agent.set_leak_matcher(self.leak_matcher.read().unwrap().clone());
         // Inject the per-agent shared resources.
@@ -716,9 +924,12 @@ impl AgentFactory {
         // means a child woken from its session alone comes back
         // constrained, on crash recovery and on offline verify
         // alike. A read failure leaves the agent unclamped, which is
-        // the wrong direction, so it is loud rather than silent.
-        if let Err(err) =
-            replay_subagent_binding(&mut agent, &self.session_log, session_id, self.purpose)
+        // the wrong direction, so it is loud rather than silent. A
+        // spawn has no row to replay: it binds the agent once this
+        // returns.
+        if binding == BindingSource::Replay
+            && let Err(err) =
+                replay_subagent_binding(&mut agent, &self.session_log, session_id, self.purpose)
         {
             tracing::error!(
                 session_id,
@@ -740,6 +951,11 @@ impl AgentFactory {
             // global default; an explicit per-agent off opts out.
             let effective = bw.config.resolve(agent_id);
             agent.set_budget(effective, Some(bw.store.clone()));
+            agent.set_budget_name(if bw.config.agents.contains_key(agent_id) {
+                format!("the budget.json budget agents.{agent_id}")
+            } else {
+                "the budget.json default budget".to_string()
+            });
         }
         if let Some(gate) = self.approval_gate_for(session_id) {
             agent.set_approval_gate(gate);
@@ -774,20 +990,14 @@ impl AgentFactory {
             agent.attach_zirkel_db(path.clone());
         }
 
-        let arc = Arc::new(AsyncMutex::new(agent));
+        Ok(agent)
+    }
 
-        // Insert into cache (cached mode only). Double-checked: if
-        // another thread inserted between our lookup and now, return
-        // theirs and discard ours.
-        if self.cache_mode == CacheMode::Cached {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(existing) = cache.get(session_id).cloned() {
-                return Ok(existing);
-            }
-            cache.put(session_id.to_string(), arc.clone());
-        }
-
-        Ok(arc)
+    /// Test-only: whether `session_id` is in the cache, without
+    /// waking it.
+    #[cfg(test)]
+    pub(crate) fn is_cached_for_test(&self, session_id: &str) -> bool {
+        self.cache.lock().unwrap().contains(session_id)
     }
 
     /// Drop a session from the cache. Used by callers that know the
@@ -899,6 +1109,18 @@ fn replay_session_scoped_approvals(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Live wakes on this thread that found a sub-agent lane with no
+    /// binding row, the case [`replay_subagent_binding`] logs at ERROR.
+    /// Tests read this
+    /// rather than capturing that line: tracing caches each callsite's
+    /// interest process-wide, so a scoped capture in one test thread
+    /// can miss events another thread's activity has made it skip.
+    pub(crate) static MISSING_BINDING_WAKES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Re-apply a `SubagentSessionBound` row to the freshly woken agent.
 ///
 /// The row is written on the child's own chain at spawn and carries
@@ -972,6 +1194,8 @@ fn replay_subagent_binding(
                          because that ceiling is not recorded on this session. Respawn the \
                          child from its parent."
                     );
+                    #[cfg(test)]
+                    MISSING_BINDING_WAKES.with(|n| n.set(n.get() + 1));
                     agent.set_subagent_runtime(
                         depth,
                         wirken_gateway::permissions::PermissionTier::Tier1,
@@ -1093,6 +1317,22 @@ mod replay_tests {
         let path = tmp.into_temp_path();
         let perm_path = path.keep().unwrap();
         Arc::new(StdMutex::new(PermissionStore::open(&perm_path).unwrap()))
+    }
+
+    #[test]
+    fn a_sub_agents_root_is_the_session_it_was_spawned_from() {
+        assert_eq!(
+            root_session_id("default/terminal/c1"),
+            "default/terminal/c1"
+        );
+        assert_eq!(
+            root_session_id("default/terminal/c1#sub-0"),
+            "default/terminal/c1"
+        );
+        assert_eq!(
+            root_session_id("default/terminal/c1#sub-0#sub-3"),
+            "default/terminal/c1"
+        );
     }
 
     fn make_log() -> Arc<dyn SessionLog> {

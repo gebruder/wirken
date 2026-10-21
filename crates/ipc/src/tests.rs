@@ -234,6 +234,103 @@ async fn frame_roundtrip_heartbeat() {
     }
 }
 
+/// The terminal channel's tool activity, both arms, survives the wire.
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+#[tokio::test]
+async fn frame_roundtrip_tool_activity() {
+    use crate::wirken_capnp::tool_activity;
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let (_, mut client_writer) = split_stream(client);
+    let (mut server_reader, _) = split_stream(server);
+
+    for call in [true, false] {
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut t = msg.init_root::<frame::Builder<'_>>().init_tool_activity();
+            t.set_call_id("call_1");
+            t.set_tool_name("exec");
+            if call {
+                t.set_call("{\"command\":\"ls\"}");
+            } else {
+                t.set_result(true);
+            }
+        }
+        client_writer.write_message(&msg).await.unwrap();
+
+        let received = server_reader.read_message().await.unwrap();
+        let frame::ToolActivity(t) = received
+            .get_root::<frame::Reader<'_>>()
+            .unwrap()
+            .which()
+            .unwrap()
+        else {
+            panic!("expected ToolActivity");
+        };
+        let t = t.unwrap();
+        assert_eq!(t.get_call_id().unwrap().to_str().unwrap(), "call_1");
+        assert_eq!(t.get_tool_name().unwrap().to_str().unwrap(), "exec");
+        match t.which().unwrap() {
+            tool_activity::Call(args) => {
+                assert!(call);
+                assert_eq!(args.unwrap().to_str().unwrap(), "{\"command\":\"ls\"}");
+            }
+            tool_activity::Result(ok) => {
+                assert!(!call);
+                assert!(ok);
+            }
+        }
+    }
+}
+
+/// The fields the terminal's approval card reads, and a request built
+/// without them reads back empty, as an older gateway's does.
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+#[tokio::test]
+async fn frame_roundtrip_approval_request_card_fields() {
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let (_, mut client_writer) = split_stream(client);
+    let (mut server_reader, _) = split_stream(server);
+
+    for filled in [true, false] {
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut r = msg
+                .init_root::<frame::Builder<'_>>()
+                .init_approval_request();
+            r.set_request_id("req-1");
+            r.set_tool_name("exec");
+            if filled {
+                r.set_arguments("{\"command\":\"ls\"}");
+                r.set_assistant_text("I'll list the files.");
+                r.set_timeout_secs(300);
+            }
+        }
+        client_writer.write_message(&msg).await.unwrap();
+        let received = server_reader.read_message().await.unwrap();
+        let frame::ApprovalRequest(r) = received
+            .get_root::<frame::Reader<'_>>()
+            .unwrap()
+            .which()
+            .unwrap()
+        else {
+            panic!("expected ApprovalRequest");
+        };
+        let r = r.unwrap();
+        assert_eq!(r.get_request_id().unwrap().to_str().unwrap(), "req-1");
+        let arguments = r.get_arguments().unwrap().to_str().unwrap();
+        let said = r.get_assistant_text().unwrap().to_str().unwrap();
+        if filled {
+            assert_eq!(arguments, "{\"command\":\"ls\"}");
+            assert_eq!(said, "I'll list the files.");
+            assert_eq!(r.get_timeout_secs(), 300);
+        } else {
+            assert_eq!((arguments, said, r.get_timeout_secs()), ("", "", 0));
+        }
+    }
+}
+
 #[cfg(unix)]
 #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]

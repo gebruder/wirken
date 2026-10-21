@@ -142,8 +142,7 @@ classification, not a command: every command carrying a shell
 metacharacter collapses to `shell::pipeline:`, so the key alone cannot
 tell `cat a | bash` from `cat b | bash`. Both approval surfaces show the
 key, the arguments the model sent, and what the model said in the same
-message. The `wirken chat` approval card carries the same lines, rendered by
-the same function (`chat::gate::tests::the_card_carries_the_cli_prompt_lines`).
+message.
 
 On the CLI, above the `[y/N]`:
 
@@ -192,6 +191,16 @@ approve? [y/N]:
 
 The command is cleaned the same way, so it occupies its one line and no
 other.
+
+`wirken chat` shows the same lines on its approval card, off the
+`ApprovalRequest` frame the gateway sends the terminal: the action key, the
+arguments, where an `exec` runs and under which runtime, what the model said
+and the message it replies to. What the model said is drawn apart and
+labeled `model's claim (unverified)`, since the gateway has not checked it;
+the other lines are what the gateway established. Each is model output or an
+inbound message, so escape sequences, bidirectional controls and zero-width
+characters are stripped before it is drawn, and the arguments are cut, with a
+marker, past eight rows.
 
 In WebChat the same three reach the approval card on the `ApprovalRequest`
 event, so the card draws them on its first paint. It previously showed the

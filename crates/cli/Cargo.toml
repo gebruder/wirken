@@ -38,6 +38,7 @@ url = "2"
 reqwest = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
+open = { workspace = true }
 console = "0.16"
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -56,15 +57,17 @@ chrono = { workspace = true }
 # Used by `wirken skills migrate` for round-tripping YAML frontmatter
 # through an untyped value so the migration can splice individual keys
 # without losing unknown fields. indexmap keeps the keys in file order.
-serde-saphyr = "1.3"
+serde-saphyr = "2.0"
 indexmap = { version = "2", features = ["serde"] }
 openssl = { workspace = true }
 libc = "0.2"
 rusqlite = { workspace = true }
+# `wirken chat`: the terminal screen. ratatui without its default
+# widgets, macros and palette; only the crossterm backend.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
-# Display widths for the chat's layout, grapheme by grapheme: the same two
-# crates ratatui measures with, already in the tree through it.
+# Display widths for the chat's layout, grapheme by grapheme: the same
+# two crates ratatui measures with.
 unicode-segmentation = "1"
 unicode-width = "0.2"
 

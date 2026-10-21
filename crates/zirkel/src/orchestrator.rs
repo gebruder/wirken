@@ -1895,6 +1895,7 @@ skills = ["other"]
             region: None,
             tools_enabled: true,
             context_window: 8192,
+            auth: Default::default(),
         };
         let llm = Arc::new(LlmClient::new(llm_cfg).unwrap());
         OrchestratorConfig {
@@ -2296,6 +2297,7 @@ skills = ["other"]
             region: None,
             tools_enabled: true,
             context_window: 8192,
+            auth: Default::default(),
         };
         let llm = Arc::new(LlmClient::new(llm_cfg).unwrap());
         OrchestratorConfig {

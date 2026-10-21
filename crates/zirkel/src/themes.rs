@@ -115,6 +115,7 @@ mod tests {
             region: None,
             tools_enabled: true,
             context_window: 32_000,
+            auth: Default::default(),
         };
         let llm = LlmClient::new(cfg).unwrap();
         let err = name_theme(&llm, None, &[]).await.unwrap_err();

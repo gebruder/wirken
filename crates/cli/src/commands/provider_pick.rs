@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use dialoguer::{Confirm, Input, Select};
+use wirken_gateway::agent_config::ProviderAuth;
 use wirken_gateway::config::GatewayConfig;
 use wirken_vault::{CredentialStore, probe_keychain};
 
@@ -24,6 +25,7 @@ const LABELS: &[&str] = &[
     "Infomaniak (Swiss)",
     "Hetzner (EU)",
     "Custom endpoint",
+    "OpenAI with your ChatGPT plan (Continue with ChatGPT)",
 ];
 
 /// Provider ids a flag may name. NIM and Privatemode are not among
@@ -65,6 +67,11 @@ pub struct ProviderChoice {
     pub region: Option<String>,
     /// The key this provider takes, if it takes one.
     pub key: Option<ChosenKey>,
+    /// How the provider is authenticated. `Plan` carries no key: the
+    /// sign-in is already stored under `credential`.
+    pub auth: ProviderAuth,
+    /// The vault entry of a plan sign-in.
+    pub credential: Option<String>,
 }
 
 pub struct ChosenKey {
@@ -105,6 +112,8 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
             base_url,
             region: None,
             key,
+            auth: ProviderAuth::Key,
+            credential: None,
         };
     let fresh = |secret: String| ChosenKey {
         secret,
@@ -457,8 +466,58 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
                 choice("custom", model, url, None)
             }
         }
+        11 => {
+            // Plan mode: a browser sign-in in place of a key. The sign-in stores its own vault entry,
+            // the endpoint is fixed, and the models are the signed-in
+            // account's.
+            let entry = super::plan_sign_in::DEFAULT_ENTRY;
+            if !keep_plan_sign_in(cfg, entry)? {
+                super::plan_sign_in::sign_in(cfg, entry, None, true).await?;
+            }
+            let models = super::plan_sign_in::models(cfg, entry)
+                .await
+                .unwrap_or_else(|e| {
+                    println!("  Models could not be listed: {e}");
+                    Vec::new()
+                });
+            let model = super::plan_sign_in::pick_plan_model(models)?;
+            ProviderChoice {
+                auth: ProviderAuth::Plan,
+                credential: Some(entry.to_string()),
+                ..choice(
+                    "openai",
+                    model,
+                    wirken_agent::plan_auth::PLAN_BASE_URL.to_string(),
+                    None,
+                )
+            }
+        }
         _ => unreachable!(),
     })
+}
+
+/// Whether to keep the plan sign-in already stored under `entry`
+/// rather than signing in again. Offered only when the entry is usable.
+fn keep_plan_sign_in(cfg: &GatewayConfig, entry: &str) -> Result<bool> {
+    let names = CredentialStore::names(&cfg.vault_db_path()).unwrap_or_default();
+    if !names.iter().any(|n| n == entry) {
+        return Ok(false);
+    }
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    let Ok(cred) = wirken_agent::plan_auth::load_plan(&store, entry) else {
+        return Ok(false);
+    };
+    if wirken_agent::plan_auth::unusable_reason(&cred, entry).is_some() {
+        return Ok(false);
+    }
+    let account = cred.email.or(cred.subject).unwrap_or_default();
+    Ok(Confirm::new()
+        .with_prompt(format!("  Use the stored plan sign-in for {account}?"))
+        .default(true)
+        .interact()?)
 }
 
 /// A live key for this provider, if the vault holds one and the

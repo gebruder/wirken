@@ -22,6 +22,10 @@
 //! The signature covers `DOMAIN || socket || 0x00 || nonce`, so one
 //! signed for one socket does not verify on the other, nor on the
 //! adapter or MCP handshakes.
+//!
+//! `wirken chat` signs the same payload under the socket name
+//! [`TERMINAL_SOCKET`], carried in Cap'n Proto frames on the gateway
+//! socket rather than in JSON lines (see `crate::auth`).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -40,6 +44,8 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(5);
 /// The socket names the signature is bound to.
 pub const ORCHESTRATOR_SOCKET: &str = "orchestrator";
 pub const PERMISSIONS_SOCKET: &str = "permissions";
+/// The terminal channel on the gateway socket.
+pub const TERMINAL_SOCKET: &str = "terminal";
 
 /// Where the operator key lives under the data dir.
 pub fn operator_key_path(data_dir: &Path) -> PathBuf {
@@ -123,6 +129,11 @@ impl OperatorKey {
     /// Short identifier recorded with what this key did.
     pub fn key_id(&self) -> String {
         key_id(&self.verifying_key())
+    }
+
+    /// Sign the handshake payload for `socket` and `nonce`.
+    pub(crate) fn sign_challenge(&self, socket: &str, nonce: &[u8]) -> Signature {
+        self.signing.sign(&signed_payload(socket, nonce))
     }
 }
 
@@ -229,7 +240,7 @@ where
     let challenge: Challenge = read_line(reader).await?;
     let nonce = hex_decode::<NONCE_SIZE>(&challenge.challenge)
         .ok_or_else(|| OperatorHandshakeError::Malformed("challenge".into()))?;
-    let signature = key.signing.sign(&signed_payload(socket, &nonce));
+    let signature = key.sign_challenge(socket, &nonce);
     write_line(
         writer,
         &Answer {
@@ -298,10 +309,26 @@ fn verify(
     }
     let signature = hex_decode::<64>(&answer.signature)
         .ok_or_else(|| OperatorHandshakeError::Malformed("signature".into()))?;
+    verify_challenge(expected, &public, &signature, socket, nonce)
+}
+
+/// Accept `public` only if it is `expected` and `signature` is its
+/// signature of the handshake payload for `socket` and `nonce`. Returns
+/// the key's [`key_id`].
+pub(crate) fn verify_challenge(
+    expected: &VerifyingKey,
+    public: &[u8; 32],
+    signature: &[u8; 64],
+    socket: &str,
+    nonce: &[u8],
+) -> Result<String, OperatorHandshakeError> {
+    if *public != expected.to_bytes() {
+        return Err(OperatorHandshakeError::UnknownKey);
+    }
     expected
         .verify_strict(
             &signed_payload(socket, nonce),
-            &Signature::from_bytes(&signature),
+            &Signature::from_bytes(signature),
         )
         .map_err(|_| OperatorHandshakeError::BadSignature)?;
     Ok(key_id(expected))

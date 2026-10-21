@@ -15,9 +15,8 @@ mod commands;
     about = "Secure personal AI agent gateway"
 )]
 struct Cli {
-    /// Absent means `chat`: `wirken` alone opens the chat.
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Commands,
 }
 
 #[derive(Subcommand)]
@@ -169,13 +168,16 @@ enum Commands {
         agent: String,
     },
 
-    /// Chat with an agent in this terminal (what `wirken` alone runs)
+    /// Chat with an agent in the terminal, through the running gateway
+    ///
+    /// Connects to `wirken run` as the `terminal` channel: messages take
+    /// the gateway's path, replies stream in, and approvals are asked
+    /// on a card here. Needs a terminal; from a script use `wirken ask`.
     Chat {
-        /// A first message to send as soon as the chat opens
-        message: Option<String>,
-        /// Agent / persona name, as for `ask` (default: "default")
-        #[arg(long, visible_alias = "persona", default_value = "default")]
-        agent: String,
+        /// Agent / persona to talk to. Without it the router picks, as
+        /// for any channel.
+        #[arg(long, visible_alias = "persona")]
+        agent: Option<String>,
     },
 
     /// Import an assistant data-export archive into the local store
@@ -574,8 +576,17 @@ enum AgentCommands {
         channels: Option<String>,
         /// Read the API key from this environment variable rather than
         /// prompting. The value never appears on the command line.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "credential")]
         api_key_env: Option<String>,
+        /// How the agent authenticates: `key` (default) or `plan`, a
+        /// plan sign-in (`wirken credentials authorize`) in place of an
+        /// API key, with no --base-url.
+        #[arg(long)]
+        auth: Option<String>,
+        /// With --auth plan: the vault entry holding the sign-in
+        /// (default openai-plan)
+        #[arg(long)]
+        credential: Option<String>,
     },
     /// List all configured agents
     List,
@@ -1028,8 +1039,52 @@ enum CredentialCommands {
         #[arg(long, conflicts_with = "stdin")]
         value_file: Option<std::path::PathBuf>,
     },
+    /// Sign in to plan mode in the browser and
+    /// keep the sign-in in the vault. The first sign-in registers this
+    /// app with the provider; later ones reuse the registration.
+    Authorize {
+        /// Vault entry to keep the sign-in under
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// Loopback port for the sign-in callback (default: any free
+        /// port)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the sign-in URL instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Sign out of a plan sign-in: revoke the session at the provider,
+    /// clear the tokens, and keep the registration for the next
+    /// sign-in.
+    SignOut {
+        /// Vault entry holding the sign-in
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+    },
+    /// Write a plan sign-in to a new owner-only file for another host
+    /// (a headless or self-hosted machine) and clear its tokens here.
+    ExportPlan {
+        /// Vault entry holding the sign-in
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// File to create; it must not exist
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Store a plan sign-in exported on another host. This host keeps
+    /// its own host id.
+    ImportPlan {
+        /// Vault entry to store the sign-in under
+        #[arg(default_value = "openai-plan")]
+        entry: String,
+        /// The exported file
+        #[arg(long)]
+        from: std::path::PathBuf,
+    },
     /// Remove a credential by name. The encrypted row is deleted from
-    /// the vault. Errors if no credential with that name exists.
+    /// the vault. Errors if no credential with that name exists. A plan
+    /// sign-in's session is revoked at the provider first.
     Remove {
         /// Credential name
         name: String,
@@ -1223,6 +1278,8 @@ async fn main() -> Result<()> {
     // chain head.
     wirken_audit::set_build_identity(build_info::audit_identity());
 
+    let cli = Cli::parse();
+
     // The default filter applies to every crate whose name starts
     // with `wirken` (the EnvFilter target-match is a prefix, so
     // `wirken` covers `wirken`, `wirken_vault`, `wirken_mcp_proxy`,
@@ -1237,21 +1294,20 @@ async fn main() -> Result<()> {
     //
     // It is a default, not a floor applied over the operator's
     // filter. See `build_env_filter`.
-    // Stdout, as the default writer is, except while the chat's screen
-    // is up: a log line printed then would land on top of the composer,
-    // so the chat holds it and shows it as a note.
-    tracing_subscriber::fmt()
-        .with_env_filter(build_env_filter(std::env::var("RUST_LOG").ok().as_deref()))
-        .with_writer(commands::chat::log_writer)
-        .init();
+    let logs = tracing_subscriber::fmt()
+        .with_env_filter(build_env_filter(std::env::var("RUST_LOG").ok().as_deref()));
+    // The chat holds log output while it has the screen, so a line
+    // cannot draw over it. Every other command writes as it always has.
+    #[cfg(unix)]
+    if matches!(cli.command, Commands::Chat { .. }) {
+        logs.with_writer(commands::chat::log_writer).init();
+    } else {
+        logs.init();
+    }
+    #[cfg(not(unix))]
+    logs.init();
 
-    let cli = Cli::parse();
-
-    let command = cli.command.unwrap_or(Commands::Chat {
-        message: None,
-        agent: "default".to_string(),
-    });
-    match command {
+    match cli.command {
         Commands::Setup {
             install_service,
             uninstall_service,
@@ -1261,6 +1317,17 @@ async fn main() -> Result<()> {
                 return commands::service::uninstall_service();
             }
             commands::setup::run(install_service, org).await
+        }
+        Commands::Chat { agent } => {
+            #[cfg(unix)]
+            {
+                commands::chat::run(agent).await
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = agent;
+                anyhow::bail!("wirken chat is not available on this platform")
+            }
         }
         Commands::Run {
             port,
@@ -1433,6 +1500,18 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            CredentialCommands::Authorize {
+                entry,
+                port,
+                no_browser,
+            } => commands::plan_sign_in::authorize(&entry, port, !no_browser).await,
+            CredentialCommands::SignOut { entry } => commands::plan_sign_in::sign_out(&entry).await,
+            CredentialCommands::ExportPlan { entry, out } => {
+                commands::plan_sign_in::export(&entry, &out).await
+            }
+            CredentialCommands::ImportPlan { entry, from } => {
+                commands::plan_sign_in::import(&entry, &from).await
+            }
             CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
             CredentialCommands::Show { name } => commands::credential::show(&name).await,
             CredentialCommands::Rescope {
@@ -1595,6 +1674,8 @@ async fn main() -> Result<()> {
                 base_url,
                 channels,
                 api_key_env,
+                auth,
+                credential,
             } => {
                 commands::agents::add(commands::agents::AddArgs {
                     id,
@@ -1604,6 +1685,8 @@ async fn main() -> Result<()> {
                     base_url,
                     channels,
                     api_key_env,
+                    auth,
+                    credential,
                 })
                 .await
             }
@@ -1669,7 +1752,6 @@ async fn main() -> Result<()> {
             CronCommands::Resume { id } => commands::cron::resume(&id).await,
         },
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
-        Commands::Chat { message, agent } => commands::chat::run(&agent, message).await,
         Commands::Import { archive, sealed } => commands::import::run(&archive, sealed).await,
         Commands::Doctor => commands::doctor::run().await,
         Commands::Status => {
@@ -1778,53 +1860,116 @@ mod tests {
         Cli::try_parse_from(args).expect("clap parse failed")
     }
 
-    /// `wirken` alone is the chat: no subcommand parses, and `main`
-    /// fills in `chat` with its defaults.
+    /// Bare `wirken` still prints help and fails: the chat is a
+    /// subcommand, not the default.
     #[test]
-    fn no_subcommand_parses_and_means_chat() {
-        assert!(parse(&["wirken"]).command.is_none());
+    fn bare_wirken_is_still_an_error() {
+        let err = match Cli::try_parse_from(["wirken"]) {
+            Err(e) => e,
+            Ok(_) => panic!("bare wirken parsed"),
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]
-    fn chat_parses_the_agent_and_a_first_message() {
-        match parse(&["wirken", "chat", "--agent", "alice", "hello there"])
-            .command
-            .expect("a subcommand")
-        {
-            Commands::Chat { message, agent } => {
-                assert_eq!(agent, "alice");
-                assert_eq!(message.as_deref(), Some("hello there"));
+    fn chat_parses_with_and_without_an_agent() {
+        match parse(&["wirken", "chat"]).command {
+            Commands::Chat { agent } => assert_eq!(agent, None),
+            _ => panic!("expected Chat"),
+        }
+        match parse(&["wirken", "chat", "--agent", "alice"]).command {
+            Commands::Chat { agent } => assert_eq!(agent.as_deref(), Some("alice")),
+            _ => panic!("expected Chat"),
+        }
+    }
+
+    /// `credentials authorize` defaults its entry and takes a port and
+    /// --no-browser; `agents add --auth plan --credential` parses, and
+    /// --credential excludes --api-key-env.
+    #[test]
+    fn plan_sign_in_commands_parse() {
+        let cli = parse(&["wirken", "credentials", "authorize"]);
+        match cli.command {
+            Commands::Credentials(CredentialCommands::Authorize {
+                entry,
+                port,
+                no_browser,
+            }) => {
+                assert_eq!(entry, "openai-plan");
+                assert_eq!(port, None);
+                assert!(!no_browser);
             }
-            other => panic!("parsed {}", std::any::type_name_of_val(&other)),
+            _ => panic!("parsed into another command"),
         }
-    }
-
-    #[test]
-    fn chat_defaults_to_the_default_agent_and_no_message() {
-        match parse(&["wirken", "chat"]).command.expect("a subcommand") {
-            Commands::Chat { message, agent } => {
-                assert_eq!(agent, "default");
-                assert!(message.is_none());
+        let cli = parse(&[
+            "wirken",
+            "credentials",
+            "authorize",
+            "work",
+            "--port",
+            "1455",
+            "--no-browser",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Commands::Credentials(CredentialCommands::Authorize { ref entry, port: Some(1455), no_browser: true }) if entry == "work"
+        ));
+        assert!(matches!(
+            parse(&["wirken", "credentials", "sign-out"]).command,
+            Commands::Credentials(CredentialCommands::SignOut { ref entry }) if entry == "openai-plan"
+        ));
+        let cli = parse(&[
+            "wirken",
+            "agents",
+            "add",
+            "--id",
+            "p",
+            "--provider",
+            "openai",
+            "--model",
+            "m",
+            "--auth",
+            "plan",
+            "--credential",
+            "openai-plan",
+        ]);
+        match cli.command {
+            Commands::Agents(AgentCommands::Add {
+                auth, credential, ..
+            }) => {
+                assert_eq!(auth.as_deref(), Some("plan"));
+                assert_eq!(credential.as_deref(), Some("openai-plan"));
             }
-            other => panic!("parsed {}", std::any::type_name_of_val(&other)),
+            _ => panic!("parsed into another command"),
         }
-    }
-
-    #[test]
-    fn chat_takes_persona_as_an_alias_of_agent() {
-        match parse(&["wirken", "chat", "--persona", "bob"])
-            .command
-            .expect("a subcommand")
-        {
-            Commands::Chat { agent, .. } => assert_eq!(agent, "bob"),
-            other => panic!("parsed {}", std::any::type_name_of_val(&other)),
-        }
+        assert!(
+            Cli::try_parse_from([
+                "wirken",
+                "agents",
+                "add",
+                "--id",
+                "p",
+                "--provider",
+                "openai",
+                "--model",
+                "m",
+                "--credential",
+                "c",
+                "--api-key-env",
+                "K",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn persona_create_parses_with_defaults() {
         let cli = parse(&["wirken", "persona", "create", "alice"]);
-        match cli.command.expect("a subcommand") {
+        match cli.command {
             Commands::Persona(PersonaCommands::Create {
                 name,
                 preset,
@@ -1872,7 +2017,7 @@ mod tests {
             "--allow-subagent",
             "writer",
         ]);
-        match cli.command.expect("a subcommand") {
+        match cli.command {
             Commands::Persona(PersonaCommands::Create {
                 name,
                 preset,
@@ -1893,7 +2038,7 @@ mod tests {
     fn persona_list_parses() {
         let cli = parse(&["wirken", "persona", "list"]);
         assert!(matches!(
-            cli.command.expect("a subcommand"),
+            cli.command,
             Commands::Persona(PersonaCommands::List)
         ));
     }
@@ -1901,7 +2046,7 @@ mod tests {
     #[test]
     fn persona_show_parses() {
         let cli = parse(&["wirken", "persona", "show", "alice"]);
-        match cli.command.expect("a subcommand") {
+        match cli.command {
             Commands::Persona(PersonaCommands::Show { name }) => assert_eq!(name, "alice"),
             _ => panic!("expected Persona::Show"),
         }
@@ -1917,7 +2062,7 @@ mod tests {
             "--preset",
             "researcher",
         ]);
-        match cli.command.expect("a subcommand") {
+        match cli.command {
             Commands::Persona(PersonaCommands::Edit {
                 name,
                 preset,
@@ -1935,7 +2080,7 @@ mod tests {
     #[test]
     fn persona_edit_with_clear_preset_parses() {
         let cli = parse(&["wirken", "persona", "edit", "alice", "--clear-preset"]);
-        match cli.command.expect("a subcommand") {
+        match cli.command {
             Commands::Persona(PersonaCommands::Edit {
                 preset,
                 clear_preset,
@@ -1968,7 +2113,7 @@ mod tests {
     #[test]
     fn persona_delete_parses() {
         let cli = parse(&["wirken", "persona", "delete", "alice"]);
-        match cli.command.expect("a subcommand") {
+        match cli.command {
             Commands::Persona(PersonaCommands::Delete { name }) => assert_eq!(name, "alice"),
             _ => panic!("expected Persona::Delete"),
         }
