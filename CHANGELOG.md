@@ -19,9 +19,12 @@ tagged.
   approvals on a card in the chat, and shows panels for the environment
   (including the sandbox runtime the gateway reports), context, cost and
   tokens, audit with a chain check, approvals and tools, plus a sidebar of
-  agents and conversations with search. Without a terminal it points to
-  `wirken ask`; without a running gateway it points to `wirken run`. Bare
-  `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
+  agents and conversations with search. The panels and the sidebar are
+  drawn where the screen has room for them, the panels first, and the
+  status line names what is hidden and the width it needs. Without a
+  terminal it points to `wirken ask`; without a running gateway it points
+  to `wirken run`. Bare `wirken` still prints help. Proposed by Tanmay
+  Maka (@maka-tanmay).
 - Plan sign-in for the `openai` provider: an agent can run on a ChatGPT
   plan the operator has, through OpenAI's sign-in for open-source and
   locally run apps, with no API key. `wirken credentials authorize`

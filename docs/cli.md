@@ -154,6 +154,12 @@ session chain. A conversation of another agent opens a new connection for
 that agent. The chat opens no store itself: all of this comes from the
 gateway over the terminal connection.
 
+The panels take 36 columns and the sidebar 30, and the transcript keeps
+at least 54, so both are drawn from 120 columns. From 90 the panels are
+drawn and the sidebar yields to them; below 90 the panels are not drawn.
+Either way the status line says what is hidden and how many columns it
+needs. Both start shown; Ctrl+B and Ctrl+P toggle them.
+
 | Key | Action |
 |-----|--------|
 | Enter | Send the message, or answer the card |

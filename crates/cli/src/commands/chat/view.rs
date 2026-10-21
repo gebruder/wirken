@@ -20,12 +20,51 @@ const CARD_ARGUMENT_ROWS: usize = 8;
 const CARD_FIELD_ROWS: usize = 3;
 /// Rows of draft the input box grows to.
 const INPUT_ROWS: usize = 6;
-/// Columns the sidebar and the panels take, and the screen width each
-/// needs before it is drawn.
+/// Columns the sidebar and the panels take beside the transcript, and
+/// the least the transcript keeps.
 const SIDEBAR_COLS: u16 = 30;
-const SIDEBAR_FROM: u16 = 90;
 const PANELS_COLS: u16 = 36;
-const PANELS_FROM: u16 = 120;
+const TRANSCRIPT_MIN_COLS: u16 = 54;
+
+/// What fits beside the transcript at `width`: the sidebar's and the
+/// panels' columns, and a note for the status line when something
+/// toggled on is not drawn.
+///
+/// Both flags start on, so on a screen too narrow for the panels a
+/// toggle used to change nothing anyone could see. Now the panels are
+/// drawn whenever they fit at all, taking the sidebar's place when the
+/// two do not fit together, and when even that is too wide the status
+/// line says how many columns they need.
+fn fit(width: u16, show_sidebar: bool, show_panels: bool) -> (u16, u16, Option<String>) {
+    let panels_need = PANELS_COLS + TRANSCRIPT_MIN_COLS;
+    let both_need = SIDEBAR_COLS + panels_need;
+    let panel_cols = if show_panels && width >= panels_need {
+        PANELS_COLS
+    } else {
+        0
+    };
+    let side_cols = if show_sidebar
+        && width >= SIDEBAR_COLS + TRANSCRIPT_MIN_COLS
+        && (panel_cols == 0 || width >= both_need)
+    {
+        SIDEBAR_COLS
+    } else {
+        0
+    };
+    // Short, because the status line is as wide as the transcript.
+    let note = if show_panels && panel_cols == 0 {
+        Some(format!(
+            "panels hidden: need {panels_need} columns, {width} now"
+        ))
+    } else if show_sidebar && side_cols == 0 && panel_cols > 0 {
+        Some(format!(
+            "sidebar hidden: both need {both_need} columns, {width} now"
+        ))
+    } else {
+        None
+    };
+    (side_cols, panel_cols, note)
+}
 
 /// How the model's own words are drawn on the card: set apart from what
 /// the gateway established, because they are a claim, not a fact.
@@ -43,19 +82,10 @@ pub(crate) fn choice_style() -> Style {
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let full = frame.area();
-    let side_cols = if app.show_sidebar && full.width >= SIDEBAR_FROM {
-        SIDEBAR_COLS
-    } else {
-        0
-    };
-    let panel_cols = if app.show_panels && full.width >= PANELS_FROM {
-        PANELS_COLS
-    } else {
-        0
-    };
+    let (side_cols, panel_cols, layout_note) = fit(full.width, app.show_sidebar, app.show_panels);
     let [side_area, area, panel_area] = Layout::horizontal([
         Constraint::Length(side_cols),
-        Constraint::Min(30),
+        Constraint::Min(TRANSCRIPT_MIN_COLS),
         Constraint::Length(panel_cols),
     ])
     .areas(full);
@@ -156,14 +186,17 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         .filter(|r| !r.is_empty())
         .map(|r| format!("exec: {} · ", sanitize(&runtime_words(r))))
         .unwrap_or_default();
+    // A toggle the screen cannot honour is explained here, in place of
+    // the key hints, so the key is never seen to do nothing.
+    let line = match layout_note {
+        Some(note) => note,
+        None => format!(
+            "{exec}Enter send · Ctrl+J newline · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar \
+             · Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
+        ),
+    };
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            format!(
-                "{exec}Enter send · Ctrl+J newline · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar \
-                 · Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
-            ),
-            Style::default().fg(Color::DarkGray),
-        )),
+        Paragraph::new(Line::styled(line, Style::default().fg(Color::DarkGray))),
         status_area,
     );
 }
@@ -580,6 +613,58 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| draw(f, app, now)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn text_of(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The panels are drawn wherever they fit, taking the sidebar's
+    /// place when the two do not fit together, and a screen too narrow
+    /// for them says so instead of ignoring the toggle.
+    #[test]
+    fn the_panels_toggle_is_never_silent() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.show_sidebar = true;
+        app.show_panels = true;
+
+        let wide = text_of(&drawn(&app, now, 130, 30));
+        assert!(
+            wide.contains(" agents ") && wide.contains(" status "),
+            "{wide}"
+        );
+        assert!(!wide.contains("columns"), "{wide}");
+
+        let middling = text_of(&drawn(&app, now, 100, 30));
+        assert!(middling.contains(" status "), "{middling}");
+        assert!(!middling.contains(" agents "), "{middling}");
+        assert!(
+            middling.contains("sidebar hidden: both need 120 columns, 100 now"),
+            "{middling}"
+        );
+
+        let narrow = text_of(&drawn(&app, now, 80, 30));
+        assert!(!narrow.contains(" status "), "{narrow}");
+        assert!(
+            narrow.contains("panels hidden: need 90 columns, 80 now"),
+            "{narrow}"
+        );
+
+        app.show_panels = false;
+        let off = text_of(&drawn(&app, now, 100, 30));
+        assert!(
+            off.contains(" agents ") && !off.contains(" status "),
+            "{off}"
+        );
+        assert!(off.contains("Enter send"), "{off}");
     }
 
     #[test]
