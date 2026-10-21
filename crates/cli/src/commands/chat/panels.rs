@@ -155,6 +155,7 @@ pub(crate) struct HistoryEntry {
     pub name: String,
     pub arguments: String,
     pub success: Option<bool>,
+    pub output: String,
 }
 
 /// The runtime the gateway named, in words. The gateway decides it from

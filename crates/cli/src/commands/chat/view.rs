@@ -18,6 +18,9 @@ use super::text::{layout_input, sanitize, width, wrap};
 const CARD_ARGUMENT_ROWS: usize = 8;
 /// Rows of anything else a card shows per field.
 const CARD_FIELD_ROWS: usize = 3;
+/// Rows of a tool's output the transcript shows before it says the
+/// rest is cut.
+const TOOL_OUTPUT_ROWS: usize = 6;
 /// Rows of draft the input box grows to.
 const INPUT_ROWS: usize = 6;
 /// Columns the sidebar and the panels take beside the transcript, and
@@ -337,6 +340,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 name,
                 arguments,
                 outcome,
+                output,
                 ..
             } => {
                 let state = match outcome {
@@ -359,6 +363,20 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Span::raw(shown),
                     Span::styled(format!(" {state}"), Style::default().fg(Color::DarkGray)),
                 ]));
+                // What the tool returned, under its line, however the
+                // model's reply then went.
+                let returned = sanitize(output);
+                let body = wrap(returned.trim_end(), width.saturating_sub(4));
+                let cut = body.len() > TOOL_OUTPUT_ROWS;
+                for row in body.into_iter().take(TOOL_OUTPUT_ROWS) {
+                    lines.push(Line::raw(format!("    {row}")));
+                }
+                if cut {
+                    lines.push(Line::styled(
+                        "    ... (cut)",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
             }
             Entry::Note(text) => {
                 for row in wrap(&sanitize(text), width.saturating_sub(2)) {
@@ -524,6 +542,52 @@ mod tests {
         );
         let shown = screen(&app, now);
         assert!(shown.contains("fine txt.exe"), "{shown}");
+        assert!(!shown.contains('\x1b'));
+        assert!(!shown.contains('\u{202E}'));
+    }
+
+    /// A tool's output is drawn under its line, through the sanitizer
+    /// and cut past a few rows, and stays when the model's reply after
+    /// it is the empty-reply fallback.
+    #[test]
+    fn a_tools_output_is_drawn_under_its_line() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_server(
+            ServerEvent::ToolCall {
+                id: "c1".into(),
+                name: "exec".into(),
+                arguments: r#"{"command":"ls"}"#.into(),
+            },
+            now,
+        );
+        let output: String = (1..=10)
+            .map(|i| format!("file{i}.txt\x1b[2J\u{202E}\n"))
+            .collect();
+        app.on_server(
+            ServerEvent::ToolResult {
+                id: "c1".into(),
+                name: "exec".into(),
+                success: true,
+                output,
+            },
+            now,
+        );
+        app.on_server(
+            ServerEvent::Reply("(no response: the model returned nothing)".into()),
+            now,
+        );
+        let shown = screen(&app, now);
+        for part in [
+            "tool exec {\"command\":\"ls\"} done",
+            "    file1.txt",
+            "    file6.txt",
+            "    ... (cut)",
+            "(no response: the model returned nothing)",
+        ] {
+            assert!(shown.contains(part), "{part:?} missing:\n{shown}");
+        }
+        assert!(!shown.contains("file7.txt"), "{shown}");
         assert!(!shown.contains('\x1b'));
         assert!(!shown.contains('\u{202E}'));
     }

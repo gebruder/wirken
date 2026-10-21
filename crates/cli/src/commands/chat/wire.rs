@@ -57,6 +57,8 @@ pub(crate) enum ServerEvent {
         id: String,
         name: String,
         success: bool,
+        /// The output as the chain records it.
+        output: String,
     },
     Approval(ApprovalAsk),
     /// The turn's reply as the gateway recorded it. Ends the turn.
@@ -98,7 +100,12 @@ pub(crate) fn parse(
                     name,
                     arguments: text(a)?,
                 },
-                Ok(tool_activity::Result(success)) => ServerEvent::ToolResult { id, name, success },
+                Ok(tool_activity::Result(success)) => ServerEvent::ToolResult {
+                    id,
+                    name,
+                    success,
+                    output: text(t.get_output())?,
+                },
                 Err(_) => ServerEvent::Other,
             }
         }
@@ -227,13 +234,15 @@ mod tests {
             t.set_call_id("c1");
             t.set_tool_name("exec");
             t.set_result(false);
+            t.set_output("ls: cannot access 'x': No such file or directory");
         }
         assert_eq!(
             round_trip(&msg),
             ServerEvent::ToolResult {
                 id: "c1".into(),
                 name: "exec".into(),
-                success: false
+                success: false,
+                output: "ls: cannot access 'x': No such file or directory".into(),
             }
         );
 

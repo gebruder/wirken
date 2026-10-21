@@ -49,11 +49,12 @@ pub enum StreamEvent {
         arguments: String,
     },
     /// A tool call finished, sent once its `ToolResult` row is on the
-    /// chain.
+    /// chain. The output is the one that row records.
     ToolResult {
         id: String,
         name: String,
         success: bool,
+        output: String,
     },
 }
 

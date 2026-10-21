@@ -424,6 +424,9 @@ struct ToolActivity {
     # The call finished, after its ToolResult row. True when it
     # succeeded.
   }
+  output @4 :Text;
+  # With `result`: the output as the ToolResult row records it. Empty
+  # with `call`, and from a gateway that does not send it.
 }
 
 struct TerminalRequest {

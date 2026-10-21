@@ -19,7 +19,8 @@ tagged.
   approvals on a card in the chat, and shows panels for the environment
   (including the sandbox runtime the gateway reports), context, cost and
   tokens, audit with a chain check, approvals and tools, plus a sidebar of
-  agents and conversations with search. The panels and the sidebar are
+  agents and conversations with search. Each tool call's output is shown
+  under its line, whatever the model's reply after it. The panels and the sidebar are
   drawn where the screen has room for them, the panels first, and the
   status line names what is hidden and the width it needs. Without a
   terminal it points to `wirken ask`; without a running gateway it points

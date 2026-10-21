@@ -3526,6 +3526,7 @@ impl Agent {
                                 id: call.id.clone(),
                                 name: call.name.clone(),
                                 success: result.success,
+                                output: result.output.clone(),
                             })
                             .await;
                     }
