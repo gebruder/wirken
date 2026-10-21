@@ -108,7 +108,11 @@ recorded on the adapter lane as `AdapterConnect` and `AdapterDisconnect` with
 channel `terminal`.
 
 The reply streams in as the model writes it, and each tool call shows when
-its row is on the chain and again when it finishes. An approval the turn
+its row is on the chain and again when it finishes. Replies are drawn as
+light Markdown: headings, bullets and numbered items, fenced code, `inline
+code` and **bold**, a marker read as one only when its closer is on the same
+line; anything else shows as written. The approval card, the messages
+typed and the notes stay plain text. An approval the turn
 needs is asked on a card at the terminal whose message started the turn
 (`TerminalApprovalGate`), with the lines every approval surface shows; see
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).

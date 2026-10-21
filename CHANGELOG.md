@@ -22,6 +22,9 @@ tagged.
   agents and conversations with search. Without a terminal it points to
   `wirken ask`; without a running gateway it points to `wirken run`. Bare
   `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
+- `wirken chat` draws the agent's replies as light Markdown: headings,
+  bullets and numbered items, fenced code, inline code and bold. The
+  approval card stays plain text.
 - Plan sign-in for the `openai` provider: an agent can run on a ChatGPT
   plan the operator has, through OpenAI's sign-in for open-source and
   locally run apps, with no API key. `wirken credentials authorize`

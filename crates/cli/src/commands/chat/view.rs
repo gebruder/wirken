@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::app::{App, Entry};
+use super::markdown;
 use super::panels::{SideItem, panels, runtime_words};
 use super::text::{layout_input, sanitize, width, wrap};
 
@@ -298,7 +299,11 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             Entry::Agent(text) => {
                 lines.push(Line::styled(sanitize(&app.agent), label.fg(Color::Green)));
-                indented(&mut lines, text, width, Style::default());
+                for line in markdown::render(&sanitize(text), width.saturating_sub(2)) {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                }
             }
             Entry::Tool {
                 name,
@@ -493,6 +498,22 @@ mod tests {
         assert!(shown.contains("fine txt.exe"), "{shown}");
         assert!(!shown.contains('\x1b'));
         assert!(!shown.contains('\u{202E}'));
+    }
+
+    #[test]
+    fn a_reply_is_drawn_as_light_markdown() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_server(
+            ServerEvent::Reply("## Plan\n- **list** the `src` dir\n2 ** 3".into()),
+            now,
+        );
+        let buffer = drawn(&app, now, 60, 30);
+        find(&buffer, "  Plan");
+        find(&buffer, "  • list the src dir");
+        find(&buffer, "  2 ** 3");
+        let bold = styles_of(&buffer, "list");
+        assert!(bold.iter().all(|s| s.add_modifier.contains(Modifier::BOLD)));
     }
 
     #[test]

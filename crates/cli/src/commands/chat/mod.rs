@@ -15,6 +15,7 @@
 //! run) runs before the screen is taken, in the terminal as it is.
 
 mod app;
+mod markdown;
 mod panels;
 mod text;
 mod view;
