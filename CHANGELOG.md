@@ -10,6 +10,26 @@ tagged.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-21
+
+#296 (slack-morphism 2.31.0, libc 0.2.191, aws-lc-rs 1.18.2) is deferred:
+slack-morphism 2.31 changes the button builder the Slack adapter uses and
+stays at 2.29 until the migrated adapter passes a live Slack round-trip, and
+the two patch bumps ride in that grouped PR. None of the three carries an
+open advisory. #286 (upload-artifact 7.0.2, download-artifact 8.0.2,
+scorecard-action 2.5.0, codeql-action 4.39.0) is folded in.
+
+Before this release, `wirken chat`, a Signal approval answered in the chat
+that raised it, and a Slack message round-trip were run live on the
+restructured adapter message loop. The Discord, Google Chat, iMessage,
+Matrix, Teams and WhatsApp adapters had no live round-trip on it and are
+covered by their unit tests. Plan sign-in was not exercised against the
+live service before this release; the contributor who proposed it tests the
+released build. Secret scanning is unverified from the release account,
+which is not an admin of the repository. Nine CodeQL alerts on the plan
+sign-in code were dismissed one by one as test vectors and false positives,
+with the evidence on each dismissal.
+
 ### Added
 
 - `wirken chat [--agent NAME]` opens a full-screen chat in the terminal.
