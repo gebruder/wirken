@@ -150,6 +150,16 @@ with the evidence on each dismissal.
   request instead of waiting until the gate timed out and refused. Turns
   on a connection still run one at a time and in order.
 
+### Security
+
+- rustls-webpki 0.103.16, webpki-roots 1.0.10 and webpki-root-certs 1.0.10
+  close RUSTSEC-2026-0381, RUSTSEC-2026-0382 and RUSTSEC-2026-0383, the
+  advisories for the distrusted emSign intermediates. The Discord adapter's
+  serenity path stays on rustls-webpki 0.102.8 and is recorded in `deny.toml`
+  under RUSTSEC-2026-0382 until that adapter moves off rustls 0.22. This
+  heading was added after the release: the 2.4.0 manifest entry said
+  `security: false`, and manifests built from the next release on flag it.
+
 ## [2.3.0] - 2026-10-18
 
 #288 (ten Cargo updates) is deferred: it carries the two major bumps 2.2.0
