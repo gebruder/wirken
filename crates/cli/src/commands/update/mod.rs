@@ -3,9 +3,9 @@
 //!
 //! It runs only when the operator asks. Nothing checks for updates on
 //! a timer, in the background or at gateway start. A release manifest
-//! is fetched through Wirken's egress client from GitHub, or from a
-//! mirror the operator names, and verified against the release keys
-//! compiled into this binary before anything in it is read.
+//! is fetched with curl from GitHub, or from a mirror the operator
+//! names, and verified against the release keys compiled into this
+//! binary before anything in it is read.
 
 pub mod fetch;
 pub mod install;
@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use fetch::{Fetcher, Source};
+use fetch::{Fetcher, Progress, Source};
 use manifest::{Release, VerifiedManifest, Version};
 
 /// `<data_dir>/update.json`, the operator's update settings.
@@ -159,11 +159,13 @@ pub async fn check(
 ) -> Result<CheckReport> {
     let current = Version::parse(current)?;
     let source = fetcher.source();
+    tracing::info!(source = %source.describe(), "update: fetching the release manifest");
     let body = fetcher
         .get(
             source.manifest_url(),
             manifest::MAX_MANIFEST_BYTES,
             Duration::from_secs(60),
+            Progress::Silent,
         )
         .await
         .with_context(|| {
@@ -177,10 +179,18 @@ pub async fn check(
             source.signature_url(),
             manifest::MAX_SIGNATURE_BYTES,
             Duration::from_secs(60),
+            Progress::Silent,
         )
         .await?;
     let verified = manifest::verify(&body, &sig, keys)?;
+    tracing::info!(
+        key = %verified.key_fingerprint,
+        issued_at = %verified.manifest.issued_at.format("%Y-%m-%dT%H:%M:%SZ"),
+        releases = verified.manifest.releases.len(),
+        "update: manifest signature verified"
+    );
     manifest::check_and_record_freshness(data_dir, &verified)?;
+    tracing::info!("update: manifest freshness checked and recorded");
     let newer = verified
         .manifest
         .releases
@@ -336,15 +346,29 @@ pub async fn run_install(
     .await?;
 
     let name = install::artifact_name(target);
+    let url = fetcher.source().artifact_url(&release.version, &name);
+    println!(
+        "  Fetching wirken {} for {target} from {}",
+        release.version,
+        fetcher.source().describe()
+    );
+    tracing::info!(url = %url, "update: fetching the release artifact");
     let bytes = fetcher
         .get(
-            fetcher.source().artifact_url(&release.version, &name),
+            url,
             MAX_ARTIFACT_BYTES,
             Duration::from_secs(600),
+            Progress::Bar,
         )
         .await
         .with_context(|| format!("download {name} {}", release.version))?;
+    println!(
+        "  Fetched {} bytes; checking its sha256 against the manifest",
+        bytes.len()
+    );
     let sha = install::verify_artifact(&bytes, release, target)?;
+    tracing::info!(sha256 = %sha, bytes = bytes.len(), "update: artifact matches the manifest");
+    println!("  sha256 matches; installing");
     install::install(
         &exe,
         &bytes,

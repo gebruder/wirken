@@ -132,11 +132,13 @@ manifest the install saw is not detected.
 
 ## Mirrors
 
-By default release files come from GitHub. The egress client allows only
-`github.com` and `release-assets.githubusercontent.com`, the host GitHub's
-release downloads redirect to. It follows no redirect on its own:
-`wirken update` follows each one, checks the new host against the same
-list, and refuses a redirect from https to http.
+By default release files come from GitHub, fetched with `curl`, which
+`wirken update` needs on the path. From GitHub every hop is HTTPS: a
+release download redirects once to GitHub's asset host, and curl is run
+with `--proto =https --proto-redir =https`, so a redirect to plain http
+fails. Nothing fetched is trusted on its own: the manifest must verify
+against the compiled-in release keys, and the binary must match the
+sha256 the signed manifest carries.
 
 To fetch from a mirror instead, name it in `<data_dir>/update.json`:
 
@@ -144,8 +146,9 @@ To fetch from a mirror instead, name it in `<data_dir>/update.json`:
 { "mirror": "https://mirror.example.internal/wirken/" }
 ```
 
-With a mirror set, the allowlist is the mirror's host alone, so nothing is
-sent to GitHub. A mirror serves the same files under this layout:
+A mirror is fetched exactly as named and may not redirect: a redirect is
+an error, not followed, so with a mirror set nothing is sent anywhere else.
+A mirror serves the same files under this layout:
 
 ```
 <base>/releases.json

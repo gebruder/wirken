@@ -38,6 +38,12 @@ tagged.
 
 ### Fixed
 
+- `wirken update` downloads with curl. The artifact download used to go
+  through the agent's egress client and could stall after the first few
+  kilobytes, leaving the command silent after the confirmation. The manifest
+  signature check and the sha256 pin are unchanged. The download shows curl's
+  progress bar, each step prints what it is doing, and `RUST_LOG=wirken=debug`
+  traces the fetch, the verification and the install.
 - `wirken credentials list` and `wirken agents list` size the KIND and MODEL
   columns to their longest value. A `plan_sign_in` kind or a `(plan)` model
   label used to push the columns after it out of line.

@@ -1,24 +1,24 @@
-//! Fetching release files through Wirken's egress client.
+//! Fetching release files with curl.
 //!
-//! Every request goes through [`EgressClient::request`], which checks
-//! the host against an allowlist before any connection and does not
-//! follow redirects. Redirects are followed here, one hop at a time,
-//! each hop checked again: for GitHub the allowlist is `github.com`
-//! and the host its release downloads redirect to; for a mirror it is
-//! the mirror's host alone, so with a mirror set nothing goes to
-//! GitHub.
+//! Nothing here is trusted: the manifest verifies against the compiled-in
+//! release keys and the artifact must match the sha256 the signed
+//! manifest carries, so the transport can be any HTTPS client. curl is
+//! that client, the same one `install.sh` uses. From GitHub every hop is
+//! HTTPS (`--proto =https --proto-redir =https`), since a release download
+//! redirects once to the asset host. A mirror is fetched as named and may
+//! not redirect at all, so with a mirror set nothing is sent anywhere else.
 
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use url::Url;
-use wirken_agent::egress::{EgressClient, EgressEnforcement};
 
 const REPO: &str = "gebruder/wirken";
-/// Hosts a GitHub release download touches: the release URL and the
-/// asset host it redirects to.
-pub const GITHUB_HOSTS: &[&str] = &["github.com", "release-assets.githubusercontent.com"];
-const MAX_REDIRECTS: usize = 5;
+const MAX_REDIRECTS: u32 = 5;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where release files come from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,13 +50,6 @@ impl Source {
                 }
             }
             None => Ok(configured.map_or(Source::GitHub, Source::Mirror)),
-        }
-    }
-
-    fn hosts(&self) -> Vec<String> {
-        match self {
-            Source::GitHub => GITHUB_HOSTS.iter().map(|h| h.to_string()).collect(),
-            Source::Mirror(base) => vec![base.host_str().unwrap_or_default().to_string()],
         }
     }
 
@@ -96,6 +89,30 @@ impl Source {
             Source::Mirror(base) => format!("mirror {base}"),
         }
     }
+
+    /// The curl arguments that pin this source's transport: GitHub is
+    /// HTTPS on every hop and follows the one redirect its downloads
+    /// make; a mirror is http or https as named and may not redirect.
+    fn transport_args(&self) -> Vec<String> {
+        match self {
+            Source::GitHub => vec![
+                "--location".into(),
+                "--max-redirs".into(),
+                MAX_REDIRECTS.to_string(),
+                "--proto".into(),
+                "=https".into(),
+                "--proto-redir".into(),
+                "=https".into(),
+            ],
+            Source::Mirror(_) => vec![
+                "--location".into(),
+                "--max-redirs".into(),
+                "0".into(),
+                "--proto".into(),
+                "=http,https".into(),
+            ],
+        }
+    }
 }
 
 /// A base URL, normalised to end in `/` so names join beneath it.
@@ -123,86 +140,132 @@ fn is_loopback(url: &Url) -> bool {
     }
 }
 
-/// Fetches release files from one [`Source`] and nowhere else.
+/// Whether a fetch shows curl's progress bar on the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// Errors only, captured into the failure message.
+    Silent,
+    /// curl's progress bar on stderr, for a download worth watching.
+    Bar,
+}
+
+/// Fetches release files from one [`Source`].
 pub struct Fetcher {
-    client: EgressClient,
     source: Source,
 }
 
+static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
 impl Fetcher {
     pub fn new(source: Source) -> Self {
-        let client = EgressClient::new();
-        client.set_enforcement(EgressEnforcement::Allowlist(
-            source.hosts().into_iter().collect(),
-        ));
-        Fetcher { client, source }
+        Fetcher { source }
     }
 
     pub fn source(&self) -> &Source {
         &self.source
     }
 
-    /// GET `url`, following redirects that stay within the allowlist,
-    /// and return at most `max_bytes` of body. GitHub is HTTPS only,
-    /// and no redirect may move from HTTPS to HTTP.
-    pub async fn get(&self, url: Url, max_bytes: usize, timeout: Duration) -> Result<Vec<u8>> {
-        let mut url = url;
-        for _ in 0..=MAX_REDIRECTS {
-            self.check_scheme(&url)?;
-            let resp = self
-                .client
-                .request(reqwest::Method::GET, url.as_str())
-                .await
-                .map_err(|e| anyhow::anyhow!("refused {url}: {e}"))?
-                .timeout(timeout)
-                .send()
-                .await
-                .with_context(|| format!("fetch {url}"))?;
-            let status = resp.status();
-            if status.is_redirection() {
-                let location = resp
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                    .with_context(|| format!("{url} redirected without a location"))?;
-                let next = url
-                    .join(location)
-                    .with_context(|| format!("{url} redirected to {location:?}"))?;
-                if url.scheme() == "https" && next.scheme() != "https" {
-                    bail!("{url} redirected from https to {next}");
-                }
-                url = next;
-                continue;
+    /// GET `url` with curl and return at most `max_bytes` of body.
+    pub async fn get(
+        &self,
+        url: Url,
+        max_bytes: usize,
+        timeout: Duration,
+        progress: Progress,
+    ) -> Result<Vec<u8>> {
+        let scratch = scratch_path();
+        tracing::debug!(
+            url = %url,
+            max_bytes,
+            timeout_secs = timeout.as_secs(),
+            "update: fetching"
+        );
+        let result = self
+            .run_curl(&url, max_bytes, timeout, progress, &scratch)
+            .await;
+        let read = match &result {
+            Ok(()) => {
+                std::fs::read(&scratch).with_context(|| format!("read {}", scratch.display()))
             }
-            if !status.is_success() {
-                bail!("{url}: {status}");
-            }
-            if resp.content_length().is_some_and(|n| n > max_bytes as u64) {
-                bail!("{url} is larger than {max_bytes} bytes");
-            }
-            let mut body = Vec::new();
-            let mut resp = resp;
-            while let Some(chunk) = resp.chunk().await.with_context(|| format!("read {url}"))? {
-                if body.len() + chunk.len() > max_bytes {
-                    bail!("{url} is larger than {max_bytes} bytes");
-                }
-                body.extend_from_slice(&chunk);
-            }
-            return Ok(body);
+            Err(_) => Ok(Vec::new()),
+        };
+        let _ = std::fs::remove_file(&scratch);
+        result?;
+        let body = read?;
+        if body.len() > max_bytes {
+            bail!("{url} is larger than {max_bytes} bytes");
         }
-        bail!(
-            "more than {MAX_REDIRECTS} redirects fetching from {}",
-            self.source.describe()
-        )
+        tracing::debug!(url = %url, bytes = body.len(), "update: fetched");
+        Ok(body)
     }
 
-    fn check_scheme(&self, url: &Url) -> Result<()> {
-        match (&self.source, url.scheme()) {
-            (_, "https") => Ok(()),
-            (Source::Mirror(_), "http") => Ok(()),
-            _ => bail!("{url} is not https"),
+    async fn run_curl(
+        &self,
+        url: &Url,
+        max_bytes: usize,
+        timeout: Duration,
+        progress: Progress,
+        scratch: &PathBuf,
+    ) -> Result<()> {
+        let mut cmd = tokio::process::Command::new("curl");
+        cmd.args(["--fail", "--show-error"])
+            .arg("--connect-timeout")
+            .arg(CONNECT_TIMEOUT.as_secs().to_string())
+            .arg("--max-time")
+            .arg(timeout.as_secs().max(1).to_string())
+            .arg("--max-filesize")
+            .arg(max_bytes.to_string())
+            .arg("--user-agent")
+            .arg(format!(
+                "wirken/{} (+https://github.com/{REPO})",
+                crate::build_info::VERSION
+            ))
+            .args(self.source.transport_args())
+            .arg("--output")
+            .arg(scratch)
+            .arg(url.as_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null());
+        match progress {
+            Progress::Silent => cmd.arg("--silent").stderr(Stdio::piped()),
+            Progress::Bar => cmd.arg("--progress-bar").stderr(Stdio::inherit()),
+        };
+        let output = cmd.output().await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!("curl is not installed; wirken update downloads with curl")
+            } else {
+                anyhow::anyhow!("run curl: {e}")
+            }
+        })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let code = output.status.code();
+        let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if said.is_empty() {
+            match code {
+                Some(c) => format!("curl exited with status {c}"),
+                None => "curl was killed by a signal".to_string(),
+            }
+        } else {
+            said
+        };
+        // 63 is curl's "maximum file size exceeded"; 47 its redirect limit.
+        match code {
+            Some(63) => bail!("{url} is larger than {max_bytes} bytes"),
+            Some(47) => bail!("{url} redirected, and this source may not redirect ({detail})"),
+            _ => bail!("fetch {url}: {detail}"),
         }
     }
+}
+
+/// A scratch file for one download, unique to this process and call.
+fn scratch_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "wirken-update-{}-{}",
+        std::process::id(),
+        SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 #[cfg(test)]
@@ -271,6 +334,17 @@ pub(crate) mod tests {
         TestServer { base, requests }
     }
 
+    async fn get(fetcher: &Fetcher, url: &str) -> Result<Vec<u8>> {
+        fetcher
+            .get(
+                Url::parse(url).unwrap(),
+                1024,
+                Duration::from_secs(5),
+                Progress::Silent,
+            )
+            .await
+    }
+
     #[test]
     fn a_base_url_must_be_loopback_or_the_configured_mirror() {
         assert!(matches!(
@@ -322,10 +396,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// With a mirror, the fetcher reaches the mirror and refuses
-    /// GitHub outright, whether asked directly or redirected there.
     #[tokio::test]
-    async fn a_mirror_sends_nothing_to_github() {
+    async fn a_mirror_is_fetched_as_named_and_may_not_redirect() {
         let server = serve(vec![
             ("/releases.json".into(), 200, vec![], b"{}".to_vec()),
             (
@@ -342,40 +414,19 @@ pub(crate) mod tests {
         .await;
         let source = Source::choose(Some(&server.base), None).unwrap();
         let fetcher = Fetcher::new(source.clone());
-        let body = fetcher
-            .get(source.manifest_url(), 1024, Duration::from_secs(5))
-            .await
-            .unwrap();
+        let body = get(&fetcher, source.manifest_url().as_str()).await.unwrap();
         assert_eq!(body, b"{}");
 
-        let direct = fetcher
-            .get(
-                Url::parse(
-                    "https://github.com/gebruder/wirken/releases/latest/download/releases.json",
-                )
-                .unwrap(),
-                1024,
-                Duration::from_secs(5),
-            )
-            .await
-            .unwrap_err();
-        assert!(format!("{direct:#}").contains("refused"), "{direct:#}");
-
-        let redirected = fetcher
-            .get(
-                Url::parse(&format!("{}to-github", server.base)).unwrap(),
-                1024,
-                Duration::from_secs(5),
-            )
+        let redirected = get(&fetcher, &format!("{}to-github", server.base))
             .await
             .unwrap_err();
         assert!(
-            format!("{redirected:#}").contains("refused"),
+            format!("{redirected:#}").contains("may not redirect"),
             "{redirected:#}"
         );
 
-        // Every request the mirror saw was its own path; the refused
-        // ones never left the process.
+        // The redirect target was never requested: the mirror saw its
+        // own two paths and nothing else left the process.
         assert_eq!(
             *server.requests.lock().unwrap(),
             vec![
@@ -385,18 +436,36 @@ pub(crate) mod tests {
         );
     }
 
+    /// The GitHub source is HTTPS only, so a plain http URL is refused by
+    /// curl before any request is made.
+    #[tokio::test]
+    async fn the_github_source_refuses_http() {
+        let server = serve(vec![("/x".into(), 200, vec![], b"x".to_vec())]).await;
+        let fetcher = Fetcher::new(Source::GitHub);
+        let err = get(&fetcher, &format!("{}x", server.base))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("fetch http://"), "{err:#}");
+        assert!(server.requests.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn an_oversize_body_is_refused() {
         let server = serve(vec![("/big".into(), 200, vec![], vec![b'x'; 4096])]).await;
         let fetcher = Fetcher::new(Source::choose(Some(&server.base), None).unwrap());
-        let err = fetcher
-            .get(
-                Url::parse(&format!("{}big", server.base)).unwrap(),
-                1024,
-                Duration::from_secs(5),
-            )
+        let err = get(&fetcher, &format!("{}big", server.base))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("larger than"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn an_http_error_names_the_status() {
+        let server = serve(vec![]).await;
+        let fetcher = Fetcher::new(Source::choose(Some(&server.base), None).unwrap());
+        let err = get(&fetcher, &format!("{}missing", server.base))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
     }
 }
