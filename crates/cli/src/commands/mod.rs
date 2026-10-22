@@ -46,6 +46,17 @@ pub mod webchat;
 pub mod zirkel;
 pub mod zirkel_calibrate;
 
+/// The width of a table column: the widest of its header and its cells,
+/// and never less than `floor`, the width it was fixed at before its cells
+/// were measured.
+pub(crate) fn column_width(
+    header: &str,
+    cells: impl IntoIterator<Item = usize>,
+    floor: usize,
+) -> usize {
+    cells.into_iter().fold(floor.max(header.len()), usize::max)
+}
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use wirken_agent::sandbox::{SandboxConfig, SandboxMode, ShellMode};
@@ -1318,5 +1329,18 @@ mod leak_seed_tests {
             ))
         });
         assert!(matcher.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod column_width_tests {
+    use super::column_width;
+
+    #[test]
+    fn a_column_is_as_wide_as_its_widest_cell_but_never_narrower_than_its_floor() {
+        assert_eq!(column_width("KIND", [10, 6], 10), 10);
+        assert_eq!(column_width("KIND", [12, 6], 10), 12);
+        assert_eq!(column_width("MODEL", [], 20), 20);
+        assert_eq!(column_width("MODEL", [25], 20), 25);
     }
 }

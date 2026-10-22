@@ -31,6 +31,9 @@ tagged.
 
 ### Fixed
 
+- `wirken credentials list` and `wirken agents list` size the KIND and MODEL
+  columns to their longest value. A `plan_sign_in` kind or a `(plan)` model
+  label used to push the columns after it out of line.
 - A message to an agent that names a skill which is not loaded now gets the
   loaded skills back as its reply. It used to get the generic internal-error
   apology, and the error was logged as a failure. Found by Tanmay Maka

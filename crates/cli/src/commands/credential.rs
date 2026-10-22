@@ -31,15 +31,18 @@ pub async fn list() -> Result<()> {
         return Ok(());
     }
 
+    // The KIND column is as wide as its longest value: `plan_sign_in` is
+    // wider than the 10 columns it was once fixed at.
+    let kind_w = super::column_width("KIND", creds.iter().map(|c| c.kind.as_str().len()), 10);
     println!(
-        "  {:24}  {:12}  {:10}  {:20}  {:12}  SCOPES",
+        "  {:24}  {:12}  {:kind_w$}  {:20}  {:12}  SCOPES",
         "NAME", "CHANNEL", "KIND", "CREATED", "STATUS"
     );
     println!(
         "  {}  {}  {}  {}  {}  {}",
         "─".repeat(24),
         "─".repeat(12),
-        "─".repeat(10),
+        "─".repeat(kind_w),
         "─".repeat(20),
         "─".repeat(12),
         "─".repeat(10),
@@ -79,7 +82,7 @@ pub async fn list() -> Result<()> {
         };
 
         println!(
-            "  {:24}  {:12}  {:10}  {:20}  {:12}  {}",
+            "  {:24}  {:12}  {:kind_w$}  {:20}  {:12}  {}",
             cred.name,
             cred.channel,
             cred.kind.as_str(),

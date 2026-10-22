@@ -411,32 +411,41 @@ pub async fn list() -> Result<()> {
         return Ok(());
     }
 
-    println!("  {:12}  {:16}  {:20}  CHANNELS", "ID", "NAME", "MODEL");
+    // The MODEL column is as wide as its longest label. `(plan)` on a plan
+    // agent's model makes a label longer than the 20 columns it was fixed at.
+    let labels: Vec<String> = agents
+        .iter()
+        .map(|agent| {
+            format!(
+                "{}/{}{}",
+                agent.provider,
+                agent.model,
+                if agent.auth.is_plan() { " (plan)" } else { "" }
+            )
+        })
+        .collect();
+    let model_w = super::column_width("MODEL", labels.iter().map(String::len), 20);
+    println!(
+        "  {:12}  {:16}  {:model_w$}  CHANNELS",
+        "ID", "NAME", "MODEL"
+    );
     println!(
         "  {}  {}  {}  {}",
         "─".repeat(12),
         "─".repeat(16),
-        "─".repeat(20),
+        "─".repeat(model_w),
         "─".repeat(30)
     );
 
-    for agent in &agents {
+    for (agent, label) in agents.iter().zip(&labels) {
         let channels = if agent.channels.is_empty() {
             "(none)".to_string()
         } else {
             agent.channels.join(", ")
         };
         println!(
-            "  {:12}  {:16}  {:20}  {}",
-            agent.id,
-            agent.name,
-            format!(
-                "{}/{}{}",
-                agent.provider,
-                agent.model,
-                if agent.auth.is_plan() { " (plan)" } else { "" }
-            ),
-            channels,
+            "  {:12}  {:16}  {:model_w$}  {}",
+            agent.id, agent.name, label, channels,
         );
         // Only channels with a granted egress policy are listed. A
         // channel with no entry has no sandbox egress, which is the
