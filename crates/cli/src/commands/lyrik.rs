@@ -2912,8 +2912,16 @@ fn merge_finding_group(group: Vec<(Option<String>, serde_json::Value)>) -> serde
         None
     };
 
+    // The surviving record keeps its own threat model. When it has none,
+    // the first member that has one supplies it.
+    let threat_model = group
+        .iter()
+        .find_map(|(_, f)| f.get("threat_model").cloned());
     let (_, mut canonical) = group.into_iter().next().expect("group non-empty");
     if let Some(obj) = canonical.as_object_mut() {
+        if let Some(tm) = threat_model {
+            obj.entry("threat_model".to_string()).or_insert(tm);
+        }
         if !framings.is_empty() {
             obj.insert(
                 "framing".to_string(),
@@ -4664,18 +4672,36 @@ mod tests {
     }
 
     #[test]
-    fn dedup_does_not_borrow_a_threat_model_from_a_folded_member() {
-        // The surviving record has none; the folded one has one. The merge
-        // keeps the surviving record as it is, so the merged record has
-        // none, and its rule 1 rejection (recorded before dedup) stands.
+    fn dedup_takes_threat_model_from_first_member_that_has_one() {
+        // The surviving record has none. The first member that has one
+        // supplies it, skipping any member without one.
         let a = finding("src/a.rs", 10, "auth", "MEDIUM");
-        let b = with_threat_model(finding("src/a.rs", 10, "injection", "HIGH"), "local user");
+        let b = finding("src/a.rs", 10, "injection", "HIGH");
+        let c = with_threat_model(finding("src/a.rs", 10, "auth", "LOW"), "local user");
+        let d = with_threat_model(finding("src/a.rs", 10, "injection", "LOW"), "remote peer");
+        let merged = dedup_findings(vec![
+            (Some("sink-walk".into()), a),
+            (Some("graph-walk".into()), b),
+            (Some("chain-walk".into()), c),
+            (Some("doc-walk".into()), d),
+        ])
+        .0;
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0]["threat_model"]["attacker_capability"],
+            "local user"
+        );
+    }
+
+    #[test]
+    fn dedup_leaves_threat_model_absent_when_no_member_has_one() {
+        let a = finding("src/a.rs", 10, "auth", "MEDIUM");
+        let b = finding("src/a.rs", 10, "injection", "HIGH");
         let merged = dedup_findings(vec![
             (Some("sink-walk".into()), a),
             (Some("graph-walk".into()), b),
         ])
         .0;
-        assert_eq!(merged.len(), 1);
         assert!(merged[0].get("threat_model").is_none());
     }
 
