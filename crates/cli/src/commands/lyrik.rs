@@ -383,10 +383,15 @@ pub async fn run(
     if let Some(funnel) = &funnel {
         println!("funnel: {}", serde_json::to_string_pretty(funnel)?);
     }
-    let inference = std::fs::read_to_string(&findings_dest)
+    let findings_body = std::fs::read_to_string(&findings_dest)
         .ok()
-        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
-        .and_then(|b| b.get("inference").cloned());
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok());
+    if let Some(body) = &findings_body {
+        for line in lyrik_brocards::run_summary(body) {
+            println!("{line}");
+        }
+    }
+    let inference = findings_body.and_then(|b| b.get("inference").cloned());
     if let Some(inference) = inference {
         println!("inference: {}", serde_json::to_string_pretty(&inference)?);
     }
@@ -4815,6 +4820,42 @@ mod tests {
             .collect();
         assert_eq!(rules, vec![1, 5]);
         assert_eq!(body["funnel"]["merged"]["brocard_removed"], 0);
+    }
+
+    #[test]
+    fn run_summary_agrees_with_rejected_candidates_in_findings_json() {
+        for mode in [
+            lyrik_brocards::Mode::Pentest,
+            lyrik_brocards::Mode::Defender,
+        ] {
+            let tmp = tempdir().unwrap();
+            let dir = brocard_fixture(tmp.path());
+            let body = run_brocard_fixture(tmp.path(), dir, mode);
+            // Counted straight from the file's array, not from the summary.
+            let mut per_rule = std::collections::BTreeMap::new();
+            for r in body["rejected_candidates"].as_array().unwrap() {
+                *per_rule.entry(r["rule"].as_u64().unwrap()).or_insert(0) += 1;
+            }
+            let lines = lyrik_brocards::run_summary(&body);
+            let kept = body["findings"].as_array().unwrap().len();
+            assert_eq!(
+                lines[0],
+                format!(
+                    "brocard rejections: {} ({kept} findings kept)",
+                    body["rejected_candidates"].as_array().unwrap().len()
+                ),
+                "{mode:?}"
+            );
+            for (rule, n) in per_rule {
+                assert!(
+                    lines
+                        .iter()
+                        .any(|l| l.starts_with(&format!("  rule {rule} ("))
+                            && l.ends_with(&format!(": {n}"))),
+                    "{mode:?} rule {rule} count {n} missing from {lines:?}"
+                );
+            }
+        }
     }
 
     #[test]
