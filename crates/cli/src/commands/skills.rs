@@ -457,17 +457,20 @@ pub fn sign_index(
     Ok(())
 }
 
-pub async fn sign(dir: &str, root_key: Option<&str>) -> Result<()> {
+pub async fn sign(dir: &str, root_key: Option<&str>, key: Option<&str>) -> Result<()> {
     let skill_dir = std::path::Path::new(dir);
     if !skill_dir.join("SKILL.md").exists() {
         anyhow::bail!("No SKILL.md found in '{dir}'");
     }
 
-    // Check for existing signing key or generate new one
+    // `--key` names the seed to sign with and must exist; otherwise the
+    // per-author key in the data directory is used, generated on first use.
     let cfg = config();
     let key_path = cfg.data_dir.join("signing-key.hex");
 
-    let signing_key = if key_path.exists() {
+    let signing_key = if let Some(path) = key {
+        read_root_seed(path).with_context(|| format!("--key {path}"))?
+    } else if key_path.exists() {
         let hex = std::fs::read_to_string(&key_path)?;
         let bytes = skill_registry::hex_decode_public(hex.trim())?;
         let mut arr = [0u8; 32];

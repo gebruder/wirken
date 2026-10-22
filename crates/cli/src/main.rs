@@ -691,6 +691,12 @@ enum SkillCommands {
     Sign {
         /// Path to skill directory
         dir: String,
+        /// Sign with this Ed25519 private seed (64 hex characters) instead
+        /// of `<data_dir>/signing-key.hex`. The file must exist; nothing
+        /// is generated or written. For a key held outside the data
+        /// directory, such as the project skill-signing key.
+        #[arg(long)]
+        key: Option<String>,
         /// Delegate the signature under an operator registry root.
         /// Path to the root Ed25519 private seed (hex). Used only for
         /// installs that have opted into a root via `skills trust-root`;
@@ -1580,8 +1586,8 @@ async fn main() -> Result<()> {
             SkillCommands::Search { query } => commands::skills::search(&query).await,
             SkillCommands::Install { name } => commands::skills::install(&name).await,
             SkillCommands::List => commands::skills::list().await,
-            SkillCommands::Sign { dir, root_key } => {
-                commands::skills::sign(&dir, root_key.as_deref()).await
+            SkillCommands::Sign { dir, root_key, key } => {
+                commands::skills::sign(&dir, root_key.as_deref(), key.as_deref()).await
             }
             SkillCommands::SignIndex {
                 index,

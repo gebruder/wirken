@@ -40,6 +40,10 @@ the signature as hex to `SKILL.sig` plus the public key to `SKILL.pub`. The
 per-author key lives at `<data_dir>/signing-key.hex` (hex Ed25519 seed, mode
 0o600), generated on first use and shared with `wirken mcp sign`.
 
+`--key <seed>` signs with that Ed25519 seed file instead of the per-author
+key, and never generates one; it is how the bundled set is re-signed with the
+project skill-signing key held outside any data directory.
+
 `wirken skills sign --root-key <offline-root-seed> <dir>` additionally binds
 the signer key to an operator registry root, writing `SKILL.deleg`, the root's
 signature over the signer's public key. The root seed is read from the given
