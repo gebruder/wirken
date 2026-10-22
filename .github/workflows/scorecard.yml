@@ -11,6 +11,8 @@
 name: Scorecard supply-chain security
 
 on:
+  # On demand, to exercise a regenerated token without waiting for the schedule.
+  workflow_dispatch:
   # Re-run when branch protection changes so the check reflects current state.
   branch_protection_rule:
   # Weekly baseline so the "Maintained" check stays fresh.
