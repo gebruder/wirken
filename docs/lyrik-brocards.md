@@ -98,7 +98,7 @@ A walk that judges a candidate under rules 2 to 6 still writes the finding. It a
 
 A rejection file that does not parse, or names a rule outside 1 to 7, is refused. The run records it as `lyrik.brocard.refused` in the audit log.
 
-Single-call mode reads the bundled `lyrik` skill. Until a signed release ships that skill's `threat_model` instruction, its findings carry no `threat_model` and receive rule 1 rejections.
+Single-call mode reads the bundled `lyrik` skill, which emits `threat_model` from 2.5.0 on. A bundled copy already on disk keeps its files, so an install made from an earlier release keeps the earlier text and its findings receive rule 1 rejections until the copy is replaced: remove `<data_dir>/skills/lyrik` and run `wirken setup`, which writes the bundled skills it finds missing.
 
 ## Worked example
 

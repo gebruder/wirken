@@ -125,7 +125,8 @@ its soak, and the CHANGELOG entry for the bump names them.
 
 **The release workflow enforces part of the gate.** Its first job, `gate`,
 runs on the tag push before any build: `scripts/check-names.sh`,
-`cargo deny check`, and open CodeQL alerts (any critical or high fails),
+`cargo deny check`, `scripts/check-security-heading.py`, and open CodeQL
+alerts (any critical or high fails),
 read with the workflow token's `security-events: read`. Every build job needs
 it, so a failing gate builds nothing and creates no draft release. If the
 token cannot read code scanning, the job prints it as `UNVERIFIED` and fails.

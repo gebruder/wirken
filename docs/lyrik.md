@@ -447,8 +447,8 @@ change them:
   `lyrik.brocard.<rule>`, with a `suppressions` entry of kind `external` whose
   justification is the reason.
 - `threat_model` on a finding, an object with the strings
-  `attacker_capability` and `harm_path`. Walk runs are told to emit it. A
-  finding without both is a rule 1 rejection.
+  `attacker_capability` and `harm_path`. Walk runs and the bundled `lyrik`
+  skill are told to emit it. A finding without both is a rule 1 rejection.
 
 ## Reports and audit
 
@@ -473,15 +473,18 @@ unresolved counts per citation sub-gate; what the run set aside is in
 and the SARIF report carries it under the run's `properties.lyrik.funnel`:
 
 - `walks`, one entry per walk (`lyrik` for single-call mode): `emitted`,
-  `refused`, `framing_stripped`, `grade_corrected`, and the `skipped` steps
+  `refused`, `framing_stripped`, `grade_corrected`, `brocard_removed`
+  (candidates a defender-mode rejection removed), and the `skipped` steps
   from its `lyrik.walk.completed` row.
-- `merged`: `emitted`, `refused`, `collapsed` (findings folded into another at
-  the same location by dedup) and `kept` (findings in `findings.json`).
+- `merged`: `emitted`, `refused`, `brocard_removed`, `collapsed` (findings
+  folded into another at the same location by dedup) and `kept` (findings in
+  `findings.json`).
 - `scanner`, when Semgrep ran: `candidates`, each counted once as `accepted`
-  (a written finding sits at its location), `declined` (otherwise, when any
-  walk declined it) or `unaddressed`.
+  (a kept finding sits at its location), `brocard_rejected` (otherwise, when
+  a candidate there was removed in defender mode), `declined` (otherwise, when
+  any walk declined it) or `unaddressed`.
 
-Before writing, the runner checks emitted - refused - collapsed = kept, with
+Before writing, the runner checks emitted - refused - brocard_removed - collapsed = kept, with
 `kept` taken from the written findings list and `collapsed` from dedup's group
 sizes, and that the scanner's three counts sum to its candidates. If either
 check fails, `findings.json` is written without `funnel`, the per-run log

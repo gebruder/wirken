@@ -10,6 +10,20 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `wirken skills sign --key <seed>` signs with a named Ed25519 seed file
+  instead of `<data_dir>/signing-key.hex`, and generates nothing.
+- The Scorecard workflow runs on demand (`workflow_dispatch`).
+
+### Changed
+
+- A `spawn_subagent` call from `wirken ask` returns an error saying that
+  sub-agents run only under the gateway, naming `wirken chat` or a channel as
+  the route. It said "agent has no factory bound".
+- The chat approval card's hint is "Enter alone refuses.", so it fits beside
+  the narrowed panels at 80 columns.
+
 ## [2.5.0] - 2026-10-22
 
 ### Added
