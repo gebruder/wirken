@@ -111,10 +111,13 @@ channel `terminal`.
 
 The reply streams in as the model writes it, and each tool call shows when
 its row is on the chain and again when it finishes. Replies are drawn as
-light Markdown: headings, bullets and numbered items, fenced code, `inline
-code` and **bold**, a marker read as one only when its closer is on the same
-line; anything else shows as written. The approval card, tool output, the
-messages typed and the notes stay plain text. An approval the turn
+light Markdown: headings, bullets and numbered items, fenced code, tables
+(cells wrapped when the table is wider than the screen), rules, `inline
+code`, **bold**, *italics* and links, whose address stays on screen after
+the text. A marker counts only when its closer is on the same line, and `_`
+only at the edge of a word, so `2 ** 3` and `snake_case` show as written, as
+does anything else. The approval card, tool output, the messages typed and
+the notes stay plain text. An approval the turn
 needs is asked on a card at the terminal whose message started the turn
 (`TerminalApprovalGate`), with the lines every approval surface shows; see
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).

@@ -19,8 +19,9 @@ tagged.
   the finding. Set `mode` in `.lyrik/config.json` to choose; the default is
   `pentest`.
 - `wirken chat` draws the agent's replies as light Markdown: headings,
-  bullets and numbered items, fenced code, inline code and bold. The
-  approval card stays plain text.
+  bullets and numbered items, fenced code, tables, rules, inline code,
+  bold, italics and links, with a link's address kept on screen. The
+  approval card and tool output stay plain text.
 
 ## [2.4.0] - 2026-10-21
 
