@@ -71,6 +71,20 @@ pub(crate) enum Outgoing {
 }
 
 /// A new conversation's id: `c-` and 12 hex digits.
+/// The `/help` note: the command table, then the keys.
+fn help_text() -> String {
+    let mut lines = vec!["commands".to_string()];
+    for (name, what) in super::slash::COMMANDS {
+        lines.push(format!("  {name:<12}{what}"));
+    }
+    lines.push(
+        "keys: Enter send · Ctrl+J newline · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar · \
+         Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
+            .into(),
+    );
+    lines.join("\n")
+}
+
 pub(crate) fn new_conversation_id() -> String {
     let hex: String = uuid::Uuid::new_v4()
         .simple()
@@ -118,6 +132,8 @@ pub(crate) struct App {
     /// Rows scrolled up from the bottom of the transcript.
     pub scroll: usize,
     pub quit: bool,
+    /// The panel command waiting for the gateway's status answer.
+    pub pending_panel: Option<super::slash::Command>,
 }
 
 impl App {
@@ -133,6 +149,7 @@ impl App {
             directory: Directory::default(),
             show_sidebar: true,
             show_panels: true,
+            pending_panel: None,
             searching: false,
             search: String::new(),
             selected: 0,
@@ -249,6 +266,28 @@ impl App {
         Vec::new()
     }
 
+    /// Run a slash command. The gateway is asked where the command needs
+    /// its answer, and the note is written when the answer arrives.
+    fn run_command(&mut self, command: super::slash::Command) -> Option<Outgoing> {
+        use super::slash::Command;
+        match command {
+            Command::Status | Command::Panel(_) => {
+                self.pending_panel = Some(command);
+                Some(Outgoing::Ask(Query::Status))
+            }
+            Command::Verify => Some(Outgoing::Ask(Query::Verify)),
+            Command::Help => {
+                self.entries.push(Entry::Note(help_text()));
+                None
+            }
+            Command::Clear => self.open(self.requested_agent.clone(), new_conversation_id(), false),
+            Command::Quit => {
+                self.quit = true;
+                None
+            }
+        }
+    }
+
     /// Take in the gateway's answer to `query`.
     pub fn on_answer(&mut self, query: Query, body: serde_json::Value) {
         match query {
@@ -258,6 +297,23 @@ impl App {
                         self.agent = status.agent.clone();
                     }
                     self.status = Some(status);
+                }
+                if let (Some(command), Some(status)) = (self.pending_panel.take(), &self.status) {
+                    let panels = super::panels::panels(status, self.verified.as_ref());
+                    let wanted = match command {
+                        super::slash::Command::Panel(title) => Some(title),
+                        _ => None,
+                    };
+                    for panel in panels
+                        .iter()
+                        .filter(|p| wanted.is_none_or(|title| p.title == title))
+                    {
+                        self.entries.push(Entry::Note(format!(
+                            "{}\n{}",
+                            panel.title,
+                            panel.lines.join("\n")
+                        )));
+                    }
                 }
             }
             Query::Verify => {
@@ -523,7 +579,17 @@ impl App {
 
         match key.code {
             KeyCode::Enter => {
-                if self.busy || self.draft.trim().is_empty() {
+                if self.draft.trim().is_empty() {
+                    return None;
+                }
+                // A command runs during a turn too, and is never sent to the
+                // model. Anything else waits for the turn to end.
+                if let Some(command) = super::slash::parse(&self.draft) {
+                    self.draft.clear();
+                    self.cursor = 0;
+                    return self.run_command(command);
+                }
+                if self.busy {
                     return None;
                 }
                 let text = std::mem::take(&mut self.draft);
@@ -915,5 +981,107 @@ mod tests {
         assert_eq!(app.cursor, 1);
         app.on_paste("\x1b[31mred\u{202E}", now);
         assert_eq!(app.draft, "aredb");
+    }
+
+    /// A commanded draft, sent as the user would: typed, then Enter.
+    fn command(app: &mut App, text: &str, now: Instant) -> Option<Outgoing> {
+        typed(app, text, now);
+        app.on_key(key(KeyCode::Enter), now)
+    }
+
+    #[test]
+    fn status_asks_the_gateway_and_writes_every_panel_when_it_answers() {
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        let now = Instant::now();
+        assert_eq!(
+            command(&mut app, "/status", now),
+            Some(Outgoing::Ask(Query::Status))
+        );
+        assert!(
+            !app.entries.iter().any(|e| matches!(e, Entry::User(_))),
+            "a command is not a message"
+        );
+        app.on_answer(Query::Status, serde_json::json!({"agent": "default"}));
+        let notes: Vec<&str> = app
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notes.iter().any(|n| n.starts_with("Context\n")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.starts_with("Cost and tokens\n")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_panel_command_writes_only_its_panel() {
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        let now = Instant::now();
+        assert_eq!(
+            command(&mut app, "/cost", now),
+            Some(Outgoing::Ask(Query::Status))
+        );
+        app.on_answer(Query::Status, serde_json::json!({"agent": "default"}));
+        let notes: Vec<&str> = app
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("Cost and tokens\n"), "{notes:?}");
+    }
+
+    #[test]
+    fn help_lists_every_command_and_sends_nothing() {
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        assert_eq!(command(&mut app, "/help", Instant::now()), None);
+        let Some(Entry::Note(help)) = app.entries.last() else {
+            panic!("no help note: {:?}", app.entries);
+        };
+        for (name, _) in super::super::slash::COMMANDS {
+            assert!(help.contains(name), "{name} missing from {help}");
+        }
+    }
+
+    #[test]
+    fn commands_run_during_a_turn_and_are_never_sent_to_the_model() {
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        let now = Instant::now();
+        app.busy = true;
+        assert_eq!(
+            command(&mut app, "/status", now),
+            Some(Outgoing::Ask(Query::Status))
+        );
+        assert_eq!(
+            command(&mut app, "/verify", now),
+            Some(Outgoing::Ask(Query::Verify))
+        );
+        assert_eq!(command(&mut app, "/clear", now), None, "refused mid-turn");
+        assert!(app.entries.iter().any(|e| matches!(
+            e,
+            Entry::Note(n) if n.starts_with("Finish this turn")
+        )));
+        assert!(!app.quit);
+        assert_eq!(command(&mut app, "/quit", now), None);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn an_unknown_slash_word_goes_to_the_gateway_as_typed() {
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        assert_eq!(
+            command(&mut app, "/summarize this week", Instant::now()),
+            Some(Outgoing::Message("/summarize this week".into()))
+        );
     }
 }

@@ -17,6 +17,7 @@
 mod app;
 mod markdown;
 mod panels;
+mod slash;
 mod text;
 mod view;
 mod wire;

@@ -100,6 +100,22 @@ each time the chat starts. `--agent` (alias `--persona`) picks the agent;
 without it the router picks, as for any channel, and an agent the gateway
 does not know is refused before the screen opens.
 
+A draft that starts with one of these words is a command, run by the chat and
+never sent to the model. It counts only as the first word, by its exact
+lowercase name; text after it is ignored. Any other `/word` (a skill, `/HELP`,
+`/etc/hosts`) goes to the agent as typed.
+
+| Command | What it does |
+|---|---|
+| `/status` | Every panel, as the gateway has them now |
+| `/context`, `/cost`, `/tools`, `/approvals`, `/audit` | That one panel |
+| `/verify` | Checks this conversation's chain, as Ctrl+K does |
+| `/clear` | A new conversation, as Ctrl+N opens one; refused mid-turn |
+| `/help` | The command list and the keys |
+| `/quit`, `/exit` | Leaves the chat, as Ctrl+C does |
+
+Commands run during a turn. `/clear` waits for the turn to end, as Ctrl+N does.
+
 The socket is mode 0600 and the gateway checks the peer's user, as for every
 connection. The chat then answers the gateway's challenge with the operator
 key (`<data_dir>/operator/operator.key`), the key `wirken permissions
