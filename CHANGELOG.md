@@ -18,6 +18,11 @@ tagged.
   Pentest mode halves the grade once per distinct rule; defender mode removes
   the finding. Set `mode` in `.lyrik/config.json` to choose; the default is
   `pentest`.
+- `wirken sessions verify --with-children` pairs each sub-agent spawn on a
+  session's chain with the child lane it names. It reports a child that is
+  unbound, never woke, or disagrees with its spawn row, and exits 5 on a
+  finding. It reuses the comparison `--with-parent` makes. The design comes from
+  #302 by Tanmay Maka (@maka-tanmay).
 
 ### Fixed
 

@@ -321,7 +321,12 @@ fn subagent_agent_id(
         })
 }
 
-pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result<()> {
+pub async fn verify(
+    session_id: &str,
+    strict: bool,
+    with_parent: bool,
+    with_children: bool,
+) -> Result<()> {
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -683,6 +688,64 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             Err(e) => {
                 cross_check_failed = true;
                 println!("  parent cross-check:  FAILED to read: {e}");
+            }
+        }
+    }
+
+    // Parent-side cross-check, opt-in. Each spawn row on this session's
+    // chain is paired with the child lane it names. The comparison is the
+    // one `--with-parent` uses, read from the other side.
+    if with_children {
+        println!();
+        match wirken_audit::cross_check_spawned_children(&*session_log, session_id) {
+            Ok(checks) if checks.is_empty() => {
+                println!("  children cross-check: n/a (no sub-agent spawns on this session)");
+            }
+            Ok(checks) => {
+                let findings: Vec<_> = checks.iter().filter(|c| c.is_finding()).collect();
+                if findings.is_empty() {
+                    println!(
+                        "  children cross-check: OK ({} checked, none disagree)",
+                        checks.len()
+                    );
+                } else {
+                    cross_check_failed = true;
+                    println!(
+                        "  children cross-check: {} of {} need attention",
+                        findings.len(),
+                        checks.len()
+                    );
+                    for c in findings {
+                        match c.status {
+                            wirken_audit::ChildCheckStatus::Unbound => println!(
+                                "    {}: has rows but no binding row, under a spawn that records a tier",
+                                c.child_session_id
+                            ),
+                            wirken_audit::ChildCheckStatus::NeverWoken => println!(
+                                "    {}: the spawn is recorded, but the child lane is empty",
+                                c.child_session_id
+                            ),
+                            _ => {
+                                println!(
+                                    "    {}: disagrees with its spawn row",
+                                    c.child_session_id
+                                );
+                                for d in &c.disagreements {
+                                    println!(
+                                        "      {}: parent says {}, child says {}",
+                                        d.field,
+                                        truncate_for_display(&d.parent_value, 48),
+                                        truncate_for_display(&d.child_value, 48),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                cross_check_failed = true;
+                println!("  children cross-check: FAILED to read: {e}");
             }
         }
     }

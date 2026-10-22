@@ -418,7 +418,8 @@ nothing new. The SIEM forwarder sends these rows by default; see
 
 Exit codes: `3` broken chain, `1` divergences, `6` a `tools_hash` that could
 not be recomputed, `2` unverifiable under `--strict`, `5` cross-check
-disagreement, `4` no such agent or no events.
+disagreement in either direction (`--with-parent` or `--with-children`), `4` no such
+agent or no events.
 
 #### Agents with MCP servers
 
@@ -479,6 +480,24 @@ session's own chain, `verify` reports `chain: BROKEN`, exits `3`, and the
 cross-check never runs. Producing one takes two real runs, then moving the
 second run's child-session rows verbatim, hashes included, into the first
 run's log. Both chains still verify; what is false is the pairing.
+
+#### `--with-children`
+
+`--with-children` is the parent's side of the same check. It reads each
+`SubagentSpawned` row on the session's own chain and pairs it with the child
+lane that row names. Where the child carries a binding row, the comparison is
+the one `--with-parent` makes, so the two directions cannot drift.
+
+It reports four things. A child whose binding disagrees with its spawn row, or
+whose binding names a different parent, is a disagreement. A child with rows
+but no binding row, under a spawn that records a tier, is `Unbound`: the build
+that wrote the spawn had the binding row, so this child is missing it. An empty
+child lane whose spawn the parent did not record as failed is `NeverWoken`.
+Two cases are not findings. An empty lane with a non-ok `SubagentResult` is a
+failed bind. A child with rows under a spawn that predates the tier is not
+comparable, and the output says so.
+
+One level only. A child's own children are not opened. Any finding exits `5`.
 
 #### Sessions with no binding row
 
