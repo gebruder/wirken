@@ -381,7 +381,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 }
             }
             Entry::Note(text) => {
-                for row in wrap(&sanitize(text), width.saturating_sub(2)) {
+                for row in note_rows(&sanitize(text), width.saturating_sub(2)) {
                     lines.push(Line::styled(
                         format!("  {row}"),
                         Style::default().fg(Color::Yellow),
@@ -403,6 +403,36 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
+}
+
+/// A note's lines in rows of at most `cols` cells. A line that wraps
+/// goes on under its second column, the text after its first run of two
+/// spaces, or under its indent when it has none, so a key table or a
+/// panel's lines stay aligned on a narrow screen. A line whose first
+/// column takes more than half the width wraps as text.
+fn note_rows(text: &str, cols: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let body = line.trim_start();
+        let tail = body
+            .split_once("  ")
+            .map_or(body, |(_, rest)| rest.trim_start());
+        let head = line.strip_suffix(tail).unwrap_or_default();
+        let hang = width(head);
+        if tail.is_empty() || hang > cols / 2 {
+            rows.extend(wrap(line, cols));
+            continue;
+        }
+        for (i, row) in wrap(tail, cols - hang).into_iter().enumerate() {
+            let lead = if i == 0 {
+                head.to_string()
+            } else {
+                " ".repeat(hang)
+            };
+            rows.push(format!("{lead}{row}"));
+        }
+    }
+    rows
 }
 
 fn indented(lines: &mut Vec<Line<'static>>, text: &str, width: usize, style: Style) {
@@ -581,6 +611,39 @@ mod tests {
         assert!(!shown.contains("file7.txt"), "{shown}");
         assert!(!shown.contains('\x1b'));
         assert!(!shown.contains('\u{202E}'));
+    }
+
+    /// A wrapped note line goes on under its second column, so the key
+    /// table and the panels read on a narrow screen; prose wraps as
+    /// before, and nothing is lost.
+    #[test]
+    fn a_wrapped_note_line_keeps_its_column() {
+        let note = "keys\n  Ctrl+F           search the sidebar; arrows select, Enter opens\n\
+                    Environment\n  data   ~/Downloads/Coding Projects/Wirken.ai/private/v240\n  \
+                    exec, generate_image, http_request, list_files\n\
+                    The approval for exec expired without an answer.";
+        let rows = note_rows(note, 44);
+        assert_eq!(
+            rows,
+            [
+                "keys",
+                "  Ctrl+F           search the sidebar;",
+                "                   arrows select, Enter",
+                "                   opens",
+                "Environment",
+                "  data   ~/Downloads/Coding",
+                "         Projects/Wirken.ai/private/v240",
+                "  exec, generate_image, http_request,",
+                "  list_files",
+                "The approval for exec expired without an",
+                "answer.",
+            ]
+        );
+        for row in &rows {
+            assert!(width(row) <= 44, "{row:?}");
+        }
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        assert_eq!(squash(&rows.concat()), squash(note));
     }
 
     #[test]
