@@ -292,7 +292,8 @@ changed during the run.
 value fails the run before any walk runs. Pentest keeps a brocard-rejected finding
 and halves its grade once per distinct rule that applied. Defender removes the
 finding from `findings.json`; its rejection record stays. The funnel counts
-removed candidates as `brocard_removed`.
+removed candidates as `brocard_removed`. A Semgrep seed whose only candidate was
+removed counts as `brocard_rejected` in the scanner funnel, not `accepted`.
 
 **`bench_mode`**: defaults false. Set it only on benchmark or
 batch-evaluation targets: when true, the run does not ask for a sign-off and
@@ -352,7 +353,8 @@ makes.
 ## Findings schema (1.1)
 
 `findings.json` is the contract external consumers (SIEM ingestors, ticketing
-systems, CI gates, diff tools) pin against.
+systems, CI gates, diff tools) pin against. Candidates declined under a brocard
+rule are recorded alongside the findings; see [lyrik-brocards.md](lyrik-brocards.md).
 
 `$id` is
 `https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json`.
@@ -447,6 +449,9 @@ change them:
 wirken lyrik report --format sarif --run <run-id> --output findings.sarif
 wirken lyrik validate --path findings.json
 ```
+
+Rejected candidates appear in SARIF as suppressed results. See
+[lyrik-brocards.md](lyrik-brocards.md#sarif).
 
 Every run writes the per-run `audit.log` with no opt-out, each row carrying
 the run ID. The SARIF report carries the same ID as `automationDetails.id`

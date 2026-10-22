@@ -248,6 +248,10 @@ compromise impossible. The honest edges:
   Each is documented and warns when engaged; the full inventory is in
   [docs/security-properties.md](docs/security-properties.md#documented-escape-hatches).
 
+## Lyrik
+
+Lyrik records every candidate it declines with the rule and reason. A rejected candidate stays in `findings.json` under `rejected_candidates` and in SARIF as a suppressed result, and the run prints the rejections by rule at its end. The seven rules, and how the `mode` key in `.lyrik/config.json` decides whether a rejection demotes or removes a finding, are in [docs/lyrik-brocards.md](docs/lyrik-brocards.md).
+
 ## Documentation
 
 **Start here**

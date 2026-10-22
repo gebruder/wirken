@@ -32,16 +32,17 @@ pub use otel_exporter::{FederatedIdentity, OtelConfig, OtelError, StaticFederate
 pub use otel_projector::{OtelProjector, Span, SpanId, SpanKind, SpanStatus, TraceId};
 pub use session_log::{
     ADAPTER_LIFECYCLE_SESSION, AdapterDisconnectReason, AdapterRestartCause, ApprovalRefusalReason,
-    ApprovalScopeKind, ApprovalSource, BudgetAction, BuildIdentity, ChainHeadReason,
-    CrossCheckDisagreement, CrossCheckStatus, DenialSource, EgressDecision, ExecLocation,
-    GrantExpiryDetection, HashHex, HexBytes, HookDecision, HookKind, HookSignatureStatus,
-    HttpFetchOutcome, ImportedSearchOutcome, LeakSurface, LlmCallPurpose, MCP_CREDENTIAL_SESSION,
-    McpServerRestartCause, OwnSession, PermissionDenialRecord, PhaseDenyContent, PhaseExitReason,
-    RedactionRecord, SandboxEgressDenyReason, SandboxEgressModeLabel, SandboxModeLabel,
-    SandboxProvenance, SandboxRuntimeLabel, SchemaDriftRecord, SessionEvent, SessionHandle,
-    SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason, SqliteSessionLog,
-    StoredSessionEvent, SubagentCrossCheck, SubagentStatus, ToolCallRecord, ToolsHashVersion,
-    TrustLevel, cross_check_subagent_session, set_build_identity,
+    ApprovalScopeKind, ApprovalSource, BudgetAction, BuildIdentity, ChainHeadReason, ChildCheck,
+    ChildCheckStatus, CrossCheckDisagreement, CrossCheckStatus, DenialSource, EgressDecision,
+    ExecLocation, GrantExpiryDetection, HashHex, HexBytes, HookDecision, HookKind,
+    HookSignatureStatus, HttpFetchOutcome, ImportedSearchOutcome, LeakSurface, LlmCallPurpose,
+    MCP_CREDENTIAL_SESSION, McpServerRestartCause, OwnSession, PermissionDenialRecord,
+    PhaseDenyContent, PhaseExitReason, RedactionRecord, SandboxEgressDenyReason,
+    SandboxEgressModeLabel, SandboxModeLabel, SandboxProvenance, SandboxRuntimeLabel,
+    SchemaDriftRecord, SessionEvent, SessionHandle, SessionId, SessionLog, SessionScope,
+    SessionVerifyResult, SkillDeniedReason, SqliteSessionLog, StoredSessionEvent,
+    SubagentCrossCheck, SubagentStatus, ToolCallRecord, ToolsHashVersion, TrustLevel,
+    cross_check_spawned_children, cross_check_subagent_session, set_build_identity,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

@@ -223,6 +223,47 @@ pub fn calibration_jsonl(rejected: &[Rejection]) -> Result<String> {
     Ok(out)
 }
 
+/// Run summary lines for a findings.json body: rejection records grouped
+/// by rule, next to the kept count. Reads the same `rejected_candidates`
+/// and `findings` arrays the file carries, so the two cannot disagree.
+pub fn run_summary(body: &Value) -> Vec<String> {
+    let rules: Vec<u8> = body
+        .get("rejected_candidates")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.get("rule").and_then(Value::as_u64))
+                .filter_map(|n| u8::try_from(n).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let kept = body
+        .get("findings")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if rules.is_empty() {
+        return vec![format!("brocard rejections: none ({kept} findings kept)")];
+    }
+    let mut lines = vec![format!(
+        "brocard rejections: {} ({kept} findings kept)",
+        rules.len()
+    )];
+    for (i, (name, _)) in RULES.iter().enumerate() {
+        let rule = (i + 1) as u8;
+        let n = rules.iter().filter(|r| **r == rule).count();
+        if n > 0 {
+            lines.push(format!("  rule {rule} ({name}): {n}"));
+        }
+    }
+    lines
+}
+
+/// Whether a candidate with these applied rules is removed from the
+/// findings. Only defender mode removes; pentest keeps and demotes.
+pub fn removes(applied: &[Rejection], mode: Mode) -> bool {
+    mode == Mode::Defender && !applied.is_empty()
+}
+
 /// Number of distinct rules in `applied`. Two rejections under the same
 /// rule halve the grade once.
 pub fn distinct_rules(applied: &[Rejection]) -> usize {
@@ -586,6 +627,55 @@ mod tests {
         assert_eq!(row["label"], "negative");
         assert_eq!(row["rule"], 4);
         assert_eq!(calibration_jsonl(&[]).unwrap(), "");
+    }
+
+    #[test]
+    fn run_summary_says_none_when_nothing_was_rejected() {
+        let body = json!({ "findings": [{}, {}], "rejected_candidates": [] });
+        assert_eq!(
+            run_summary(&body),
+            vec!["brocard rejections: none (2 findings kept)".to_string()]
+        );
+        assert_eq!(
+            run_summary(&json!({ "findings": [] })),
+            vec!["brocard rejections: none (0 findings kept)".to_string()]
+        );
+    }
+
+    #[test]
+    fn run_summary_groups_rejections_by_rule_next_to_kept_count() {
+        let body = json!({
+            "findings": [{}],
+            "rejected_candidates": [
+                { "rule": 1, "reason": "x", "applied_by": "a" },
+                { "rule": 5, "reason": "y", "applied_by": "b" },
+                { "rule": 1, "reason": "z", "applied_by": "c" },
+            ],
+        });
+        assert_eq!(
+            run_summary(&body),
+            vec![
+                "brocard rejections: 3 (1 findings kept)".to_string(),
+                "  rule 1 (No threat model): 2".to_string(),
+                "  rule 5 (No vulnerability from documented behavior): 1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_defender_removes() {
+        let rule = vec![Rejection {
+            rule: 1,
+            walk: None,
+            stable_id: None,
+            title: None,
+            location: None,
+            reason: String::new(),
+            applied_by: String::new(),
+        }];
+        assert!(removes(&rule, Mode::Defender));
+        assert!(!removes(&rule, Mode::Pentest));
+        assert!(!removes(&[], Mode::Defender));
     }
 
     #[test]

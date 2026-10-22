@@ -383,10 +383,15 @@ pub async fn run(
     if let Some(funnel) = &funnel {
         println!("funnel: {}", serde_json::to_string_pretty(funnel)?);
     }
-    let inference = std::fs::read_to_string(&findings_dest)
+    let findings_body = std::fs::read_to_string(&findings_dest)
         .ok()
-        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
-        .and_then(|b| b.get("inference").cloned());
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok());
+    if let Some(body) = &findings_body {
+        for line in lyrik_brocards::run_summary(body) {
+            println!("{line}");
+        }
+    }
+    let inference = findings_body.and_then(|b| b.get("inference").cloned());
     if let Some(inference) = inference {
         println!("inference: {}", serde_json::to_string_pretty(&inference)?);
     }
@@ -1460,6 +1465,7 @@ async fn dispatch_via_agent_runtime(
         walks_cfg.as_ref().map(|wc| wc.walks.as_slice()),
         &seeds,
         &finding_sources,
+        brocard_mode,
         audit,
     )
     .context("process seed dispositions")?;
@@ -2598,6 +2604,9 @@ struct MergedFunnel {
 struct ScannerFunnel {
     candidates: usize,
     accepted: usize,
+    /// No kept finding at the seed's location, but a candidate there was
+    /// removed by a defender-mode brocard rejection.
+    brocard_rejected: usize,
     declined: usize,
     unaddressed: usize,
 }
@@ -2631,11 +2640,11 @@ impl Funnel {
             ));
         }
         if let Some(sc) = &self.scanner
-            && sc.accepted + sc.declined + sc.unaddressed != sc.candidates
+            && sc.accepted + sc.brocard_rejected + sc.declined + sc.unaddressed != sc.candidates
         {
             out.push(format!(
-                "scanner accepted {} + declined {} + unaddressed {} != candidates {}",
-                sc.accepted, sc.declined, sc.unaddressed, sc.candidates
+                "scanner accepted {} + brocard_rejected {} + declined {} + unaddressed {} != candidates {}",
+                sc.accepted, sc.brocard_rejected, sc.declined, sc.unaddressed, sc.candidates
             ));
         }
         out
@@ -2908,8 +2917,16 @@ fn merge_finding_group(group: Vec<(Option<String>, serde_json::Value)>) -> serde
         None
     };
 
+    // The surviving record keeps its own threat model. When it has none,
+    // the first member that has one supplies it.
+    let threat_model = group
+        .iter()
+        .find_map(|(_, f)| f.get("threat_model").cloned());
     let (_, mut canonical) = group.into_iter().next().expect("group non-empty");
     if let Some(obj) = canonical.as_object_mut() {
+        if let Some(tm) = threat_model {
+            obj.entry("threat_model".to_string()).or_insert(tm);
+        }
         if !framings.is_empty() {
             obj.insert(
                 "framing".to_string(),
@@ -3022,6 +3039,7 @@ fn process_seed_dispositions(
     walks: Option<&[String]>,
     seeds: &[Seed],
     finding_sources: &[(Option<String>, PathBuf)],
+    brocard_mode: lyrik_brocards::Mode,
     audit: &mut AuditLogger,
 ) -> Result<ScannerFunnel> {
     let mut counts = ScannerFunnel {
@@ -3032,13 +3050,24 @@ fn process_seed_dispositions(
         return Ok(counts);
     }
 
-    // Build the accepted set: every (file, line) covered by a staged
-    // finding across all walks / the single-call source.
+    // Build the accepted set: every (file, line) covered by a kept
+    // staged finding across all walks / the single-call source. A
+    // candidate the defender mode removes under a brocard rule does
+    // not accept the seed; its location goes to `removed` instead, and
+    // the seed is counted as rejected unless a kept finding also sits
+    // there. The decision matches the aggregator's, so the two agree.
     let mut accepted: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (_, source) in finding_sources {
+    let mut removed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (walk_name, source) in finding_sources {
         if !source.is_dir() {
             continue;
         }
+        let rej_dir = source.parent().map(|d| d.join("rejections"));
+        let walk_side = match &rej_dir {
+            Some(d) => lyrik_brocards::read_walk_rejections(d, walk_name.as_deref())?.0,
+            None => Vec::new(),
+        };
+        let mut walk_side_matched = vec![false; walk_side.len()];
         for entry in std::fs::read_dir(source)
             .with_context(|| format!("read {}", source.display()))?
             .flatten()
@@ -3058,7 +3087,18 @@ fn process_seed_dispositions(
             if conform_framing(&mut parsed) == FramingOutcome::Refused {
                 continue;
             }
-            if let Some(key) = location_key(&parsed) {
+            let Some(key) = location_key(&parsed) else {
+                continue;
+            };
+            let applied = lyrik_brocards::applied_for(
+                &parsed,
+                walk_name.as_deref(),
+                &walk_side,
+                &mut walk_side_matched,
+            );
+            if lyrik_brocards::removes(&applied, brocard_mode) {
+                removed.insert(key);
+            } else {
                 accepted.insert(key);
             }
         }
@@ -3124,11 +3164,16 @@ fn process_seed_dispositions(
     for seed in seeds {
         let seed_key = format!("{}:{}", seed.file, seed.line);
         let is_accepted = accepted.contains(&seed_key);
+        let is_removed = !is_accepted && removed.contains(&seed_key);
         let declines = declined_by_seed.get(&seed.seed_id);
-        match (is_accepted, declines.is_some()) {
-            (true, _) => counts.accepted += 1,
-            (false, true) => counts.declined += 1,
-            (false, false) => counts.unaddressed += 1,
+        if is_accepted {
+            counts.accepted += 1;
+        } else if is_removed {
+            counts.brocard_rejected += 1;
+        } else if declines.is_some() {
+            counts.declined += 1;
+        } else {
+            counts.unaddressed += 1;
         }
 
         if let Some(rows) = declines {
@@ -3159,7 +3204,7 @@ fn process_seed_dispositions(
             // already captured the per-walk dissent so no further
             // unaddressed/acceptance row fires.
             let _ = is_accepted;
-        } else if !is_accepted {
+        } else if !is_accepted && !is_removed {
             audit.emit(
                 "lyrik.candidate.unaddressed",
                 serde_json::json!({
@@ -4599,6 +4644,72 @@ mod tests {
         );
     }
 
+    fn with_threat_model(mut f: serde_json::Value, capability: &str) -> serde_json::Value {
+        f["threat_model"] = serde_json::json!({
+            "attacker_capability": capability,
+            "harm_path": "reads another session",
+        });
+        f
+    }
+
+    #[test]
+    fn dedup_keeps_the_surviving_records_threat_model() {
+        let a = with_threat_model(finding("src/a.rs", 10, "auth", "MEDIUM"), "local user");
+        let b = with_threat_model(
+            finding("src/a.rs", 10, "injection", "HIGH"),
+            "unauthenticated peer",
+        );
+        let (merged, collapsed) = dedup_findings(vec![
+            (Some("sink-walk".into()), a),
+            (Some("graph-walk".into()), b),
+        ]);
+        assert_eq!(collapsed, 1);
+        assert_eq!(merged.len(), 1);
+        // The first member survives and its threat model is kept.
+        assert_eq!(
+            merged[0]["threat_model"]["attacker_capability"],
+            "local user"
+        );
+        assert_eq!(
+            merged[0]["threat_model"]["harm_path"],
+            "reads another session"
+        );
+    }
+
+    #[test]
+    fn dedup_takes_threat_model_from_first_member_that_has_one() {
+        // The surviving record has none. The first member that has one
+        // supplies it, skipping any member without one.
+        let a = finding("src/a.rs", 10, "auth", "MEDIUM");
+        let b = finding("src/a.rs", 10, "injection", "HIGH");
+        let c = with_threat_model(finding("src/a.rs", 10, "auth", "LOW"), "local user");
+        let d = with_threat_model(finding("src/a.rs", 10, "injection", "LOW"), "remote peer");
+        let merged = dedup_findings(vec![
+            (Some("sink-walk".into()), a),
+            (Some("graph-walk".into()), b),
+            (Some("chain-walk".into()), c),
+            (Some("doc-walk".into()), d),
+        ])
+        .0;
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0]["threat_model"]["attacker_capability"],
+            "local user"
+        );
+    }
+
+    #[test]
+    fn dedup_leaves_threat_model_absent_when_no_member_has_one() {
+        let a = finding("src/a.rs", 10, "auth", "MEDIUM");
+        let b = finding("src/a.rs", 10, "injection", "HIGH");
+        let merged = dedup_findings(vec![
+            (Some("sink-walk".into()), a),
+            (Some("graph-walk".into()), b),
+        ])
+        .0;
+        assert!(merged[0].get("threat_model").is_none());
+    }
+
     #[test]
     fn dedup_keeps_homogeneous_static_prescreen_label_on_convergence() {
         let mut a = finding("src/a.rs", 10, "auth", "MEDIUM");
@@ -4709,6 +4820,42 @@ mod tests {
             .collect();
         assert_eq!(rules, vec![1, 5]);
         assert_eq!(body["funnel"]["merged"]["brocard_removed"], 0);
+    }
+
+    #[test]
+    fn run_summary_agrees_with_rejected_candidates_in_findings_json() {
+        for mode in [
+            lyrik_brocards::Mode::Pentest,
+            lyrik_brocards::Mode::Defender,
+        ] {
+            let tmp = tempdir().unwrap();
+            let dir = brocard_fixture(tmp.path());
+            let body = run_brocard_fixture(tmp.path(), dir, mode);
+            // Counted straight from the file's array, not from the summary.
+            let mut per_rule = std::collections::BTreeMap::new();
+            for r in body["rejected_candidates"].as_array().unwrap() {
+                *per_rule.entry(r["rule"].as_u64().unwrap()).or_insert(0) += 1;
+            }
+            let lines = lyrik_brocards::run_summary(&body);
+            let kept = body["findings"].as_array().unwrap().len();
+            assert_eq!(
+                lines[0],
+                format!(
+                    "brocard rejections: {} ({kept} findings kept)",
+                    body["rejected_candidates"].as_array().unwrap().len()
+                ),
+                "{mode:?}"
+            );
+            for (rule, n) in per_rule {
+                assert!(
+                    lines
+                        .iter()
+                        .any(|l| l.starts_with(&format!("  rule {rule} ("))
+                            && l.ends_with(&format!(": {n}"))),
+                    "{mode:?} rule {rule} count {n} missing from {lines:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5029,6 +5176,7 @@ mod tests {
         let scanner = super::ScannerFunnel {
             candidates: 3,
             accepted: 1,
+            brocard_rejected: 0,
             declined: 1,
             unaddressed: 1,
         };
@@ -5074,7 +5222,7 @@ mod tests {
                 },
             },
             "merged": {"emitted": 6, "refused": 1, "brocard_removed": 0, "collapsed": 2, "kept": 3},
-            "scanner": {"candidates": 3, "accepted": 1, "declined": 1, "unaddressed": 1},
+            "scanner": {"candidates": 3, "accepted": 1, "brocard_rejected": 0, "declined": 1, "unaddressed": 1},
         });
         assert_eq!(serde_json::to_value(&funnel).unwrap(), expected);
         assert!(funnel.mismatches().is_empty());
@@ -5119,6 +5267,7 @@ mod tests {
             scanner: Some(super::ScannerFunnel {
                 candidates: 2,
                 accepted: 1,
+                brocard_rejected: 0,
                 declined: 0,
                 unaddressed: 0,
             }),
@@ -5145,7 +5294,7 @@ mod tests {
             rows[0]["mismatches"],
             serde_json::json!([
                 "emitted 4 - refused 1 - brocard_removed 0 - collapsed 0 != kept 2",
-                "scanner accepted 1 + declined 0 + unaddressed 0 != candidates 2",
+                "scanner accepted 1 + brocard_rejected 0 + declined 0 + unaddressed 0 != candidates 2",
             ])
         );
     }
@@ -5153,6 +5302,99 @@ mod tests {
     /// Each seed counts once: accepted by a written finding, declined
     /// once however many walks declined it, and unaddressed when the
     /// only finding at its location is one the merge step refuses.
+    #[test]
+    fn defender_removal_counts_the_seed_as_brocard_rejected_not_accepted() {
+        let tmp = tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let sink = staging.join("sink-walk").join("findings");
+        // No threat model on a.rs:10 and b.rs:5: defender mode removes
+        // both. c.rs:3 has a removed candidate and a kept one, so the
+        // seed there stays accepted.
+        write_finding(
+            &sink,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "auth", "HIGH"),
+        );
+        write_finding(
+            &sink,
+            "finding-002.json",
+            &finding("src/b.rs", 5, "injection", "HIGH"),
+        );
+        write_finding(
+            &sink,
+            "finding-003.json",
+            &finding("src/c.rs", 3, "auth", "HIGH"),
+        );
+        let mut kept = finding("src/c.rs", 3, "injection", "HIGH");
+        kept["threat_model"] = serde_json::json!({
+            "attacker_capability": "unauthenticated peer",
+            "harm_path": "runs a command",
+        });
+        write_finding(&sink, "finding-004.json", &kept);
+        let seed = |id: &str, file: &str, line: u64| super::Seed {
+            seed_id: id.to_string(),
+            rule_id: "r".to_string(),
+            file: file.to_string(),
+            line,
+            message: String::new(),
+        };
+        let seeds = vec![
+            seed("s1", "src/a.rs", 10),
+            seed("s2", "src/x.rs", 1),
+            seed("s3", "src/b.rs", 5),
+            seed("s4", "src/c.rs", 3),
+        ];
+        let sources = [(Some("sink-walk".to_string()), sink)];
+        let log = tmp.path().join("audit.log");
+        let mut audit = super::AuditLogger::open(&log, "sample/run-017", true).unwrap();
+        let defender = super::process_seed_dispositions(
+            &staging,
+            Some(&["sink-walk".to_string()]),
+            &seeds,
+            &sources,
+            lyrik_brocards::Mode::Defender,
+            &mut audit,
+        )
+        .unwrap();
+        assert_eq!(
+            defender,
+            super::ScannerFunnel {
+                candidates: 4,
+                accepted: 1,
+                brocard_rejected: 2,
+                declined: 0,
+                unaddressed: 1,
+            }
+        );
+        // The rejected seeds are not reported as unaddressed.
+        let unaddressed = audit_details(&log, "lyrik.candidate.unaddressed");
+        assert_eq!(unaddressed.len(), 1);
+        assert_eq!(unaddressed[0]["seed_id"], "s2");
+
+        // Pentest keeps every finding, so the same seeds are accepted.
+        let log2 = tmp.path().join("audit2.log");
+        let mut audit2 = super::AuditLogger::open(&log2, "sample/run-018", true).unwrap();
+        let pentest = super::process_seed_dispositions(
+            &staging,
+            Some(&["sink-walk".to_string()]),
+            &seeds,
+            &sources,
+            lyrik_brocards::Mode::Pentest,
+            &mut audit2,
+        )
+        .unwrap();
+        assert_eq!(
+            pentest,
+            super::ScannerFunnel {
+                candidates: 4,
+                accepted: 3,
+                brocard_rejected: 0,
+                declined: 0,
+                unaddressed: 1,
+            }
+        );
+    }
+
     #[test]
     fn scanner_funnel_counts_each_seed_once() {
         let tmp = tempdir().unwrap();
@@ -5199,6 +5441,7 @@ mod tests {
                 (Some("sink-walk".to_string()), sink),
                 (Some("graph-walk".to_string()), graph),
             ],
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
@@ -5207,6 +5450,7 @@ mod tests {
             super::ScannerFunnel {
                 candidates: 3,
                 accepted: 1,
+                brocard_rejected: 0,
                 declined: 1,
                 unaddressed: 1,
             }

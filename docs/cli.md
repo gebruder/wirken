@@ -355,7 +355,7 @@ Flags, exit codes, JSON schema and what each verification proves:
 ```bash
 wirken sessions list [--channel C] [--parent SESSION_ID]
 wirken sessions close <SESSION-ID>
-wirken sessions verify <SESSION-ID> [--strict] [--with-parent]
+wirken sessions verify <SESSION-ID> [--strict] [--with-parent] [--with-children]
 ```
 
 What `verify` replays and what a `tools_hash` attests:
@@ -439,7 +439,7 @@ wirken lyrik report [--format sarif] (--findings PATH | --run RUN_ID) --output P
 wirken lyrik validate --path PATH
 ```
 
-See [lyrik.md](lyrik.md).
+See [lyrik.md](lyrik.md). Brocard rejections, as they appear in `findings.json`, SARIF and the run summary: [lyrik-brocards.md](lyrik-brocards.md).
 
 ## wirken import
 
