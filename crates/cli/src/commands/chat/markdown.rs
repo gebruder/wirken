@@ -39,6 +39,13 @@ pub(crate) fn lines(source: &str, cols: usize) -> Vec<Line<'static>> {
                 i += 1;
             }
             fenced(&mut out, lang, &src[start..i], cols);
+        } else if is_table_start(&src, i) {
+            let start = i;
+            while i < src.len() && src[i].trim().starts_with('|') {
+                i += 1;
+            }
+            table(&mut out, &src[start..i], cols);
+            continue;
         } else if is_rule(trimmed) {
             out.push(Line::styled("─".repeat(cols), dim()));
         } else if let Some(rest) = heading(trimmed) {
@@ -54,6 +61,130 @@ pub(crate) fn lines(source: &str, cols: usize) -> Vec<Line<'static>> {
         i += 1;
     }
     out
+}
+
+/// Whether a table starts at line `i`: a pipe row, then a delimiter row.
+fn is_table_start(src: &[&str], i: usize) -> bool {
+    let header = src[i].trim();
+    header.starts_with('|')
+        && src
+            .get(i + 1)
+            .is_some_and(|next| is_delimiter(&split_row(next)))
+}
+
+/// A delimiter row: every cell is dashes, with optional alignment colons.
+fn is_delimiter(cells: &[String]) -> bool {
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            let inner = c.trim_matches(':');
+            !inner.is_empty() && inner.chars().all(|ch| ch == '-')
+        })
+}
+
+/// The cells of a pipe row, outer pipes dropped and each cell trimmed.
+fn split_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// A table: the header bold and ruled off from the body. Columns take their
+/// natural width when the table fits in `cols`. Otherwise each takes a share
+/// and its cells wrap. When even the minimum share does not fit, each row is
+/// one line with its cells apart.
+fn table(out: &mut Vec<Line<'static>>, block: &[&str], cols: usize) {
+    const GAP: usize = 2;
+    const MIN_SHARE: usize = 4;
+    let rows: Vec<Vec<String>> = block
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| *n != 1)
+        .map(|(_, line)| split_row(line))
+        .collect();
+    let ncols = rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
+    let cells: Vec<Vec<Vec<Piece>>> = rows
+        .iter()
+        .enumerate()
+        .map(|(r, row)| {
+            (0..ncols)
+                .map(|c| {
+                    let base = if r == 0 {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    inline(row.get(c).map_or("", String::as_str), base)
+                })
+                .collect()
+        })
+        .collect();
+
+    let natural: Vec<usize> = (0..ncols)
+        .map(|c| {
+            cells
+                .iter()
+                .map(|r| pieces_width(&r[c]))
+                .max()
+                .unwrap_or(0)
+                .max(1)
+        })
+        .collect();
+    let gaps = GAP * (ncols - 1);
+    let total: usize = natural.iter().sum::<usize>() + gaps;
+    let avail = cols.saturating_sub(gaps);
+    let widths: Vec<usize> = if total <= cols {
+        natural.clone()
+    } else if avail >= MIN_SHARE * ncols {
+        let sum: usize = natural.iter().sum();
+        natural
+            .iter()
+            .map(|w| (w * avail / sum).max(MIN_SHARE))
+            .collect()
+    } else {
+        for row in &cells {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (c, cell) in row.iter().enumerate() {
+                if c > 0 {
+                    spans.push(Span::raw(" ".repeat(GAP)));
+                }
+                spans.extend(to_line(cell.clone()).spans);
+            }
+            out.push(Line::from(spans));
+        }
+        return;
+    };
+
+    for (r, row) in cells.iter().enumerate() {
+        let wrapped: Vec<Vec<Vec<Piece>>> = row
+            .iter()
+            .enumerate()
+            .map(|(c, cell)| wrap_pieces(cell.clone(), widths[c], "", ""))
+            .collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for h in 0..height {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (c, cell_rows) in wrapped.iter().enumerate() {
+                if c > 0 {
+                    spans.push(Span::raw(" ".repeat(GAP)));
+                }
+                let piece_row = cell_rows.get(h).cloned().unwrap_or_default();
+                let used = pieces_width(&piece_row);
+                spans.extend(to_line(piece_row).spans);
+                if c + 1 < ncols {
+                    spans.push(Span::raw(" ".repeat(widths[c].saturating_sub(used))));
+                }
+            }
+            out.push(Line::from(spans));
+        }
+        if r == 0 {
+            out.push(Line::styled("─".repeat(total.min(cols)), dim()));
+        }
+    }
+}
+
+fn pieces_width(pieces: &[Piece]) -> usize {
+    pieces.iter().map(|(g, _)| width(g)).sum()
 }
 
 /// The language of a fence that opens on this line, or `None`.
@@ -404,5 +535,49 @@ mod tests {
             joined.split_whitespace().collect::<Vec<_>>().join(" "),
             source
         );
+    }
+
+    #[test]
+    fn a_table_that_fits_keeps_its_columns_and_rules_off_the_header() {
+        let out = plain("| name | n |\n|---|:-:|\n| ab | 1 |\n| c | 22 |", 40);
+        assert_eq!(out[0], "name  n");
+        assert_eq!(out[1], "─".repeat(8));
+        assert_eq!(out[2], "ab    1");
+        assert_eq!(out[3], "c     22");
+    }
+
+    #[test]
+    fn a_table_wider_than_the_transcript_wraps_its_cells_and_keeps_every_word() {
+        let source = "| item | notes |\n|---|---|\n| one | a long note that must wrap |";
+        let out = plain(source, 20);
+        assert!(out.iter().all(|l| width(l) <= 20), "{out:?}");
+        let joined: String = out.join(" ");
+        for word in ["one", "a", "long", "note", "that", "must", "wrap"] {
+            assert!(joined.contains(word), "{word} lost: {out:?}");
+        }
+        // Header, rule, then the body row over two lines.
+        assert!(out.len() > 3, "the row took more than one line: {out:?}");
+    }
+
+    #[test]
+    fn a_table_too_narrow_for_any_share_is_one_line_per_row() {
+        let source = "| a | b | c | d | e |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |";
+        assert_eq!(plain(source, 12), vec!["a  b  c  d  e", "1  2  3  4  5"]);
+    }
+
+    #[test]
+    fn a_pipe_line_without_a_delimiter_row_is_not_a_table() {
+        assert_eq!(plain("a | b", 20), vec!["a | b"]);
+    }
+
+    #[test]
+    fn a_table_header_is_bold() {
+        let out = lines("| h |\n|---|\n| v |", 20);
+        let header = out[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('h'))
+            .unwrap();
+        assert!(header.style.add_modifier.contains(Modifier::BOLD));
     }
 }

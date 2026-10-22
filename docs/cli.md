@@ -119,8 +119,10 @@ Commands run during a turn. `/clear` waits for the turn to end, as Ctrl+N does.
 Agent replies are drawn as light Markdown: headings without their hashes,
 bullets and numbered items with a hanging indent, fenced code behind a rule
 with its language as a label, `inline code`, **bold** and *italic*, links as
-their text and then their address, and horizontal rules. Tables are shown as
-written. Blockquotes, images and HTML are shown as written too. Your own
+their text and then their address, horizontal rules, and pipe tables. A table
+draws its columns under a bold header, ruled off from the body. When it is wider
+than the transcript its cells wrap; when even that does not fit, each row is one
+line with its cells apart. Blockquotes, images and HTML are shown as written. Your own
 messages, tool output and the approval card stay plain.
 
 Below 90 columns the panels take one narrow column of 24, beside a transcript
