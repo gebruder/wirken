@@ -223,6 +223,12 @@ pub fn calibration_jsonl(rejected: &[Rejection]) -> Result<String> {
     Ok(out)
 }
 
+/// Whether a candidate with these applied rules is removed from the
+/// findings. Only defender mode removes; pentest keeps and demotes.
+pub fn removes(applied: &[Rejection], mode: Mode) -> bool {
+    mode == Mode::Defender && !applied.is_empty()
+}
+
 /// Number of distinct rules in `applied`. Two rejections under the same
 /// rule halve the grade once.
 pub fn distinct_rules(applied: &[Rejection]) -> usize {
@@ -586,6 +592,22 @@ mod tests {
         assert_eq!(row["label"], "negative");
         assert_eq!(row["rule"], 4);
         assert_eq!(calibration_jsonl(&[]).unwrap(), "");
+    }
+
+    #[test]
+    fn only_defender_removes() {
+        let rule = vec![Rejection {
+            rule: 1,
+            walk: None,
+            stable_id: None,
+            title: None,
+            location: None,
+            reason: String::new(),
+            applied_by: String::new(),
+        }];
+        assert!(removes(&rule, Mode::Defender));
+        assert!(!removes(&rule, Mode::Pentest));
+        assert!(!removes(&[], Mode::Defender));
     }
 
     #[test]

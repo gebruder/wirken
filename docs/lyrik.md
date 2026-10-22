@@ -292,7 +292,8 @@ changed during the run.
 value fails the run before any walk runs. Pentest keeps a brocard-rejected finding
 and halves its grade once per distinct rule that applied. Defender removes the
 finding from `findings.json`; its rejection record stays. The funnel counts
-removed candidates as `brocard_removed`.
+removed candidates as `brocard_removed`. A Semgrep seed whose only candidate was
+removed counts as `brocard_rejected` in the scanner funnel, not `accepted`.
 
 **`bench_mode`**: defaults false. Set it only on benchmark or
 batch-evaluation targets: when true, the run does not ask for a sign-off and
