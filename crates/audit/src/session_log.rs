@@ -4868,6 +4868,7 @@ pub fn cross_check_spawned_children(
         // Last binding wins, matching the replay.
         let binding = child_rows
             .into_iter()
+            .rev()
             .filter_map(|stored| match stored.event {
                 SessionEvent::SubagentSessionBound {
                     agent_id,
@@ -4878,7 +4879,7 @@ pub fn cross_check_spawned_children(
                 } => Some((agent_id, bound_parent, max_permission_tier, tools_granted)),
                 _ => None,
             })
-            .last();
+            .next();
 
         let check = match binding {
             Some((bound_agent, bound_parent, bound_tier, bound_tools)) => {
