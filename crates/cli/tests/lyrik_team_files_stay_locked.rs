@@ -298,9 +298,9 @@ fn a_committed_team_rubric_is_what_the_model_scores_against() {
         serde_json::json!({
             "walks": {"lyrik": {
                 "emitted": 1, "refused": 0, "framing_stripped": 0,
-                "grade_corrected": 0, "skipped": [],
+                "grade_corrected": 0, "brocard_removed": 0, "skipped": [],
             }},
-            "merged": {"emitted": 1, "refused": 0, "collapsed": 0, "kept": 1},
+            "merged": {"emitted": 1, "refused": 0, "brocard_removed": 0, "collapsed": 0, "kept": 1},
         }),
         "{body}"
     );
