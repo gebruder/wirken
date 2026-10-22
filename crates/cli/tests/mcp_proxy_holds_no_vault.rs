@@ -15,6 +15,12 @@ use std::time::{Duration, Instant};
 
 const PASSPHRASE_ENV: &str = "WIRKEN_VAULT_PASSPHRASE";
 const PASSPHRASE: &str = "proxy-vault-test-passphrase";
+/// Bound on each wait for the gateway. A passing run returns as soon as the
+/// condition holds. On an idle machine a debug gateway reaches its "Wirken
+/// running" line in about 9 seconds, so this bound is about 30 times that. It
+/// exists for a starved machine: under full CPU load one startup ran past 90
+/// seconds and failed the old 90-second wait.
+const GATEWAY_DEADLINE: Duration = Duration::from_secs(300);
 
 /// A data directory whose vault holds `github-token`, and whose
 /// `mcp.json` runs one host server that writes the value it was given
@@ -120,7 +126,7 @@ fn the_proxy_run_starts_has_no_passphrase_no_vault_open_and_its_credential() {
             let _ = tx.send(line);
         }
     });
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + GATEWAY_DEADLINE;
     let mut output = Vec::new();
     while !output.iter().any(|l: &String| l.contains("Wirken running")) {
         match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -159,7 +165,7 @@ fn the_proxy_run_starts_has_no_passphrase_no_vault_open_and_its_credential() {
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + GATEWAY_DEADLINE;
     while gateway.try_wait().unwrap().is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -260,7 +266,7 @@ fn the_proxy_binary_opens_no_vault_file() {
         .unwrap()
         .write_all(&common::handoff(&[]))
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + GATEWAY_DEADLINE;
     while !socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
