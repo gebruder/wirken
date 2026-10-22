@@ -4631,6 +4631,54 @@ mod tests {
         );
     }
 
+    fn with_threat_model(mut f: serde_json::Value, capability: &str) -> serde_json::Value {
+        f["threat_model"] = serde_json::json!({
+            "attacker_capability": capability,
+            "harm_path": "reads another session",
+        });
+        f
+    }
+
+    #[test]
+    fn dedup_keeps_the_surviving_records_threat_model() {
+        let a = with_threat_model(finding("src/a.rs", 10, "auth", "MEDIUM"), "local user");
+        let b = with_threat_model(
+            finding("src/a.rs", 10, "injection", "HIGH"),
+            "unauthenticated peer",
+        );
+        let (merged, collapsed) = dedup_findings(vec![
+            (Some("sink-walk".into()), a),
+            (Some("graph-walk".into()), b),
+        ]);
+        assert_eq!(collapsed, 1);
+        assert_eq!(merged.len(), 1);
+        // The first member survives and its threat model is kept.
+        assert_eq!(
+            merged[0]["threat_model"]["attacker_capability"],
+            "local user"
+        );
+        assert_eq!(
+            merged[0]["threat_model"]["harm_path"],
+            "reads another session"
+        );
+    }
+
+    #[test]
+    fn dedup_does_not_borrow_a_threat_model_from_a_folded_member() {
+        // The surviving record has none; the folded one has one. The merge
+        // keeps the surviving record as it is, so the merged record has
+        // none, and its rule 1 rejection (recorded before dedup) stands.
+        let a = finding("src/a.rs", 10, "auth", "MEDIUM");
+        let b = with_threat_model(finding("src/a.rs", 10, "injection", "HIGH"), "local user");
+        let merged = dedup_findings(vec![
+            (Some("sink-walk".into()), a),
+            (Some("graph-walk".into()), b),
+        ])
+        .0;
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].get("threat_model").is_none());
+    }
+
     #[test]
     fn dedup_keeps_homogeneous_static_prescreen_label_on_convergence() {
         let mut a = finding("src/a.rs", 10, "auth", "MEDIUM");
