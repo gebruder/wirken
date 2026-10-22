@@ -73,6 +73,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check
 
+      # A closed advisory needs a `### Security` heading, or releases.json
+      # says the release carries no security fix. Needs the full history
+      # for the previous tag, which the checkout above fetches.
+      - name: Security heading
+        if: ${{ !cancelled() }}
+        run: scripts/check-security-heading.py
+
       # Code scanning gates on CodeQL; Scorecard findings are reviewed,
       # not gating (docs/release-process.md). Dependabot alerts are not
       # read here: the workflow token cannot be granted them, so they

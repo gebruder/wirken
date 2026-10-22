@@ -251,6 +251,11 @@ jobs:
       - name: Message-field reporter gate tests
         run: python3 -W error::ResourceWarning scripts/test_anthropic_export_message_fields.py
 
+      # The release gate's security-heading check reads CHANGELOG.md; its
+      # section rules are tested here, without cargo-deny or a tag.
+      - name: Security-heading gate tests
+        run: python3 -W error::ResourceWarning scripts/test_check_security_heading.py
+
       # Checks on the text of Rust source. They are lints, not tests,
       # and the first one is what keeps them out of the test binary: a
       # `#[test]` that greps a `.rs` file breaks on a rename that

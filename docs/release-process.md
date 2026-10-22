@@ -65,6 +65,7 @@ cargo test --workspace
 cargo deny check
 ./scripts/test-install.sh
 scripts/check-names.sh
+scripts/check-security-heading.py   # previous tag by default; or name it
 gh api repos/gebruder/wirken/dependabot/alerts \
     --jq '.[] | select(.state == "open") | {num: .number, sev: .security_advisory.severity, pkg: .dependency.package.name, ghsa: .security_advisory.ghsa_id}'
 gh api repos/gebruder/wirken/code-scanning/alerts \
@@ -138,8 +139,9 @@ the build matrix and without creating a release:
 gh workflow run release.yml -R gebruder/wirken --ref <branch> -f gate_only=true
 ```
 
-**What gates a tag.** `scripts/check-names.sh` passing, and three surfaces,
-not interchangeable:
+**What gates a tag.** `scripts/check-names.sh` and
+`scripts/check-security-heading.py` passing, and three surfaces, not
+interchangeable:
 
 - **Code-scanning findings (CodeQL).** A critical or high finding blocks until
   fixed or dismissed per the policy below.
@@ -149,6 +151,17 @@ not interchangeable:
   `[graph] all-features = true`; do not relax any of the three to get a green
   run. An advisory ignored there needs a written reason in the `ignore` entry
   naming the reachable path and what would make it revisitable.
+
+**`scripts/check-security-heading.py`** runs `cargo deny check advisories`
+at the previous tag and at HEAD, and takes the advisory ids reported there
+and not now: the advisories this release closes. When that set is not empty,
+the release's CHANGELOG section (`## [Unreleased]` before the bump, the new
+version's section after it) must carry a `### Security` heading, or the
+check fails naming the ids. `build-releases-json.py` sets `security` in
+`releases.json` from that heading alone, so a dependency bump that closes an
+advisory without the heading ships a manifest that tells every installed
+binary there is nothing security-related to install. A `### Security` heading
+with no closed advisory is allowed: a fix in this repo's own code counts.
 
 **`scripts/check-names.sh`** fails on an AI-tool name in any tracked file or
 path, and on a co-author trailer naming the tool or its vendor, or a
