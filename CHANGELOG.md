@@ -18,6 +18,10 @@ tagged.
   Pentest mode halves the grade once per distinct rule; defender mode removes
   the finding. Set `mode` in `.lyrik/config.json` to choose; the default is
   `pentest`.
+- `wirken chat` slash commands: `/status`, `/context`, `/cost`, `/tools`,
+  `/approvals`, `/audit`, `/verify`, `/clear`, `/help`, `/quit`. The chat
+  handles them and never sends them to the model. The design comes from #301 by
+  Tanmay Maka (@maka-tanmay).
 - `wirken sessions verify --with-children` pairs each sub-agent spawn on a
   session's chain with the child lane it names. It reports a child that is
   unbound, never woke, or disagrees with its spawn row, and exits 5 on a
@@ -26,6 +30,10 @@ tagged.
 
 ### Fixed
 
+- A message to an agent that names a skill which is not loaded now gets the
+  loaded skills back as its reply. It used to get the generic internal-error
+  apology, and the error was logged as a failure. Found by Tanmay Maka
+  (@maka-tanmay).
 - `wirken sessions verify` no longer reports a `messages_hash` divergence on
   every `wirken ask` after the first. Each ask is a fresh agent that sends only
   its own turn, but the asks share their agent's lane, and verify replayed the

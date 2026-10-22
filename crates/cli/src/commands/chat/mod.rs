@@ -16,6 +16,7 @@
 
 mod app;
 mod panels;
+mod slash;
 mod text;
 mod view;
 mod wire;
