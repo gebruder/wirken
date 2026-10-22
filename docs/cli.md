@@ -116,6 +116,13 @@ lowercase name; text after it is ignored. Any other `/word` (a skill, `/HELP`,
 
 Commands run during a turn. `/clear` waits for the turn to end, as Ctrl+N does.
 
+Agent replies are drawn as light Markdown: headings without their hashes,
+bullets and numbered items with a hanging indent, fenced code behind a rule
+with its language as a label, `inline code`, **bold** and *italic*, links as
+their text and then their address, and horizontal rules. Tables are shown as
+written. Blockquotes, images and HTML are shown as written too. Your own
+messages, tool output and the approval card stay plain.
+
 Below 90 columns the panels take one narrow column of 24, beside a transcript
 of at least 40. Below 64 columns they are not drawn, and the status line says
 how many columns they need.

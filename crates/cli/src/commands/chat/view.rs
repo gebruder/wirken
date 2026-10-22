@@ -345,7 +345,11 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             Entry::Agent(text) => {
                 lines.push(Line::styled(sanitize(&app.agent), label.fg(Color::Green)));
-                indented(&mut lines, text, width, Style::default());
+                for row in super::markdown::lines(&sanitize(text), width.saturating_sub(2)) {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(row.spans);
+                    lines.push(Line::from(spans));
+                }
             }
             Entry::Tool {
                 name,
@@ -840,5 +844,20 @@ mod tests {
         ] {
             find(&buffer, part);
         }
+    }
+
+    #[test]
+    fn an_agent_reply_is_drawn_as_markdown() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.entries.push(Entry::Agent(
+            "## Results\n- **first** item\n`code` here".into(),
+        ));
+        let shown = text_of(&drawn(&app, now, 80, 30));
+        assert!(shown.contains("Results"), "{shown}");
+        assert!(!shown.contains("## Results"), "{shown}");
+        assert!(shown.contains("• first item"), "{shown}");
+        assert!(!shown.contains("**first**"), "{shown}");
+        assert!(shown.contains("code here"), "{shown}");
     }
 }

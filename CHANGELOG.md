@@ -18,6 +18,9 @@ tagged.
   Pentest mode halves the grade once per distinct rule; defender mode removes
   the finding. Set `mode` in `.lyrik/config.json` to choose; the default is
   `pentest`.
+- `wirken chat` draws agent replies as light Markdown: headings, lists, fenced
+  code, emphasis, inline code, links and rules. Your messages and the approval
+  card stay plain. The design comes from #300 by Tanmay Maka (@maka-tanmay).
 - `wirken chat` slash commands: `/status`, `/context`, `/cost`, `/tools`,
   `/approvals`, `/audit`, `/verify`, `/clear`, `/help`, `/quit`. The chat
   handles them and never sends them to the model. Below 90 columns the panels
