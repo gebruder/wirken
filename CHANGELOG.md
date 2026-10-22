@@ -20,8 +20,9 @@ tagged.
   `pentest`.
 - `wirken chat` slash commands: `/status`, `/context`, `/cost`, `/tools`,
   `/approvals`, `/audit`, `/verify`, `/clear`, `/help`, `/quit`. The chat
-  handles them and never sends them to the model. The design comes from #301 by
-  Tanmay Maka (@maka-tanmay).
+  handles them and never sends them to the model. Below 90 columns the panels
+  narrow to one column rather than disappear, until 64 columns. The design comes
+  from #301 by Tanmay Maka (@maka-tanmay).
 - `wirken sessions verify --with-children` pairs each sub-agent spawn on a
   session's chain with the child lane it names. It reports a child that is
   unbound, never woke, or disagrees with its spawn row, and exits 5 on a

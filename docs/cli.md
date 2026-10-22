@@ -116,6 +116,10 @@ lowercase name; text after it is ignored. Any other `/word` (a skill, `/HELP`,
 
 Commands run during a turn. `/clear` waits for the turn to end, as Ctrl+N does.
 
+Below 90 columns the panels take one narrow column of 24, beside a transcript
+of at least 40. Below 64 columns they are not drawn, and the status line says
+how many columns they need.
+
 The socket is mode 0600 and the gateway checks the peer's user, as for every
 connection. The chat then answers the gateway's challenge with the operator
 key (`<data_dir>/operator/operator.key`), the key `wirken permissions

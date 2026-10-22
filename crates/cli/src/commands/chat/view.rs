@@ -30,6 +30,11 @@ const INPUT_ROWS: usize = 6;
 const SIDEBAR_COLS: u16 = 30;
 const PANELS_COLS: u16 = 36;
 const TRANSCRIPT_MIN_COLS: u16 = 54;
+/// Below the full layout's width the panels narrow to one column of this
+/// width rather than disappear, and the transcript keeps at least the
+/// narrow minimum beside them.
+const PANELS_NARROW_COLS: u16 = 24;
+const TRANSCRIPT_NARROW_MIN_COLS: u16 = 40;
 
 /// What fits beside the transcript at `width`: the sidebar's and the
 /// panels' columns, and a note for the status line when something
@@ -41,10 +46,14 @@ const TRANSCRIPT_MIN_COLS: u16 = 54;
 /// two do not fit together, and when even that is too wide the status
 /// line says how many columns they need.
 fn fit(width: u16, show_sidebar: bool, show_panels: bool) -> (u16, u16, Option<String>) {
-    let panels_need = PANELS_COLS + TRANSCRIPT_MIN_COLS;
-    let both_need = SIDEBAR_COLS + panels_need;
-    let panel_cols = if show_panels && width >= panels_need {
+    let panels_need = PANELS_NARROW_COLS + TRANSCRIPT_NARROW_MIN_COLS;
+    let both_need = SIDEBAR_COLS + PANELS_COLS + TRANSCRIPT_MIN_COLS;
+    let panel_cols = if !show_panels {
+        0
+    } else if width >= PANELS_COLS + TRANSCRIPT_MIN_COLS {
         PANELS_COLS
+    } else if width >= panels_need {
+        PANELS_NARROW_COLS
     } else {
         0
     };
@@ -90,7 +99,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let (side_cols, panel_cols, layout_note) = fit(full.width, app.show_sidebar, app.show_panels);
     let [side_area, area, panel_area] = Layout::horizontal([
         Constraint::Length(side_cols),
-        Constraint::Min(TRANSCRIPT_MIN_COLS),
+        Constraint::Min(TRANSCRIPT_NARROW_MIN_COLS),
         Constraint::Length(panel_cols),
     ])
     .areas(full);
@@ -707,11 +716,16 @@ mod tests {
             "{middling}"
         );
 
+        // Below the full width the panels narrow to one column, and only
+        // when even that cannot fit do they go, with the threshold named.
         let narrow = text_of(&drawn(&app, now, 80, 30));
-        assert!(!narrow.contains(" status "), "{narrow}");
+        assert!(narrow.contains(" status "), "{narrow}");
+        assert!(!narrow.contains("panels hidden"), "{narrow}");
+        let tiny = text_of(&drawn(&app, now, 50, 30));
+        assert!(!tiny.contains(" Context "), "{tiny}");
         assert!(
-            narrow.contains("panels hidden: need 90 columns, 80 now"),
-            "{narrow}"
+            tiny.contains("panels hidden: need 64 columns, 50 now"),
+            "{tiny}"
         );
 
         app.show_panels = false;
@@ -726,7 +740,9 @@ mod tests {
     #[test]
     fn approve_and_refuse_are_drawn_alike() {
         let now = Instant::now();
-        let buffer = drawn(&card_app(now), now, 80, 30);
+        // 100 columns, so the narrow panels still leave the hint room. At 80
+        // the panels take 24 columns and the hint is clipped to the rest.
+        let buffer = drawn(&card_app(now), now, 100, 30);
         let approve = styles_of(&buffer, "[y] approve");
         let refuse = styles_of(&buffer, "[n] refuse");
         assert!(approve.iter().all(|s| *s == approve[0]));
