@@ -256,6 +256,11 @@ jobs:
       - name: Security-heading gate tests
         run: python3 -W error::ResourceWarning scripts/test_check_security_heading.py
 
+      # The manifest builder's time and section rules, without a tag or
+      # a network.
+      - name: Manifest builder tests
+        run: python3 -W error::ResourceWarning scripts/test_build_releases_json.py
+
       # Checks on the text of Rust source. They are lints, not tests,
       # and the first one is what keeps them out of the test binary: a
       # `#[test]` that greps a `.rs` file breaks on a rename that

@@ -219,7 +219,10 @@ Five files change together in the release commit:
 
 - `README.md`: the gateway banner example, `wirken vX.Y.Z`.
 - `CHANGELOG.md`: the entries under `## [Unreleased]` move under a new
-  `## [X.Y.Z] - YYYY-MM-DD` heading, and `## [Unreleased]` stays, empty.
+  `## [X.Y.Z] - YYYY-MM-DD` heading, dated in UTC (`date -u +%F`), and
+  `## [Unreleased]` stays, empty. The manifest takes each release's
+  `issued_at` from its tag's time in UTC, not from this heading, so the two
+  agree only when the heading is a UTC date.
 
 Scan published docs for prose hardcoded to the previous series; skip for patch
 bumps:
