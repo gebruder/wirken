@@ -12,6 +12,12 @@ tagged.
 
 ### Added
 
+- `wirken lyrik` rejects candidates under seven brocard rules, adapted from
+  the list at <https://vulnbrocards.com/>. Each rejection is recorded under
+  `rejected_candidates` in `findings.json` and as a suppressed SARIF result.
+  Pentest mode halves the grade once per distinct rule; defender mode removes
+  the finding. Set `mode` in `.lyrik/config.json` to choose; the default is
+  `pentest`.
 - `wirken chat` takes its own slash commands. `/status`, `/context`,
   `/cost`, `/tools`, `/approvals` and `/audit` ask the gateway for the
   panels and write them in the transcript as a note, so they can be read

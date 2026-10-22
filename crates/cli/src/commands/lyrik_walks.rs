@@ -284,10 +284,15 @@ pub fn wrap_with_wirken_frontmatter(
     let (orig_description, body) = strip_leading_frontmatter(source);
     let description =
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
-    let section = match scoring {
-        Some(scoring) => format!("{}\n{scoring}", run_section(walk_name, exec_available)),
-        None => run_section(walk_name, exec_available),
-    };
+    let mut section = format!(
+        "{}\n{}",
+        run_section(walk_name, exec_available),
+        brocard_section(walk_name)
+    );
+    if let Some(scoring) = scoring {
+        section.push('\n');
+        section.push_str(scoring);
+    }
     let tools = run_tools(exec_available);
     let write_scope = run_write_scope(run_id);
     format!(
@@ -402,6 +407,101 @@ fn run_section(walk_name: &str, exec_available: bool) -> String {
     )
 }
 
+/// Brocard rules a walk applies, in rule order. Rules 1, 2 and 6 apply
+/// to every walk. Rule 3 draws on the graph and invariant walks, rule 4
+/// on the crypto and sink walks, rule 5 on the doc walk. Rule 7 is
+/// structural and has no walk text.
+pub fn brocard_rules_for(walk_name: &str) -> Vec<u8> {
+    let mut rules = vec![1, 2, 6];
+    match walk_name {
+        "graph-walk" | "invariant-walk" => rules.push(3),
+        "crypto-walk" | "sink-walk" => rules.push(4),
+        "doc-walk" => rules.push(5),
+        _ => {}
+    }
+    rules.sort_unstable();
+    rules
+}
+
+/// Source page per brocard rule, indexed by `rule - 1`. The rule text
+/// is written in this repo's words; the pages are the reference.
+const BROCARD_SOURCES: [&str; 7] = [
+    "https://vulnbrocards.com/brocards/vb001-no-vuln-report-without-threat-model/",
+    "https://vulnbrocards.com/brocards/vb002-no-exploit-from-heavens/",
+    "https://vulnbrocards.com/brocards/vb003-no-vuln-outside-of-usage/",
+    "https://vulnbrocards.com/brocards/vb004-no-vuln-from-standard-behavior/",
+    "https://vulnbrocards.com/brocards/vb005-no-vuln-from-documented-behavior/",
+    "https://vulnbrocards.com/brocards/vb006-no-cure-worse-than-disease/",
+    "https://vulnbrocards.com/brocards/vb007-report-neither-necessary-nor-sufficient/",
+];
+
+/// One rule's walk instruction, in this repo's words.
+fn brocard_instruction(rule: u8) -> &'static str {
+    match rule {
+        1 => {
+            "Every finding carries a `threat_model` object with two non-blank strings, \
+              `attacker_capability` and `harm_path`. The runner rejects a finding that \
+              lacks either. If the stated model is present but incoherent, record rule 1 \
+              yourself."
+        }
+        2 => {
+            "Compare `attacker_capability` with the impact. If the stated precondition \
+              already grants the impact, the finding is not an exploit: record rule 2."
+        }
+        3 => {
+            "If the sink is reached only through callers that bound the input, record \
+              rule 3. A precondition violation belongs to the caller, not the API. An \
+              upstream advisory whose vulnerable surface is unreachable here is not a \
+              re-finding."
+        }
+        4 => {
+            "If the behavior is what the relevant specification permits, record rule 4. \
+              An implementation stricter than its spec that fails its own strictness \
+              still stands."
+        }
+        5 => {
+            "If the project documents the behavior and its security implication, record \
+              rule 5, unless the downstream usage you can read ignores that documentation. \
+              In that case the finding moves to that usage."
+        }
+        6 => {
+            "If remediating the finding costs more than the harm it prevents, record \
+              rule 6 and say what the cost is. A ReDoS in a context the caller can cancel \
+              locally is the reference case."
+        }
+        _ => "",
+    }
+}
+
+/// The brocard section of a staged walk: its rules, the threat-model
+/// field every finding carries, and where a rejection goes.
+fn brocard_section(walk_name: &str) -> String {
+    let mut out = String::from(
+        "## Brocard rules\n\n\
+         Every finding you emit carries a `threat_model` object: \
+         `attacker_capability` and `harm_path`, both non-blank strings. \
+         A finding without both is a rule 1 rejection.\n\n\
+         A candidate that fails one of the rules below is still written as a \
+         finding. Also record the rejection: write a file to \
+         `staging/<walk>/rejections/rejection-NNN.json` (zero-padded ordinal) with \
+         `{\"rule\": <number>, \"stable_id\": \"<the finding's stable_id>\", \
+         \"reason\": \"<one sentence>\"}`. The runner grades a rejected finding \
+         down in pentest mode and removes it in defender mode. A rejection file that \
+         does not parse, or names a rule outside 1 to 7, is refused and recorded as \
+         such.\n\n\
+         Rules that apply to this walk:\n\n",
+    );
+    for rule in brocard_rules_for(walk_name) {
+        let idx = usize::from(rule - 1);
+        out.push_str(&format!(
+            "- Rule {rule} (source: {}): {}\n",
+            BROCARD_SOURCES[idx],
+            brocard_instruction(rule)
+        ));
+    }
+    out
+}
+
 /// Pull the `description:` line out of a leading `---` frontmatter
 /// block (if any) and return the remainder as the body. Used to
 /// preserve a meaningful description on the staged skill so
@@ -448,7 +548,7 @@ fn strip_leading_frontmatter(source: &str) -> (Option<String>, &str) {
 pub fn ensure_walk_staging(run_dir: &Path, walks: &[String]) -> Result<()> {
     for w in walks {
         let walk_dir = run_dir.join("staging").join(w);
-        for sub in &["context", "rubric", "findings"] {
+        for sub in &["context", "rubric", "findings", "rejections"] {
             let p = walk_dir.join(sub);
             std::fs::create_dir_all(&p).with_context(|| format!("create {}", p.display()))?;
         }
@@ -782,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_walk_staging_creates_three_subdirs_per_walk() {
+    fn ensure_walk_staging_creates_subdirs_per_walk() {
         let run = tempdir().unwrap();
         ensure_walk_staging(
             run.path(),
@@ -790,7 +890,7 @@ mod tests {
         )
         .unwrap();
         for w in ["sink-walk", "graph-walk"] {
-            for sub in ["context", "rubric", "findings"] {
+            for sub in ["context", "rubric", "findings", "rejections"] {
                 assert!(
                     run.path().join("staging").join(w).join(sub).is_dir(),
                     "missing {w}/{sub}"
@@ -812,5 +912,41 @@ mod tests {
         let suffix = " SEEDS-MARKER";
         let p = build_walk_prompt("sink-walk", "sample/run-001", suffix);
         assert!(p.ends_with(suffix));
+    }
+
+    #[test]
+    fn brocard_rules_route_by_walk() {
+        assert_eq!(brocard_rules_for("doc-walk"), vec![1, 2, 5, 6]);
+        assert_eq!(brocard_rules_for("sink-walk"), vec![1, 2, 4, 6]);
+        assert_eq!(brocard_rules_for("crypto-walk"), vec![1, 2, 4, 6]);
+        assert_eq!(brocard_rules_for("graph-walk"), vec![1, 2, 3, 6]);
+        assert_eq!(brocard_rules_for("invariant-walk"), vec![1, 2, 3, 6]);
+        assert_eq!(brocard_rules_for("chain-walk"), vec![1, 2, 6]);
+    }
+
+    #[test]
+    fn brocard_section_names_threat_model_and_routed_rules_only() {
+        let doc = brocard_section("doc-walk");
+        assert!(doc.contains("`threat_model`"));
+        assert!(doc.contains("rejections/rejection-NNN.json"));
+        assert!(doc.contains("Rule 5 (source: https://vulnbrocards.com/brocards/vb005"));
+        assert!(!doc.contains("Rule 4 (source"));
+        let sink = brocard_section("sink-walk");
+        assert!(sink.contains("Rule 4 (source: https://vulnbrocards.com/brocards/vb004"));
+        assert!(!sink.contains("Rule 5 (source"));
+    }
+
+    #[test]
+    fn wrapped_walk_carries_brocard_section_before_body() {
+        let wrapped = wrap_with_wirken_frontmatter(
+            "sink-walk",
+            "r1",
+            None,
+            false,
+            "---\ndescription: d\n---\nBODY",
+        );
+        let at_section = wrapped.find("## Brocard rules").unwrap();
+        let at_body = wrapped.find("BODY").unwrap();
+        assert!(at_section < at_body);
     }
 }

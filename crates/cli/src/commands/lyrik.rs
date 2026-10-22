@@ -19,6 +19,7 @@ use wirken_agent::recovery::RecoveryObserver;
 use wirken_gateway::permissions::PermissionStore;
 use wirken_vault::{CredentialStore, probe_keychain};
 
+use super::lyrik_brocards;
 use super::lyrik_semgrep::{
     self, DispatchOutcome, Seed, parse_scanner_config, write_bundled_ruleset, write_seed_files,
 };
@@ -1036,6 +1037,7 @@ async fn dispatch_via_agent_runtime(
     // mismatch / parse failure degrade-and-log (the runner pin is
     // the contract, mismatched binary on PATH is unavailable).
     let scanner_cfg = parse_scanner_config(config).context("parse scanner config")?;
+    let brocard_mode = lyrik_brocards::parse_mode(config).context("parse brocard mode")?;
     let mut scanner_ran = false;
     let seeds: Vec<Seed> = if scanner_cfg.semgrep_enabled {
         let ruleset_path =
@@ -1482,6 +1484,7 @@ async fn dispatch_via_agent_runtime(
         &with_inference(extras, &*session_log, &run_handle, chain_mark)?,
         &skipped,
         scanner_ran.then_some(scanner_counts),
+        brocard_mode,
         audit,
     )
     .context("aggregate findings");
@@ -2225,6 +2228,7 @@ fn aggregate_findings_multi(
     extras: &Extras,
     skipped: &std::collections::BTreeMap<String, Vec<String>>,
     scanner: Option<ScannerFunnel>,
+    brocard_mode: lyrik_brocards::Mode,
     audit: &mut AuditLogger,
 ) -> Result<Funnel> {
     use super::lyrik_citation;
@@ -2243,6 +2247,7 @@ fn aggregate_findings_multi(
         .collect();
     let mut tagged: Vec<(Option<String>, serde_json::Value)> = Vec::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
+    let mut rejected: Vec<lyrik_brocards::Rejection> = Vec::new();
     let mut literal_claim_resolved: usize = 0;
     let mut literal_claim_unresolved: usize = 0;
     let mut prompt_injection_deferred_resolved: usize = 0;
@@ -2272,6 +2277,24 @@ fn aggregate_findings_multi(
             .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
             .collect();
         entries.sort();
+        // Judgment rejections a walk wrote sit beside its findings. Each
+        // is matched to its candidate by stable_id inside the loop below.
+        let mut walk_side: Vec<lyrik_brocards::Rejection> = Vec::new();
+        if let Some(rej_dir) = source.parent().map(|d| d.join("rejections")) {
+            let (accepted, refused) =
+                lyrik_brocards::read_walk_rejections(&rej_dir, walk_name.as_deref())?;
+            for file in refused {
+                audit.emit(
+                    "lyrik.brocard.refused",
+                    serde_json::json!({ "walk": walk_name, "file": file }),
+                )?;
+            }
+            walk_side = accepted;
+            if rej_dir.is_dir() {
+                consumed.push(rej_dir);
+            }
+        }
+        let mut walk_side_matched = vec![false; walk_side.len()];
         for p in &entries {
             let body =
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
@@ -2320,6 +2343,55 @@ fn aggregate_findings_multi(
                         "new": GRADE_CAP,
                     }),
                 )?;
+            }
+
+            // Brocard rules that apply to this candidate: structural
+            // (rule 1) plus the walk's own. Every applied rule is
+            // recorded. Pentest halves the grade once per distinct rule;
+            // defender removes the candidate.
+            let applied = lyrik_brocards::applied_for(
+                &parsed,
+                walk_name.as_deref(),
+                &walk_side,
+                &mut walk_side_matched,
+            );
+            for r in &applied {
+                audit.emit(
+                    "lyrik.brocard.rejected",
+                    serde_json::json!({
+                        "stable_id": r.stable_id,
+                        "walk": r.walk,
+                        "rule": r.rule,
+                        "applied_by": r.applied_by,
+                        "reason": r.reason,
+                    }),
+                )?;
+                rejected.push(r.clone());
+            }
+            if !applied.is_empty() {
+                match brocard_mode {
+                    lyrik_brocards::Mode::Defender => {
+                        counts.brocard_removed += 1;
+                        continue;
+                    }
+                    lyrik_brocards::Mode::Pentest => {
+                        let rules = lyrik_brocards::distinct_rules(&applied);
+                        if let Some((original, new)) =
+                            lyrik_brocards::demote_grade(&mut parsed, rules)
+                        {
+                            audit.emit(
+                                "lyrik.brocard.demoted",
+                                serde_json::json!({
+                                    "stable_id": parsed.get("stable_id").and_then(|v| v.as_str()),
+                                    "walk": walk_name,
+                                    "rules": rules,
+                                    "original": original,
+                                    "new": new,
+                                }),
+                            )?;
+                        }
+                    }
+                }
             }
 
             let outcome = lyrik_citation::check(&parsed, workspace);
@@ -2389,8 +2461,28 @@ fn aggregate_findings_multi(
 
             tagged.push((walk_name.clone(), parsed));
         }
+        for (r, matched) in walk_side.into_iter().zip(walk_side_matched) {
+            if !matched {
+                audit.emit(
+                    "lyrik.brocard.rejected",
+                    serde_json::json!({
+                        "stable_id": r.stable_id,
+                        "walk": r.walk,
+                        "rule": r.rule,
+                        "applied_by": r.applied_by,
+                        "reason": r.reason,
+                    }),
+                )?;
+                rejected.push(r);
+            }
+        }
         if !entries.is_empty() {
             consumed.push(source.clone());
+        }
+    }
+    for r in &mut rejected {
+        for (_, f) in &tagged {
+            lyrik_brocards::fill_from_finding(r, f);
         }
     }
     let (findings, collapsed): (Vec<serde_json::Value>, usize) = if dedup_active {
@@ -2402,6 +2494,7 @@ fn aggregate_findings_multi(
         merged: MergedFunnel {
             emitted: walks.values().map(|w| w.emitted).sum(),
             refused: walks.values().map(|w| w.refused).sum(),
+            brocard_removed: walks.values().map(|w| w.brocard_removed).sum(),
             collapsed,
             kept: findings.len(),
         },
@@ -2412,6 +2505,11 @@ fn aggregate_findings_multi(
         return Ok(funnel);
     }
 
+    std::fs::write(
+        dest.with_file_name("rejections.jsonl"),
+        lyrik_brocards::calibration_jsonl(&rejected)?,
+    )
+    .with_context(|| format!("write rejections.jsonl beside {}", dest.display()))?;
     let body = serde_json::json!({
         "schema_version": "1.1",
         "run_id": run_id,
@@ -2450,6 +2548,7 @@ fn aggregate_findings_multi(
                 "unresolved": file_line_only_unresolved,
             },
         },
+        "rejected_candidates": rejected,
         "findings": findings,
     });
     write_findings_with_funnel(dest, with_extras(body, extras), &funnel, audit)?;
@@ -2475,6 +2574,8 @@ struct WalkFunnel {
     grade_corrected: usize,
     /// Steps the turn skipped, as on its `lyrik.walk.completed` row.
     skipped: Vec<String>,
+    /// Candidates a defender-mode brocard rejection removed.
+    brocard_removed: usize,
 }
 
 /// Every turn's findings taken together.
@@ -2482,6 +2583,8 @@ struct WalkFunnel {
 struct MergedFunnel {
     emitted: usize,
     refused: usize,
+    /// Candidates removed by a defender-mode brocard rejection.
+    brocard_removed: usize,
     /// Findings folded into another at the same location by dedup.
     collapsed: usize,
     /// Findings in findings.json.
@@ -2518,12 +2621,13 @@ impl Funnel {
         let mut out = Vec::new();
         if m.emitted
             .checked_sub(m.refused)
+            .and_then(|n| n.checked_sub(m.brocard_removed))
             .and_then(|n| n.checked_sub(m.collapsed))
             != Some(m.kept)
         {
             out.push(format!(
-                "emitted {} - refused {} - collapsed {} != kept {}",
-                m.emitted, m.refused, m.collapsed, m.kept
+                "emitted {} - refused {} - brocard_removed {} - collapsed {} != kept {}",
+                m.emitted, m.refused, m.brocard_removed, m.collapsed, m.kept
             ));
         }
         if let Some(sc) = &self.scanner
@@ -3340,6 +3444,7 @@ impl AuditLogger {
 
 #[cfg(test)]
 mod tests {
+    use super::lyrik_brocards;
     use super::rewrite_top_level_run_id;
 
     #[test]
@@ -4351,6 +4456,7 @@ mod tests {
             &super::Extras::new(),
             &Default::default(),
             None,
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
@@ -4418,6 +4524,7 @@ mod tests {
             &super::Extras::new(),
             &Default::default(),
             None,
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
@@ -4543,6 +4650,106 @@ mod tests {
 
     /// A walk that grades a finding 1.0 lands at 0.5 in
     /// findings.json, with the correction on the per-run log.
+    /// A candidate with no threat model, a walk-side rule 5 rejection
+    /// naming it, and grade 0.5. Returns the findings dir.
+    fn brocard_fixture(tmp: &std::path::Path) -> std::path::PathBuf {
+        let walk = tmp.join("staging").join("sink-walk");
+        let dir = walk.join("findings");
+        let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+        f["grade"] = serde_json::json!(0.5);
+        write_finding(&dir, "finding-001.json", &f);
+        let rej = walk.join("rejections");
+        std::fs::create_dir_all(&rej).unwrap();
+        std::fs::write(
+            rej.join("rejection-001.json"),
+            r#"{"rule":5,"stable_id":"auth::src/a.rs:10","reason":"documented as intended"}"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    fn run_brocard_fixture(
+        tmp: &std::path::Path,
+        dir: std::path::PathBuf,
+        mode: lyrik_brocards::Mode,
+    ) -> serde_json::Value {
+        let dest = tmp.join("findings.json");
+        let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let log = tmp.join("audit.log");
+        let mut audit = super::AuditLogger::open(&log, "sample/run-012", true).unwrap();
+        aggregate_findings_multi(
+            &[(Some("sink-walk".to_string()), dir)],
+            &dest,
+            "sample/run-012",
+            true,
+            &seeds,
+            tmp,
+            &super::Extras::new(),
+            &Default::default(),
+            None,
+            mode,
+            &mut audit,
+        )
+        .unwrap();
+        serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn pentest_halves_once_per_distinct_rule_and_keeps_the_finding() {
+        let tmp = tempdir().unwrap();
+        let dir = brocard_fixture(tmp.path());
+        let body = run_brocard_fixture(tmp.path(), dir, lyrik_brocards::Mode::Pentest);
+        // Rule 1 (no threat model) and rule 5 (walk-side): two halvings.
+        assert_eq!(body["findings"][0]["grade"], serde_json::json!(0.125));
+        let rules: Vec<u64> = body["rejected_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["rule"].as_u64().unwrap())
+            .collect();
+        assert_eq!(rules, vec![1, 5]);
+        assert_eq!(body["funnel"]["merged"]["brocard_removed"], 0);
+    }
+
+    #[test]
+    fn defender_removes_the_finding_and_keeps_the_record() {
+        let tmp = tempdir().unwrap();
+        let dir = brocard_fixture(tmp.path());
+        let body = run_brocard_fixture(tmp.path(), dir, lyrik_brocards::Mode::Defender);
+        assert_eq!(body["findings"], serde_json::json!([]));
+        assert_eq!(body["rejected_candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(body["funnel"]["merged"]["brocard_removed"], 1);
+        assert_eq!(body["funnel"]["merged"]["emitted"], 1);
+        assert_eq!(body["funnel"]["merged"]["kept"], 0);
+    }
+
+    #[test]
+    fn unmatched_walk_rejection_is_recorded_without_demotion() {
+        let tmp = tempdir().unwrap();
+        let walk = tmp.path().join("staging").join("sink-walk");
+        let dir = walk.join("findings");
+        let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+        f["grade"] = serde_json::json!(0.5);
+        f["threat_model"] = serde_json::json!({
+            "attacker_capability": "unauthenticated peer",
+            "harm_path": "reads another session",
+        });
+        write_finding(&dir, "finding-001.json", &f);
+        let rej = walk.join("rejections");
+        std::fs::create_dir_all(&rej).unwrap();
+        std::fs::write(
+            rej.join("rejection-001.json"),
+            r#"{"rule":6,"stable_id":"sid-elsewhere","reason":"cost exceeds harm"}"#,
+        )
+        .unwrap();
+        let body = run_brocard_fixture(tmp.path(), dir, lyrik_brocards::Mode::Pentest);
+        assert_eq!(body["findings"][0]["grade"], serde_json::json!(0.5));
+        let rejected = body["rejected_candidates"].as_array().unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["rule"], 6);
+        assert_eq!(rejected[0]["stable_id"], "sid-elsewhere");
+    }
+
     #[test]
     fn aggregate_findings_multi_caps_grade_one_at_half() {
         let tmp = tempdir().unwrap();
@@ -4553,6 +4760,10 @@ mod tests {
             .join("findings");
         let mut f = finding("src/a.rs", 10, "auth", "HIGH");
         f["grade"] = serde_json::json!(1.0);
+        f["threat_model"] = serde_json::json!({
+            "attacker_capability": "unauthenticated peer",
+            "harm_path": "reads another session",
+        });
         write_finding(&dir, "finding-001.json", &f);
         let dest = tmp.path().join("findings.json");
         let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4568,6 +4779,7 @@ mod tests {
             &super::Extras::new(),
             &Default::default(),
             None,
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
@@ -4611,6 +4823,7 @@ mod tests {
             &super::Extras::new(),
             &Default::default(),
             None,
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
@@ -4736,6 +4949,7 @@ mod tests {
             &extras,
             &Default::default(),
             None,
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
@@ -4839,6 +5053,7 @@ mod tests {
             &super::Extras::new(),
             &skipped,
             Some(scanner),
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
@@ -4847,18 +5062,18 @@ mod tests {
             "walks": {
                 "chain-walk": {
                     "emitted": 0, "refused": 0, "framing_stripped": 0,
-                    "grade_corrected": 0, "skipped": [],
+                    "grade_corrected": 0, "brocard_removed": 0, "skipped": [],
                 },
                 "graph-walk": {
                     "emitted": 3, "refused": 0, "framing_stripped": 0,
-                    "grade_corrected": 0, "skipped": ["exec (shell:git)"],
+                    "grade_corrected": 0, "brocard_removed": 0, "skipped": ["exec (shell:git)"],
                 },
                 "sink-walk": {
                     "emitted": 3, "refused": 1, "framing_stripped": 1,
-                    "grade_corrected": 1, "skipped": [],
+                    "grade_corrected": 1, "brocard_removed": 0, "skipped": [],
                 },
             },
-            "merged": {"emitted": 6, "refused": 1, "collapsed": 2, "kept": 3},
+            "merged": {"emitted": 6, "refused": 1, "brocard_removed": 0, "collapsed": 2, "kept": 3},
             "scanner": {"candidates": 3, "accepted": 1, "declined": 1, "unaddressed": 1},
         });
         assert_eq!(serde_json::to_value(&funnel).unwrap(), expected);
@@ -4897,6 +5112,7 @@ mod tests {
             merged: super::MergedFunnel {
                 emitted: 4,
                 refused: 1,
+                brocard_removed: 0,
                 collapsed: 0,
                 kept: 2,
             },
@@ -4928,7 +5144,7 @@ mod tests {
         assert_eq!(
             rows[0]["mismatches"],
             serde_json::json!([
-                "emitted 4 - refused 1 - collapsed 0 != kept 2",
+                "emitted 4 - refused 1 - brocard_removed 0 - collapsed 0 != kept 2",
                 "scanner accepted 1 + declined 0 + unaddressed 0 != candidates 2",
             ])
         );
@@ -5027,6 +5243,7 @@ mod tests {
             &super::Extras::new(),
             &Default::default(),
             None,
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
@@ -5061,6 +5278,7 @@ mod tests {
             &super::Extras::new(),
             &Default::default(),
             None,
+            lyrik_brocards::Mode::Pentest,
             &mut audit,
         )
         .unwrap();
