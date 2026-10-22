@@ -480,6 +480,35 @@ cross-check never runs. Producing one takes two real runs, then moving the
 second run's child-session rows verbatim, hashes included, into the first
 run's log. Both chains still verify; what is false is the pairing.
 
+`--with-children` is the same pairing from the parent's side: verify the
+parent, and pair every `SubagentSpawned` row on its chain with the child
+session it names. `--with-parent` starts from the child's binding row, so a
+child with no binding row reads there as an ordinary session (`n/a`).
+Starting from the spawn row is what makes that a finding. Per spawn row:
+
+| Child's chain | Reported | Exit `5` |
+| --- | --- | --- |
+| Has a binding row | `OK`, or `DISAGREES` on agent id, granted tools, tier cap, or `parent_session_id` (the child naming a parent other than this one) | on disagreement |
+| Rows, no binding row, spawn row records a tier | `NO BINDING ROW` | yes |
+| Rows, no binding row, spawn row predates the tier | not comparable | no |
+| No rows, parent recorded the spawn as `error` | never woken | no |
+| No rows, otherwise | `NO CHILD CHAIN` | yes |
+
+The tier on the spawn row postdates the binding row, so a spawn row that
+records one was written by a build that binds its children. Under it, a child
+lane with no binding row is either a spawn-path bug or a pair that does not
+correspond. Builds 1.20.0 to 2.3.0 wrote no binding row for children started
+by several `spawn_subagent` calls in one turn; those children report `NO
+BINDING ROW`, and they are the children that clamp to `tier1` when woken
+again. Under an older spawn row, absence is unknown rather than a
+disagreement, and the output says so.
+
+A child lane is only written once the child is woken, so an empty lane means
+the child never ran. When the parent recorded that spawn's result as `error`,
+the child could not be bound and nothing disagrees. Otherwise the parent says
+the child ran, or never closed the spawn, and nothing of the child is in the
+log.
+
 #### Sessions with no binding row
 
 A session whose id has the sub-agent shape but carries no binding row arises

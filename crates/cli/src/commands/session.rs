@@ -321,7 +321,12 @@ fn subagent_agent_id(
         })
 }
 
-pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result<()> {
+pub async fn verify(
+    session_id: &str,
+    strict: bool,
+    with_parent: bool,
+    with_children: bool,
+) -> Result<()> {
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -683,6 +688,96 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             Err(e) => {
                 cross_check_failed = true;
                 println!("  parent cross-check:  FAILED to read: {e}");
+            }
+        }
+    }
+
+    // The same pairing from the parent's side. It starts from the
+    // spawn row, so a child with no binding row, which the child side
+    // reads as an ordinary session, is a finding here.
+    if with_children {
+        use wirken_audit::SpawnCheckStatus;
+        println!();
+        match wirken_audit::cross_check_subagent_spawns(&*session_log, session_id) {
+            Ok(checks) if checks.is_empty() => {
+                println!("  children cross-check: n/a (no spawn rows on this session)");
+            }
+            Ok(checks) => {
+                println!(
+                    "  children cross-check: {} spawn row{} on this session",
+                    checks.len(),
+                    if checks.len() == 1 { "" } else { "s" },
+                );
+                for check in &checks {
+                    let child = &check.child_session_id;
+                    match check.status {
+                        SpawnCheckStatus::Checked if check.disagreements.is_empty() => {
+                            println!("    {child}  OK");
+                            if !check.parent_tier_recorded {
+                                println!(
+                                    "        Tier not compared: the spawn row predates the field."
+                                );
+                            }
+                        }
+                        SpawnCheckStatus::Checked => {
+                            cross_check_failed = true;
+                            println!("    {child}  DISAGREES");
+                            for d in &check.disagreements {
+                                println!(
+                                    "      {}: parent says {}, child says {}",
+                                    d.field,
+                                    truncate_for_display(&d.parent_value, 48),
+                                    truncate_for_display(&d.child_value, 48),
+                                );
+                            }
+                        }
+                        SpawnCheckStatus::ChildBindingMissing => {
+                            cross_check_failed = true;
+                            println!("    {child}  NO BINDING ROW on the child's chain");
+                            println!("        The spawn row records a grant and the child's chain");
+                            println!(
+                                "        does not. Builds 1.20.0 to 2.3.0 wrote no binding row"
+                            );
+                            println!(
+                                "        for children started by several spawn_subagent calls"
+                            );
+                            println!("        in one turn; otherwise the two do not correspond.");
+                        }
+                        SpawnCheckStatus::BindingNotComparable => {
+                            println!(
+                                "    {child}  not comparable (no binding row; the spawn row \
+                                 predates the tier field)"
+                            );
+                        }
+                        SpawnCheckStatus::ChildNeverWoken => {
+                            println!(
+                                "    {child}  never woken (the parent recorded the spawn failing)"
+                            );
+                        }
+                        SpawnCheckStatus::ChildChainMissing => {
+                            cross_check_failed = true;
+                            println!("    {child}  NO CHILD CHAIN");
+                            println!(
+                                "        The parent did not record this spawn failing, and the"
+                            );
+                            println!(
+                                "        child's session has no rows. Before 2.4.0 a child that"
+                            );
+                            println!("        could not be bound ended the parent's turn with no");
+                            println!(
+                                "        result; otherwise the process stopped between the spawn"
+                            );
+                            println!(
+                                "        and the child's first row, or the child's chain is not"
+                            );
+                            println!("        in this log.");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                cross_check_failed = true;
+                println!("  children cross-check: FAILED to read: {e}");
             }
         }
     }

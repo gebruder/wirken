@@ -32,7 +32,7 @@
 //!
 //! [`AuditWriter`]: crate::AuditWriter
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::Path;
@@ -4696,17 +4696,46 @@ pub fn cross_check_subagent_session(
         });
     };
 
+    let disagreements = grant_disagreements(
+        &parent_child_agent_id,
+        &parent_tools,
+        parent_tier.as_deref(),
+        &child_agent_id,
+        &child_tools,
+        &child_tier,
+    );
+
+    Ok(SubagentCrossCheck {
+        child_session_id: child_session_id.to_string(),
+        parent_session_id: Some(parent_session_id),
+        status: CrossCheckStatus::Checked,
+        disagreements,
+        parent_tier_recorded: parent_tier.is_some(),
+    })
+}
+
+/// Where a spawn row and a binding row recording the same grant
+/// disagree. Shared by both directions of the cross-check so the two
+/// cannot drift apart.
+fn grant_disagreements(
+    parent_agent_id: &str,
+    parent_tools: &[String],
+    parent_tier: Option<&str>,
+    child_agent_id: &str,
+    child_tools: &[String],
+    child_tier: &str,
+) -> Vec<CrossCheckDisagreement> {
     let mut disagreements = Vec::new();
-    if parent_child_agent_id != child_agent_id {
+    if parent_agent_id != child_agent_id {
         disagreements.push(CrossCheckDisagreement {
             field: "agent_id",
-            parent_value: parent_child_agent_id,
-            child_value: child_agent_id,
+            parent_value: parent_agent_id.to_string(),
+            child_value: child_agent_id.to_string(),
         });
     }
     // Order is not meaningful on either side; the sets are.
-    let mut p_tools = parent_tools.clone();
-    let mut c_tools = child_tools.clone();
+    let mut p_tools = parent_tools.to_vec();
+    let mut c_tools = child_tools.to_vec();
     p_tools.sort();
     p_tools.dedup();
     c_tools.sort();
@@ -4721,24 +4750,163 @@ pub fn cross_check_subagent_session(
 
     // A tier on one side only is a claim nothing can check, so it is
     // reported as not comparable rather than passed over as agreement.
-    let parent_tier_recorded = parent_tier.is_some();
     if let Some(pt) = parent_tier
         && pt != child_tier
     {
         disagreements.push(CrossCheckDisagreement {
             field: "max_permission_tier",
-            parent_value: pt,
-            child_value: child_tier,
+            parent_value: pt.to_string(),
+            child_value: child_tier.to_string(),
         });
     }
+    disagreements
+}
 
-    Ok(SubagentCrossCheck {
-        child_session_id: child_session_id.to_string(),
-        parent_session_id: Some(parent_session_id),
-        status: CrossCheckStatus::Checked,
-        disagreements,
-        parent_tier_recorded,
-    })
+/// Outcome of pairing one `SubagentSpawned` row on a parent's chain
+/// with the child session it names: the parent-side counterpart of
+/// [`SubagentCrossCheck`].
+///
+/// The child side starts from the child's binding row, so it cannot
+/// see a child that has none: that child reads as
+/// [`CrossCheckStatus::NotASubagentSession`], the answer an ordinary
+/// session gets. Starting from the spawn row is what makes a missing
+/// binding row a finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnCrossCheck {
+    pub child_session_id: String,
+    pub status: SpawnCheckStatus,
+    /// Fields the two rows disagree on. Empty unless `Checked`.
+    pub disagreements: Vec<CrossCheckDisagreement>,
+    /// Whether the spawn row recorded a permission-tier cap. `false`
+    /// for a row written before the field existed.
+    pub parent_tier_recorded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnCheckStatus {
+    /// The child's binding row was found and compared.
+    Checked,
+    /// The child's chain has rows and no binding row, and the spawn
+    /// row records a tier. The tier on the spawn row postdates the
+    /// binding row, so the build that wrote it binds its children:
+    /// either the spawn path dropped the row (children of a fan-out
+    /// on 1.20.0 to 2.3.0) or the two chains do not correspond.
+    ChildBindingMissing,
+    /// The child's chain has rows and no binding row, and the spawn
+    /// row predates the tier field. Such a build may never have
+    /// written binding rows, so absence is unknown rather than a
+    /// disagreement, and is not agreement either.
+    BindingNotComparable,
+    /// The child's chain is empty and the parent recorded the spawn
+    /// as an error: the child could not be woken and never ran. A
+    /// child lane is only written once woken, so there is nothing to
+    /// compare.
+    ChildNeverWoken,
+    /// The child's chain is empty and the parent did not record the
+    /// spawn failing. The parent-side twin of
+    /// [`CrossCheckStatus::ParentRowMissing`].
+    ChildChainMissing,
+}
+
+/// Pair every `SubagentSpawned` row on a parent's chain with the child
+/// session it names and report where the two sides disagree, in chain
+/// order.
+pub fn cross_check_subagent_spawns(
+    log: &dyn SessionLog,
+    parent_session_id: &str,
+) -> Result<Vec<SpawnCrossCheck>, AuditError> {
+    let parent_handle = log.handle_for(SessionId::new(parent_session_id.to_string()));
+    let mut spawns = Vec::new();
+    let mut failed = HashSet::new();
+    for stored in log.get_since(&parent_handle, 0)? {
+        match stored.event {
+            SessionEvent::SubagentSpawned {
+                child_session_id,
+                child_agent_id,
+                tools_granted,
+                max_permission_tier,
+            } => spawns.push((
+                child_session_id,
+                child_agent_id,
+                tools_granted,
+                max_permission_tier,
+            )),
+            SessionEvent::SubagentResult {
+                child_session_id,
+                status: SubagentStatus::Error,
+                ..
+            } => {
+                failed.insert(child_session_id);
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::with_capacity(spawns.len());
+    for (child_session_id, parent_agent_id, parent_tools, parent_tier) in spawns {
+        let child_handle = log.handle_for(SessionId::new(child_session_id.clone()));
+        let child_rows = log.get_since(&child_handle, 0)?;
+        // Last binding wins, matching the replay.
+        let binding = child_rows
+            .iter()
+            .rev()
+            .find_map(|stored| match &stored.event {
+                SessionEvent::SubagentSessionBound {
+                    agent_id,
+                    parent_session_id,
+                    max_permission_tier,
+                    tools_granted,
+                    ..
+                } => Some((
+                    agent_id,
+                    parent_session_id,
+                    max_permission_tier,
+                    tools_granted,
+                )),
+                _ => None,
+            });
+        let (status, disagreements) = match binding {
+            Some((child_agent_id, bound_parent, child_tier, child_tools)) => {
+                let mut d = grant_disagreements(
+                    &parent_agent_id,
+                    &parent_tools,
+                    parent_tier.as_deref(),
+                    child_agent_id,
+                    child_tools,
+                    child_tier,
+                );
+                // The child side opens the parent the child names, so
+                // it agrees on this by construction. This side has to
+                // check it.
+                if bound_parent != parent_session_id {
+                    d.insert(
+                        0,
+                        CrossCheckDisagreement {
+                            field: "parent_session_id",
+                            parent_value: parent_session_id.to_string(),
+                            child_value: bound_parent.clone(),
+                        },
+                    );
+                }
+                (SpawnCheckStatus::Checked, d)
+            }
+            None if !child_rows.is_empty() && parent_tier.is_some() => {
+                (SpawnCheckStatus::ChildBindingMissing, Vec::new())
+            }
+            None if !child_rows.is_empty() => (SpawnCheckStatus::BindingNotComparable, Vec::new()),
+            None if failed.contains(&child_session_id) => {
+                (SpawnCheckStatus::ChildNeverWoken, Vec::new())
+            }
+            None => (SpawnCheckStatus::ChildChainMissing, Vec::new()),
+        };
+        out.push(SpawnCrossCheck {
+            child_session_id,
+            status,
+            disagreements,
+            parent_tier_recorded: parent_tier.is_some(),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

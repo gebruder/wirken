@@ -39,9 +39,10 @@ pub use session_log::{
     McpServerRestartCause, OwnSession, PermissionDenialRecord, PhaseDenyContent, PhaseExitReason,
     RedactionRecord, SandboxEgressDenyReason, SandboxEgressModeLabel, SandboxModeLabel,
     SandboxProvenance, SandboxRuntimeLabel, SchemaDriftRecord, SessionEvent, SessionHandle,
-    SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason, SqliteSessionLog,
-    StoredSessionEvent, SubagentCrossCheck, SubagentStatus, ToolCallRecord, ToolsHashVersion,
-    TrustLevel, cross_check_subagent_session, set_build_identity,
+    SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason, SpawnCheckStatus,
+    SpawnCrossCheck, SqliteSessionLog, StoredSessionEvent, SubagentCrossCheck, SubagentStatus,
+    ToolCallRecord, ToolsHashVersion, TrustLevel, cross_check_subagent_session,
+    cross_check_subagent_spawns, set_build_identity,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

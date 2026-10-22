@@ -456,6 +456,13 @@ enum SessionCommands {
         /// single-session checks are unchanged either way.
         #[arg(long)]
         with_parent: bool,
+        /// Also pair each `SubagentSpawned` row on this session's
+        /// chain with the child session it names, and report a child
+        /// whose binding row disagrees, is missing, or whose chain is
+        /// absent. Opens each child's session; the single-session
+        /// checks are unchanged either way.
+        #[arg(long)]
+        with_children: bool,
     },
 }
 
@@ -1434,7 +1441,8 @@ async fn main() -> Result<()> {
                 id,
                 strict,
                 with_parent,
-            } => commands::session::verify(&id, strict, with_parent).await,
+                with_children,
+            } => commands::session::verify(&id, strict, with_parent, with_children).await,
         },
         Commands::Permissions(cmd) => match cmd {
             PermissionCommands::List { agent } => commands::permission::list(&agent).await,

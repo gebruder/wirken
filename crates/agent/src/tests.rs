@@ -3747,8 +3747,9 @@ mod subagent_bound_at_wake {
 
     use tempfile::TempDir;
     use wirken_audit::{
-        AuditError, OwnSession, SessionEvent, SessionHandle, SessionId, SessionLog,
-        SessionVerifyResult, SqliteSessionLog, StoredSessionEvent, SubagentStatus, TrustLevel,
+        AuditError, CrossCheckStatus, OwnSession, SessionEvent, SessionHandle, SessionId,
+        SessionLog, SessionVerifyResult, SpawnCheckStatus, SqliteSessionLog, StoredSessionEvent,
+        SubagentStatus, TrustLevel, cross_check_subagent_session, cross_check_subagent_spawns,
     };
     use wirken_gateway::agent_config::SubagentCeiling;
     use wirken_gateway::permissions::PermissionTier;
@@ -4364,6 +4365,348 @@ mod subagent_bound_at_wake {
             Arc::ptr_eq(&first, &factory.wake("child", &session).unwrap()),
             "the cached agent is left in place",
         );
+    }
+
+    // -- The parent-side cross-check ---------------------------------
+    //
+    // The mismatch cases splice real runs: every row is copied, with its
+    // trust level, from a lane the runtime wrote into a fresh log, so
+    // each lane still verifies and only the pairing is false.
+
+    /// Copy `from_id`'s rows from `from` onto `to_id` in `into`, through
+    /// `keep`, and check the copied lane verifies on its own.
+    fn copy_lane(
+        from: &dyn SessionLog,
+        from_id: &str,
+        into: &dyn SessionLog,
+        to_id: &str,
+        mut keep: impl FnMut(SessionEvent) -> Option<SessionEvent>,
+    ) {
+        let handle = into.handle_for(SessionId::new(to_id));
+        for stored in from
+            .get_since(&from.handle_for(SessionId::new(from_id)), 0)
+            .unwrap()
+        {
+            if let Some(event) = keep(stored.event) {
+                into.append(&handle, stored.trust, event).unwrap();
+            }
+        }
+        assert!(
+            matches!(
+                into.verify(&handle).unwrap(),
+                SessionVerifyResult::Ok { .. }
+            ),
+            "{to_id}: the copied lane does not verify",
+        );
+    }
+
+    fn without_binding(event: SessionEvent) -> Option<SessionEvent> {
+        (!matches!(event, SessionEvent::SubagentSessionBound { .. })).then_some(event)
+    }
+
+    /// The spawn row as a build before the tier field wrote it.
+    fn without_spawn_tier(event: SessionEvent) -> Option<SessionEvent> {
+        Some(match event {
+            SessionEvent::SubagentSpawned {
+                child_session_id,
+                child_agent_id,
+                tools_granted,
+                ..
+            } => SessionEvent::SubagentSpawned {
+                child_session_id,
+                child_agent_id,
+                tools_granted,
+                max_permission_tier: None,
+            },
+            other => other,
+        })
+    }
+
+    fn fresh_log() -> Arc<dyn SessionLog> {
+        Arc::new(SqliteSessionLog::open_in_memory().unwrap())
+    }
+
+    /// The parent-side cross-check of [`PARENT`], one entry per spawn
+    /// row: the child, its status, and the fields that disagree.
+    fn spawn_checks(log: &dyn SessionLog) -> Vec<(String, SpawnCheckStatus, Vec<&'static str>)> {
+        cross_check_subagent_spawns(log, PARENT)
+            .unwrap()
+            .into_iter()
+            .map(|c| {
+                let fields = c.disagreements.iter().map(|d| d.field).collect();
+                (c.child_session_id, c.status, fields)
+            })
+            .collect()
+    }
+
+    fn all(
+        children: &[(String, Vec<String>)],
+        status: SpawnCheckStatus,
+    ) -> Vec<(String, SpawnCheckStatus, Vec<&'static str>)> {
+        children
+            .iter()
+            .map(|(session, _)| (session.clone(), status, Vec::new()))
+            .collect()
+    }
+
+    /// Every child a spawn bound agrees with its spawn row, and the
+    /// child side agrees with the parent side on each.
+    #[tokio::test]
+    async fn with_children_finds_every_spawned_child_agreeing() {
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let log = fresh_log();
+            let (_factory, _, children) = spawn_on(path, &tmp, log.clone()).await;
+
+            assert_eq!(
+                spawn_checks(&*log),
+                all(&children, SpawnCheckStatus::Checked),
+                "{path:?}",
+            );
+            for check in cross_check_subagent_spawns(&*log, PARENT).unwrap() {
+                assert!(check.parent_tier_recorded, "{path:?} {check:?}");
+            }
+            for (session, _) in &children {
+                let child_side = cross_check_subagent_session(&*log, session).unwrap();
+                assert_eq!(
+                    child_side.status,
+                    CrossCheckStatus::Checked,
+                    "{path:?} {session}"
+                );
+                assert!(
+                    child_side.disagreements.is_empty(),
+                    "{path:?} {child_side:?}"
+                );
+            }
+        }
+    }
+
+    /// A child lane with rows and no binding row, under a spawn row
+    /// that records a tier, is a finding: what the 1.20.0 to 2.3.0
+    /// fan-out wrote. The child side reads the same lane as an ordinary
+    /// session, which is why the check has to start from the parent.
+    #[tokio::test]
+    async fn with_children_reports_a_child_lane_missing_its_binding_row() {
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let run = fresh_log();
+            let (_factory, _, children) = spawn_on(path, &tmp, run.clone()).await;
+
+            let spliced = fresh_log();
+            copy_lane(&*run, PARENT, &*spliced, PARENT, Some);
+            for (session, _) in &children {
+                copy_lane(&*run, session, &*spliced, session, without_binding);
+            }
+
+            assert_eq!(
+                spawn_checks(&*spliced),
+                all(&children, SpawnCheckStatus::ChildBindingMissing),
+                "{path:?}",
+            );
+            for (session, _) in &children {
+                assert_eq!(
+                    cross_check_subagent_session(&*spliced, session)
+                        .unwrap()
+                        .status,
+                    CrossCheckStatus::NotASubagentSession,
+                    "{path:?} {session}",
+                );
+            }
+        }
+    }
+
+    /// The fan-out's two child lanes, each a real chain, presented in
+    /// each other's place. Both directions name the tool grant.
+    #[tokio::test]
+    async fn with_children_reports_two_children_swapped_between_lanes() {
+        let tmp = TempDir::new().unwrap();
+        let run = fresh_log();
+        spawn_on(Path::FanOut, &tmp, run.clone()).await;
+        let (first, second) = (child_session(0), child_session(1));
+
+        let spliced = fresh_log();
+        copy_lane(&*run, PARENT, &*spliced, PARENT, Some);
+        copy_lane(&*run, &first, &*spliced, &second, Some);
+        copy_lane(&*run, &second, &*spliced, &first, Some);
+
+        assert_eq!(
+            spawn_checks(&*spliced),
+            vec![
+                (
+                    first.clone(),
+                    SpawnCheckStatus::Checked,
+                    vec!["tools_granted"]
+                ),
+                (
+                    second.clone(),
+                    SpawnCheckStatus::Checked,
+                    vec!["tools_granted"]
+                ),
+            ],
+        );
+        let d = &cross_check_subagent_spawns(&*spliced, PARENT).unwrap()[0].disagreements[0];
+        assert_eq!(
+            (d.parent_value.as_str(), d.child_value.as_str()),
+            ("list_files,read_file", "read_file"),
+        );
+        let child_side = cross_check_subagent_session(&*spliced, &first).unwrap();
+        assert_eq!(
+            child_side
+                .disagreements
+                .iter()
+                .map(|d| d.field)
+                .collect::<Vec<_>>(),
+            vec!["tools_granted"],
+        );
+    }
+
+    /// A child lane from another conversation's spawn, presented as this
+    /// parent's child. Its binding row names the parent it really had.
+    /// The child side opens that parent, which is not in this log.
+    #[tokio::test]
+    async fn with_children_reports_a_child_lane_that_names_another_parent() {
+        let tmp = TempDir::new().unwrap();
+        let run = fresh_log();
+        spawn_on(Path::Single, &tmp, run.clone()).await;
+        let other = "parent/test/c2";
+        let (base_url, server, _) = stub(vec![text("child done")]).await;
+        let factory = live_factory(&tmp, &llm(&base_url), run.clone());
+        let parent = factory.wake("parent", other).unwrap();
+        parent
+            .lock()
+            .await
+            .spawn_subagent_intercept(&spawn_args(None).to_string())
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let spliced = fresh_log();
+        copy_lane(&*run, PARENT, &*spliced, PARENT, Some);
+        copy_lane(
+            &*run,
+            &format!("{other}#sub-0"),
+            &*spliced,
+            &child_session(0),
+            Some,
+        );
+
+        assert_eq!(
+            spawn_checks(&*spliced),
+            vec![(
+                child_session(0),
+                SpawnCheckStatus::Checked,
+                vec!["parent_session_id"]
+            )],
+        );
+        assert_eq!(
+            cross_check_subagent_session(&*spliced, &child_session(0))
+                .unwrap()
+                .status,
+            CrossCheckStatus::ParentRowMissing,
+        );
+    }
+
+    /// The parent's chain without its children's: each spawn the parent
+    /// did not record failing is reported, since the parent says the
+    /// child ran and nothing of the child is here.
+    #[tokio::test]
+    async fn with_children_reports_a_child_whose_chain_is_absent() {
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let run = fresh_log();
+            let (_factory, _, children) = spawn_on(path, &tmp, run.clone()).await;
+
+            let spliced = fresh_log();
+            copy_lane(&*run, PARENT, &*spliced, PARENT, Some);
+
+            assert_eq!(
+                spawn_checks(&*spliced),
+                all(&children, SpawnCheckStatus::ChildChainMissing),
+                "{path:?}",
+            );
+        }
+    }
+
+    /// A child whose binding could not be written never ran, and the
+    /// parent recorded the spawn failing. That is the runtime reporting
+    /// a failed bind, not a disagreement; a fan-out sibling is still
+    /// compared.
+    #[tokio::test]
+    async fn with_children_reads_a_child_that_failed_to_bind_as_never_woken() {
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let log = refusing(&child_session(0));
+            let expected = match path {
+                Path::Single => {
+                    let factory = live_factory(&tmp, &LlmConfig::ollama("test"), log.clone());
+                    let parent = factory.wake("parent", PARENT).unwrap();
+                    parent
+                        .lock()
+                        .await
+                        .spawn_subagent_intercept(&spawn_args(None).to_string())
+                        .await
+                        .unwrap();
+                    vec![(child_session(0), SpawnCheckStatus::ChildNeverWoken, vec![])]
+                }
+                Path::FanOut => {
+                    let (base_url, server, _) =
+                        stub(vec![two_spawns(), text("child done"), text("parent done")]).await;
+                    let factory = live_factory(&tmp, &llm(&base_url), log.clone());
+                    let parent = factory.wake("parent", PARENT).unwrap();
+                    parent
+                        .lock()
+                        .await
+                        .process_message("ask two children", "m1".into())
+                        .await
+                        .unwrap();
+                    server.await.unwrap();
+                    vec![
+                        (child_session(0), SpawnCheckStatus::ChildNeverWoken, vec![]),
+                        (child_session(1), SpawnCheckStatus::Checked, vec![]),
+                    ]
+                }
+            };
+
+            assert_eq!(spawn_checks(&*log), expected, "{path:?}");
+        }
+    }
+
+    /// A spawn row written before the tier field cannot say whether its
+    /// build bound children, so a child lane with no binding row under
+    /// it is not comparable rather than a finding. A child that was
+    /// bound is still compared, with the tier left out.
+    #[tokio::test]
+    async fn with_children_does_not_judge_a_missing_binding_under_a_spawn_row_with_no_tier() {
+        for path in PATHS {
+            let tmp = TempDir::new().unwrap();
+            let run = fresh_log();
+            let (_factory, _, children) = spawn_on(path, &tmp, run.clone()).await;
+
+            let unbound = fresh_log();
+            copy_lane(&*run, PARENT, &*unbound, PARENT, without_spawn_tier);
+            for (session, _) in &children {
+                copy_lane(&*run, session, &*unbound, session, without_binding);
+            }
+            assert_eq!(
+                spawn_checks(&*unbound),
+                all(&children, SpawnCheckStatus::BindingNotComparable),
+                "{path:?}",
+            );
+
+            let bound = fresh_log();
+            copy_lane(&*run, PARENT, &*bound, PARENT, without_spawn_tier);
+            for (session, _) in &children {
+                copy_lane(&*run, session, &*bound, session, Some);
+            }
+            assert_eq!(
+                spawn_checks(&*bound),
+                all(&children, SpawnCheckStatus::Checked),
+                "{path:?}",
+            );
+            for check in cross_check_subagent_spawns(&*bound, PARENT).unwrap() {
+                assert!(!check.parent_tier_recorded, "{path:?} {check:?}");
+            }
+        }
     }
 }
 

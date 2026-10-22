@@ -10,6 +10,21 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `wirken sessions verify --with-children` pairs every `SubagentSpawned`
+  row on a session's chain with the child session it names: the
+  `--with-parent` comparison from the parent's side, plus
+  `parent_session_id`. It reports a child lane with rows and no binding
+  row, which `--with-parent` reads as an ordinary session, when the
+  spawn row records a tier and so was written by a build that binds its
+  children. Children of a multi-spawn turn on 1.20.0 to 2.3.0 report
+  this way. It also reports an empty child lane when the parent did not
+  record the spawn failing. Under an older spawn row a missing binding
+  is reported as not comparable, and a child that could not be bound is
+  reported as never woken. Findings exit `5`. Without the flag no child
+  chain is opened. Issue #247.
+
 ## [2.4.0] - 2026-10-21
 
 #296 (slack-morphism 2.31.0, libc 0.2.191, aws-lc-rs 1.18.2) is deferred:
