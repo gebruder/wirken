@@ -15086,3 +15086,158 @@ mod empty_reply_fallback {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// `wirken ask` builds a fresh agent for every invocation and writes the
+// turn to the agent's own lane, so consecutive asks share one session
+// id and each closes its range with a `SessionEnd` head. Each ask's
+// request carries only that ask; `verify` has to project the lane the
+// same way, and only for asks.
+// ---------------------------------------------------------------------------
+mod consecutive_asks {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{
+        AuditSigningKey, ChainHeadReason, SessionEvent, SessionId, SessionLog, SessionVerifyResult,
+        SqliteSessionLog,
+    };
+
+    use crate::llm::LlmConfig;
+    use crate::{
+        AgentFactory, AgentStaticConfig, VerifyOptions, VerifyReport, ask_inbound_id,
+        session_id_for,
+    };
+
+    fn llm_config(base_url: &str) -> LlmConfig {
+        LlmConfig {
+            provider: "custom".into(),
+            model: "stub".into(),
+            base_url: base_url.into(),
+            max_tokens: 256,
+            temperature: 0.0,
+            region: None,
+            tools_enabled: true,
+            context_window: 32_000,
+            auth: Default::default(),
+        }
+    }
+
+    /// Two turns on `lane`, each by an agent built fresh for it and
+    /// closed with a `SessionEnd` head, then the lane verified the
+    /// way `wirken sessions verify` does. Returns the report and the
+    /// seq of every turn's `LlmRequest`.
+    async fn two_fresh_turns(lane: &str, inbound_ids: [String; 2]) -> (VerifyReport, Vec<u64>) {
+        let (base_url, server) = super::approved_unknown_tool::stub(vec![
+            serde_json::json!({"role": "assistant", "content": "First answer."}),
+            serde_json::json!({"role": "assistant", "content": "Second answer."}),
+        ])
+        .await;
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(
+            SqliteSessionLog::open_in_memory_with_signer(Arc::new(AuditSigningKey::generate()))
+                .unwrap(),
+        );
+        let handle = log.handle_for(SessionId::new(lane));
+        for (message, inbound_id) in ["what changed?", "and since then?"]
+            .into_iter()
+            .zip(inbound_ids)
+        {
+            let mut agent = crate::runtime::Agent::new(
+                lane.to_string(),
+                tmp.path().to_path_buf(),
+                llm_config(&base_url),
+                Some("unused".into()),
+                None,
+                log.clone() as Arc<dyn SessionLog>,
+                crate::tests::test_permissions(),
+            )
+            .unwrap();
+            agent.set_agent_id("default");
+            agent
+                .process_message(message, inbound_id)
+                .await
+                .expect("a reply");
+            assert!(
+                log.emit_chain_head(&handle, ChainHeadReason::SessionEnd)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        server.await.unwrap();
+
+        let requests: Vec<u64> = log
+            .get_since(&handle, 0)
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(&r.event, SessionEvent::LlmRequest { purpose, .. } if purpose.is_turn()))
+            .map(|r| r.seq)
+            .collect();
+        assert_eq!(requests.len(), 2, "one request per turn");
+
+        let verifier = AgentFactory::for_verify(
+            HashMap::from([(
+                "default".to_string(),
+                AgentStaticConfig {
+                    agent_id: "default".to_string(),
+                    workspace: tmp.path().to_path_buf(),
+                    llm_config: llm_config(&base_url),
+                    channel_overrides: HashMap::new(),
+                    api_key: None,
+                    api_key_credential: None,
+                    skills: Vec::new(),
+                    mcp_client: None,
+                    identity: None,
+                    allowed_subagents: Default::default(),
+                    sandbox: Default::default(),
+                    extra_interceptors: vec![],
+                    zirkel_db_path: None,
+                    plan_token_source: None,
+                    channel_egress: Default::default(),
+                },
+            )]),
+            log.clone() as Arc<dyn SessionLog>,
+        );
+        let report = verifier
+            .wake("default", lane)
+            .unwrap()
+            .lock()
+            .await
+            .verify_with(VerifyOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            matches!(report.chain_status, SessionVerifyResult::Ok { .. }),
+            "{report:?}"
+        );
+        (report, requests)
+    }
+
+    #[tokio::test]
+    async fn a_second_ask_verifies_against_its_own_message() {
+        let (report, _) = two_fresh_turns("default", [ask_inbound_id(), ask_inbound_id()]).await;
+        assert!(
+            report.events_divergent.is_empty(),
+            "{:?}",
+            report.events_divergent
+        );
+    }
+
+    /// A gateway lane carries its history across a `SessionEnd`: a
+    /// graceful shutdown writes one on every lane, and the next wake
+    /// replays the lane. A turn sent there without that history is a
+    /// real divergence, and the ask projection must not hide it.
+    #[tokio::test]
+    async fn a_gateway_turn_sent_without_its_history_still_diverges() {
+        let lane = session_id_for("default", "webchat", "conv-1");
+        let (report, requests) =
+            two_fresh_turns(&lane, ["msg-1".to_string(), "msg-2".to_string()]).await;
+        let found: Vec<(u64, &str)> = report
+            .events_divergent
+            .iter()
+            .map(|d| (d.seq, d.kind.as_str()))
+            .collect();
+        assert_eq!(found, [(requests[1], "messages_hash")]);
+    }
+}

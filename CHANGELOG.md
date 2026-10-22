@@ -10,6 +10,17 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- `wirken sessions verify` no longer reports a `messages_hash` divergence
+  on every request after an agent's first `wirken ask`. Each ask builds a
+  fresh agent and sends only its own turn, on a lane every ask of that
+  agent shares; verify rebuilt each request with the earlier asks in
+  front of it. It now starts an ask's turn from the recorded system
+  prompt, recognizing the turn by the `ask-` prefix on its `inbound_id`,
+  which every ask has written. Turns on every other lane keep their
+  history, so one sent without it is still reported.
+
 ## [2.4.0] - 2026-10-21
 
 #296 (slack-morphism 2.31.0, libc 0.2.191, aws-lc-rs 1.18.2) is deferred:

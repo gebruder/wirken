@@ -96,6 +96,17 @@ pub(crate) const WIRKEN_EXIT_PHASE_TOOL: &str = "wirken_exit_phase";
 /// reads, which is what makes the lost result recoverable in-band.
 pub const PARTIAL_RESULT_LOST_SENTINEL: &str = "PARTIAL_RESULT_LOST:";
 
+/// Prefix on the `inbound_id` of a `wirken ask` turn's `UserMessage`.
+/// Every ask builds a fresh agent on the agent's own lane, so the
+/// turn starts from the system prompt and its own message. `verify`
+/// reads the prefix to project the lane the same way.
+const ASK_INBOUND_PREFIX: &str = "ask-";
+
+/// A fresh `inbound_id` for one `wirken ask` turn.
+pub fn ask_inbound_id() -> String {
+    format!("{ASK_INBOUND_PREFIX}{}", uuid::Uuid::new_v4())
+}
+
 /// Automatic session attestation triggers.
 ///
 /// The harness signs the chain head every time the running agent
@@ -5436,7 +5447,7 @@ impl Agent {
         // not divergent — the verifier cannot reconstruct what the
         // prompt was at hash time.
         let mut conv = crate::conversation::Conversation::new(100_000);
-        let mut have_recorded_prompt = false;
+        let mut recorded_prompt: Option<&str> = None;
 
         // Snapshot the agent's CURRENT tool defs. tools_hash
         // divergence means the agent's tool surface has changed
@@ -5477,10 +5488,27 @@ impl Agent {
                     // conversation. set_system_prompt
                     // replaces any existing system message in place.
                     conv.set_system_prompt(content);
-                    have_recorded_prompt = true;
+                    recorded_prompt = Some(content);
                     events_verified += 1;
                 }
-                wirken_audit::SessionEvent::UserMessage { content, .. } => {
+                wirken_audit::SessionEvent::UserMessage {
+                    content,
+                    inbound_id,
+                    ..
+                } => {
+                    // An ask's agent is built fresh for its one turn,
+                    // so its request carried the prompt and this
+                    // message, not the asks before it on the lane.
+                    // Every other turn carries the lane's history.
+                    if inbound_id
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with(ASK_INBOUND_PREFIX))
+                    {
+                        conv.clear();
+                        if let Some(prompt) = recorded_prompt {
+                            conv.set_system_prompt(prompt);
+                        }
+                    }
                     conv.add_user_message(content);
                     events_verified += 1;
                 }
@@ -5599,7 +5627,7 @@ impl Agent {
                     // Mark as unverifiable instead of divergent so
                     // a code-side prompt update doesn't produce
                     // false positives on historical sessions.
-                    if !have_recorded_prompt {
+                    if recorded_prompt.is_none() {
                         events_unverifiable += 1;
                         continue;
                     }
