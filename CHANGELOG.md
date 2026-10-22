@@ -10,6 +10,15 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `wirken lyrik` rejects candidates under seven brocard rules, adapted from
+  the list at <https://vulnbrocards.com/>. Each rejection is recorded under
+  `rejected_candidates` in `findings.json` and as a suppressed SARIF result.
+  Pentest mode halves the grade once per distinct rule; defender mode removes
+  the finding. Set `mode` in `.lyrik/config.json` to choose; the default is
+  `pentest`.
+
 ## [2.4.0] - 2026-10-21
 
 #296 (slack-morphism 2.31.0, libc 0.2.191, aws-lc-rs 1.18.2) is deferred:

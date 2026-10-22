@@ -73,12 +73,16 @@ scorers into a consensus, and does not send findings to any delivery channel.
   stable ID, the walk, and the original and new value.
 - **Brocard rejections.** Seven rules for dismissing a candidate, adapted from
   the list at <https://vulnbrocards.com/>, where rule N is VB00N. Rule 1 (no
-  threat model) and rule 7 (seed provenance earns no credit) are structural and
-  run in the gate. Rules 2 to 6 are judgment: the walks apply them under their
-  own wrapper section. A rejected candidate stays in `findings.json` and is also
-  recorded under `rejected_candidates`, with its rule number, a one-line reason,
-  and the gate or walk that applied it. The per-run log records
-  `lyrik.brocard.rejected` and `lyrik.brocard.refused`.
+  threat model) is structural and runs in the gate. Rule 7 (seed provenance
+  earns no credit) has no rejection path: nothing in the gate reads a seed's
+  `detection_source`. Rules 2 to 6 are judgment: the walks apply them under
+  their own wrapper section, writing a file to `staging/<walk>/rejections/`.
+  Every applied rule is recorded under `rejected_candidates`, with its rule
+  number, a one-line reason, and the gate or walk that applied it. The per-run
+  log records `lyrik.brocard.rejected`, `lyrik.brocard.refused` for a rejection
+  file that does not parse, and `lyrik.brocard.demoted`. What happens to the
+  finding depends on `mode`: pentest halves its grade once per distinct rule,
+  and defender removes it from `findings.json`.
 - **Per-finding `detection_source` provenance**, a closed enum enforced when
   present.
 - **Opt-in Semgrep prescreen.** With `scanner.semgrep.enabled` set, the runner
@@ -158,7 +162,7 @@ committed; run state lives under `.lyrik/state/`.
 | `<data_dir>/sandbox.json` | sandbox mode |
 | `<data_dir>/lyrik.json` | the operator's `walks_dir` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
-| `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode |
+| `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
 | `<repo>/.lyrik/context.md` | the team's project context |
 | `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `audit.log`, `proposed/`, staging; the only place a run's agents may write |
@@ -281,6 +285,12 @@ under `skipped`, as `tool (approval key)`, for example `exec (shell:git)`.
 Either way a `findings.json` is produced. Two more conditions exit non-zero
 after writing it: a funnel that does not reconcile, and a team-owned file that
 changed during the run.
+
+**`mode`**: `"pentest"` or `"defender"`, defaults to `"pentest"`. Any other
+value fails the run before any walk runs. Pentest keeps a brocard-rejected finding
+and halves its grade once per distinct rule that applied. Defender removes the
+finding from `findings.json`; its rejection record stays. The funnel counts
+removed candidates as `brocard_removed`.
 
 **`bench_mode`**: defaults false. Set it only on benchmark or
 batch-evaluation targets: when true, the run does not ask for a sign-off and

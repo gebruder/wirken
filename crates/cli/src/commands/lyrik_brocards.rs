@@ -15,9 +15,10 @@
 //! one row per rejection, `label` is always negative. No corpus
 //! consumer exists yet.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -156,6 +157,78 @@ pub fn fill_from_finding(rejection: &mut Rejection, finding: &Value) {
     let from = record(finding, None, rejection.rule, String::new());
     rejection.title = from.title;
     rejection.location = from.location;
+}
+
+/// What a rejection does to the candidate it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Rejections halve the grade, once per distinct applied rule. The
+    /// finding stays.
+    Pentest,
+    /// Rejections remove the finding. The record stays.
+    Defender,
+}
+
+/// Read `mode` from `.lyrik/config.json`. Absent means pentest. Any
+/// other value is an error: an unreadable mode must not default to a
+/// mode the operator did not choose.
+pub fn parse_mode(config: &Value) -> Result<Mode> {
+    match config.get("mode") {
+        None => Ok(Mode::Pentest),
+        Some(v) => match v.as_str() {
+            Some("pentest") => Ok(Mode::Pentest),
+            Some("defender") => Ok(Mode::Defender),
+            _ => bail!("mode must be \"pentest\" or \"defender\", got {v}"),
+        },
+    }
+}
+
+/// Every brocard rule that applies to one candidate: the structural
+/// rules, plus any walk-side rejection that names its stable_id. Marks
+/// each walk-side rejection that matched, so the caller can record the
+/// rest on their own.
+pub fn applied_for(
+    finding: &Value,
+    walk: Option<&str>,
+    walk_side: &[Rejection],
+    matched: &mut [bool],
+) -> Vec<Rejection> {
+    let mut out = check_structural(finding, walk);
+    let id = finding.get("stable_id").and_then(Value::as_str);
+    if id.is_some() {
+        for (i, r) in walk_side.iter().enumerate() {
+            if r.stable_id.as_deref() == id {
+                matched[i] = true;
+                out.push(r.clone());
+            }
+        }
+    }
+    for r in &mut out {
+        fill_from_finding(r, finding);
+    }
+    out
+}
+
+/// Number of distinct rules in `applied`. Two rejections under the same
+/// rule halve the grade once.
+pub fn distinct_rules(applied: &[Rejection]) -> usize {
+    applied
+        .iter()
+        .map(|r| r.rule)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+/// Pentest demotion: halve the grade `rules` times, so each distinct
+/// applied rule halves it once. Returns the original and new grade, or
+/// `None` when the finding carries no numeric grade. Only lowers.
+pub fn demote_grade(finding: &mut Value, rules: usize) -> Option<(f64, f64)> {
+    let obj = finding.as_object_mut()?;
+    let original = obj.get("grade")?.as_f64()?;
+    let halvings = i32::try_from(rules).ok()?;
+    let new = original * 0.5_f64.powi(halvings);
+    obj.insert("grade".to_string(), serde_json::json!(new));
+    Some((original, new))
 }
 
 /// Structural brocard checks on one staged candidate, run before the
@@ -440,5 +513,89 @@ mod tests {
         miss.stable_id = Some("sid-2".to_string());
         fill_from_finding(&mut miss, &finding);
         assert!(miss.title.is_none() && miss.location.is_none());
+    }
+
+    #[test]
+    fn mode_defaults_to_pentest_and_rejects_unknown_values() {
+        assert_eq!(parse_mode(&json!({})).unwrap(), Mode::Pentest);
+        assert_eq!(
+            parse_mode(&json!({ "mode": "pentest" })).unwrap(),
+            Mode::Pentest
+        );
+        assert_eq!(
+            parse_mode(&json!({ "mode": "defender" })).unwrap(),
+            Mode::Defender
+        );
+        assert!(parse_mode(&json!({ "mode": "Defender" })).is_err());
+        assert!(parse_mode(&json!({ "mode": 1 })).is_err());
+    }
+
+    #[test]
+    fn demotion_halves_once_per_distinct_rule() {
+        let mut f = json!({ "grade": 0.5 });
+        assert_eq!(demote_grade(&mut f, 1), Some((0.5, 0.25)));
+        let mut g = json!({ "grade": 0.5 });
+        assert_eq!(demote_grade(&mut g, 2), Some((0.5, 0.125)));
+        assert_eq!(g["grade"], json!(0.125));
+    }
+
+    #[test]
+    fn demotion_never_reaches_zero_from_a_positive_grade() {
+        let mut f = json!({ "grade": 0.5 });
+        let (_, new) = demote_grade(&mut f, 7).unwrap();
+        assert!(new > 0.0);
+    }
+
+    #[test]
+    fn demotion_skips_a_finding_without_a_grade() {
+        let mut f = json!({ "stable_id": "sid-1" });
+        assert_eq!(demote_grade(&mut f, 1), None);
+        assert!(f.get("grade").is_none());
+    }
+
+    #[test]
+    fn distinct_rules_counts_each_rule_once() {
+        let r = |rule| Rejection {
+            rule,
+            walk: None,
+            stable_id: None,
+            title: None,
+            location: None,
+            reason: String::new(),
+            applied_by: String::new(),
+        };
+        assert_eq!(distinct_rules(&[r(1), r(1), r(5)]), 2);
+        assert_eq!(distinct_rules(&[]), 0);
+    }
+
+    #[test]
+    fn applied_for_joins_structural_and_matching_walk_rejections() {
+        let finding = candidate(json!({}));
+        let walk_side = vec![
+            Rejection {
+                rule: 5,
+                walk: Some("doc-walk".to_string()),
+                stable_id: Some("sid-1".to_string()),
+                title: None,
+                location: None,
+                reason: "documented".to_string(),
+                applied_by: "walk:doc-walk".to_string(),
+            },
+            Rejection {
+                rule: 3,
+                walk: Some("doc-walk".to_string()),
+                stable_id: Some("sid-other".to_string()),
+                title: None,
+                location: None,
+                reason: "elsewhere".to_string(),
+                applied_by: "walk:doc-walk".to_string(),
+            },
+        ];
+        let mut matched = vec![false; walk_side.len()];
+        let applied = applied_for(&finding, Some("doc-walk"), &walk_side, &mut matched);
+        assert_eq!(matched, vec![true, false]);
+        let rules: Vec<u8> = applied.iter().map(|r| r.rule).collect();
+        assert_eq!(rules, vec![1, 5]);
+        assert_eq!(applied[1].title.as_deref(), Some("t"));
     }
 }
