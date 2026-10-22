@@ -4450,21 +4450,8 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                     match result {
                         Ok(result) => (result.response, result.denials),
                         Err(e) => {
-                            // The full error stays in operator logs
-                            // and the audit trail. The outbound
-                            // reply is a generic apology: raw
-                            // error strings can leak operator-side
-                            // internals (database paths, session
-                            // log locks, provider stack traces)
-                            // to an allowlisted contact over
-                            // whatever channel they reached us on.
                             tracing::error!("Agent '{resolved_agent}' error: {e}");
-                            (
-                                "Sorry, I hit an internal error and could not process \
-                                     that message. The operator has been notified."
-                                    .into(),
-                                Vec::new(),
-                            )
+                            (turn_error_reply(&e), Vec::new())
                         }
                     }
                 }
@@ -4757,6 +4744,20 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
 /// outbound frame once the turn is over. A write that fails stops the
 /// stream and leaves the turn to finish; the reader sees the
 /// disconnect.
+/// What the channel hears when a turn fails. An unknown `/skill` names the
+/// loaded skills, so its own text is the reply. Every other error stays in
+/// the operator's logs and the audit trail; the reply is a generic apology,
+/// since raw error strings can carry operator-side internals (database
+/// paths, session log locks, provider stack traces).
+fn turn_error_reply(e: &wirken_agent::AgentError) -> String {
+    match e {
+        wirken_agent::AgentError::UnknownSlashSkill { .. } => e.to_string(),
+        _ => "Sorry, I hit an internal error and could not process that message. \
+              The operator has been notified."
+            .into(),
+    }
+}
+
 async fn stream_terminal_turn(
     agent: &mut wirken_agent::Agent,
     text: &str,
@@ -8155,5 +8156,33 @@ mod terminal_channel_tests {
         assert_eq!(broken["chain"], "broken", "{broken}");
         drop((reader, writer));
         gw.finish().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod turn_error_reply_tests {
+    use super::turn_error_reply;
+
+    #[test]
+    fn an_unknown_skill_replies_with_the_loaded_skills() {
+        let e = wirken_agent::AgentError::UnknownSlashSkill {
+            name: "summarize".into(),
+            known: vec!["git".into(), "lyrik".into()],
+        };
+        assert_eq!(
+            turn_error_reply(&e),
+            "unknown skill '/summarize'; loaded skills: git, lyrik"
+        );
+    }
+
+    #[test]
+    fn any_other_error_replies_with_the_generic_apology() {
+        let e = wirken_agent::AgentError::SessionLog("database locked at /var/x".into());
+        let reply = turn_error_reply(&e);
+        assert!(
+            reply.starts_with("Sorry, I hit an internal error"),
+            "{reply}"
+        );
+        assert!(!reply.contains("/var/x"), "{reply}");
     }
 }
