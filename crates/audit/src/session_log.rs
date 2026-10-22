@@ -4788,9 +4788,10 @@ pub enum SpawnCheckStatus {
     Checked,
     /// The child's chain has rows and no binding row, and the spawn
     /// row records a tier. The tier on the spawn row postdates the
-    /// binding row, so the build that wrote it binds its children:
-    /// either the spawn path dropped the row (children of a fan-out
-    /// on 1.20.0 to 2.3.0) or the two chains do not correspond.
+    /// binding row, so the build that wrote it has the binding row:
+    /// either its spawn path dropped the row (every child spawned on
+    /// an adapter or cron turn on 1.20.0 to 2.3.0) or the two chains
+    /// do not correspond.
     ChildBindingMissing,
     /// The child's chain has rows and no binding row, and the spawn
     /// row predates the tier field. Such a build may never have

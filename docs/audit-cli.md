@@ -495,12 +495,13 @@ Starting from the spawn row is what makes that a finding. Per spawn row:
 | No rows, otherwise | `NO CHILD CHAIN` | yes |
 
 The tier on the spawn row postdates the binding row, so a spawn row that
-records one was written by a build that binds its children. Under it, a child
-lane with no binding row is either a spawn-path bug or a pair that does not
-correspond. Builds 1.20.0 to 2.3.0 wrote no binding row for children started
-by several `spawn_subagent` calls in one turn; those children report `NO
-BINDING ROW`, and they are the children that clamp to `tier1` when woken
-again. Under an older spawn row, absence is unknown rather than a
+records one was written by a build that has the binding row. Under it, a
+child lane with no binding row is either a spawn-path bug or a pair that does
+not correspond. On 1.20.0 to 2.3.0 the spawn path dropped the row for every
+child spawned on a non-streaming turn (an adapter message or a cron job),
+however many spawns the turn made; webchat turns wrote it. Those children
+report `NO BINDING ROW`, and they are the children that clamp to `tier1` when
+woken again. Under an older spawn row, absence is unknown rather than a
 disagreement, and the output says so.
 
 A child lane is only written once the child is woken, so an empty lane means

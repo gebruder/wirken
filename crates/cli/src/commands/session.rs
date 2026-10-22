@@ -738,10 +738,8 @@ pub async fn verify(
                             println!(
                                 "        does not. Builds 1.20.0 to 2.3.0 wrote no binding row"
                             );
-                            println!(
-                                "        for children started by several spawn_subagent calls"
-                            );
-                            println!("        in one turn; otherwise the two do not correspond.");
+                            println!("        for a child spawned on an adapter or cron turn;");
+                            println!("        otherwise the two do not correspond.");
                         }
                         SpawnCheckStatus::BindingNotComparable => {
                             println!(
