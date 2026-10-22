@@ -419,7 +419,7 @@ wirken lyrik report [--format sarif] (--findings PATH | --run RUN_ID) --output P
 wirken lyrik validate --path PATH
 ```
 
-See [lyrik.md](lyrik.md).
+See [lyrik.md](lyrik.md). Brocard rejections, as they appear in `findings.json`, SARIF and the run summary: [lyrik-brocards.md](lyrik-brocards.md).
 
 ## wirken import
 

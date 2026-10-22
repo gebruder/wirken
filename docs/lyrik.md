@@ -353,7 +353,8 @@ makes.
 ## Findings schema (1.1)
 
 `findings.json` is the contract external consumers (SIEM ingestors, ticketing
-systems, CI gates, diff tools) pin against.
+systems, CI gates, diff tools) pin against. Candidates declined under a brocard
+rule are recorded alongside the findings; see [lyrik-brocards.md](lyrik-brocards.md).
 
 `$id` is
 `https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json`.
@@ -448,6 +449,9 @@ change them:
 wirken lyrik report --format sarif --run <run-id> --output findings.sarif
 wirken lyrik validate --path findings.json
 ```
+
+Rejected candidates appear in SARIF as suppressed results. See
+[lyrik-brocards.md](lyrik-brocards.md#sarif).
 
 Every run writes the per-run `audit.log` with no opt-out, each row carrying
 the run ID. The SARIF report carries the same ID as `automationDetails.id`
