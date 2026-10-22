@@ -1231,9 +1231,9 @@ dependencies = [
 
 [[package]]
 name = "granit-parser"
-version = "1.3.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e20f99e46474f56bd905c56e817ebddcf377a611f94c53ac4649e4d3fa3c0cd0"
+checksum = "da55feca5d1625466bae068f9fd4b87892caeae70c3fe671ddb0f50d41aebf37"
 dependencies = [
  "arraydeque",
  "smallvec",
@@ -2834,9 +2834,9 @@ dependencies = [
 
 [[package]]
 name = "serde-saphyr"
-version = "1.3.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
+checksum = "a253edfdea34032da21af84e16fcc94f4c7a6ba237f9f3bc2dbf43cea8535c44"
 dependencies = [
  "annotate-snippets",
  "encoding_rs_io",
@@ -4006,10 +4006,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wirken-adapter-core"
+version = "2.4.0"
+
+[[package]]
 name = "wirken-agent"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "base64 0.23.1",
  "bollard",
  "cap-std",
@@ -4034,16 +4039,18 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wirken-adapter-core",
  "wirken-audit",
  "wirken-gateway",
  "wirken-ipc",
  "wirken-mcp-proxy",
  "wirken-sandbox",
+ "wirken-vault",
 ]
 
 [[package]]
 name = "wirken-audit"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4077,7 +4084,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-gateway"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -4107,7 +4114,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-ipc"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "async-trait",
  "capnp",
@@ -4123,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-mcp-proxy"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4152,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-sandbox"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4168,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-vault"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",

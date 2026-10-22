@@ -12656,7 +12656,7 @@ fn bedrock_keeps_the_text_block_beside_the_tool_use() {
 }
 
 /// A message with calls and no text records none, rather than an
-/// empty string that would print as a blank "the model said:".
+/// empty string that would print as a blank claim line on the card.
 #[test]
 fn calls_with_no_text_carry_none() {
     use crate::llm::parse_anthropic_response;
@@ -14962,5 +14962,127 @@ mod llm_request_failure {
             format!("error withheld: it contained stored credential {NAME}")
         );
         assert_no_secret_recorded(&events);
+    }
+}
+
+/// A model that returns nothing ends the turn with a reply saying why,
+/// as far as the turn's own tool calls say. The reply and the
+/// `AssistantMessage` row carry the same text, on both dispatch paths.
+mod empty_reply_fallback {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::SessionEvent;
+
+    use super::leak_detection::{Reply, agent, events, stub, text, tool_call};
+    use crate::approval_gate::ApprovalOutcome;
+    use crate::approval_gate::test_support::ScriptedGate;
+
+    /// Run `replies` as one turn and return its reply and the chain's
+    /// assistant rows.
+    async fn turn(
+        tmp: &TempDir,
+        replies: Vec<Reply>,
+        gate: Option<ApprovalOutcome>,
+        streaming: bool,
+    ) -> (String, Vec<String>) {
+        let (base_url, server, _) = stub(replies).await;
+        let (mut agent, log) = agent(tmp, &base_url);
+        if let Some(outcome) = gate {
+            agent.set_approval_gate(Arc::new(ScriptedGate::new(vec![outcome])));
+        }
+        let result = if streaming {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+            let r = agent.process_message_stream("go", "m1".into(), tx).await;
+            drain.await.unwrap();
+            r
+        } else {
+            agent.process_message("go", "m1".into()).await
+        }
+        .unwrap();
+        server.await.unwrap();
+        let rows = events(&log, "leaky")
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::AssistantMessage { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect();
+        (result.response, rows)
+    }
+
+    #[tokio::test]
+    async fn a_refused_call_is_named() {
+        for streaming in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (reply, rows) = turn(
+                &tmp,
+                vec![
+                    tool_call("c1", "exec", serde_json::json!({"command": "ls"})),
+                    text(""),
+                ],
+                Some(ApprovalOutcome::Denied {
+                    reason: Some("not now".into()),
+                    actor: None,
+                }),
+                streaming,
+            )
+            .await;
+            assert_eq!(
+                reply, "(no response: the model stopped after exec was refused)",
+                "streaming={streaming}"
+            );
+            assert_eq!(rows, [reply], "streaming={streaming}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_call_is_named() {
+        for streaming in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (reply, rows) = turn(
+                &tmp,
+                vec![
+                    tool_call(
+                        "c1",
+                        "read_file",
+                        serde_json::json!({"path": "missing.txt"}),
+                    ),
+                    text(""),
+                ],
+                None,
+                streaming,
+            )
+            .await;
+            assert_eq!(
+                reply, "(no response: the model stopped after read_file failed)",
+                "streaming={streaming}"
+            );
+            assert_eq!(rows, [reply], "streaming={streaming}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_that_ran_leaves_nothing_to_name() {
+        for streaming in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            std::fs::write(tmp.path().join("notes.txt"), "a note\n").unwrap();
+            let (reply, rows) = turn(
+                &tmp,
+                vec![
+                    tool_call("c1", "read_file", serde_json::json!({"path": "notes.txt"})),
+                    text(""),
+                ],
+                None,
+                streaming,
+            )
+            .await;
+            assert_eq!(
+                reply, "(no response: the model returned nothing)",
+                "streaming={streaming}"
+            );
+            assert_eq!(rows, [reply], "streaming={streaming}");
+        }
     }
 }

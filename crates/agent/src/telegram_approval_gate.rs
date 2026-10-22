@@ -39,6 +39,7 @@ use wirken_ipc::wirken_capnp::frame;
 
 use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
 use crate::error::PermissionDenialContext;
+use crate::exec_location::runtime_name;
 
 /// Default wall-clock cap on a Telegram approval await. Same
 /// default as `CliApprovalGate` (300s) because the operational
@@ -153,9 +154,13 @@ impl ApprovalGate for TelegramApprovalGate {
             action_key: ctx.action.approval_key(),
             requested_tier: ctx.requested_tier.label().to_string(),
             trigger_message: ctx.trigger_message.clone(),
-            assistant_text: None,
-            arguments: None,
+            arguments: ctx.arguments.clone(),
+            assistant_text: ctx.assistant_text.clone(),
             exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
+            exec_runtime: ctx
+                .exec_location
+                .as_ref()
+                .map(|l| runtime_name(l.mode).to_string()),
         };
         let (request_id, rx) = self.queue.register(request);
 
@@ -177,6 +182,15 @@ impl ApprovalGate for TelegramApprovalGate {
                 ctx.exec_location
                     .as_ref()
                     .map(|l| l.text.as_str())
+                    .unwrap_or(""),
+            );
+            req.set_arguments(ctx.arguments.as_deref().unwrap_or(""));
+            req.set_assistant_text(ctx.assistant_text.as_deref().unwrap_or(""));
+            req.set_timeout_secs(u32::try_from(self.timeout.as_secs()).unwrap_or(u32::MAX));
+            req.set_exec_runtime(
+                ctx.exec_location
+                    .as_ref()
+                    .map(|l| runtime_name(l.mode))
                     .unwrap_or(""),
             );
         }
@@ -246,8 +260,8 @@ mod tests {
             requested_tier: PermissionTier::Tier2,
             agent_id: "default".into(),
             trigger_message: Some("clean old logs".into()),
-            arguments: None,
-            assistant_text: None,
+            arguments: Some(r#"{"command":"find /var/log -mtime +30 -delete"}"#.into()),
+            assistant_text: Some("Clearing the old logs.".into()),
             exec_location: None,
             session_id: String::new(),
         }
@@ -376,6 +390,72 @@ mod tests {
         let outcome = gate.request_approval(&ctx("exec")).await;
         assert_eq!(outcome, ApprovalOutcome::Timeout);
         assert!(queue.is_empty(), "timed-out entry must be forgotten");
+    }
+
+    /// The frame carries what the card shows: the arguments, what the
+    /// model said, where an `exec` runs and under which runtime, from
+    /// the exec location the runtime computed from the agent's sandbox
+    /// settings.
+    #[tokio::test]
+    async fn the_frame_carries_the_arguments_and_the_runtime() {
+        for (mode, expected) in [
+            (wirken_audit::SandboxModeLabel::Gvisor, "gvisor"),
+            (wirken_audit::SandboxModeLabel::ExecOnly, "docker"),
+            (wirken_audit::SandboxModeLabel::Off, "host"),
+        ] {
+            let queue = Arc::new(PendingApprovalQueue::new());
+            let (_tmp, approvers) = setup_approvers("telegram", Some(-100123));
+            let outbound = Arc::new(OutboundDispatcher::new());
+            let (writer, mut reader) = writer_pair().await;
+            outbound.register("telegram", writer);
+            let gate = TelegramApprovalGate::new(queue.clone(), approvers, outbound);
+            let mut asked = ctx("exec");
+            asked.exec_location = Some(wirken_audit::ExecLocation {
+                mode,
+                text: "runs somewhere".into(),
+            });
+            let task = tokio::spawn(async move { gate.request_approval(&asked).await });
+
+            let msg = reader.read_message().await.unwrap();
+            let frame::ApprovalRequest(req) = msg
+                .get_root::<frame::Reader<'_>>()
+                .unwrap()
+                .which()
+                .unwrap()
+            else {
+                panic!("expected ApprovalRequest");
+            };
+            let req = req.unwrap();
+            assert_eq!(
+                req.get_arguments().unwrap().to_str().unwrap(),
+                r#"{"command":"find /var/log -mtime +30 -delete"}"#
+            );
+            assert_eq!(
+                req.get_assistant_text().unwrap().to_str().unwrap(),
+                "Clearing the old logs."
+            );
+            assert_eq!(
+                req.get_exec_location().unwrap().to_str().unwrap(),
+                "runs somewhere"
+            );
+            assert_eq!(req.get_exec_runtime().unwrap().to_str().unwrap(), expected);
+            assert!(req.get_timeout_secs() > 0);
+            let id = req.get_request_id().unwrap().to_string().unwrap();
+            let shown = queue.show(&id).unwrap();
+            assert_eq!(shown.exec_runtime.as_deref(), Some(expected));
+            assert_eq!(
+                shown.arguments.as_deref(),
+                Some(r#"{"command":"find /var/log -mtime +30 -delete"}"#)
+            );
+            queue.resolve(
+                &id,
+                PendingDecision::Deny {
+                    reason: None,
+                    actor: None,
+                },
+            );
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]

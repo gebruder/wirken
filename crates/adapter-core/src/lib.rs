@@ -1,6 +1,6 @@
 //! Shared adapter primitives.
 //!
-//! Three families of primitive live here:
+//! Four families of primitive live here:
 //!
 //! 1. Channel-specific outbound formatters. Agents emit markdown;
 //!    each channel has its own rendering dialect (Signal
@@ -24,6 +24,10 @@
 //!    second consumer existed; once iMessage shipped, the
 //!    factoring landed (#121).
 //!
+//! 4. The approval card (see [`approval_card`]): the one template every
+//!    approval surface renders, with the control-sequence strip
+//!    ([`ansi`]) its values go through.
+//!
 //! [`TelegramFormatter`] emits HTML, not MarkdownV2, because the escape
 //! surface is bounded (three characters: `<`, `>`, `&`) and the
 //! converter shares structure with the Matrix HTML path. MarkdownV2's
@@ -35,7 +39,9 @@
 // stays carries an allow naming why its offsets are boundaries.
 #![cfg_attr(not(test), deny(clippy::string_slice))]
 
+pub mod ansi;
 pub mod approval;
+pub mod approval_card;
 pub mod text_command;
 
 /// Transform agent-emitted markdown into a string suitable for the

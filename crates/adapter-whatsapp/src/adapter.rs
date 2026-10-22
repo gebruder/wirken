@@ -14,6 +14,7 @@ use wirken_ipc::{
 };
 
 use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
+use wirken_adapter_core::approval_card::CardStyle;
 
 use crate::convert::{self, ApprovalPress, WhatsAppInbound};
 use crate::error::WhatsAppError;
@@ -579,6 +580,12 @@ enum FrameAction {
 /// case maps to `"window_closed"` so the gateway-side audit row
 /// distinguishes "send refused by platform" from "network broken"
 /// or "malformed request".
+/// The approval message body: the card every surface renders, plain.
+/// The reply buttons carry the decision.
+pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
+    fields.card().render(CardStyle::Plain)
+}
+
 async fn send_approval_request(
     http: &reqwest::Client,
     access_token: &str,
@@ -617,18 +624,7 @@ async fn send_approval_request(
         }
     };
 
-    let prompt = format!(
-        "Agent {} requests {} (tier {}).\nAction: {}\nTrigger: {}",
-        fields.triggering_agent,
-        fields.tool_name,
-        fields.requested_tier,
-        fields.action_key,
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            fields.trigger_message.clone()
-        },
-    );
+    let prompt = approval_text(&fields);
 
     let body = serde_json::json!({
         "messaging_product": "whatsapp",

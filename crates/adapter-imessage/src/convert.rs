@@ -200,7 +200,34 @@ pub struct ApprovalRequestFields {
     pub requested_tier: String,
     pub triggering_agent: String,
     pub trigger_message: String,
+    /// The rest of the card: the arguments the model sent, what it said
+    /// beside the call, where an `exec` runs and under which runtime.
+    /// Empty when the ask has none, and from a gateway that predates
+    /// the field.
+    pub arguments: String,
+    pub assistant_text: String,
+    pub exec_location: String,
+    pub exec_runtime: String,
     pub target_chat_guid: String,
+}
+
+impl ApprovalRequestFields {
+    /// The card every surface renders, from the frame's fields; an
+    /// empty field is a value the ask does not have.
+    pub fn card(&self) -> wirken_adapter_core::approval_card::ApprovalCard {
+        let present = |s: &String| (!s.is_empty()).then(|| s.clone());
+        wirken_adapter_core::approval_card::ApprovalCard {
+            agent: self.triggering_agent.clone(),
+            tool_name: self.tool_name.clone(),
+            tier: self.requested_tier.clone(),
+            action_key: self.action_key.clone(),
+            arguments: present(&self.arguments),
+            exec_location: present(&self.exec_location),
+            exec_runtime: present(&self.exec_runtime),
+            trigger_message: present(&self.trigger_message),
+            assistant_text: present(&self.assistant_text),
+        }
+    }
 }
 
 pub fn parse_approval_request(
@@ -240,6 +267,26 @@ pub fn parse_approval_request(
                 .to_str()
                 .map_err(|e| capnp::Error::failed(format!("trigger_message not utf8: {e}")))?
                 .to_string();
+            let arguments = r
+                .get_arguments()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("arguments not utf8: {e}")))?
+                .to_string();
+            let assistant_text = r
+                .get_assistant_text()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("assistant_text not utf8: {e}")))?
+                .to_string();
+            let exec_location = r
+                .get_exec_location()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("exec_location not utf8: {e}")))?
+                .to_string();
+            let exec_runtime = r
+                .get_exec_runtime()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("exec_runtime not utf8: {e}")))?
+                .to_string();
             let target_chat_guid = r
                 .get_target_conversation_id()?
                 .to_str()
@@ -257,6 +304,10 @@ pub fn parse_approval_request(
                 requested_tier,
                 triggering_agent,
                 trigger_message,
+                arguments,
+                assistant_text,
+                exec_location,
+                exec_runtime,
                 target_chat_guid,
             })
         }

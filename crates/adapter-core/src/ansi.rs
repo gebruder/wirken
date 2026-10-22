@@ -1,7 +1,9 @@
 //! Strip ANSI / C1 control sequences from untrusted text before it
 //! crosses a trust boundary.
 //!
-//! Two sites need this in 1.3.0:
+//! Lives in the adapter core so the approval card
+//! ([`crate::approval_card`]) and the agent runtime share one strip.
+//! The sites that need it:
 //!
 //! - `crates/cli/src/commands/agent.rs` prints `result.response` to
 //!   the operator's terminal. A skill body in the system prompt can

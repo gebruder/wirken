@@ -189,7 +189,7 @@ pub async fn run(channel: &str) -> Result<()> {
                 )?;
 
                 // Fail-closed sender allowlist. Missing vault entry = empty list
-                // = every inbound message is dropped. See docs/channels/signal.md.
+                // = every inbound message is dropped. See docs/channels.md.
                 let allowlist_csv =
                     optional(&mut creds, &format!("{channel}-allowed-senders")).unwrap_or_default();
                 let allowlist = SignalAllowlist::from_csv(&allowlist_csv)

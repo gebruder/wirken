@@ -81,7 +81,7 @@ pub fn collect_signal_creds(
     allowed_senders: Option<String>,
 ) -> Result<SignalCreds> {
     println!("  Signal requires signal-cli running as a JSON-RPC daemon.");
-    println!("  See docs/channels/signal.md for the full setup and threat model.");
+    println!("  See docs/channels.md for the full setup and threat model.");
 
     let phone = resolve_with_validation(
         "Registered phone number (e.g., +15551234567)",

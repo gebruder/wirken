@@ -12,6 +12,7 @@ use wirken_ipc::{
 };
 
 use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
+use wirken_adapter_core::approval_card::CardStyle;
 
 use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert::{self, ApprovalPress};
@@ -409,6 +410,12 @@ enum FrameAction {
 /// access token with refresh-on-expiry, parallel to how the Teams
 /// adapter would land real auth. Pre-existing limitation; not
 /// introduced by the approval slice. Its own slice.
+/// The approval message body: the card every surface renders, in
+/// Markdown. The card's buttons carry the decision.
+pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
+    fields.card().render(CardStyle::Markdown)
+}
+
 async fn send_approval_request(
     http: &reqwest::Client,
     service_account_token: &str,
@@ -446,20 +453,7 @@ async fn send_approval_request(
         }
     };
 
-    let prompt = format!(
-        "Agent **{}** requests **{}** (tier `{}`).\n\
-         Action: `{}`\n\
-         Trigger: _{}_",
-        fields.triggering_agent,
-        fields.tool_name,
-        fields.requested_tier,
-        fields.action_key,
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            fields.trigger_message.clone()
-        },
-    );
+    let prompt = approval_text(&fields);
 
     let card = serde_json::json!({
         "cardId": format!("approval-{}", fields.request_id),

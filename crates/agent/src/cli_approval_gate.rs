@@ -69,9 +69,13 @@ impl ApprovalGate for CliApprovalGate {
             action_key: ctx.action.approval_key(),
             requested_tier: ctx.requested_tier.label().to_string(),
             trigger_message: ctx.trigger_message.clone(),
-            assistant_text: None,
-            arguments: None,
+            arguments: ctx.arguments.clone(),
+            assistant_text: ctx.assistant_text.clone(),
             exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
+            exec_runtime: ctx
+                .exec_location
+                .as_ref()
+                .map(|l| crate::exec_location::runtime_name(l.mode).to_string()),
         };
         let (request_id, rx) = self.queue.register(request);
         tracing::info!(
@@ -131,8 +135,8 @@ mod tests {
             requested_tier: PermissionTier::Tier2,
             agent_id: "default".into(),
             trigger_message: Some("operator request".into()),
-            arguments: None,
-            assistant_text: None,
+            arguments: Some(r#"{"command":"ls"}"#.into()),
+            assistant_text: Some("Listing.".into()),
             exec_location: None,
             session_id: String::new(),
         }

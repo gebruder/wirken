@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
+use wirken_adapter_core::approval_card::CardStyle;
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
     AdapterIdentity, IpcFrameReader, IpcFrameWriter, connect, perform_adapter_handshake,
@@ -481,6 +482,13 @@ async fn emit_approval_failure(
 /// (Teams has no ephemeral equivalent to Slack's chat.postEphemeral
 /// or Telegram's callback-query toast, so silent ack is the
 /// umbrella-consistent choice).
+/// The approval message body: the card every surface renders, in the
+/// Markdown an Adaptive Card text block draws. The card's actions carry
+/// the decision.
+pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
+    fields.card().render(CardStyle::Markdown)
+}
+
 async fn send_approval_request(
     http: &reqwest::Client,
     token: &str,
@@ -519,20 +527,7 @@ async fn send_approval_request(
         }
     };
 
-    let prompt = format!(
-        "Agent **{}** requests **{}** (tier `{}`).\n\
-         Action: `{}`\n\
-         Trigger: _{}_",
-        fields.triggering_agent,
-        fields.tool_name,
-        fields.requested_tier,
-        fields.action_key,
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            fields.trigger_message.clone()
-        },
-    );
+    let prompt = approval_text(fields);
 
     let card = serde_json::json!({
         "type": "AdaptiveCard",

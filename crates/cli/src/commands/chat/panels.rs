@@ -5,6 +5,7 @@
 //! goes through `sanitize` when drawn.
 
 use serde::Deserialize;
+use wirken_adapter_core::approval_card::runtime_words;
 
 /// The panels for one conversation.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -155,17 +156,7 @@ pub(crate) struct HistoryEntry {
     pub name: String,
     pub arguments: String,
     pub success: Option<bool>,
-}
-
-/// The runtime the gateway named, in words. The gateway decides it from
-/// the agent's sandbox mode; this only names what it was told.
-pub(crate) fn runtime_words(runtime: &str) -> String {
-    match runtime {
-        "gvisor" => "gVisor (runsc)".to_string(),
-        "docker" => "Docker default runtime (runc)".to_string(),
-        "host" => "this host, no container".to_string(),
-        other => other.to_string(),
-    }
+    pub output: String,
 }
 
 fn thousands(n: u64) -> String {

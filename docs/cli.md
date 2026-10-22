@@ -40,9 +40,11 @@ it refused the page's approvals snapshot stayed null, which meant no
 in the rail, and no pending card restored after a reload however many
 decisions were waiting.
 
-The approval card shows the action key, the arguments the model sent,
-what the model said in the same message and, for an `exec`, where it runs
-if approved, all off the `ApprovalRequest` event. See
+The approval card is the one every surface renders: the action key, the
+arguments the model sent, for an `exec` where it runs and under which
+runtime, the message the turn replies to and, set apart, the model's own
+words labeled `model's claim (unverified)`, all off the `ApprovalRequest`
+event. See
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
 
 The About panel draws the capabilities of the conversation it is open on.
@@ -111,8 +113,8 @@ The reply streams in as the model writes it, and each tool call shows when
 its row is on the chain and again when it finishes. Replies are drawn as
 light Markdown: headings, bullets and numbered items, fenced code, `inline
 code` and **bold**, a marker read as one only when its closer is on the same
-line; anything else shows as written. The approval card, the messages
-typed and the notes stay plain text. An approval the turn
+line; anything else shows as written. The approval card, tool output, the
+messages typed and the notes stay plain text. An approval the turn
 needs is asked on a card at the terminal whose message started the turn
 (`TerminalApprovalGate`), with the lines every approval surface shows; see
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
@@ -120,10 +122,11 @@ The card takes no keys for its first 0.7 seconds. Only a lone `y` or `yes`
 approves; anything else refuses, and text after `n` or `no`, or anything
 else typed, is recorded as the reason. Enter with nothing typed refuses, and
 the two answers are drawn alike, so approving is never the default. The card
-shows the action key, the arguments that will run, where an `exec` runs, the
-runtime it runs under and the message the turn replies to as the gateway
-established them; what the model said beside the call is drawn apart and
-labeled `model's claim (unverified)`. A draft being typed when a card
+is the one every surface renders, line by line: the request, the action key,
+the arguments that will run, where an `exec` runs, the runtime it runs under
+and the message the turn replies to as the gateway established them; what
+the model said beside the call is drawn apart and labeled `model's claim
+(unverified)`. A draft being typed when a card
 arrives is set aside and comes back once the cards are answered; cards that
 arrive together are asked in order. The decision is recorded with
 `approved_via` / `denied_via` `{"kind":"channel_adapter","channel":"terminal"}`
@@ -157,6 +160,12 @@ and Enter on a conversation resumes it, its messages read back from the
 session chain. A conversation of another agent opens a new connection for
 that agent. The chat opens no store itself: all of this comes from the
 gateway over the terminal connection.
+
+The panels take 36 columns and the sidebar 30, and the transcript keeps
+at least 54, so both are drawn from 120 columns. From 90 the panels are
+drawn and the sidebar yields to them; below 90 the panels are not drawn.
+Either way the status line says what is hidden and how many columns it
+needs. Both start shown; Ctrl+B and Ctrl+P toggle them.
 
 | Key | Action |
 |-----|--------|

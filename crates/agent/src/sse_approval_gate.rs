@@ -125,6 +125,10 @@ impl ApprovalGate for SseApprovalGate {
             arguments: ctx.arguments.clone(),
             assistant_text: ctx.assistant_text.clone(),
             exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
+            exec_runtime: ctx
+                .exec_location
+                .as_ref()
+                .map(|l| crate::exec_location::runtime_name(l.mode).to_string()),
         };
         let (request_id, rx) = self.queue.register(request);
 
@@ -138,6 +142,10 @@ impl ApprovalGate for SseApprovalGate {
             arguments: ctx.arguments.clone(),
             assistant_text: ctx.assistant_text.clone(),
             exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
+            exec_runtime: ctx
+                .exec_location
+                .as_ref()
+                .map(|l| crate::exec_location::runtime_name(l.mode).to_string()),
         };
 
         if let Err(e) = sender.send(event).await {

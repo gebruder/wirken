@@ -10,6 +10,7 @@ use serenity::all::{
 use tokio::sync::Mutex;
 
 use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
+use wirken_adapter_core::approval_card::CardStyle;
 use wirken_adapter_core::{DiscordFormatter, OutboundFormatter};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
@@ -340,6 +341,12 @@ enum FrameAction {
     Skip,
 }
 
+/// The approval message body: the card every surface renders, in the
+/// Markdown Discord draws. The buttons under it carry the decision.
+pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
+    fields.card().render(CardStyle::Markdown)
+}
+
 /// Render an approval message in the configured channel and ship
 /// it with a Components-v2 button row carrying Approve / Deny
 /// buttons. Each button's `custom_id` is the cross-adapter
@@ -354,20 +361,7 @@ async fn send_approval_request(
     writer: &Arc<Mutex<IpcFrameWriter>>,
     fields: convert::ApprovalRequestFields,
 ) {
-    let text = format!(
-        "Agent **{}** requests **{}** (tier: **{}**).\n\
-         Action: `{}`\n\
-         Trigger: _{}_",
-        fields.triggering_agent,
-        fields.tool_name,
-        fields.requested_tier,
-        fields.action_key,
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            fields.trigger_message.clone()
-        },
-    );
+    let text = approval_text(&fields);
 
     // Encode the approval payloads under the cross-adapter
     // convention. Encoding failure here would indicate a malformed

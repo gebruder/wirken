@@ -12,6 +12,32 @@ tagged.
 
 ### Added
 
+- `wirken chat` draws the agent's replies as light Markdown: headings,
+  bullets and numbered items, fenced code, inline code and bold. The
+  approval card stays plain text.
+
+## [2.4.0] - 2026-10-21
+
+#296 (slack-morphism 2.31.0, libc 0.2.191, aws-lc-rs 1.18.2) is deferred:
+slack-morphism 2.31 changes the button builder the Slack adapter uses and
+stays at 2.29 until the migrated adapter passes a live Slack round-trip, and
+the two patch bumps ride in that grouped PR. None of the three carries an
+open advisory. #286 (upload-artifact 7.0.2, download-artifact 8.0.2,
+scorecard-action 2.5.0, codeql-action 4.39.0) is folded in.
+
+Before this release, `wirken chat`, a Signal approval answered in the chat
+that raised it, and a Slack message round-trip were run live on the
+restructured adapter message loop. The Discord, Google Chat, iMessage,
+Matrix, Teams and WhatsApp adapters had no live round-trip on it and are
+covered by their unit tests. Plan sign-in was not exercised against the
+live service before this release; the contributor who proposed it tests the
+released build. Secret scanning is unverified from the release account,
+which is not an admin of the repository. Nine CodeQL alerts on the plan
+sign-in code were dismissed one by one as test vectors and false positives,
+with the evidence on each dismissal.
+
+### Added
+
 - `wirken chat [--agent NAME]` opens a full-screen chat in the terminal.
   It is a channel of the running gateway, `terminal`, so its messages
   take the same path as any adapter's: injection scan, audit rows, router,
@@ -19,12 +45,13 @@ tagged.
   approvals on a card in the chat, and shows panels for the environment
   (including the sandbox runtime the gateway reports), context, cost and
   tokens, audit with a chain check, approvals and tools, plus a sidebar of
-  agents and conversations with search. Without a terminal it points to
-  `wirken ask`; without a running gateway it points to `wirken run`. Bare
-  `wirken` still prints help. Proposed by Tanmay Maka (@maka-tanmay).
-- `wirken chat` draws the agent's replies as light Markdown: headings,
-  bullets and numbered items, fenced code, inline code and bold. The
-  approval card stays plain text.
+  agents and conversations with search. Each tool call's output is shown
+  under its line, whatever the model's reply after it. The panels and the sidebar are
+  drawn where the screen has room for them, the panels first, and the
+  status line names what is hidden and the width it needs. Without a
+  terminal it points to `wirken ask`; without a running gateway it points
+  to `wirken run`. Bare `wirken` still prints help. Proposed by Tanmay
+  Maka (@maka-tanmay).
 - Plan sign-in for the `openai` provider: an agent can run on a ChatGPT
   plan the operator has, through OpenAI's sign-in for open-source and
   locally run apps, with no API key. `wirken credentials authorize`
@@ -55,6 +82,21 @@ tagged.
   call returns an error result, the parent's chain records the spawn's
   `SubagentResult` as an error, and the child does not run. Single and
   parallel spawns behave the same; siblings in a parallel spawn run on.
+- A turn the model ends without text now replies with why, on every
+  channel: `(no response: the model stopped after exec was refused)`,
+  `(no response: the model stopped after read_file failed)`, or
+  `(no response: the model returned nothing)`, naming the tools of the
+  turn. The reply was `(no response)` whatever had happened. The same
+  text is the turn's `AssistantMessage` row.
+- Every approval surface renders the same card: the request with the
+  tier printed once, the action key, the arguments, where an `exec` runs
+  and under which runtime (gVisor, Docker's default runtime, or this
+  host), the message it replies to, and the model's words labeled
+  `model's claim (unverified)`. The nine channel adapters, the `wirken
+  ask` prompt, `wirken permissions pending show`, the WebChat card and
+  the chat card each had their own text; Signal's said `tier tier2` and
+  named no runtime. Every gate now sends the arguments, the model's text
+  and the runtime, so each surface shows them.
 - An approval answered in the chat whose message raised it now reaches
   the gate. Each adapter connection's frames are read while a turn runs,
   so a Telegram or Signal decision sent on that connection resolves the

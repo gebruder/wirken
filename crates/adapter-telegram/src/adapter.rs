@@ -9,6 +9,7 @@ use teloxide::types::{
 use tokio::sync::Mutex;
 
 use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
+use wirken_adapter_core::approval_card::CardStyle;
 use wirken_adapter_core::{OutboundFormatter, TelegramFormatter};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
@@ -291,29 +292,11 @@ async fn handle_outbound(mut reader: IpcFrameReader, bot: Bot, writer: Arc<Mutex
     }
 }
 
-/// The approval message body. HTML, since the message is sent with
-/// `ParseMode::Html`; every field is escaped.
+/// The approval message body: the card every surface renders, as HTML,
+/// since the message is sent with `ParseMode::Html`; the card escapes
+/// every value. The inline keyboard under it carries the decision.
 pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
-    let mut text = format!(
-        "Agent <b>{}</b> requests <b>{}</b> (tier: <b>{}</b>).\n\
-         Action: <code>{}</code>",
-        html_escape(&fields.triggering_agent),
-        html_escape(&fields.tool_name),
-        html_escape(&fields.requested_tier),
-        html_escape(&fields.action_key),
-    );
-    if !fields.exec_location.is_empty() {
-        text.push_str(&format!("\nWhere: {}", html_escape(&fields.exec_location)));
-    }
-    text.push_str(&format!(
-        "\nTrigger: <i>{}</i>",
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            html_escape(&fields.trigger_message)
-        }
-    ));
-    text
+    fields.card().render(CardStyle::TelegramHtml)
 }
 
 /// Render an approval message in the configured chat and ship it
@@ -418,12 +401,6 @@ fn classify_send_error(e: &teloxide::RequestError) -> &'static str {
         RequestError::InvalidJson { .. } => "telegram_api_error",
         RequestError::Io(_) => "network_error",
     }
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 /// Intermediate enum so we can drop Cap'n Proto readers before .await

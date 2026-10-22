@@ -140,44 +140,81 @@ Operator grants made out of band of any conversation (`wirken permissions approv
 The tool name and the tier do not describe the call. The action key is a
 classification, not a command: every command carrying a shell
 metacharacter collapses to `shell::pipeline:`, so the key alone cannot
-tell `cat a | bash` from `cat b | bash`. Both approval surfaces show the
-key, the arguments the model sent, and what the model said in the same
-message.
-
-On the CLI, above the `[y/N]`:
+tell `cat a | bash` from `cat b | bash`. Every approval surface renders
+one card from the fields the gateway sends, the same lines in the same
+order with the same labels:
 
 ```text
-wirken: agent 'default' requests 'exec' (tier3)
-  action key: shell::pipeline:
-  arguments:  {"command": "cat ./payload.sh | bash"}
-  where:      runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)
-  the model said: Just checking the build script so the summary is accurate.
-  in reply to: summarise the release notes
-approve? [y/N]:
+request: agent default requests exec (tier3)
+action key: shell::pipeline:
+arguments: {"command": "cat ./payload.sh | bash"}
+runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)
+runtime: Docker default runtime (runc)
+in reply to: summarise the release notes
+model's claim (unverified): Just checking the build script so the summary is accurate.
 ```
 
-For an `exec`, `where:` says where the command runs if approved: a
-sandbox container, with its mode and network, or `runs on this host as
-<user>` under `mode: off`. It is built from the settings the `exec` will
-use, the agent's loaded sandbox configuration and the channel's egress
-policy for the turn, not from `sandbox.json` as it reads now, which can
-have been edited since. The network part is `no network`, `network only
-to <hosts> through the egress proxy`, `network to any public host through
-the egress proxy`, or `unrestricted network` when `"network": true` is set
-and no channel policy applies. The same line is on the webchat card,
-`wirken permissions pending show`, and the Telegram and Signal approval
-messages.
+- `request`: the agent asking, the tool, and the tier as the gateway
+  labels it, in parentheses.
+- `action key`: what the gate matched and what a stored grant would be
+  recorded under.
+- `arguments`: the arguments the model sent, verbatim. This is what will
+  run if approved. An action with no call behind it, such as sandbox
+  egress asking about a destination the key already names, reads
+  `(none; the action key is the whole ask)`.
+- `runs`: for an `exec`, where the command runs if approved: a sandbox
+  container, with its mode and network, or `runs on this host as
+  <user>` under `mode: off`. It is built from the settings the `exec`
+  will use, the agent's loaded sandbox configuration and the channel's
+  egress policy for the turn, not from `sandbox.json` as it reads now,
+  which can have been edited since. The network part is `no network`,
+  `network only to <hosts> through the egress proxy`, `network to any
+  public host through the egress proxy`, or `unrestricted network` when
+  `"network": true` is set and no channel policy applies.
+- `runtime`: for an `exec`, the container runtime the gateway's sandbox
+  settings give it, in words: `gVisor (runsc)` under `"mode": "gvisor"`,
+  `Docker default runtime (runc)` under `exec-only`, `this host, no
+  container` under `off`. There is no fallback between them: a `gvisor`
+  mode whose `runsc` runtime is missing refuses `exec`. The gateway
+  sends the value; a value the surface does not know is shown as sent.
+- `in reply to`: the message that triggered the turn.
+- `model's claim (unverified)`: what the model said in the same message
+  as the call. It is the model's own account and not a description:
+  reading it against the arguments is the decision. A surface that can
+  style text draws it apart from the lines above, which are what the
+  gateway established; one that cannot labels it exactly so. The
+  arguments are never labeled a claim.
 
-The sentence is the model's own account and not a description: reading it
-against the arguments is the decision. A model that sent calls and no text
-leaves the line out rather than printing an empty one.
+A line the ask does not have is left out: `runs` and `runtime` for a tool
+other than `exec`, `in reply to` for a system-driven turn, the claim for
+a model that sent calls and no text. Blank lines are never printed.
 
-Everything on those lines except the tier is model output or an inbound
-message on its way to a terminal, so escape sequences are stripped and
-line breaks are folded. An argument cannot repaint the line above it or
-write a second line that looks like the question. A literal
-`approve? [y/N]:` inside the arguments survives, indented under
-`arguments:`, because it is part of the command being approved.
+Everything on the card except the tier is model output or an inbound
+message, so every value is cleaned the same way before it is shown:
+escape sequences are stripped, line breaks are folded, and a value past
+2000 characters is cut with a marker. An argument cannot repaint the
+line above it or write a second line that reads as a label. A literal
+`approve? [y/N]:` inside the arguments survives, after `arguments:`,
+because it is part of the command being approved.
+
+The surfaces, and what each adds after the card:
+
+- `wirken ask` on the CLI prints the card to stderr, then `approve?
+  [y/N]:`.
+- `wirken chat` draws the card from the `ApprovalRequest` frame the
+  gateway sends the terminal, the claim set apart, then `[y] approve`
+  and `[n] refuse` drawn alike.
+- WebChat draws the card from the `ApprovalRequest` event on its first
+  paint, the claim set apart, then the Approve and Deny buttons. The
+  pending queue carries the same fields, so a card restored after a
+  browser reload shows what the live one showed.
+- `wirken permissions pending show` prints the request id, when it was
+  made and its age, then the card.
+- The channel adapters send the card in the channel's own text dialect
+  (plain text on Signal, WhatsApp, iMessage and Matrix; Markdown on
+  Discord, Teams and Google Chat; mrkdwn on Slack; HTML on Telegram,
+  every value escaped), then the channel's way of deciding: buttons, a
+  reaction, or `!approve <prefix>` / `!deny <prefix> [reason]`.
 
 A `wirken lyrik run` asks in a shorter form, because its triggering message
 is the staged walk text, which says nothing about the one command being
@@ -191,24 +228,6 @@ approve? [y/N]:
 
 The command is cleaned the same way, so it occupies its one line and no
 other.
-
-`wirken chat` shows the same lines on its approval card, off the
-`ApprovalRequest` frame the gateway sends the terminal: the action key, the
-arguments, where an `exec` runs and under which runtime, what the model said
-and the message it replies to. What the model said is drawn apart and
-labeled `model's claim (unverified)`, since the gateway has not checked it;
-the other lines are what the gateway established. Each is model output or an
-inbound message, so escape sequences, bidirectional controls and zero-width
-characters are stripped before it is drawn, and the arguments are cut, with a
-marker, past eight rows.
-
-In WebChat the same three reach the approval card on the `ApprovalRequest`
-event, so the card draws them on its first paint. It previously showed the
-action key where the command belonged and swapped the command in once the
-events poll had fetched the call row from the chain, which meant a card
-could be decided on before the command it was about had arrived. The
-pending queue carries them too, so a card restored after a browser reload
-shows what the live one showed.
 
 ### Platform sender identity is audited, not authorized
 

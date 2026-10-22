@@ -318,9 +318,9 @@ struct ApprovalRequest {
   # read it is unaffected.
   execLocation @8 :Text;
   # The arguments the model sent for the call, verbatim, and what it
-  # said in the same message. Filled by the terminal channel's gate,
-  # whose card shows them; empty from the other gates. An adapter that
-  # does not read them is unaffected.
+  # said in the same message. Every gate fills them; the adapter
+  # renders them on the approval card (`wirken_adapter_core::
+  # approval_card`). An adapter that does not read them is unaffected.
   arguments @9 :Text;
   assistantText @10 :Text;
   # How long the gateway waits for a decision, in seconds, so the
@@ -330,8 +330,8 @@ struct ApprovalRequest {
   # The container runtime the exec runs under if approved, from the
   # gateway's sandbox settings for the agent: `gvisor` (Docker's
   # `runsc` runtime), `docker` (Docker's default runtime) or `host`
-  # (no container). Empty for other tools. Filled by the terminal
-  # channel's gate.
+  # (no container). Empty for other tools. Every gate fills it; the
+  # card names it in words.
   execRuntime @12 :Text;
 }
 
@@ -424,6 +424,9 @@ struct ToolActivity {
     # The call finished, after its ToolResult row. True when it
     # succeeded.
   }
+  output @4 :Text;
+  # With `result`: the output as the ToolResult row records it. Empty
+  # with `call`, and from a gateway that does not send it.
 }
 
 struct TerminalRequest {

@@ -16,6 +16,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use super::lyrik_brocards::{RULES, Rejection, sarif_rule_id};
+
 const SARIF_SCHEMA_URL: &str = "https://json.schemastore.org/sarif-2.1.0-rtm.5.json";
 const SARIF_VERSION: &str = "2.1.0";
 const LYRIK_INFO_URI: &str = "https://lyrik.wirken.ai";
@@ -92,6 +94,10 @@ struct LyrikReport {
     /// The run's funnel, carried as-is into the run properties.
     #[serde(default)]
     funnel: Option<serde_json::Value>,
+    /// Candidates a brocard rule rejected. Each becomes a SARIF result
+    /// suppressed as external.
+    #[serde(default)]
+    rejected_candidates: Vec<Rejection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,12 +305,21 @@ struct SarifResult {
     rule_id: String,
     level: Level,
     message: Text,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     locations: Vec<SarifLocation>,
     #[serde(rename = "partialFingerprints")]
     partial_fingerprints: serde_json::Value,
     properties: serde_json::Value,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     fixes: Vec<Fix>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suppressions: Vec<Suppression>,
+}
+
+#[derive(Debug, Serialize)]
+struct Suppression {
+    kind: &'static str,
+    justification: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,6 +390,12 @@ pub fn build_sarif(findings_path: &Path, driver_version: &str) -> Result<Sarif> 
         .findings
         .iter()
         .map(|f| build_result(f, &report.run_id))
+        .chain(
+            report
+                .rejected_candidates
+                .iter()
+                .map(build_rejection_result),
+        )
         .collect();
 
     let invocation_props = serde_json::json!({
@@ -417,23 +438,36 @@ pub fn build_sarif(findings_path: &Path, driver_version: &str) -> Result<Sarif> 
 }
 
 fn build_rules() -> Vec<Rule> {
-    FRAMINGS
-        .iter()
-        .map(|(framing, name, description)| Rule {
-            id: format!("lyrik.framing.{framing}"),
+    let framing_rules = FRAMINGS.iter().map(|(framing, name, description)| Rule {
+        id: format!("lyrik.framing.{framing}"),
+        name: (*name).to_string(),
+        short_description: Text {
+            text: description_short(framing),
+        },
+        full_description: Text {
+            text: (*description).to_string(),
+        },
+        default_configuration: DefaultConfig {
+            level: Level::Warning,
+        },
+        properties: serde_json::json!({ "lyrik_framing": framing }),
+    });
+    let brocard_rules = RULES.iter().enumerate().map(|(i, (name, statement))| {
+        let rule = (i + 1) as u8;
+        Rule {
+            id: sarif_rule_id(rule),
             name: (*name).to_string(),
             short_description: Text {
-                text: description_short(framing),
+                text: format!("Brocard rule {rule}: {name}."),
             },
             full_description: Text {
-                text: (*description).to_string(),
+                text: (*statement).to_string(),
             },
-            default_configuration: DefaultConfig {
-                level: Level::Warning,
-            },
-            properties: serde_json::json!({ "lyrik_framing": framing }),
-        })
-        .collect()
+            default_configuration: DefaultConfig { level: Level::Note },
+            properties: serde_json::json!({ "lyrik_brocard": rule }),
+        }
+    });
+    framing_rules.chain(brocard_rules).collect()
 }
 
 fn description_short(framing: &str) -> String {
@@ -518,6 +552,63 @@ fn build_result(f: &Finding, run_id: &str) -> SarifResult {
         partial_fingerprints,
         properties,
         fixes,
+        suppressions: Vec::new(),
+    }
+}
+
+/// One rejected candidate as a suppressed SARIF result. The reason is
+/// the justification; the rule, walk and gate sit under `properties`.
+fn build_rejection_result(r: &Rejection) -> SarifResult {
+    let locations = r
+        .location
+        .as_ref()
+        .map(|loc| {
+            vec![SarifLocation {
+                physical_location: PhysicalLocation {
+                    artifact_location: ArtifactLocation {
+                        uri: loc.file.clone(),
+                        uri_base_id: "%SRCROOT%",
+                    },
+                    region: Region {
+                        start_line: loc.line_start,
+                        end_line: loc.line_start,
+                    },
+                },
+            }]
+        })
+        .unwrap_or_default();
+
+    let partial_fingerprints = match &r.stable_id {
+        Some(id) => serde_json::json!({ "lyrik/rejection_stable_id/v1": id }),
+        None => serde_json::json!({}),
+    };
+
+    SarifResult {
+        rule_id: sarif_rule_id(r.rule),
+        level: Level::Note,
+        message: Text {
+            text: r
+                .title
+                .clone()
+                .map_or_else(|| r.reason.clone(), |t| format!("{t}\n\n{}", r.reason)),
+        },
+        locations,
+        partial_fingerprints,
+        properties: serde_json::json!({
+            "lyrik": {
+                "rejection": {
+                    "rule": r.rule,
+                    "walk": r.walk,
+                    "stable_id": r.stable_id,
+                    "applied_by": r.applied_by,
+                }
+            }
+        }),
+        fixes: Vec::new(),
+        suppressions: vec![Suppression {
+            kind: "external",
+            justification: r.reason.clone(),
+        }],
     }
 }
 
@@ -664,7 +755,10 @@ mod tests {
         assert_eq!(sarif.version, SARIF_VERSION);
         assert_eq!(sarif.runs.len(), 1);
         assert_eq!(sarif.runs[0].results.len(), 0);
-        assert_eq!(sarif.runs[0].tool.driver.rules.len(), FRAMINGS.len());
+        assert_eq!(
+            sarif.runs[0].tool.driver.rules.len(),
+            FRAMINGS.len() + RULES.len()
+        );
     }
 
     #[test]
@@ -844,6 +938,73 @@ mod tests {
             v.get("fixes").is_none(),
             "fixes should be absent when no patch_localized is present"
         );
+    }
+
+    #[test]
+    fn rejected_candidate_becomes_external_suppression() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("findings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "run_id":"r",
+                "produced_at":"2026-05-03T00:00:00Z",
+                "findings":[],
+                "rejected_candidates":[{
+                    "rule":1,
+                    "walk":"sink-walk",
+                    "stable_id":"sid-9",
+                    "location":{"file":"src/a.rs","line_start":12},
+                    "reason":"no attacker capability stated",
+                    "applied_by":"brocard_structural"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let sarif = serde_json::to_value(build_sarif(&path, "test").unwrap()).unwrap();
+        let result = &sarif["runs"][0]["results"][0];
+        assert_eq!(result["ruleId"], "lyrik.brocard.1");
+        assert_eq!(result["level"], "note");
+        assert_eq!(result["suppressions"][0]["kind"], "external");
+        assert_eq!(
+            result["suppressions"][0]["justification"],
+            "no attacker capability stated"
+        );
+        assert_eq!(
+            result["properties"]["lyrik"]["rejection"]["applied_by"],
+            "brocard_structural"
+        );
+        assert_eq!(
+            result["locations"][0]["physicalLocation"]["region"]["startLine"],
+            12
+        );
+        let rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
+        assert!(rules.iter().any(|r| r["id"] == "lyrik.brocard.7"));
+    }
+
+    #[test]
+    fn kept_finding_carries_no_suppressions_key() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("findings.json");
+        std::fs::write(
+            &path,
+            r#"{"run_id":"r","produced_at":"2026-05-03T00:00:00Z","findings":[{
+                "id":"f1","stable_id":"sid-1","framing":["auth"],
+                "location":{"file":"src/a.rs","line_start":3},
+                "title":"t","summary":"s","tier":"HIGH"}]}"#,
+        )
+        .unwrap();
+        let sarif = serde_json::to_value(build_sarif(&path, "test").unwrap()).unwrap();
+        assert!(sarif["runs"][0]["results"][0].get("suppressions").is_none());
+    }
+
+    #[test]
+    fn brocard_rules_are_numbered_one_to_seven() {
+        let ids: Vec<String> = (1..=RULES.len() as u8).map(sarif_rule_id).collect();
+        assert_eq!(ids.first().unwrap(), "lyrik.brocard.1");
+        assert_eq!(ids.last().unwrap(), "lyrik.brocard.7");
     }
 
     #[test]

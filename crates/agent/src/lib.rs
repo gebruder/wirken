@@ -2,7 +2,6 @@
 // stays carries an allow naming why its offsets are boundaries.
 #![cfg_attr(not(test), deny(clippy::string_slice))]
 
-pub mod ansi;
 pub mod approval_gate;
 pub mod attestation;
 pub mod bundled_presets;
@@ -42,6 +41,10 @@ pub mod telegram_approval_gate;
 pub mod terminal_approval_gate;
 pub mod tool;
 pub mod yaml;
+
+/// The control-sequence strip, kept at this path for its callers; it
+/// lives with the approval card in the adapter core.
+pub use wirken_adapter_core::ansi;
 
 pub use context::ContextEngine;
 pub use error::{AgentError, PermissionDenialContext};
