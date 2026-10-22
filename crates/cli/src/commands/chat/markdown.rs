@@ -29,22 +29,29 @@ pub(crate) fn render(text: &str, cols: usize) -> Vec<Line<'static>> {
     let cols = cols.max(1);
     let source: Vec<&str> = text.split('\n').collect();
     let mut lines = Vec::new();
-    let mut fenced = false;
+    // The indent of the open fence, when inside a code block.
+    let mut fence: Option<usize> = None;
     let mut at = 0;
     while let Some(raw) = source.get(at).copied() {
         at += 1;
         let line = raw.trim_start();
+        // An indent past half the width is drawn as half, so the text
+        // after it always has room.
+        let indent = (width(raw) - width(line)).min(cols / 2);
         if let Some(lang) = line.strip_prefix("```") {
-            fenced = !fenced;
-            if fenced && !lang.trim().is_empty() {
-                lines.push(code_row(lang.trim().to_string(), rule_style()));
+            fence = if fence.is_some() { None } else { Some(indent) };
+            if fence.is_some() && !lang.trim().is_empty() {
+                lines.push(code_row(indent, lang.trim().to_string(), rule_style()));
             }
             continue;
         }
-        if fenced {
-            // As written, indentation and all: it is part of the code.
-            for row in wrap(raw, cols.saturating_sub(2)) {
-                lines.push(code_row(row, code_style()));
+        if let Some(fence) = fence {
+            // As written, less the fence's own indent, which places the
+            // block (under a list item, say) and is not part of the code.
+            let spaces = raw.len() - raw.trim_start_matches(' ').len();
+            let code = raw.get(spaces.min(fence)..).unwrap_or(raw);
+            for row in wrap(code, cols.saturating_sub(fence + 2)) {
+                lines.push(code_row(fence, row, code_style()));
             }
             continue;
         }
@@ -75,9 +82,6 @@ pub(crate) fn render(text: &str, cols: usize) -> Vec<Line<'static>> {
             continue;
         }
         let (marker, body) = list_marker(line).unwrap_or((String::new(), line));
-        // An indent past half the width is drawn as half, so the text
-        // after it always has room.
-        let indent = (width(raw) - width(line)).min(cols / 2);
         let lead = format!("{}{marker}", " ".repeat(indent));
         let room = cols.saturating_sub(width(&lead));
         for (i, mut spans) in styled(&inline(body, Style::default()), room)
@@ -96,9 +100,10 @@ pub(crate) fn render(text: &str, cols: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// One row of a code block, behind its rule.
-fn code_row(text: String, style: Style) -> Line<'static> {
+/// One row of a code block, behind its rule, `indent` cells in.
+fn code_row(indent: usize, text: String, style: Style) -> Line<'static> {
     Line::from(vec![
+        Span::raw(" ".repeat(indent)),
         Span::styled("│ ", rule_style()),
         Span::styled(text, style),
     ])
@@ -510,6 +515,22 @@ mod tests {
         let long = render("```\nfind . -name '*.log' -delete\n```", 16);
         let shown: String = plain(&long).concat().replace(['│', ' '], "");
         assert_eq!(shown, "find.-name'*.log'-delete");
+    }
+
+    #[test]
+    fn a_fenced_block_in_a_list_item_sits_under_it() {
+        let text = "2. List them:\n\n   ```bash\n   du -sh ~/*\n     | sort -h\n   ```\n3. Next";
+        assert_eq!(
+            plain(&render(text, 40)),
+            [
+                "2. List them:",
+                "",
+                "   │ bash",
+                "   │ du -sh ~/*",
+                "   │   | sort -h",
+                "3. Next"
+            ]
+        );
     }
 
     #[test]
