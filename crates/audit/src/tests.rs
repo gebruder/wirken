@@ -4301,3 +4301,238 @@ fn legacy_view_still_projects_audit_legacy_detail() {
         start.event.detail
     );
 }
+
+/// `--with-children`: each spawn row on a parent's chain is paired with
+/// the child lane it names.
+mod children_check {
+    use super::{seed_bound, seed_spawned};
+    use crate::{
+        ChildCheck, ChildCheckStatus, SessionEvent, SessionId, SessionLog, SqliteSessionLog,
+        SubagentStatus, TrustLevel, cross_check_spawned_children,
+    };
+
+    fn log() -> SqliteSessionLog {
+        SqliteSessionLog::open_in_memory().unwrap()
+    }
+
+    fn seed_untiered_spawn(log: &SqliteSessionLog, parent: &str, child: &str, agent: &str) {
+        let h = log.handle_for(SessionId::new(parent.to_string()));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::SubagentSpawned {
+                child_session_id: child.into(),
+                child_agent_id: agent.into(),
+                tools_granted: vec!["exec".into()],
+                max_permission_tier: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_result(log: &SqliteSessionLog, parent: &str, child: &str, status: SubagentStatus) {
+        let h = log.handle_for(SessionId::new(parent.to_string()));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::SubagentResult {
+                child_session_id: child.into(),
+                output: String::new(),
+                status,
+            },
+        )
+        .unwrap();
+    }
+
+    /// A row on the child's lane with no binding row.
+    fn seed_child_lane_row(log: &SqliteSessionLog, child: &str) {
+        let h = log.handle_for(SessionId::new(child.to_string()));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::SystemPromptSet {
+                content: "prompt".into(),
+                agent_id: "researcher".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn only(checks: &[ChildCheck]) -> &ChildCheck {
+        assert_eq!(checks.len(), 1, "{checks:?}");
+        &checks[0]
+    }
+
+    #[test]
+    fn a_child_whose_binding_agrees_is_checked_and_not_a_finding() {
+        let log = log();
+        seed_spawned(
+            &log,
+            "p/webchat/c1",
+            "p/webchat/c1#sub-0",
+            "researcher",
+            &["exec"],
+            "tier2",
+        );
+        seed_bound(
+            &log,
+            "p/webchat/c1#sub-0",
+            "p/webchat/c1",
+            "researcher",
+            &["exec"],
+        );
+        let checks = cross_check_spawned_children(&log, "p/webchat/c1").unwrap();
+        let check = only(&checks);
+        assert_eq!(check.status, ChildCheckStatus::Checked);
+        assert!(check.disagreements.is_empty(), "{check:?}");
+        assert!(!check.is_finding());
+    }
+
+    #[test]
+    fn a_binding_that_disagrees_on_tools_is_a_finding() {
+        let log = log();
+        seed_spawned(
+            &log,
+            "p/webchat/c1",
+            "p/webchat/c1#sub-0",
+            "researcher",
+            &["exec"],
+            "tier2",
+        );
+        seed_bound(
+            &log,
+            "p/webchat/c1#sub-0",
+            "p/webchat/c1",
+            "researcher",
+            &["read_file"],
+        );
+        let checks = cross_check_spawned_children(&log, "p/webchat/c1").unwrap();
+        let check = only(&checks);
+        assert_eq!(check.status, ChildCheckStatus::Checked);
+        assert_eq!(check.disagreements.len(), 1, "{check:?}");
+        assert_eq!(check.disagreements[0].field, "tools_granted");
+        assert!(check.is_finding());
+    }
+
+    #[test]
+    fn a_binding_naming_another_parent_is_a_finding() {
+        let log = log();
+        seed_spawned(
+            &log,
+            "p/webchat/c1",
+            "p/webchat/c1#sub-0",
+            "researcher",
+            &["exec"],
+            "tier2",
+        );
+        seed_bound(
+            &log,
+            "p/webchat/c1#sub-0",
+            "p/webchat/other",
+            "researcher",
+            &["exec"],
+        );
+        let checks = cross_check_spawned_children(&log, "p/webchat/c1").unwrap();
+        let check = only(&checks);
+        assert_eq!(check.disagreements.len(), 1, "{check:?}");
+        assert_eq!(check.disagreements[0].field, "parent_session_id");
+        assert!(check.is_finding());
+    }
+
+    /// The case the PR was written for: a child that ran with rows but no
+    /// binding, from a build whose spawn row records a tier.
+    #[test]
+    fn a_child_with_rows_and_no_binding_under_a_tiered_spawn_is_unbound() {
+        let log = log();
+        seed_spawned(
+            &log,
+            "p/cron/j1",
+            "p/cron/j1#sub-0",
+            "researcher",
+            &["exec"],
+            "tier2",
+        );
+        seed_child_lane_row(&log, "p/cron/j1#sub-0");
+        let checks = cross_check_spawned_children(&log, "p/cron/j1").unwrap();
+        let check = only(&checks);
+        assert_eq!(check.status, ChildCheckStatus::Unbound);
+        assert!(check.is_finding());
+    }
+
+    #[test]
+    fn a_child_with_rows_and_no_binding_under_an_untiered_spawn_is_not_comparable() {
+        let log = log();
+        seed_untiered_spawn(&log, "p/cron/j1", "p/cron/j1#sub-0", "researcher");
+        seed_child_lane_row(&log, "p/cron/j1#sub-0");
+        let checks = cross_check_spawned_children(&log, "p/cron/j1").unwrap();
+        let check = only(&checks);
+        assert_eq!(check.status, ChildCheckStatus::NotComparable);
+        assert!(!check.is_finding());
+    }
+
+    /// A spawn the parent recorded but no child ever ran is a finding: the
+    /// parent-side twin of a missing spawn row.
+    #[test]
+    fn a_spawn_with_an_empty_lane_and_no_failed_result_is_never_woken() {
+        let log = log();
+        seed_spawned(
+            &log,
+            "p/cron/j1",
+            "p/cron/j1#sub-0",
+            "researcher",
+            &["exec"],
+            "tier2",
+        );
+        let checks = cross_check_spawned_children(&log, "p/cron/j1").unwrap();
+        let check = only(&checks);
+        assert_eq!(check.status, ChildCheckStatus::NeverWoken);
+        assert!(check.is_finding());
+    }
+
+    /// A bind the parent recorded as an error is a failed bind, not a
+    /// finding: the child was never meant to run.
+    #[test]
+    fn a_spawn_with_an_empty_lane_and_an_error_result_is_a_failed_bind() {
+        let log = log();
+        seed_spawned(
+            &log,
+            "p/cron/j1",
+            "p/cron/j1#sub-0",
+            "researcher",
+            &["exec"],
+            "tier2",
+        );
+        seed_result(&log, "p/cron/j1", "p/cron/j1#sub-0", SubagentStatus::Error);
+        let checks = cross_check_spawned_children(&log, "p/cron/j1").unwrap();
+        let check = only(&checks);
+        assert_eq!(check.status, ChildCheckStatus::FailedBind);
+        assert!(!check.is_finding());
+    }
+
+    #[test]
+    fn a_session_with_no_spawns_has_no_children() {
+        let log = log();
+        seed_child_lane_row(&log, "p/cron/j1");
+        assert!(
+            cross_check_spawned_children(&log, "p/cron/j1")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The child-side check reads the same comparison: a child whose
+    /// binding names a parent with no spawn row is still a missing row.
+    #[test]
+    fn the_child_side_check_still_reports_a_missing_spawn_row() {
+        let log = log();
+        seed_bound(
+            &log,
+            "p/cron/j1#sub-0",
+            "p/cron/j1",
+            "researcher",
+            &["exec"],
+        );
+        let out = crate::cross_check_subagent_session(&log, "p/cron/j1#sub-0").unwrap();
+        assert_eq!(out.status, crate::CrossCheckStatus::ParentRowMissing);
+    }
+}
