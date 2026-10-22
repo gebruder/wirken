@@ -76,6 +76,11 @@ read deadline (default 60). A prompt left unanswered past the deadline is a
 denial: the model is told the action was refused and not executed, and the
 chain records a `PermissionDenied` row with `approval timeout` as its reason.
 
+`wirken ask` runs no gateway, so the agent it builds cannot spawn
+sub-agents: a `spawn_subagent` call returns an error saying so, naming
+`wirken chat` or a channel as the route, and the turn goes on. Children are
+woken by the gateway, which is what those routes run under.
+
 ## wirken chat
 
 A full-screen chat with an agent in the terminal, through the running

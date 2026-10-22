@@ -2777,7 +2777,7 @@ mod subagent {
             env["output"]
                 .as_str()
                 .unwrap()
-                .contains("agent has no factory bound"),
+                .contains("send this through `wirken chat` or a channel"),
             "envelope: {result:?}"
         );
     }

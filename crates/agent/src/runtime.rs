@@ -65,6 +65,12 @@ const MCP_TOOLS_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_se
 /// The built-in tool name for spawning a child agent.
 pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 
+/// What a `spawn_subagent` call returns on an agent with no factory: one
+/// built by `wirken ask`, which runs no gateway. Children are woken by the
+/// gateway's factory, so the route is a session the gateway runs.
+pub(crate) const NO_GATEWAY_FOR_SUBAGENTS: &str = "sub-agents run only under the running \
+    gateway, and `wirken ask` runs none; send this through `wirken chat` or a channel";
+
 /// Prefix of the inbound id every `wirken ask` mints.
 const ASK_INBOUND_PREFIX: &str = "ask-";
 
@@ -4762,8 +4768,7 @@ impl Agent {
             let factory = match self.factory.as_ref().and_then(|w| w.upgrade()) {
                 Some(f) => f,
                 None => {
-                    early_results[i] =
-                        Some(envelope_result("", "error", "agent has no factory bound"));
+                    early_results[i] = Some(envelope_result("", "error", NO_GATEWAY_FOR_SUBAGENTS));
                     batch.push(None);
                     continue;
                 }
@@ -5176,11 +5181,12 @@ impl Agent {
         }
 
         // Factory back-pointer must be live. Standalone agents
-        // (Agent::new without a factory) cannot spawn children.
+        // (Agent::new without a factory, as `wirken ask` builds them)
+        // cannot spawn children.
         let factory = match self.factory.as_ref().and_then(|w| w.upgrade()) {
             Some(f) => f,
             None => {
-                return Ok(envelope_result("", "error", "agent has no factory bound"));
+                return Ok(envelope_result("", "error", NO_GATEWAY_FOR_SUBAGENTS));
             }
         };
 

@@ -128,9 +128,10 @@ is a hard depth cap of 4 to prevent nesting cycles, and the parent's LLM sees
 only a JSON result envelope carrying the child's final response and status.
 
 Delegation works the same on every channel: the streaming dispatch (webchat)
-and the non-streaming one (cron, adapters, `wirken ask`) build the offered
-tool set from one place, so a configured ceiling reaches the model regardless
-of what drove the turn.
+and the non-streaming one (cron, adapters) build the offered tool set from one
+place, so a configured ceiling reaches the model regardless of what drove the
+turn. `wirken ask` is the exception: it runs no gateway, so a `spawn_subagent`
+call from it returns an error naming `wirken chat` or a channel as the route.
 
 Each child runs under its own session id (`{parent_session_id}#sub-{n}`), so
 parent and child audit independently. See
