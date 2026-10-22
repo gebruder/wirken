@@ -428,6 +428,13 @@ per-finding `gate_routed`, `dedup_match` or `stream` as closed enums; a
 `triage_status` field. 1.1 does not require producers to emit `$schema`, and
 if a report carries one the validator asserts it string-equals `$id`.
 
+A run that finds nothing still writes `findings.json`, with an empty `findings`
+array, but only when the agent also wrote a no-findings marker at
+`staging/no-findings.json`. The marker names the framings checked and the files
+read, both as non-empty lists of strings. The runner copies those two lists into
+a top-level `no_findings` key. A run with no findings and no marker fails, and a
+marker beside a finding fails the run.
+
 ### Carried outside schema 1.1
 
 Two additions sit outside the 1.1 contract. The validator tolerates unknown

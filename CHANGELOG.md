@@ -12,6 +12,10 @@ tagged.
 
 ### Added
 
+- `wirken lyrik` accepts a run with no findings only when the agent also writes
+  a no-findings marker at `staging/no-findings.json`, naming the framings checked
+  and the files read. The runner records them under `no_findings`. A run with no
+  findings and no marker still fails.
 - `wirken lyrik` rejects candidates under seven brocard rules, adapted from
   the list at <https://vulnbrocards.com/>. Each rejection is recorded under
   `rejected_candidates` in `findings.json` and as a suppressed SARIF result.

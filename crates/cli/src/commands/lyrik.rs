@@ -875,6 +875,7 @@ fn write_empty_findings(path: &Path, run_id: &str, extras: &Extras) -> Result<()
             "run_id": run_id,
             "produced_at": chrono::Utc::now().to_rfc3339(),
             "findings": [],
+            "rejected_candidates": [],
         }),
         extras,
     );
@@ -1533,15 +1534,35 @@ async fn dispatch_via_agent_runtime(
 
     let funnel = aggregated?;
 
-    if !expected_findings.exists() {
-        anyhow::bail!(
-            "agent ran but findings.json was not written at {} \
-             (skill emits to staging/<walk?>/findings/finding-NNN.json; the \
-             runner aggregates them. Neither path produced output. \
-             Total response length across turns: {})",
-            expected_findings.display(),
-            total_response_len
-        );
+    // A run that stages nothing is accepted only with the skill's explicit
+    // no-findings marker, which says what was checked. A marker beside
+    // staged findings contradicts them and fails the run.
+    let marker_path = staging.join(NO_FINDINGS_MARKER);
+    let marker = read_no_findings_marker(&marker_path)?;
+    if expected_findings.exists() {
+        if marker.is_some() {
+            anyhow::bail!(
+                "findings.json was written and {} is also present; a \
+                 no-findings marker contradicts staged findings",
+                marker_path.display()
+            );
+        }
+    } else {
+        let Some(marker) = marker else {
+            anyhow::bail!(
+                "agent ran but findings.json was not written at {} \
+                 (skill emits to staging/<walk?>/findings/finding-NNN.json; the \
+                 runner aggregates them. Neither path produced output, and no \
+                 no-findings marker was written at {}. \
+                 Total response length across turns: {})",
+                expected_findings.display(),
+                marker_path.display(),
+                total_response_len
+            );
+        };
+        let mut recorded = extras.clone();
+        recorded.insert("no_findings".into(), marker);
+        write_empty_findings(expected_findings, run_id, &recorded)?;
     }
 
     // Exit-code policy for per-walk dispatch. A refused call skips a
@@ -2766,6 +2787,41 @@ fn conform_framing(finding: &mut serde_json::Value) -> FramingOutcome {
         removed,
         staged_stable_id,
     }
+}
+
+/// The file the skill writes when no framing applies, at the top of the run's
+/// staging directory.
+const NO_FINDINGS_MARKER: &str = "no-findings.json";
+
+/// Read the no-findings marker, when one was written. It must name the framings
+/// checked and the files read, both as non-empty lists of strings. Only those
+/// two keys are kept, so the marker records what the agent claimed and nothing
+/// else. A marker that does not parse fails the run.
+fn read_no_findings_marker(path: &Path) -> Result<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| format!("parse {}", path.display()))?;
+    let list = |key: &str| -> Option<serde_json::Value> {
+        let items = value.get(key)?.as_array()?;
+        let all_text = !items.is_empty()
+            && items
+                .iter()
+                .all(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()));
+        all_text.then(|| serde_json::Value::Array(items.clone()))
+    };
+    let (Some(framings), Some(files)) = (list("framings_checked"), list("files_read")) else {
+        anyhow::bail!(
+            "{}: framings_checked and files_read must each be a non-empty list of strings",
+            path.display()
+        );
+    };
+    Ok(Some(serde_json::json!({
+        "framings_checked": framings,
+        "files_read": files,
+    })))
 }
 
 /// Highest `grade` a run writes. No exploit adapter runs, so no
@@ -4895,6 +4951,30 @@ mod tests {
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0]["rule"], 6);
         assert_eq!(rejected[0]["stable_id"], "sid-elsewhere");
+    }
+
+    #[test]
+    fn no_findings_marker_needs_both_lists_as_non_empty_strings() {
+        use super::read_no_findings_marker;
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("no-findings.json");
+        assert!(read_no_findings_marker(&path).unwrap().is_none());
+        std::fs::write(
+            &path,
+            r#"{"framings_checked":["auth"],"files_read":["a.c"],"extra":1}"#,
+        )
+        .unwrap();
+        let kept = read_no_findings_marker(&path).unwrap().unwrap();
+        assert_eq!(
+            kept,
+            serde_json::json!({"framings_checked":["auth"],"files_read":["a.c"]})
+        );
+        std::fs::write(&path, r#"{"framings_checked":[],"files_read":["a.c"]}"#).unwrap();
+        assert!(read_no_findings_marker(&path).is_err());
+        std::fs::write(&path, r#"{"framings_checked":["auth"],"files_read":[" "]}"#).unwrap();
+        assert!(read_no_findings_marker(&path).is_err());
+        std::fs::write(&path, "not json").unwrap();
+        assert!(read_no_findings_marker(&path).is_err());
     }
 
     #[test]
