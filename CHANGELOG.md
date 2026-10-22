@@ -12,6 +12,13 @@ tagged.
 
 ### Added
 
+- `wirken lyrik` rejects candidates under seven brocard rules, adapted from
+  the list at <https://vulnbrocards.com/>. Each rejection is recorded under
+  `rejected_candidates` in `findings.json` and as a suppressed SARIF result.
+  Pentest mode halves the grade once per distinct rule; defender mode removes
+  the finding. Set `mode` in `.lyrik/config.json` to choose; the default is
+  `pentest`.
+
 - `wirken sessions verify --with-children` pairs every `SubagentSpawned`
   row on a session's chain with the child session it names: the
   `--with-parent` comparison from the parent's side, plus
