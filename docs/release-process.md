@@ -323,28 +323,45 @@ gh release edit vX.Y.Z -R gebruder/wirken --draft=false
 
 ### 12. Smoke test
 
-Fresh shell, scratch install dir so your local binary survives:
+A real `wirken update` from the previous release to this one, on Linux, as
+an operator would run it. Fresh shell, scratch install and data dirs so
+your local binary and data survive. `P.Q.R` is the release this one
+replaces.
 
 ```bash
-WIRKEN_INSTALL_DIR=/tmp/wirken-smoke \
-    sh -c 'curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh'
-/tmp/wirken-smoke/wirken --version
-/tmp/wirken-smoke/wirken update --check
+mkdir -p /tmp/wirken-smoke && cd /tmp/wirken-smoke
+curl -fsSL --proto =https --proto-redir =https -o wirken \
+    https://github.com/gebruder/wirken/releases/download/vP.Q.R/wirken-x86_64-unknown-linux-musl
+chmod +x wirken
+./wirken --version                                             # P.Q.R
+export WIRKEN_DATA_DIR=/tmp/wirken-smoke/data
+./wirken update --check                                        # latest X.Y.Z
+./wirken update                                                # type X.Y.Z
+./wirken --version                                             # X.Y.Z
+./wirken update --check                                        # Up to date.
+./wirken update --rollback                                     # type rollback
+./wirken --version                                             # P.Q.R
 ```
 
-The installer output must contain both
-`Signature verified: releases@gebruder.ottenheimer.app` and
-`Checksum verified: ...`. If either is missing the release is broken.
+`update --check` from the previous binary must verify the published
+`releases.json` against the key compiled into it, name `X.Y.Z` as latest,
+and say `Security fixes in: X.Y.Z` exactly when this release's CHANGELOG
+section has a `### Security` heading. `update` must show the download's
+progress bar, then `sha256 matches; installing`, then `Installed wirken
+X.Y.Z at ... checked against releases.json signed by <fingerprint>`, where
+the fingerprint is the release key's. A refused signature, a fetch error, or
+a sha256 mismatch means the manifest step (6-9) or the build is broken for
+every installed binary. The rollback must restore `P.Q.R` byte for byte.
 
-`wirken update --check` from the installed binary must verify the published
-`releases.json` against the key compiled into it and end with `Up to date.`
-A refused signature or a fetch error means the manifest step (6-9) is broken
-for every installed binary.
+This replaces the old `install.sh` smoke test: `install.sh` is exercised by
+`scripts/test-install.sh` in the pre-flight, and the update path is the one
+only a published release can exercise.
 
 **Housekeeping.** Re-read `README.md` for any count or version that shifted.
 If `crates/audit/src/session_log.rs` changed since the previous release, sync
 the `wirken-siem` repo's compatibility table and field index in the same
-sitting. Clean up `/tmp/wirken-release` and `/tmp/wirken-smoke`.
+sitting. Clean up `/tmp/wirken-release` and `/tmp/wirken-smoke`, and unset
+`WIRKEN_DATA_DIR`.
 
 ## Recovery during a release
 
