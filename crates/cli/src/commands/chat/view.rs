@@ -492,7 +492,7 @@ fn card_lines(app: &App, width: usize, now: Instant) -> Vec<Line<'static>> {
         Span::raw("   "),
         Span::styled("[n] refuse", choice_style()),
         Span::styled(
-            "   Enter with nothing typed refuses.",
+            "   Enter alone refuses.",
             Style::default().fg(Color::DarkGray),
         ),
     ]));
@@ -744,15 +744,14 @@ mod tests {
     #[test]
     fn approve_and_refuse_are_drawn_alike() {
         let now = Instant::now();
-        // 100 columns, so the narrow panels still leave the hint room. At 80
-        // the panels take 24 columns and the hint is clipped to the rest.
-        let buffer = drawn(&card_app(now), now, 100, 30);
+        // 80 columns: the narrow panels take 24, and the hint fits the rest.
+        let buffer = drawn(&card_app(now), now, 80, 30);
         let approve = styles_of(&buffer, "[y] approve");
         let refuse = styles_of(&buffer, "[n] refuse");
         assert!(approve.iter().all(|s| *s == approve[0]));
         assert!(refuse.iter().all(|s| *s == refuse[0]));
         assert_eq!(approve[0], refuse[0], "neither answer is emphasised");
-        find(&buffer, "Enter with nothing typed refuses");
+        find(&buffer, "Enter alone refuses.");
     }
 
     #[test]

@@ -150,7 +150,7 @@ needs is asked on a card at the terminal whose message started the turn
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
 The card takes no keys for its first 0.7 seconds. Only a lone `y` or `yes`
 approves; anything else refuses, and text after `n` or `no`, or anything
-else typed, is recorded as the reason. Enter with nothing typed refuses, and
+else typed, is recorded as the reason. Enter alone refuses, and
 the two answers are drawn alike, so approving is never the default. The card
 is the one every surface renders, line by line: the request, the action key,
 the arguments that will run, where an `exec` runs, the runtime it runs under
