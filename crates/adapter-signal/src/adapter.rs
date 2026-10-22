@@ -12,6 +12,7 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
+use wirken_adapter_core::approval_card::CardStyle;
 use wirken_adapter_core::{OutboundFormatter, SignalFormatter};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
@@ -961,24 +962,13 @@ enum GatewayBoundAction {
     Skip,
 }
 
-/// The approval message body, plain text.
+/// The approval message body: the card every surface renders, plain,
+/// then the text commands that decide it.
 pub(crate) fn approval_body(fields: &convert::ApprovalRequestFields, prefix: &str) -> String {
-    let mut body = format!(
-        "Agent {} requests {} (tier {}).\nAction: {}",
-        fields.triggering_agent, fields.tool_name, fields.requested_tier, fields.action_key,
-    );
-    if !fields.exec_location.is_empty() {
-        body.push_str(&format!("\nWhere: {}", fields.exec_location));
-    }
-    body.push_str(&format!(
-        "\nTrigger: {}\nReply !approve {prefix} to approve or !deny {prefix} [reason] to deny.",
-        if fields.trigger_message.is_empty() {
-            "(none)"
-        } else {
-            fields.trigger_message.as_str()
-        },
-    ));
-    body
+    format!(
+        "{}\nReply !approve {prefix} to approve or !deny {prefix} [reason] to deny.",
+        fields.card().render(CardStyle::Plain)
+    )
 }
 
 /// Render the approval prompt in the configured conversation,

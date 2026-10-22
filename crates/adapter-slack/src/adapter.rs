@@ -5,6 +5,7 @@ use slack_morphism::prelude::*;
 use tokio::sync::Mutex;
 
 use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
+use wirken_adapter_core::approval_card::CardStyle;
 use wirken_adapter_core::{OutboundFormatter, SlackFormatter};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
@@ -461,6 +462,12 @@ async fn handle_outbound(
 /// `ApprovalRequestFailed` frame back to the gateway with a
 /// snake_case reason label so the audit row records the failure
 /// distinctly from a generic timeout.
+/// The approval message body: the card every surface renders, in
+/// mrkdwn. The actions block under it carries the decision.
+pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
+    fields.card().render(CardStyle::SlackMrkdwn)
+}
+
 async fn send_approval_request<C: SlackClientHttpConnector + Send + Sync>(
     session: &SlackClientSession<'_, C>,
     writer: &Arc<Mutex<IpcFrameWriter>>,
@@ -497,20 +504,7 @@ async fn send_approval_request<C: SlackClientHttpConnector + Send + Sync>(
         }
     };
 
-    let prompt = format!(
-        "*Agent* `{}` requests *{}* (tier `{}`).\n\
-         *Action:* `{}`\n\
-         *Trigger:* _{}_",
-        fields.triggering_agent,
-        fields.tool_name,
-        fields.requested_tier,
-        fields.action_key,
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            fields.trigger_message.clone()
-        },
-    );
+    let prompt = approval_text(&fields);
 
     let section = SlackSectionBlock::new().with_text(SlackBlockText::MarkDown(
         SlackBlockMarkDownText::new(prompt),

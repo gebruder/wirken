@@ -33,6 +33,9 @@ pub(crate) enum Entry {
         arguments: String,
         /// `None` while it runs.
         outcome: Option<bool>,
+        /// What it returned, as the chain records it. Empty while it
+        /// runs.
+        output: String,
     },
     Note(String),
 }
@@ -187,16 +190,25 @@ impl App {
                     name,
                     arguments,
                     outcome: None,
+                    output: String::new(),
                 });
             }
-            ServerEvent::ToolResult { id, success, .. } => {
-                if let Some(Entry::Tool { outcome, .. }) = self
+            ServerEvent::ToolResult {
+                id,
+                success,
+                output: returned,
+                ..
+            } => {
+                if let Some(Entry::Tool {
+                    outcome, output, ..
+                }) = self
                     .entries
                     .iter_mut()
                     .rev()
                     .find(|e| matches!(e, Entry::Tool { id: i, .. } if *i == id))
                 {
                     *outcome = Some(success);
+                    *output = returned;
                 }
             }
             ServerEvent::Approval(ask) => {
@@ -290,6 +302,7 @@ impl App {
                             name: e.name,
                             arguments: e.arguments,
                             outcome: e.success,
+                            output: e.output,
                         }),
                         _ => None,
                     })
@@ -857,6 +870,7 @@ mod tests {
                 id: "c1".into(),
                 name: "exec".into(),
                 success: true,
+                output: "notes.txt\n".into(),
             },
             now,
         );
@@ -870,11 +884,59 @@ mod tests {
                     id: "c1".into(),
                     name: "exec".into(),
                     arguments: "{}".into(),
-                    outcome: Some(true)
+                    outcome: Some(true),
+                    output: "notes.txt\n".into(),
                 },
                 Entry::Agent("Done.".into()),
             ]
         );
+    }
+
+    /// The model's reply after a tool round may be empty; what the tool
+    /// returned stays in the transcript whatever the reply says, as it
+    /// does when a conversation is resumed from the chain.
+    #[test]
+    fn a_tools_output_stays_when_the_reply_is_empty() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_server(
+            ServerEvent::ToolCall {
+                id: "c1".into(),
+                name: "exec".into(),
+                arguments: r#"{"command":"ls"}"#.into(),
+            },
+            now,
+        );
+        app.on_server(
+            ServerEvent::ToolResult {
+                id: "c1".into(),
+                name: "exec".into(),
+                success: true,
+                output: "notes.txt\ntodo.md\n".into(),
+            },
+            now,
+        );
+        let fallback = "(no response: the model returned nothing)";
+        app.on_server(ServerEvent::Reply(fallback.into()), now);
+        let tool = Entry::Tool {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: r#"{"command":"ls"}"#.into(),
+            outcome: Some(true),
+            output: "notes.txt\ntodo.md\n".into(),
+        };
+        assert_eq!(app.entries, [tool.clone(), Entry::Agent(fallback.into())]);
+
+        let mut resumed = App::new(Some("default".into()), "c-1".into());
+        resumed.on_answer(
+            Query::History,
+            serde_json::json!({"entries": [
+                {"kind": "tool", "id": "c1", "name": "exec", "arguments": "{\"command\":\"ls\"}",
+                 "success": true, "output": "notes.txt\ntodo.md\n"},
+                {"kind": "agent", "text": fallback},
+            ]}),
+        );
+        assert_eq!(resumed.entries, app.entries);
     }
 
     #[test]

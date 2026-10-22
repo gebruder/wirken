@@ -18,8 +18,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+use wirken_adapter_core::approval_card::{ApprovalCard, CardStyle, one_line};
 use wirken_agent::approval_gate::{ApprovalGate, ApprovalOutcome};
 use wirken_agent::error::PermissionDenialContext;
+use wirken_agent::exec_location::runtime_name;
 use wirken_audit::ApprovalSource;
 
 /// Default wall-clock cap on the prompt read. Overridable via
@@ -58,38 +60,12 @@ fn timeout_from(raw: Option<&str>) -> Duration {
     }
 }
 
-/// Model output on its way to a terminal, as one printable line.
+/// What the operator is shown before `[y/N]`: the approval card every
+/// surface renders ([`ApprovalCard`]), as plain text.
 ///
-/// Two steps, and both are needed. [`strip_control_sequences`] takes
-/// out the escapes, which is what stops a model from erasing the line
-/// above or repainting the question. Folding the line breaks is what
-/// stops it from writing a second line that looks like the question:
-/// an argument that contains a newline would otherwise be printed as
-/// two lines, the second of which the model chooses in full.
-///
-/// A literal `approve? [y/N]:` inside the argument text survives both
-/// steps, and should: it is part of the command being approved, and
-/// it is shown indented under `arguments:` where the operator is
-/// looking. What it cannot do is occupy a line of its own.
-fn one_line(s: &str) -> String {
-    wirken_agent::ansi::strip_control_sequences(s)
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
-
-/// Longest argument string the prompt prints before cutting it.
-///
-/// The argument is what the operator is being asked to approve, so
-/// the cut is generous: a real command is far shorter, and anything
-/// near this is already a reason to answer no. The cut is marked, so
-/// a decision is never made on text that silently ended.
-const MAX_ARGUMENT_CHARS: usize = 2000;
-
-/// What the operator is shown before `[y/N]`.
-///
-/// Three things beyond the tool name and the tier, because the tool
-/// name and the tier do not say what is about to happen:
+/// The card shows three things beyond the tool name and the tier,
+/// because the tool name and the tier do not say what is about to
+/// happen:
 ///
 /// - the action key, which is what the gate matched and what a
 ///   stored grant would be recorded under;
@@ -99,88 +75,38 @@ const MAX_ARGUMENT_CHARS: usize = 2000;
 ///   `shell::pipeline:`, so the key alone cannot distinguish
 ///   `cat a | bash` from `cat b | bash`;
 /// - what the model said in the same message as the call, which is
-///   its own statement of what it is about to do;
-/// - the message that triggered the turn, which is the operator's
-///   own last input and the context in which the call makes sense or
-///   does not.
+///   its own statement of what it is about to do, and is labeled a
+///   claim.
 ///
-/// Everything interpolated here except the tier is either model
-/// output or an inbound message, so every one of them goes through
-/// [`strip_control_sequences`] first. Without it a model can emit an
-/// escape sequence that rewrites the line above it, hides the
-/// command it is asking to run, or redraws the prompt it is being
-/// judged by.
+/// Everything on the card except the tier is either model output or
+/// an inbound message, so the card cleans every value: escapes out,
+/// line breaks folded, a long value cut with a marker. Without that a
+/// model can emit an escape sequence that rewrites the line above it,
+/// hides the command it is asking to run, or redraws the prompt it is
+/// being judged by.
 pub(crate) fn render_prompt(ctx: &PermissionDenialContext) -> String {
-    use std::fmt::Write as _;
-
-    let clean = one_line;
-
-    let mut prompt = String::new();
-    let _ = writeln!(
-        prompt,
-        "wirken: agent '{}' requests '{}' ({})",
-        clean(&ctx.agent_id),
-        clean(&ctx.tool_name),
-        ctx.requested_tier.label(),
-    );
-    let _ = writeln!(
-        prompt,
-        "  action key: {}",
-        clean(&ctx.action.approval_key())
-    );
-
-    match ctx.arguments.as_deref() {
-        Some(raw) => {
-            let cleaned = clean(raw);
-            let shown: String = cleaned.chars().take(MAX_ARGUMENT_CHARS).collect();
-            let cut = cleaned.chars().count() > MAX_ARGUMENT_CHARS;
-            let _ = writeln!(
-                prompt,
-                "  arguments:  {shown}{}",
-                if cut { " … (cut)" } else { "" }
-            );
-        }
-        // Not every gated action comes from a tool call: sandbox
-        // egress asks about a destination, which the key above
-        // already names. Saying so beats printing an empty field.
-        None => {
-            let _ = writeln!(
-                prompt,
-                "  arguments:  (none; the action key is the whole ask)"
-            );
-        }
-    }
-
-    // Where the command runs if approved. Built by the gateway from its
-    // own sandbox settings, not model output, so it is printed as is.
-    if let Some(location) = &ctx.exec_location {
-        let _ = writeln!(prompt, "  where:      {}", location.text);
-    }
-
-    if let Some(said) = ctx.assistant_text.as_deref().filter(|t| !t.is_empty()) {
-        let cleaned = clean(said);
-        let shown: String = cleaned.chars().take(MAX_ARGUMENT_CHARS).collect();
-        let cut = cleaned.chars().count() > MAX_ARGUMENT_CHARS;
-        let _ = writeln!(
-            prompt,
-            "  the model said: {shown}{}",
-            if cut { " … (cut)" } else { "" }
-        );
-    }
-
-    if let Some(trigger) = ctx.trigger_message.as_deref().filter(|t| !t.is_empty()) {
-        let cleaned = clean(trigger);
-        let shown: String = cleaned.chars().take(MAX_ARGUMENT_CHARS).collect();
-        let cut = cleaned.chars().count() > MAX_ARGUMENT_CHARS;
-        let _ = writeln!(
-            prompt,
-            "  in reply to: {shown}{}",
-            if cut { " … (cut)" } else { "" }
-        );
-    }
-
-    prompt.push_str("approve? [y/N]: ");
+    let mut prompt = card(ctx).render(CardStyle::Plain);
+    prompt.push_str("\napprove? [y/N]: ");
     prompt
+}
+
+/// The card for a denial context: the gateway's own fields, with the
+/// runtime named from the exec location's mode.
+fn card(ctx: &PermissionDenialContext) -> ApprovalCard {
+    ApprovalCard {
+        agent: ctx.agent_id.clone(),
+        tool_name: ctx.tool_name.clone(),
+        tier: ctx.requested_tier.label().to_string(),
+        action_key: ctx.action.approval_key(),
+        arguments: ctx.arguments.clone(),
+        exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
+        exec_runtime: ctx
+            .exec_location
+            .as_ref()
+            .map(|l| runtime_name(l.mode).to_string()),
+        trigger_message: ctx.trigger_message.clone(),
+        assistant_text: ctx.assistant_text.clone(),
+    }
 }
 
 /// Stdin gate that prompts on stderr (so stdout pipes stay clean
@@ -309,9 +235,9 @@ impl ApprovalGate for LyrikPromptGate {
 /// `wirken lyrik: <asker> wants to run:`, the command on its own
 /// line, then the question. The command is what `exec` will run,
 /// rebuilt from the arguments the way the dispatcher does, cleaned of
-/// escapes and folded onto one line like every other model text the
-/// prompt shows. A call other than `exec` shows its tool name and
-/// arguments in the same place.
+/// escapes, folded onto one line and cut with a marker like every
+/// value on the approval card. A call other than `exec` shows its
+/// tool name and arguments in the same place.
 pub(crate) fn render_lyrik_prompt(asker: &str, ctx: &PermissionDenialContext) -> String {
     let raw = ctx.arguments.as_deref().unwrap_or("");
     let command = if ctx.tool_name == "exec" {
@@ -322,13 +248,10 @@ pub(crate) fn render_lyrik_prompt(asker: &str, ctx: &PermissionDenialContext) ->
     } else {
         format!("{} {raw}", ctx.tool_name)
     };
-    let command = one_line(&command);
-    let shown: String = command.chars().take(MAX_ARGUMENT_CHARS).collect();
-    let cut = command.chars().count() > MAX_ARGUMENT_CHARS;
     format!(
-        "wirken lyrik: {} wants to run:\n  {shown}{}\napprove? [y/N]: ",
+        "wirken lyrik: {} wants to run:\n  {}\napprove? [y/N]: ",
         one_line(asker),
-        if cut { " … (cut)" } else { "" }
+        one_line(&command)
     )
 }
 
@@ -683,18 +606,21 @@ mod tests {
     fn the_exec_prompt_says_where_the_command_runs() {
         use wirken_agent::exec_location::describe;
         use wirken_agent::sandbox::{SandboxConfig, SandboxMode};
-        for (mode, line) in [
+        for (mode, line, runtime) in [
             (
                 SandboxMode::ExecOnly,
-                "  where:      runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n",
+                "runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n",
+                "runtime: Docker default runtime (runc)\n",
             ),
             (
                 SandboxMode::GVisor,
-                "  where:      runs in sandbox container (gvisor, read-only root, workspace at /workspace, no network)\n",
+                "runs: runs in sandbox container (gvisor, read-only root, workspace at /workspace, no network)\n",
+                "runtime: gVisor (runsc)\n",
             ),
             (
                 SandboxMode::Off,
-                "  where:      runs on this host as davi\n",
+                "runs: runs on this host as davi\n",
+                "runtime: this host, no container\n",
             ),
         ] {
             let config = SandboxConfig {
@@ -711,8 +637,9 @@ mod tests {
             ctx.exec_location = Some(describe(&config, None, "davi"));
             let prompt = render_prompt(&ctx);
             assert!(prompt.contains(line), "{mode:?}: {prompt}");
+            assert!(prompt.contains(runtime), "{mode:?}: {prompt}");
             assert!(
-                prompt.find("  where:").unwrap() < prompt.find("approve? [y/N]").unwrap(),
+                prompt.find("runs:").unwrap() < prompt.find("approve? [y/N]").unwrap(),
                 "said before the question"
             );
         }
@@ -727,7 +654,9 @@ mod tests {
             },
             Some(r#"{"url": "https://example.com"}"#),
         );
-        assert!(!render_prompt(&ctx).contains("where:"));
+        let prompt = render_prompt(&ctx);
+        assert!(!prompt.contains("runs:"), "{prompt}");
+        assert!(!prompt.contains("runtime:"), "{prompt}");
     }
 
     /// The shell case is the one the action key cannot describe: a
@@ -745,29 +674,29 @@ mod tests {
         let prompt = render_prompt(&ctx);
 
         assert!(
-            prompt.starts_with("wirken: agent 'default' requests 'exec' (tier3)\n"),
+            prompt.starts_with("request: agent default requests exec (tier3)\n"),
             "{prompt}"
         );
         assert!(
-            prompt.contains("  action key: shell::pipeline:\n"),
+            prompt.contains("\naction key: shell::pipeline:\n"),
             "the key the gate matched: {prompt}"
         );
         assert!(
-            prompt.contains(r#"  arguments:  {"command": "cat ./payload.sh | bash"}"#),
+            prompt.contains(r#"arguments: {"command": "cat ./payload.sh | bash"}"#),
             "the command itself, which the key does not carry: {prompt}"
         );
         assert!(
-            prompt.contains("  the model said: Pulling the release notes now.\n"),
-            "what the model said in the same message: {prompt}"
+            prompt.contains("\nmodel's claim (unverified): Pulling the release notes now.\n"),
+            "what the model said in the same message, labeled a claim: {prompt}"
         );
         assert!(
-            prompt.contains("  in reply to: summarise the release notes\n"),
+            prompt.contains("\nin reply to: summarise the release notes\n"),
             "{prompt}"
         );
         assert!(prompt.ends_with("approve? [y/N]: "), "{prompt}");
         assert!(
-            prompt.find("arguments:").unwrap() < prompt.find("the model said:").unwrap(),
-            "the sentence reads under the command it accompanies"
+            prompt.find("arguments:").unwrap() < prompt.find("model's claim").unwrap(),
+            "the claim reads under the command it accompanies"
         );
         assert!(
             prompt.find("arguments:").unwrap() < prompt.find("approve?").unwrap(),
@@ -790,10 +719,7 @@ mod tests {
         );
         let prompt = render_prompt(&ctx);
 
-        assert!(
-            prompt.contains("requests 'http_request' (tier3)"),
-            "{prompt}"
-        );
+        assert!(prompt.contains("requests http_request (tier3)"), "{prompt}");
         assert!(
             prompt.contains("action key: network:exfil.example.net"),
             "{prompt}"
@@ -807,7 +733,7 @@ mod tests {
             "the slot it would spend: {prompt}"
         );
         assert!(
-            prompt.contains("the model said: Pulling the release notes now."),
+            prompt.contains("model's claim (unverified): Pulling the release notes now."),
             "the sentence, which names none of that: {prompt}"
         );
     }
@@ -827,24 +753,24 @@ mod tests {
         let prompt = render_prompt(&ctx);
 
         assert!(
-            prompt.contains("requests 'vault_dump_all' (tier3)"),
+            prompt.contains("requests vault_dump_all (tier3)"),
             "{prompt}"
         );
         assert!(
             prompt.contains("action key: tool:vault_dump_all"),
             "{prompt}"
         );
-        assert!(prompt.contains(r#"arguments:  {"scope": "*"}"#), "{prompt}");
+        assert!(prompt.contains(r#"arguments: {"scope": "*"}"#), "{prompt}");
         assert!(
-            prompt.contains("the model said: Pulling the release notes now."),
+            prompt.contains("model's claim (unverified): Pulling the release notes now."),
             "{prompt}"
         );
     }
 
     /// A model that sent calls and no text leaves the line out
-    /// rather than printing an empty one: a blank "the model said:"
-    /// reads as a model that said nothing in particular, which is a
-    /// different claim from a model that said nothing.
+    /// rather than printing an empty one: a blank claim line reads as
+    /// a model that said nothing in particular, which is a different
+    /// claim from a model that said nothing.
     #[test]
     fn absent_model_text_omits_the_line() {
         let ctx = said_ctx(
@@ -856,11 +782,11 @@ mod tests {
             None,
         );
         let prompt = render_prompt(&ctx);
-        assert!(!prompt.contains("the model said:"), "{prompt:?}");
+        assert!(!prompt.contains("model's claim"), "{prompt:?}");
         assert_eq!(
             prompt.lines().count(),
             5,
-            "head, key, arguments, trigger, question, and no said line: {prompt:?}"
+            "request, key, arguments, trigger, question, and no claim line: {prompt:?}"
         );
 
         // An empty string is the same absence, not an empty sentence.
@@ -872,7 +798,7 @@ mod tests {
             Some(r#"{"command": "ls"}"#),
             Some(""),
         );
-        assert!(!render_prompt(&ctx).contains("the model said:"));
+        assert!(!render_prompt(&ctx).contains("model's claim"));
     }
 
     /// The arguments are model output on their way to a terminal. An
@@ -906,8 +832,8 @@ mod tests {
         assert_eq!(
             prompt.lines().count(),
             6,
-            "a line each for the head, the key, the arguments, the sentence, \
-             the trigger and the question: {prompt:?}"
+            "a line each for the request, the key, the arguments, the trigger, \
+             the claim and the question: {prompt:?}"
         );
         assert!(prompt.ends_with("approve? [y/N]: "));
     }
@@ -939,7 +865,10 @@ mod tests {
     /// is never taken on text that ended without saying so.
     #[test]
     fn a_long_argument_is_cut_and_says_so() {
-        let long = format!(r#"{{"command": "{}"}}"#, "a".repeat(MAX_ARGUMENT_CHARS * 2));
+        let long = format!(
+            r#"{{"command": "{}"}}"#,
+            "a".repeat(wirken_adapter_core::approval_card::MAX_VALUE_CHARS * 2)
+        );
         let ctx = ctx_for(
             "exec",
             wirken_gateway::permissions::Action::ShellExec {
@@ -970,7 +899,7 @@ mod tests {
         );
         let prompt = render_prompt(&ctx);
         assert!(
-            prompt.contains("arguments:  (none; the action key is the whole ask)"),
+            prompt.contains("arguments: (none; the action key is the whole ask)"),
             "{prompt}"
         );
     }

@@ -384,12 +384,16 @@ const HTML: &str = r#"<!DOCTYPE html>
   .approval-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
   .approval-sentence { font-size: 12.5px; line-height: 1.45; color: rgba(233,233,237,.62); flex: 1 1 320px; }
   .approval-age { font-size: 11.5px; color: rgba(233,233,237,.5); white-space: nowrap; margin-left: auto; }
-  .approval-cmd { font-family: var(--mono); font-size: 13px; line-height: 1.5; background: rgba(0,0,0,.4); padding: 10px 12px; border-radius: 7px; overflow-x: auto; white-space: pre; }
   .approval-note { font-size: 11.5px; color: rgba(233,233,237,.5); }
-  .approval-where { font-size: 12.5px; line-height: 1.45; color: rgba(233,233,237,.82); }
-  .approval-said { margin-top: 6px; font-size: 12.5px; line-height: 1.45; }
-  .approval-said-label { color: rgba(233,233,237,.5); margin-right: 6px; }
-  .approval-said-text { color: rgba(233,233,237,.82); }
+  /* The card's lines: label, then value. The arguments and the key are
+     code; the model's claim is set apart from what the gateway
+     established. */
+  .approval-lines { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; line-height: 1.45; }
+  .approval-line { display: flex; gap: 6px; align-items: baseline; }
+  .approval-label { color: rgba(233,233,237,.5); white-space: nowrap; flex: none; }
+  .approval-value { color: rgba(233,233,237,.82); overflow-wrap: anywhere; }
+  .approval-code .approval-value { font-family: var(--mono); font-size: 13px; background: rgba(0,0,0,.4); padding: 2px 6px; border-radius: 5px; }
+  .approval-claim .approval-value { font-style: italic; color: var(--accent-300); }
   .input { width: 100%; background: rgba(0,0,0,.25); border: 1px solid var(--neutral-800); border-radius: var(--radius-md); padding: 9px 12px; font-size: 13px; color: var(--text); resize: none; }
   .input::placeholder { color: rgba(233,233,237,.38); }
   .input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 2px rgba(145,132,217,.25); }
@@ -857,6 +861,41 @@ function approvalSentence(ev) {
   return String(ev.tool_name || 'This tool') + ' needs approval.' + tail;
 }
 
+// The runtime the gateway named, in words. The gateway decides it from
+// the agent's sandbox mode; this only names what it was told, and shows
+// a value it does not know as sent.
+function runtimeWords(runtime) {
+  if (runtime === 'gvisor') return 'gVisor (runsc)';
+  if (runtime === 'docker') return 'Docker default runtime (runc)';
+  if (runtime === 'host') return 'this host, no container';
+  return String(runtime || '');
+}
+// A value as one line, as every surface shows it: line breaks folded
+// and a long value cut with a marker, so an argument cannot write a
+// second line that reads as part of the card. A text node renders no
+// escape sequence, so there is nothing to strip here.
+function oneLine(v) {
+  const folded = String(v).replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t');
+  const chars = Array.from(folded);
+  return chars.length > 2000 ? chars.slice(0, 2000).join('') + ' … (cut)' : folded;
+}
+// The approval card every surface renders: the same lines in the same
+// order with the same labels. The arguments are what will run and are
+// never a claim; the model's words beside the call are its own claim,
+// last and set apart.
+function approvalCardLines(ev) {
+  const lines = [
+    ['request', 'agent ' + String(ev.triggering_agent || '') + ' requests ' + String(ev.tool_name || '') + ' (' + String(ev.requested_tier || '') + ')'],
+    ['action key', String(ev.action_key || '')],
+    ['arguments', ev.arguments ? ev.arguments : '(none; the action key is the whole ask)'],
+  ];
+  if (ev.exec_location) lines.push(['runs', ev.exec_location]);
+  if (ev.exec_runtime) lines.push(['runtime', runtimeWords(ev.exec_runtime)]);
+  if (ev.trigger_message) lines.push(['in reply to', ev.trigger_message]);
+  if (ev.assistant_text) lines.push(["model's claim (unverified)", ev.assistant_text, true]);
+  return lines.map(([label, value, claim]) => ({ label, value: oneLine(value), claim: claim === true }));
+}
+
 function renderApproval(ev) {
   if (approvalCurrent) { approvalQueue.push(ev); return; }
   approvalCurrent = ev;
@@ -873,31 +912,20 @@ function renderApproval(ev) {
   head.appendChild(age);
   card.appendChild(head);
 
-  // The event carries the arguments the model sent, so the card shows
+  // The event carries every field the card shows, so the card shows
   // what is being approved on its first paint. It used to show the
-  // action key here and swap in the command once the events poll had
-  // the call row, which meant the card could be decided on before the
-  // command it was about had arrived.
-  const cmd = el('div', 'approval-cmd', ev.arguments || ev.action_key || ev.tool_name || '');
-  const note = el('div', 'approval-note',
-    (ev.arguments ? 'arguments as sent by the model · action key ' + (ev.action_key || '')
-                  : 'action key as computed by the gate') + ' · tool ' + (ev.tool_name || ''));
-  card.appendChild(cmd);
-  card.appendChild(note);
-  // Where the command runs if approved: a container or this host.
-  // The gateway builds the line from the settings the exec will use.
-  if (ev.exec_location) {
-    card.appendChild(el('div', 'approval-where', ev.exec_location));
+  // action key where the command belonged and swap in the command
+  // once the events poll had the call row, which meant the card could
+  // be decided on before the command it was about had arrived.
+  const lines = el('div', 'approval-lines');
+  for (const line of approvalCardLines(ev)) {
+    const code = line.label === 'arguments' || line.label === 'action key';
+    const row = el('div', 'approval-line' + (code ? ' approval-code' : '') + (line.claim ? ' approval-claim' : ''));
+    row.appendChild(el('span', 'approval-label', line.label + ':'));
+    row.appendChild(el('span', 'approval-value', line.value));
+    lines.appendChild(row);
   }
-  // What the model said in the same message as the call. Its own
-  // statement of intent, which the arguments do not carry. Absent
-  // when the model sent calls and no text.
-  if (ev.assistant_text) {
-    const said = el('div', 'approval-said');
-    said.appendChild(el('span', 'approval-said-label', 'the model said:'));
-    said.appendChild(el('span', 'approval-said-text', ev.assistant_text));
-    card.appendChild(said);
-  }
+  card.appendChild(lines);
   // The thread's own row for this call is marked as awaiting a
   // decision when the poll reaches it. That is all the join is for
   // now: the card no longer needs the chain to say what it is about.
@@ -3969,12 +3997,15 @@ fn approvals_snapshot_for(
             let trigger = detail.as_ref().and_then(|d| d.trigger_message.clone());
             let args = detail.as_ref().and_then(|d| d.arguments.clone());
             let said = detail.as_ref().and_then(|d| d.assistant_text.clone());
-            let location = detail.and_then(|d| d.exec_location);
+            let location = detail.as_ref().and_then(|d| d.exec_location.clone());
+            let runtime = detail.and_then(|d| d.exec_runtime);
             mine.push(json!({
                 "request_id": entry.request_id,
                 // The page keys a restored card to its conversation by
-                // this field, so it carries the session id.
+                // this field, so it carries the session id; the agent
+                // asking is on `triggering_agent`, as on the event.
                 "agent_id": entry.session_id,
+                "triggering_agent": entry.agent_id,
                 "tool_name": entry.tool_name,
                 "action_key": entry.action_key,
                 "requested_tier": entry.requested_tier,
@@ -3990,6 +4021,7 @@ fn approvals_snapshot_for(
                 "arguments": args,
                 "assistant_text": said,
                 "exec_location": location,
+                "exec_runtime": runtime,
             }));
         } else {
             let channel = session_channel(&entry.session_id)
@@ -6794,8 +6826,65 @@ mod tests {
             assistant_text: None,
             arguments: None,
             exec_location: None,
+            exec_runtime: None,
             session_id: session_id.into(),
         }
+    }
+
+    /// A restored card draws the same lines as the live one: the
+    /// snapshot carries the agent asking, the arguments, what the model
+    /// said, where an `exec` runs and under which runtime.
+    #[test]
+    fn approvals_snapshot_carries_the_card_fields() {
+        let queue = PendingApprovalQueue::new();
+        let mut request = pending("default/webchat/webchat-default", "list the files");
+        request.arguments = Some(r#"{"command":"ls"}"#.into());
+        request.assistant_text = Some("Listing.".into());
+        request.exec_location = Some("runs in sandbox container".into());
+        request.exec_runtime = Some("gvisor".into());
+        let (_id, _rx) = queue.register(request);
+        let v = approvals_snapshot_for(&queue, None);
+        let mine = &v["mine"][0];
+        assert_eq!(mine["triggering_agent"], "default");
+        assert_eq!(mine["arguments"], r#"{"command":"ls"}"#);
+        assert_eq!(mine["assistant_text"], "Listing.");
+        assert_eq!(mine["exec_location"], "runs in sandbox container");
+        assert_eq!(mine["exec_runtime"], "gvisor");
+    }
+
+    /// The page draws the one card every surface renders: the same
+    /// labels in the same order, the runtime in words from the value
+    /// the gateway sent, and the model's words set apart as a claim.
+    #[test]
+    fn the_approval_card_draws_the_shared_template() {
+        let script = page_script();
+        let lines = script
+            .split_once("function approvalCardLines(ev) {")
+            .expect("the card's lines")
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let mut at = 0;
+        for label in [
+            "'request'",
+            "'action key'",
+            "'arguments'",
+            "'runs'",
+            "'runtime'",
+            "'in reply to'",
+            "\"model's claim (unverified)\"",
+        ] {
+            let i = lines[at..]
+                .find(label)
+                .unwrap_or_else(|| panic!("{label} in order"));
+            at += i;
+        }
+        assert!(lines.contains("runtimeWords(ev.exec_runtime)"));
+        assert!(lines.contains("'(none; the action key is the whole ask)'"));
+        assert!(script.contains("if (runtime === 'gvisor') return 'gVisor (runsc)';"));
+        assert!(script.contains("line.claim ? ' approval-claim' : ''"));
+        assert!(HTML.contains(".approval-claim .approval-value { font-style: italic;"));
     }
 
     /// The list carries this browser's requests with their trigger text

@@ -60,6 +60,11 @@ pub enum AckResult {
 /// with a `type` discriminator matching the existing event format
 /// (`{"type":"delta","text":...}`). The slice adds two new types
 /// alongside the existing delta/error events the agent loop emits.
+// `ApprovalRequest` carries the whole approval card inline. Boxing it
+// to satisfy `large_enum_variant` would change the shape every gate and
+// test matches on purely to shrink the small `ApprovalDecisionAck`, so
+// the card stays inline by choice.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseEvent {
@@ -87,9 +92,13 @@ pub enum SseEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_text: Option<String>,
         /// Where an `exec` runs if approved, the same line every
-        /// approval surface shows. Absent for other tools.
+        /// approval surface shows, and the container runtime it runs
+        /// under (`gvisor`, `docker` or `host`). Absent for other
+        /// tools.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exec_location: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exec_runtime: Option<String>,
     },
     /// Gateway → browser. Fires after the operator POSTs to
     /// /api/approvals/{request_id}. Distinct from
@@ -276,6 +285,7 @@ mod tests {
             trigger_message: "clean logs".into(),
             assistant_text: None,
             exec_location: None,
+            exec_runtime: None,
             arguments: None,
         };
         let line = ev.to_sse_line();

@@ -225,9 +225,16 @@ here.
 
 ### Setup
 
-Install [signal-cli](https://github.com/AsamK/signal-cli); the native
-GraalVM-compiled build has no JRE dependency. Then link it as a secondary
-device, which keeps your phone primary and needs no new number:
+Install [signal-cli](https://github.com/AsamK/signal-cli) from its release
+page, using the `Linux-native` tarball. That build is GraalVM-compiled and has
+no JRE dependency. Check the `.asc` signature against the maintainer's key
+before you unpack it. Put the binary on your `PATH`, for example in
+`~/.local/bin`. The native build reads the working directory at startup, so
+run it from a directory that exists; otherwise it fails with `Could not
+determine current working directory`.
+
+Then link it as a secondary device, which keeps your phone primary and needs
+no new number:
 
 ```bash
 signal-cli link -n "wirken"
@@ -262,6 +269,30 @@ To skip the prompts, pass `--phone-number`, `--endpoint` and
 `WIRKEN_SIGNAL_ENDPOINT` and `WIRKEN_SIGNAL_ALLOWED_SENDERS`. With no terminal,
 an endpoint not given is `/tmp/signal-cli.sock` and an allowlist not given is
 empty, which drops every inbound message.
+
+### Approvals
+
+Tool calls that need approval are answered in Signal, not with buttons. Two
+settings control where and by whom:
+
+```bash
+wirken approvers set-chat signal +15551234567          # where prompts render
+wirken approvers add signal +15551234567 --display "Name"   # who may approve
+wirken run                                             # both load at startup
+```
+
+`set-chat` takes your E.164 number for a 1:1 DM, or a base64 group ID for a
+group. `approvers add` takes the E.164 number of each operator allowed to
+approve or deny. A reply from anyone else is logged as an unauthorized actor
+and dropped. Both settings are read at startup, so restart `wirken run` after
+changing them.
+
+The prompt shows a prefix. Reply in the approval chat with `!approve <prefix>`
+or `!deny <prefix> [reason]`.
+
+To send from your own number (Note to Self), signal-cli delivers those messages
+as sync messages from your other device, and wirken drops them unless
+`WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1` is set on `wirken run`.
 
 ### The allowlist is the perimeter
 

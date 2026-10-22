@@ -33,6 +33,7 @@ use wirken_ipc::wirken_capnp::frame;
 
 use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
 use crate::error::PermissionDenialContext;
+use crate::exec_location::runtime_name;
 
 /// Default wall-clock cap on a terminal approval await. Same 300s as
 /// the other out-of-band surfaces.
@@ -41,22 +42,6 @@ pub const DEFAULT_TERMINAL_TIMEOUT_SECS: u64 = 300;
 /// The denial reason recorded when the terminal is gone before it
 /// decided: closed, or not reachable to ask.
 pub const CLIENT_GONE_REASON: &str = "terminal client disconnected";
-
-/// The container runtime a sandbox mode runs an `exec` under, as the
-/// terminal names it. The mode decides it: `gvisor` passes Docker the
-/// `runsc` runtime, `exec-only` passes none, so Docker's default runtime
-/// runs the container, and `off` runs the command on the host. There is
-/// no fallback between them: a `gvisor` mode whose `runsc` runtime is
-/// missing refuses `exec` instead (`crate::tool`), and every `exec` that
-/// ran records the runtime Docker was told to use on its `ToolResult`
-/// row.
-pub fn exec_runtime_name(mode: wirken_audit::SandboxModeLabel) -> &'static str {
-    match mode {
-        wirken_audit::SandboxModeLabel::Gvisor => "gvisor",
-        wirken_audit::SandboxModeLabel::ExecOnly => "docker",
-        wirken_audit::SandboxModeLabel::Off => "host",
-    }
-}
 
 pub fn resolve_terminal_timeout() -> Duration {
     terminal_timeout_from(
@@ -137,6 +122,10 @@ impl ApprovalGate for TerminalApprovalGate {
             arguments: ctx.arguments.clone(),
             assistant_text: ctx.assistant_text.clone(),
             exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
+            exec_runtime: ctx
+                .exec_location
+                .as_ref()
+                .map(|l| runtime_name(l.mode).to_string()),
         };
         let (request_id, rx) = self.queue.register(request);
 
@@ -164,7 +153,7 @@ impl ApprovalGate for TerminalApprovalGate {
             req.set_exec_runtime(
                 ctx.exec_location
                     .as_ref()
-                    .map(|l| exec_runtime_name(l.mode))
+                    .map(|l| runtime_name(l.mode))
                     .unwrap_or(""),
             );
         }

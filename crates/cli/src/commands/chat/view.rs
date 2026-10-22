@@ -10,22 +10,66 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use wirken_adapter_core::approval_card::runtime_words;
+
 use super::app::{App, Entry};
-use super::panels::{SideItem, panels, runtime_words};
+use super::panels::{SideItem, panels};
 use super::text::{layout_input, sanitize, width, wrap};
 
 /// Rows of arguments a card shows before it says the rest is cut.
 const CARD_ARGUMENT_ROWS: usize = 8;
 /// Rows of anything else a card shows per field.
 const CARD_FIELD_ROWS: usize = 3;
+/// Rows of a tool's output the transcript shows before it says the
+/// rest is cut.
+const TOOL_OUTPUT_ROWS: usize = 6;
 /// Rows of draft the input box grows to.
 const INPUT_ROWS: usize = 6;
-/// Columns the sidebar and the panels take, and the screen width each
-/// needs before it is drawn.
+/// Columns the sidebar and the panels take beside the transcript, and
+/// the least the transcript keeps.
 const SIDEBAR_COLS: u16 = 30;
-const SIDEBAR_FROM: u16 = 90;
 const PANELS_COLS: u16 = 36;
-const PANELS_FROM: u16 = 120;
+const TRANSCRIPT_MIN_COLS: u16 = 54;
+
+/// What fits beside the transcript at `width`: the sidebar's and the
+/// panels' columns, and a note for the status line when something
+/// toggled on is not drawn.
+///
+/// Both flags start on, so on a screen too narrow for the panels a
+/// toggle used to change nothing anyone could see. Now the panels are
+/// drawn whenever they fit at all, taking the sidebar's place when the
+/// two do not fit together, and when even that is too wide the status
+/// line says how many columns they need.
+fn fit(width: u16, show_sidebar: bool, show_panels: bool) -> (u16, u16, Option<String>) {
+    let panels_need = PANELS_COLS + TRANSCRIPT_MIN_COLS;
+    let both_need = SIDEBAR_COLS + panels_need;
+    let panel_cols = if show_panels && width >= panels_need {
+        PANELS_COLS
+    } else {
+        0
+    };
+    let side_cols = if show_sidebar
+        && width >= SIDEBAR_COLS + TRANSCRIPT_MIN_COLS
+        && (panel_cols == 0 || width >= both_need)
+    {
+        SIDEBAR_COLS
+    } else {
+        0
+    };
+    // Short, because the status line is as wide as the transcript.
+    let note = if show_panels && panel_cols == 0 {
+        Some(format!(
+            "panels hidden: need {panels_need} columns, {width} now"
+        ))
+    } else if show_sidebar && side_cols == 0 && panel_cols > 0 {
+        Some(format!(
+            "sidebar hidden: both need {both_need} columns, {width} now"
+        ))
+    } else {
+        None
+    };
+    (side_cols, panel_cols, note)
+}
 
 /// How the model's own words are drawn on the card: set apart from what
 /// the gateway established, because they are a claim, not a fact.
@@ -43,19 +87,10 @@ pub(crate) fn choice_style() -> Style {
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let full = frame.area();
-    let side_cols = if app.show_sidebar && full.width >= SIDEBAR_FROM {
-        SIDEBAR_COLS
-    } else {
-        0
-    };
-    let panel_cols = if app.show_panels && full.width >= PANELS_FROM {
-        PANELS_COLS
-    } else {
-        0
-    };
+    let (side_cols, panel_cols, layout_note) = fit(full.width, app.show_sidebar, app.show_panels);
     let [side_area, area, panel_area] = Layout::horizontal([
         Constraint::Length(side_cols),
-        Constraint::Min(30),
+        Constraint::Min(TRANSCRIPT_MIN_COLS),
         Constraint::Length(panel_cols),
     ])
     .areas(full);
@@ -156,14 +191,17 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         .filter(|r| !r.is_empty())
         .map(|r| format!("exec: {} · ", sanitize(&runtime_words(r))))
         .unwrap_or_default();
+    // A toggle the screen cannot honour is explained here, in place of
+    // the key hints, so the key is never seen to do nothing.
+    let line = match layout_note {
+        Some(note) => note,
+        None => format!(
+            "{exec}Enter send · Ctrl+J newline · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar \
+             · Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
+        ),
+    };
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            format!(
-                "{exec}Enter send · Ctrl+J newline · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar \
-                 · Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
-            ),
-            Style::default().fg(Color::DarkGray),
-        )),
+        Paragraph::new(Line::styled(line, Style::default().fg(Color::DarkGray))),
         status_area,
     );
 }
@@ -304,6 +342,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 name,
                 arguments,
                 outcome,
+                output,
                 ..
             } => {
                 let state = match outcome {
@@ -326,6 +365,20 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Span::raw(shown),
                     Span::styled(format!(" {state}"), Style::default().fg(Color::DarkGray)),
                 ]));
+                // What the tool returned, under its line, however the
+                // model's reply then went.
+                let returned = sanitize(output);
+                let body = wrap(returned.trim_end(), width.saturating_sub(4));
+                let cut = body.len() > TOOL_OUTPUT_ROWS;
+                for row in body.into_iter().take(TOOL_OUTPUT_ROWS) {
+                    lines.push(Line::raw(format!("    {row}")));
+                }
+                if cut {
+                    lines.push(Line::styled(
+                        "    ... (cut)",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
             }
             Entry::Note(text) => {
                 for row in wrap(&sanitize(text), width.saturating_sub(2)) {
@@ -401,35 +454,24 @@ fn card_lines(app: &App, width: usize, now: Instant) -> Vec<Line<'static>> {
             ));
         }
     };
-    // What the gateway established, in plain text.
-    field(
-        "request",
-        &format!(
-            "agent {} wants to use {} ({})",
-            ask.agent, ask.tool_name, ask.tier
-        ),
-        CARD_FIELD_ROWS,
-        None,
-    );
-    field("action key", &ask.action_key, CARD_FIELD_ROWS, None);
-    // What will run if approved, exactly as the model sent it.
-    field("arguments", &ask.arguments, CARD_ARGUMENT_ROWS, None);
-    field("runs", &ask.exec_location, CARD_FIELD_ROWS, None);
-    field(
-        "runtime",
-        &runtime_words(&ask.exec_runtime),
-        CARD_FIELD_ROWS,
-        None,
-    );
-    field("in reply to", &ask.trigger, CARD_FIELD_ROWS, None);
-    // The model's own account of the call, set apart: the gateway has
-    // not checked it, and it is not a description of what will run.
-    field(
-        "model's claim (unverified)",
-        &ask.assistant_text,
-        CARD_FIELD_ROWS,
-        Some(claim_style()),
-    );
+    // The card every surface renders, line by line. What the gateway
+    // established is drawn plain; the model's own account of the call
+    // is set apart, since the gateway has not checked it and it is not
+    // a description of what will run. The arguments, which are, get
+    // the most rows.
+    for line in ask.card().lines() {
+        let rows = if line.label == "arguments" {
+            CARD_ARGUMENT_ROWS
+        } else {
+            CARD_FIELD_ROWS
+        };
+        field(
+            line.label,
+            &line.value,
+            rows,
+            line.is_model_claim.then(claim_style),
+        );
+    }
 
     // The two answers, drawn alike.
     lines.push(Line::from(vec![
@@ -495,6 +537,52 @@ mod tests {
         assert!(!shown.contains('\u{202E}'));
     }
 
+    /// A tool's output is drawn under its line, through the sanitizer
+    /// and cut past a few rows, and stays when the model's reply after
+    /// it is the empty-reply fallback.
+    #[test]
+    fn a_tools_output_is_drawn_under_its_line() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_server(
+            ServerEvent::ToolCall {
+                id: "c1".into(),
+                name: "exec".into(),
+                arguments: r#"{"command":"ls"}"#.into(),
+            },
+            now,
+        );
+        let output: String = (1..=10)
+            .map(|i| format!("file{i}.txt\x1b[2J\u{202E}\n"))
+            .collect();
+        app.on_server(
+            ServerEvent::ToolResult {
+                id: "c1".into(),
+                name: "exec".into(),
+                success: true,
+                output,
+            },
+            now,
+        );
+        app.on_server(
+            ServerEvent::Reply("(no response: the model returned nothing)".into()),
+            now,
+        );
+        let shown = screen(&app, now);
+        for part in [
+            "tool exec {\"command\":\"ls\"} done",
+            "    file1.txt",
+            "    file6.txt",
+            "    ... (cut)",
+            "(no response: the model returned nothing)",
+        ] {
+            assert!(shown.contains(part), "{part:?} missing:\n{shown}");
+        }
+        assert!(!shown.contains("file7.txt"), "{shown}");
+        assert!(!shown.contains('\x1b'));
+        assert!(!shown.contains('\u{202E}'));
+    }
+
     #[test]
     fn the_card_shows_what_is_being_approved() {
         let now = Instant::now();
@@ -517,6 +605,7 @@ mod tests {
         );
         let shown = screen(&app, now);
         for part in [
+            "request: agent default requests exec (tier2)",
             "action key: shell:ls",
             "arguments: {\"command\":\"ls -la\"}",
             "runtime: gVisor (runsc)",
@@ -580,6 +669,58 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| draw(f, app, now)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn text_of(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The panels are drawn wherever they fit, taking the sidebar's
+    /// place when the two do not fit together, and a screen too narrow
+    /// for them says so instead of ignoring the toggle.
+    #[test]
+    fn the_panels_toggle_is_never_silent() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.show_sidebar = true;
+        app.show_panels = true;
+
+        let wide = text_of(&drawn(&app, now, 130, 30));
+        assert!(
+            wide.contains(" agents ") && wide.contains(" status "),
+            "{wide}"
+        );
+        assert!(!wide.contains("columns"), "{wide}");
+
+        let middling = text_of(&drawn(&app, now, 100, 30));
+        assert!(middling.contains(" status "), "{middling}");
+        assert!(!middling.contains(" agents "), "{middling}");
+        assert!(
+            middling.contains("sidebar hidden: both need 120 columns, 100 now"),
+            "{middling}"
+        );
+
+        let narrow = text_of(&drawn(&app, now, 80, 30));
+        assert!(!narrow.contains(" status "), "{narrow}");
+        assert!(
+            narrow.contains("panels hidden: need 90 columns, 80 now"),
+            "{narrow}"
+        );
+
+        app.show_panels = false;
+        let off = text_of(&drawn(&app, now, 100, 30));
+        assert!(
+            off.contains(" agents ") && !off.contains(" status "),
+            "{off}"
+        );
+        assert!(off.contains("Enter send"), "{off}");
     }
 
     #[test]

@@ -283,6 +283,48 @@ async fn frame_roundtrip_tool_activity() {
     }
 }
 
+/// A result's output survives the wire, and one sent without it, as an
+/// older gateway sends it, reads back empty.
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
+#[tokio::test]
+async fn frame_roundtrip_tool_activity_output() {
+    use crate::wirken_capnp::tool_activity;
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let (_, mut client_writer) = split_stream(client);
+    let (mut server_reader, _) = split_stream(server);
+
+    for output in [Some("total 0\ndrwxr-xr-x  2 . .\n"), None] {
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut t = msg.init_root::<frame::Builder<'_>>().init_tool_activity();
+            t.set_call_id("call_1");
+            t.set_tool_name("exec");
+            t.set_result(true);
+            if let Some(output) = output {
+                t.set_output(output);
+            }
+        }
+        client_writer.write_message(&msg).await.unwrap();
+
+        let received = server_reader.read_message().await.unwrap();
+        let frame::ToolActivity(t) = received
+            .get_root::<frame::Reader<'_>>()
+            .unwrap()
+            .which()
+            .unwrap()
+        else {
+            panic!("expected ToolActivity");
+        };
+        let t = t.unwrap();
+        assert!(matches!(t.which().unwrap(), tool_activity::Result(true)));
+        assert_eq!(
+            t.get_output().unwrap().to_str().unwrap(),
+            output.unwrap_or_default()
+        );
+    }
+}
+
 /// The fields the terminal's approval card reads, and a request built
 /// without them reads back empty, as an older gateway's does.
 #[cfg(unix)]

@@ -3568,18 +3568,23 @@ fn process_permissions_request(
             PermissionsResponse::PendingList { entries }
         }
         PermissionsRequest::PendingShow { request_id } => {
-            let detail = queue.show(&request_id).map(|d| PendingDetail {
-                summary: PendingSummary {
-                    request_id: d.request_id,
-                    agent_id: d.agent_id,
-                    tool_name: d.tool_name,
-                    action_key: d.action_key,
-                    requested_tier: d.requested_tier,
-                    requested_at: d.requested_at.to_rfc3339(),
-                    age_seconds: d.age_seconds,
-                },
-                trigger_message: d.trigger_message,
-                exec_location: d.exec_location,
+            let detail = queue.show(&request_id).map(|d| {
+                Box::new(PendingDetail {
+                    summary: PendingSummary {
+                        request_id: d.request_id,
+                        agent_id: d.agent_id,
+                        tool_name: d.tool_name,
+                        action_key: d.action_key,
+                        requested_tier: d.requested_tier,
+                        requested_at: d.requested_at.to_rfc3339(),
+                        age_seconds: d.age_seconds,
+                    },
+                    trigger_message: d.trigger_message,
+                    arguments: d.arguments,
+                    assistant_text: d.assistant_text,
+                    exec_location: d.exec_location,
+                    exec_runtime: d.exec_runtime,
+                })
             });
             PermissionsResponse::PendingShow { entry: detail }
         }
@@ -4795,11 +4800,17 @@ fn turn_event_frame(
             activity.set_tool_name(&name);
             activity.set_call(&arguments);
         }
-        StreamEvent::ToolResult { id, name, success } => {
+        StreamEvent::ToolResult {
+            id,
+            name,
+            success,
+            output,
+        } => {
             let mut activity = fb.init_tool_activity();
             activity.set_call_id(&id);
             activity.set_tool_name(&name);
             activity.set_result(success);
+            activity.set_output(&output);
         }
         StreamEvent::Done(_) => return None,
     }
@@ -7560,6 +7571,10 @@ mod terminal_channel_tests {
             self._tmp.path().join("sessions.db")
         }
 
+        fn workspace(&self) -> std::path::PathBuf {
+            self._tmp.path().join("workspace")
+        }
+
         fn rows(&self, action: &str) -> Vec<AuditEvent> {
             AuditLog::open(&self.db)
                 .unwrap()
@@ -7587,7 +7602,7 @@ mod terminal_channel_tests {
     enum Seen {
         Chunk(String),
         Call(String, String),
-        Result(String, bool),
+        Result(String, bool, String),
         Approval {
             request_id: String,
             arguments: String,
@@ -7616,7 +7631,9 @@ mod terminal_channel_tests {
                     let name = t.get_tool_name().unwrap().to_string().unwrap();
                     match t.which().unwrap() {
                         tool_activity::Call(a) => Seen::Call(name, a.unwrap().to_string().unwrap()),
-                        tool_activity::Result(ok) => Seen::Result(name, ok),
+                        tool_activity::Result(ok) => {
+                            Seen::Result(name, ok, t.get_output().unwrap().to_string().unwrap())
+                        }
                     }
                 }
                 frame::ApprovalRequest(r) => {
@@ -7774,7 +7791,7 @@ mod terminal_channel_tests {
                 Seen::Reply(text) => break text,
                 Seen::Answer(..) => {}
                 Seen::Call(name, args) => seen.push(format!("call {name} {args}")),
-                Seen::Result(name, ok) => seen.push(format!("result {name} {ok}")),
+                Seen::Result(name, ok, _) => seen.push(format!("result {name} {ok}")),
                 Seen::Chunk(_) => {}
             }
         };
@@ -7844,6 +7861,58 @@ mod terminal_channel_tests {
                     }) && *approved_by == format!("davi (operator key {key})"))),
             "{lane:?}"
         );
+    }
+
+    /// What a tool returned reaches the terminal with its result, and
+    /// the conversation's history carries it, when the model's reply
+    /// after the call is empty.
+    #[tokio::test]
+    async fn a_tools_output_reaches_the_terminal_whatever_the_reply() {
+        let model = super::scripted_model::serve(vec![
+            tool_call_body("read_file", r#"{"path":"notes.txt"}"#),
+            text_body(&[]),
+        ])
+        .await;
+        let (mut gw, client) = Gateway::start(model).await;
+        std::fs::write(gw.workspace().join("notes.txt"), "milk\neggs\n").unwrap();
+        let (mut reader, mut writer) = split_stream(client);
+        wirken_ipc::perform_terminal_handshake(&mut reader, &mut writer, &gw.operator, "")
+            .await
+            .unwrap();
+
+        send_message(&mut writer, "c-8", "what is on my list").await;
+        let mut results = Vec::new();
+        let reply = loop {
+            match next(&mut reader).await {
+                Seen::Approval { request_id, .. } => {
+                    send_decision(&mut writer, &request_id, true).await
+                }
+                Seen::Result(name, ok, output) => results.push((name, ok, output)),
+                Seen::Reply(text) => break text,
+                _ => {}
+            }
+        };
+        assert_eq!(
+            results,
+            [("read_file".to_string(), true, "milk\neggs\n".to_string())]
+        );
+        assert_eq!(reply, "(no response: the model returned nothing)");
+
+        let history = ask(&mut reader, &mut writer, "c-8", "history").await;
+        let entries = history["entries"].as_array().unwrap();
+        let tool = entries
+            .iter()
+            .find(|e| e["kind"] == "tool")
+            .unwrap_or_else(|| panic!("{history}"));
+        assert_eq!(tool["name"], "read_file");
+        assert_eq!(tool["success"], true);
+        assert_eq!(tool["output"], "milk\neggs\n");
+        assert_eq!(
+            entries.last().unwrap()["text"],
+            "(no response: the model returned nothing)"
+        );
+        drop((reader, writer));
+        gw.finish().await.unwrap();
     }
 
     #[tokio::test]

@@ -70,7 +70,7 @@ pub(crate) async fn status(
                 "model": llm.model,
                 "exec": {
                     "mode": mode_word(mode),
-                    "runtime": wirken_agent::terminal_approval_gate::exec_runtime_name(mode),
+                    "runtime": wirken_agent::exec_location::runtime_name(mode),
                 },
             })
         }
@@ -310,11 +310,15 @@ pub(crate) fn history(log: &dyn SessionLog, session_id: &str) -> Value {
                         "name": call.name,
                         "arguments": call.arguments,
                         "success": Value::Null,
+                        "output": "",
                     }));
                 }
             }
             SessionEvent::ToolResult {
-                call_id, success, ..
+                call_id,
+                success,
+                output,
+                ..
             } => {
                 if let Some(entry) = entries
                     .iter_mut()
@@ -322,6 +326,7 @@ pub(crate) fn history(log: &dyn SessionLog, session_id: &str) -> Value {
                     .find(|e| e["kind"] == "tool" && e["id"] == call_id.as_str())
                 {
                     entry["success"] = json!(success);
+                    entry["output"] = json!(output);
                 }
             }
             _ => {}

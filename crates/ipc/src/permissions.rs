@@ -68,8 +68,9 @@ pub enum PermissionsResponse {
     /// Per-entry summary for `PendingList`. The CLI renders this as
     /// a table.
     PendingList { entries: Vec<PendingSummary> },
-    /// Full context for `PendingShow`.
-    PendingShow { entry: Option<PendingDetail> },
+    /// Full context for `PendingShow`. Boxed: the detail carries the
+    /// whole card and would otherwise dwarf the other variants.
+    PendingShow { entry: Option<Box<PendingDetail>> },
     /// Outcome of an `Approve` or `Deny` request. The CLI prints the
     /// result verbatim.
     Decision { result: DecisionResult },
@@ -110,9 +111,19 @@ pub struct PendingDetail {
     /// when the agent loop captured one; `None` for system-driven
     /// or subagent-driven calls.
     pub trigger_message: Option<String>,
-    /// Where an `exec` runs if approved. `None` for other tools.
+    /// The arguments the model sent, and what it said in the same
+    /// message. Absent from a gateway that predates them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_text: Option<String>,
+    /// Where an `exec` runs if approved, and the container runtime it
+    /// runs under (`gvisor`, `docker` or `host`). `None` for other
+    /// tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_runtime: Option<String>,
 }
 
 /// Per-decision outcome. `Accepted` means the queue accepted the

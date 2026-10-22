@@ -2395,11 +2395,13 @@ async fn reconnect_cap_emits_approval_request_failed_with_reason() {
     fake_signal.abort();
 }
 
-/// The approval message says where an `exec` runs, from the frame's
-/// `execLocation`, and has no such line when the field is empty.
+/// The approval message is the card every surface renders: the tier
+/// printed once, the arguments, where an `exec` runs and under which
+/// runtime, and the model's words labeled a claim. A frame with no
+/// location has no `runs` line.
 #[test]
-fn the_approval_message_says_where_an_exec_runs() {
-    let build = |location: &str| {
+fn the_approval_message_is_the_shared_card() {
+    let build = |location: &str, runtime: &str| {
         let mut msg = capnp::message::Builder::new_default();
         {
             let fb = msg.init_root::<frame::Builder<'_>>();
@@ -2411,18 +2413,34 @@ fn the_approval_message_says_where_an_exec_runs() {
             req.set_triggering_agent("default");
             req.set_trigger_message("run ls ~");
             req.set_target_conversation_id("9LJqVbY9wKD2c3vH/abcDEF==");
+            req.set_arguments(r#"{"command":"ls ~"}"#);
+            req.set_assistant_text("Listing your home directory.");
             req.set_exec_location(location);
+            req.set_exec_runtime(runtime);
         }
         msg
     };
     let reader = serialize_and_read(&build(
         "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)",
+        "docker",
     ));
     let fields = convert::parse_approval_request(&reader).unwrap();
     let text = crate::adapter::approval_body(&fields, "0f9d3c52");
-    assert!(text.contains("\nWhere: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n"), "{text}");
+    assert_eq!(
+        text,
+        "request: agent default requests exec (tier2)\n\
+         action key: shell:ls\n\
+         arguments: {\"command\":\"ls ~\"}\n\
+         runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\
+         runtime: Docker default runtime (runc)\n\
+         in reply to: run ls ~\n\
+         model's claim (unverified): Listing your home directory.\n\
+         Reply !approve 0f9d3c52 to approve or !deny 0f9d3c52 [reason] to deny."
+    );
 
-    let reader = serialize_and_read(&build(""));
+    let reader = serialize_and_read(&build("", ""));
     let fields = convert::parse_approval_request(&reader).unwrap();
-    assert!(!crate::adapter::approval_body(&fields, "0f9d3c52").contains("Where:"));
+    let text = crate::adapter::approval_body(&fields, "0f9d3c52");
+    assert!(!text.contains("runs:"), "{text}");
+    assert!(!text.contains("runtime:"), "{text}");
 }
