@@ -154,4 +154,10 @@ brocard rejections: 2 (1 findings kept)
   rule 5 (No vulnerability from documented behavior): 1
 ```
 
-In `defender` mode the same fixture removes the finding from `findings.json`. The two `rejected_candidates` entries stay, and the summary reads `brocard rejections: 2 (0 findings kept)`.
+In `defender` mode the same fixture removes the finding from `findings.json`. The two `rejected_candidates` entries stay, and the run summary prints:
+
+```
+brocard rejections: 2 (0 findings kept)
+  rule 1 (No threat model): 1
+  rule 5 (No vulnerability from documented behavior): 1
+```
