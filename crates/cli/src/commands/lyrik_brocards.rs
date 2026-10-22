@@ -209,6 +209,20 @@ pub fn applied_for(
     out
 }
 
+/// Calibration corpus form: one JSON object per line, each a rejection
+/// with `label` set to `negative`. Written beside `findings.json`. No
+/// reader in this repo consumes it yet.
+pub fn calibration_jsonl(rejected: &[Rejection]) -> Result<String> {
+    let mut out = String::new();
+    for r in rejected {
+        let mut row = serde_json::to_value(r)?;
+        row["label"] = Value::String("negative".to_string());
+        out.push_str(&serde_json::to_string(&row)?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// Number of distinct rules in `applied`. Two rejections under the same
 /// rule halve the grade once.
 pub fn distinct_rules(applied: &[Rejection]) -> usize {
@@ -551,6 +565,27 @@ mod tests {
         let mut f = json!({ "stable_id": "sid-1" });
         assert_eq!(demote_grade(&mut f, 1), None);
         assert!(f.get("grade").is_none());
+    }
+
+    #[test]
+    fn calibration_rows_are_negative_labels_one_per_line() {
+        let rejected = vec![Rejection {
+            rule: 4,
+            walk: Some("crypto-walk".to_string()),
+            stable_id: Some("sid-1".to_string()),
+            title: None,
+            location: None,
+            reason: "spec permits it".to_string(),
+            applied_by: "walk:crypto-walk".to_string(),
+        }];
+        let out = calibration_jsonl(&rejected).unwrap();
+        assert!(out.ends_with('\n'));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let row: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(row["label"], "negative");
+        assert_eq!(row["rule"], 4);
+        assert_eq!(calibration_jsonl(&[]).unwrap(), "");
     }
 
     #[test]

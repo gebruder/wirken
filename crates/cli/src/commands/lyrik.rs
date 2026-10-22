@@ -2505,6 +2505,11 @@ fn aggregate_findings_multi(
         return Ok(funnel);
     }
 
+    std::fs::write(
+        dest.with_file_name("rejections.jsonl"),
+        lyrik_brocards::calibration_jsonl(&rejected)?,
+    )
+    .with_context(|| format!("write rejections.jsonl beside {}", dest.display()))?;
     let body = serde_json::json!({
         "schema_version": "1.1",
         "run_id": run_id,

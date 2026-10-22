@@ -82,7 +82,9 @@ scorers into a consensus, and does not send findings to any delivery channel.
   log records `lyrik.brocard.rejected`, `lyrik.brocard.refused` for a rejection
   file that does not parse, and `lyrik.brocard.demoted`. What happens to the
   finding depends on `mode`: pentest halves its grade once per distinct rule,
-  and defender removes it from `findings.json`.
+  and defender removes it from `findings.json`. The same rejections are written
+  one per line to `rejections.jsonl` in the run directory, each with
+  `label: "negative"`, for calibration.
 - **Per-finding `detection_source` provenance**, a closed enum enforced when
   present.
 - **Opt-in Semgrep prescreen.** With `scanner.semgrep.enabled` set, the runner
@@ -165,7 +167,7 @@ committed; run state lives under `.lyrik/state/`.
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
 | `<repo>/.lyrik/context.md` | the team's project context |
-| `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `audit.log`, `proposed/`, staging; the only place a run's agents may write |
+| `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may write |
 
 `.lyrik/config.json` names the provider, not its key:
 `phases.framing.provider: "privatemode"` resolves through the vault. Lyrik
