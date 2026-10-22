@@ -10,7 +10,7 @@ tagged.
 
 ## [Unreleased]
 
-## [2.5.0] - 2026-10-23
+## [2.5.0] - 2026-10-22
 
 ### Added
 
@@ -3097,6 +3097,13 @@ This tag produced no release: the Windows job of the release build failed, so no
   `path_open(TRUNCATE)` was bypassing the host `FilePerms::WRITE`
   restriction. Fixed upstream; sandbox semantics unchanged, enforcement
   correct. No API change in `wirken_agent::wasm_sandbox`.
+
+### Security
+
+- wasmtime 45.0.0 closes RUSTSEC-2026-0149, the WASI `path_open(TRUNCATE)`
+  bypass of the host write restriction, as the sandbox entry above records.
+  This heading was added after the release: the 1.7.2 manifest entry said
+  `security: false`, and manifests built from the next release on flag it.
 
 ### Zirkel score calibration
 
