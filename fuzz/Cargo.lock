@@ -1273,8 +1273,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash",
 ]
 
@@ -1825,9 +1823,9 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lru"
-version = "0.18.4"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
+checksum = "4a9f71e3591c7ec44d3e563e87bf14ddc2bada8519dca046e5b0e560cd004e2d"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -4007,11 +4005,11 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-core"
-version = "2.4.0"
+version = "2.5.0"
 
 [[package]]
 name = "wirken-agent"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -4050,7 +4048,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-audit"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4084,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-gateway"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -4114,7 +4112,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-ipc"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "capnp",
@@ -4130,7 +4128,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-mcp-proxy"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4159,7 +4157,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-sandbox"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4175,7 +4173,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-vault"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",

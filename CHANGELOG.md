@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-23
+
 ### Added
 
 - `wirken lyrik` accepts a run with no findings only when the agent also writes

@@ -6244,11 +6244,11 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-core"
-version = "2.4.0"
+version = "2.5.0"
 
 [[package]]
 name = "wirken-adapter-discord"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "capnp",
  "chrono",
@@ -6265,7 +6265,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-google-chat"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "base64 0.23.1",
  "capnp",
@@ -6284,7 +6284,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-imessage"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "capnp",
  "reqwest 0.13.5",
@@ -6300,7 +6300,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-matrix"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "capnp",
  "reqwest 0.13.5",
@@ -6316,7 +6316,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-signal"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "capnp",
  "lru 0.19.0",
@@ -6332,7 +6332,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-slack"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "capnp",
  "serde",
@@ -6349,7 +6349,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-teams"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "base64 0.23.1",
  "capnp",
@@ -6368,7 +6368,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-telegram"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "capnp",
  "chrono",
@@ -6385,7 +6385,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-whatsapp"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "capnp",
  "hmac 0.13.0",
@@ -6404,7 +6404,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-agent"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -6444,7 +6444,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-audit"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6465,7 +6465,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-cli"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6521,7 +6521,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-gateway"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -6552,7 +6552,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-ipc"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "capnp",
@@ -6569,7 +6569,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-mcp-proxy"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -6599,7 +6599,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-sandbox"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "bollard",
@@ -6615,7 +6615,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-skill-store"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -6626,7 +6626,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-vault"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -6646,11 +6646,11 @@ dependencies = [
 
 [[package]]
 name = "wirken-webchat"
-version = "2.4.0"
+version = "2.5.0"
 
 [[package]]
 name = "wirken-zirkel"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "async-trait",
  "chrono",
