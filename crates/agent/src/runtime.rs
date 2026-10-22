@@ -65,6 +65,23 @@ const MCP_TOOLS_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_se
 /// The built-in tool name for spawning a child agent.
 pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 
+/// Prefix of the inbound id every `wirken ask` mints.
+const ASK_INBOUND_PREFIX: &str = "ask-";
+
+/// The inbound id for one `wirken ask`. Each ask is a fresh agent that
+/// sends only its own turn, so verify replays it from a clean projection.
+pub fn ask_inbound_id() -> String {
+    format!("{ASK_INBOUND_PREFIX}{}", uuid::Uuid::new_v4())
+}
+
+/// Whether a recorded inbound id came from [`ask_inbound_id`]. The
+/// prefix alone is not enough: a UUID must follow it, so an id that only
+/// starts the same way is not taken for an ask.
+pub(crate) fn is_ask_inbound(id: Option<&str>) -> bool {
+    id.and_then(|s| s.strip_prefix(ASK_INBOUND_PREFIX))
+        .is_some_and(|rest| uuid::Uuid::parse_str(rest).is_ok())
+}
+
 /// Separator a child's session id appends to its parent's, once per
 /// nesting level. `{parent_session}#sub-{n}`.
 ///
@@ -5437,6 +5454,7 @@ impl Agent {
         // prompt was at hash time.
         let mut conv = crate::conversation::Conversation::new(100_000);
         let mut have_recorded_prompt = false;
+        let mut recorded_prompt: Option<String> = None;
 
         // Snapshot the agent's CURRENT tool defs. tools_hash
         // divergence means the agent's tool surface has changed
@@ -5477,10 +5495,26 @@ impl Agent {
                     // conversation. set_system_prompt
                     // replaces any existing system message in place.
                     conv.set_system_prompt(content);
+                    recorded_prompt = Some(content.clone());
                     have_recorded_prompt = true;
                     events_verified += 1;
                 }
-                wirken_audit::SessionEvent::UserMessage { content, .. } => {
+                wirken_audit::SessionEvent::UserMessage {
+                    content,
+                    inbound_id,
+                    ..
+                } => {
+                    // Every `wirken ask` on this agent shares the lane,
+                    // but each sent only its own turn. Verify an ask from
+                    // a clean projection under the last recorded prompt.
+                    // A gateway lane is not reset: it replays its history
+                    // across `SessionEnd`, so its turns carry earlier ones.
+                    if is_ask_inbound(inbound_id.as_deref()) {
+                        conv = crate::conversation::Conversation::new(100_000);
+                        if let Some(prompt) = &recorded_prompt {
+                            conv.set_system_prompt(prompt);
+                        }
+                    }
                     conv.add_user_message(content);
                     events_verified += 1;
                 }

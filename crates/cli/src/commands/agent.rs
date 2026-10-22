@@ -214,7 +214,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         .context("attach skills")?;
 
     println!();
-    let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
+    let inbound_id = wirken_agent::ask_inbound_id();
     let outcome = agent.process_message(message, inbound_id).await;
     // Seal before reporting, and on the error path too: the rows the
     // turn already wrote are real, and a failed turn is exactly the one
@@ -334,7 +334,7 @@ async fn send_with_agent_config(
         .context("attach skills")?;
 
     println!();
-    let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
+    let inbound_id = wirken_agent::ask_inbound_id();
     let outcome = agent.process_message(message, inbound_id).await;
     // Seal before reporting, and on the error path too: the rows the
     // turn already wrote are real, and a failed turn is exactly the one
@@ -416,7 +416,7 @@ async fn send_on_plan(
     agent.attach_skills(skills).context("attach skills")?;
 
     println!();
-    let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
+    let inbound_id = wirken_agent::ask_inbound_id();
     let outcome = agent.process_message(message, inbound_id).await;
     seal_session(&session_log_concrete, agent_id);
     match outcome {
