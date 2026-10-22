@@ -15,6 +15,9 @@
 //! one row per rejection, `label` is always negative. No corpus
 //! consumer exists yet.
 
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -85,6 +88,74 @@ pub struct Rejection {
     /// The gate or walk that applied the rule, e.g. `brocard_structural`
     /// or `walk:doc-walk`.
     pub applied_by: String,
+}
+
+/// One judgment rejection a walk wrote under `staging/<walk>/rejections/`.
+#[derive(Debug, Deserialize)]
+struct WalkRejection {
+    rule: u8,
+    #[serde(default)]
+    stable_id: Option<String>,
+    reason: String,
+}
+
+/// Read the walk-side rejections in `dir`, in file-name order. Returns
+/// the accepted records and the file names that did not parse or named
+/// a rule outside `1..=RULE_COUNT`. The caller records the refusals.
+/// A missing directory is an empty result.
+pub fn read_walk_rejections(
+    dir: &Path,
+    walk: Option<&str>,
+) -> Result<(Vec<Rejection>, Vec<String>)> {
+    let mut accepted = Vec::new();
+    let mut refused = Vec::new();
+    if !dir.is_dir() {
+        return Ok((accepted, refused));
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("read {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    paths.sort();
+    for p in &paths {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let body = std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+        match serde_json::from_str::<WalkRejection>(&body) {
+            Ok(w) if (1..=RULE_COUNT).contains(&w.rule) => accepted.push(Rejection {
+                rule: w.rule,
+                walk: walk.map(str::to_string),
+                stable_id: w.stable_id,
+                title: None,
+                location: None,
+                reason: w.reason,
+                applied_by: match walk {
+                    Some(w) => format!("walk:{w}"),
+                    None => "single_call".to_string(),
+                },
+            }),
+            _ => refused.push(name),
+        }
+    }
+    Ok((accepted, refused))
+}
+
+/// Copy title and location from the finding a rejection names, when the
+/// finding is in the run. A rejection with no matching finding keeps
+/// the fields it has.
+pub fn fill_from_finding(rejection: &mut Rejection, finding: &Value) {
+    let Some(id) = rejection.stable_id.as_deref() else {
+        return;
+    };
+    if finding.get("stable_id").and_then(Value::as_str) != Some(id) {
+        return;
+    }
+    let from = record(finding, None, rejection.rule, String::new());
+    rejection.title = from.title;
+    rejection.location = from.location;
 }
 
 /// Structural brocard checks on one staged candidate, run before the
@@ -299,5 +370,75 @@ mod tests {
             }],
         });
         assert!(super::super::lyrik_validate::validate_value(&report).is_empty());
+    }
+
+    #[test]
+    fn walk_rejections_read_in_order_and_refuse_bad_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let rej = dir.path().join("rejections");
+        std::fs::create_dir_all(&rej).unwrap();
+        std::fs::write(
+            rej.join("rejection-001.json"),
+            r#"{"rule":5,"stable_id":"sid-1","reason":"documented as intended"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            rej.join("rejection-002.json"),
+            r#"{"rule":9,"reason":"no such rule"}"#,
+        )
+        .unwrap();
+        std::fs::write(rej.join("rejection-003.json"), "not json").unwrap();
+        let (accepted, refused) = read_walk_rejections(&rej, Some("doc-walk")).unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].rule, 5);
+        assert_eq!(accepted[0].walk.as_deref(), Some("doc-walk"));
+        assert_eq!(accepted[0].applied_by, "walk:doc-walk");
+        assert_eq!(accepted[0].stable_id.as_deref(), Some("sid-1"));
+        assert_eq!(refused, vec!["rejection-002.json", "rejection-003.json"]);
+    }
+
+    #[test]
+    fn single_call_rejections_carry_no_walk_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("rejection-001.json"),
+            r#"{"rule":2,"reason":"precondition grants impact"}"#,
+        )
+        .unwrap();
+        let (accepted, _) = read_walk_rejections(dir.path(), None).unwrap();
+        assert!(accepted[0].walk.is_none());
+        assert_eq!(accepted[0].applied_by, "single_call");
+    }
+
+    #[test]
+    fn missing_rejections_dir_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (accepted, refused) =
+            read_walk_rejections(&dir.path().join("absent"), Some("sink-walk")).unwrap();
+        assert!(accepted.is_empty() && refused.is_empty());
+    }
+
+    #[test]
+    fn fill_from_finding_copies_title_and_location_on_matching_id_only() {
+        let finding = candidate(json!({}));
+        let mut hit = Rejection {
+            rule: 3,
+            walk: Some("graph-walk".to_string()),
+            stable_id: Some("sid-1".to_string()),
+            title: None,
+            location: None,
+            reason: "x".to_string(),
+            applied_by: "walk:graph-walk".to_string(),
+        };
+        fill_from_finding(&mut hit, &finding);
+        assert_eq!(hit.title.as_deref(), Some("t"));
+        assert_eq!(hit.location.as_ref().map(|l| l.line_start), Some(4));
+
+        let mut miss = hit.clone();
+        miss.title = None;
+        miss.location = None;
+        miss.stable_id = Some("sid-2".to_string());
+        fill_from_finding(&mut miss, &finding);
+        assert!(miss.title.is_none() && miss.location.is_none());
     }
 }

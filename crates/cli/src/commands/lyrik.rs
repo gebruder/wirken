@@ -2274,6 +2274,33 @@ fn aggregate_findings_multi(
             .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
             .collect();
         entries.sort();
+        // Judgment rejections a walk wrote sit beside its findings.
+        if let Some(rej_dir) = source.parent().map(|d| d.join("rejections")) {
+            let (accepted, refused) =
+                lyrik_brocards::read_walk_rejections(&rej_dir, walk_name.as_deref())?;
+            for file in refused {
+                audit.emit(
+                    "lyrik.brocard.refused",
+                    serde_json::json!({ "walk": walk_name, "file": file }),
+                )?;
+            }
+            for r in accepted {
+                audit.emit(
+                    "lyrik.brocard.rejected",
+                    serde_json::json!({
+                        "stable_id": r.stable_id,
+                        "walk": r.walk,
+                        "rule": r.rule,
+                        "applied_by": r.applied_by,
+                        "reason": r.reason,
+                    }),
+                )?;
+                rejected.push(r);
+            }
+            if rej_dir.is_dir() {
+                consumed.push(rej_dir);
+            }
+        }
         for p in &entries {
             let body =
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
@@ -2409,6 +2436,11 @@ fn aggregate_findings_multi(
         }
         if !entries.is_empty() {
             consumed.push(source.clone());
+        }
+    }
+    for r in &mut rejected {
+        for (_, f) in &tagged {
+            lyrik_brocards::fill_from_finding(r, f);
         }
     }
     let (findings, collapsed): (Vec<serde_json::Value>, usize) = if dedup_active {

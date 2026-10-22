@@ -71,6 +71,14 @@ scorers into a consensus, and does not send findings to any delivery channel.
   for every walk: a staged finding whose `grade` is above 0.5 is written at
   0.5, and the per-run log records `lyrik.finding.grade_corrected` with the
   stable ID, the walk, and the original and new value.
+- **Brocard rejections.** Seven rules for dismissing a candidate, adapted from
+  the list at <https://vulnbrocards.com/>, where rule N is VB00N. Rule 1 (no
+  threat model) and rule 7 (seed provenance earns no credit) are structural and
+  run in the gate. Rules 2 to 6 are judgment: the walks apply them under their
+  own wrapper section. A rejected candidate stays in `findings.json` and is also
+  recorded under `rejected_candidates`, with its rule number, a one-line reason,
+  and the gate or walk that applied it. The per-run log records
+  `lyrik.brocard.rejected` and `lyrik.brocard.refused`.
 - **Per-finding `detection_source` provenance**, a closed enum enforced when
   present.
 - **Opt-in Semgrep prescreen.** With `scanner.semgrep.enabled` set, the runner
@@ -405,6 +413,21 @@ runner's `funnel` is one of the extras above);
 per-finding `gate_routed`, `dedup_match` or `stream` as closed enums; a
 `triage_status` field. 1.1 does not require producers to emit `$schema`, and
 if a report carries one the validator asserts it string-equals `$id`.
+
+### Carried outside schema 1.1
+
+Two additions sit outside the 1.1 contract. The validator tolerates unknown
+keys, so they do not change `schema_version`, and a later minor release may
+change them:
+
+- `rejected_candidates`, a top-level array. Each entry carries `rule` (1 to 7),
+  `walk` (absent in single-call mode), `stable_id`, `title`, `location`,
+  `reason`, and `applied_by`. In SARIF each entry is a result under rule
+  `lyrik.brocard.<rule>`, with a `suppressions` entry of kind `external` whose
+  justification is the reason.
+- `threat_model` on a finding, an object with the strings
+  `attacker_capability` and `harm_path`. Walk runs are told to emit it. A
+  finding without both is a rule 1 rejection.
 
 ## Reports and audit
 
