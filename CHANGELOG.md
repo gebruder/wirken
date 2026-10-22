@@ -21,6 +21,12 @@ tagged.
 
 ### Fixed
 
+- `wirken sessions verify` no longer reports a `messages_hash` divergence on
+  every `wirken ask` after the first. Each ask is a fresh agent that sends only
+  its own turn, but the asks share their agent's lane, and verify replayed the
+  lane as one conversation. An ask now verifies from its own turn. Gateway
+  lanes are unchanged. Found, with the reproduction on a 2.4.0 chain, by Tanmay
+  Maka (@maka-tanmay).
 - In 1.20.0 through 2.3.0, any sub-agent spawned on a non-streaming turn (an
   adapter message or a cron job) was left unbound, whether the turn spawned one
   call or several. 2cc30ce fixed it in 2.4.0. The 2.4.0 entry describes only

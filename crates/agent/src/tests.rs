@@ -15086,3 +15086,138 @@ mod empty_reply_fallback {
         }
     }
 }
+
+/// `verify` replays a lane from its first row. Each `wirken ask` is a fresh
+/// agent that sends only its own turn, while every ask on the same agent
+/// shares one lane. The asks must verify against their own turns.
+mod consecutive_asks {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{SessionLog, SqliteSessionLog};
+
+    use super::leak_detection::{llm, stub, text};
+    use crate::runtime::{Agent, VerifyOptions, ask_inbound_id, is_ask_inbound};
+
+    /// One `wirken ask` on `lane`: a new agent, one turn, the shared log.
+    async fn ask(
+        lane: &str,
+        base_url: &str,
+        log: Arc<dyn SessionLog>,
+        tmp: &TempDir,
+        message: &str,
+        inbound: String,
+    ) {
+        let mut agent = Agent::new(
+            lane.into(),
+            tmp.path().to_path_buf(),
+            llm(base_url),
+            None,
+            None,
+            log,
+            super::test_permissions(),
+        )
+        .unwrap();
+        agent.process_message(message, inbound).await.unwrap();
+    }
+
+    fn verifier(lane: &str, base_url: &str, log: Arc<dyn SessionLog>, tmp: &TempDir) -> Agent {
+        Agent::new(
+            lane.into(),
+            tmp.path().to_path_buf(),
+            llm(base_url),
+            None,
+            None,
+            log,
+            super::test_permissions(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_second_ask_verifies_against_its_own_turn() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let (base_url, server, _) = stub(vec![text("first reply"), text("second reply")]).await;
+        ask(
+            "plan",
+            &base_url,
+            log.clone(),
+            &tmp,
+            "first question",
+            ask_inbound_id(),
+        )
+        .await;
+        ask(
+            "plan",
+            &base_url,
+            log.clone(),
+            &tmp,
+            "second question",
+            ask_inbound_id(),
+        )
+        .await;
+        server.await.unwrap();
+
+        let report = verifier("plan", &base_url, log, &tmp)
+            .verify_with(VerifyOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            report.events_divergent.is_empty(),
+            "{:?}",
+            report.events_divergent
+        );
+        assert!(report.events_verified > 0, "{report:?}");
+    }
+
+    /// A turn that is not an ask still answers to the lane: sent without
+    /// the earlier turn, it must diverge, so the reset is not general.
+    #[tokio::test]
+    async fn a_turn_without_an_ask_id_still_diverges_on_the_lane() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let (base_url, server, _) = stub(vec![text("first reply"), text("second reply")]).await;
+        ask(
+            "plan",
+            &base_url,
+            log.clone(),
+            &tmp,
+            "first question",
+            ask_inbound_id(),
+        )
+        .await;
+        ask(
+            "plan",
+            &base_url,
+            log.clone(),
+            &tmp,
+            "second question",
+            "msg-2".into(),
+        )
+        .await;
+        server.await.unwrap();
+
+        let report = verifier("plan", &base_url, log, &tmp)
+            .verify_with(VerifyOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            report
+                .events_divergent
+                .iter()
+                .any(|d| d.kind == "messages_hash"),
+            "{:?}",
+            report.events_divergent
+        );
+    }
+
+    #[test]
+    fn only_a_minted_ask_id_counts_as_an_ask() {
+        let id = ask_inbound_id();
+        assert!(is_ask_inbound(Some(id.as_str())));
+        assert!(!is_ask_inbound(Some("ask-not-a-uuid")));
+        assert!(!is_ask_inbound(Some("msg-1")));
+        assert!(!is_ask_inbound(None));
+    }
+}
