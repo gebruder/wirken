@@ -2227,6 +2227,7 @@ fn aggregate_findings_multi(
     scanner: Option<ScannerFunnel>,
     audit: &mut AuditLogger,
 ) -> Result<Funnel> {
+    use super::lyrik_brocards;
     use super::lyrik_citation;
 
     let mut walks: std::collections::BTreeMap<String, WalkFunnel> = skipped
@@ -2243,6 +2244,7 @@ fn aggregate_findings_multi(
         .collect();
     let mut tagged: Vec<(Option<String>, serde_json::Value)> = Vec::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
+    let mut rejected: Vec<lyrik_brocards::Rejection> = Vec::new();
     let mut literal_claim_resolved: usize = 0;
     let mut literal_claim_unresolved: usize = 0;
     let mut prompt_injection_deferred_resolved: usize = 0;
@@ -2320,6 +2322,22 @@ fn aggregate_findings_multi(
                         "new": GRADE_CAP,
                     }),
                 )?;
+            }
+
+            // Structural brocards run ahead of the citation gate, rule 1
+            // first. Each applied rule is recorded; the candidate stays.
+            for r in lyrik_brocards::check_structural(&parsed, walk_name.as_deref()) {
+                audit.emit(
+                    "lyrik.brocard.rejected",
+                    serde_json::json!({
+                        "stable_id": r.stable_id,
+                        "walk": r.walk,
+                        "rule": r.rule,
+                        "applied_by": r.applied_by,
+                        "reason": r.reason,
+                    }),
+                )?;
+                rejected.push(r);
             }
 
             let outcome = lyrik_citation::check(&parsed, workspace);
@@ -2450,6 +2468,7 @@ fn aggregate_findings_multi(
                 "unresolved": file_line_only_unresolved,
             },
         },
+        "rejected_candidates": rejected,
         "findings": findings,
     });
     write_findings_with_funnel(dest, with_extras(body, extras), &funnel, audit)?;

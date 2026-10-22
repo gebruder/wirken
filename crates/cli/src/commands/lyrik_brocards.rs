@@ -16,6 +16,7 @@
 //! consumer exists yet.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Brocard rule numbers, in the order the walks apply them.
 pub const RULE_COUNT: u8 = 7;
@@ -86,10 +87,154 @@ pub struct Rejection {
     pub applied_by: String,
 }
 
+/// Structural brocard checks on one staged candidate, run before the
+/// citation gate. Rule 1 runs first. Rules 2 through 6 are judgment
+/// and live in walk text, so they never appear here.
+///
+/// Rule 7 has no rejection path. Nothing in the gate grants a seed
+/// credit, so a seed can change no decision. The invariant test below
+/// holds that: `detection_source` is never read here.
+///
+/// Returns one record per applied rule. The caller stamps nothing:
+/// every field comes from the candidate or from `walk`.
+pub fn check_structural(finding: &Value, walk: Option<&str>) -> Vec<Rejection> {
+    let mut out = Vec::new();
+    if let Some(reason) = missing_threat_model(finding) {
+        out.push(record(finding, walk, 1, reason));
+    }
+    out
+}
+
+/// The reason rule 1 applies, or `None` when both threat-model strings
+/// are present and non-blank.
+fn missing_threat_model(finding: &Value) -> Option<String> {
+    let model = finding.get("threat_model").and_then(Value::as_object);
+    let filled = |key: &str| {
+        model
+            .and_then(|m| m.get(key))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    };
+    let missing: Vec<&str> = ["attacker_capability", "harm_path"]
+        .into_iter()
+        .filter(|k| !filled(k))
+        .collect();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(format!("threat_model lacks {}", missing.join(" and ")))
+    }
+}
+
+fn record(finding: &Value, walk: Option<&str>, rule: u8, reason: String) -> Rejection {
+    let location = finding.get("location").and_then(|loc| {
+        Some(RejectionLocation {
+            file: loc.get("file")?.as_str()?.to_string(),
+            line_start: u32::try_from(loc.get("line_start")?.as_u64()?).ok()?,
+        })
+    });
+    Rejection {
+        rule,
+        walk: walk.map(str::to_string),
+        stable_id: finding
+            .get("stable_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        title: finding
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        location,
+        reason,
+        applied_by: "brocard_structural".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn candidate(threat_model: Value) -> Value {
+        json!({
+            "id": "f1",
+            "stable_id": "sid-1",
+            "title": "t",
+            "location": { "file": "src/a.rs", "line_start": 4 },
+            "threat_model": threat_model,
+        })
+    }
+
+    #[test]
+    fn complete_threat_model_passes_rule_1() {
+        let f = candidate(json!({
+            "attacker_capability": "unauthenticated network peer",
+            "harm_path": "reads another user's session",
+        }));
+        assert!(check_structural(&f, Some("sink-walk")).is_empty());
+    }
+
+    #[test]
+    fn absent_threat_model_is_rule_1() {
+        let f = json!({ "stable_id": "sid-1", "location": { "file": "a", "line_start": 1 } });
+        let out = check_structural(&f, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rule, 1);
+        assert_eq!(
+            out[0].reason,
+            "threat_model lacks attacker_capability and harm_path"
+        );
+        assert_eq!(out[0].applied_by, "brocard_structural");
+        assert!(out[0].walk.is_none());
+    }
+
+    #[test]
+    fn blank_harm_path_is_rule_1() {
+        let f = candidate(json!({
+            "attacker_capability": "local user",
+            "harm_path": "   ",
+        }));
+        let out = check_structural(&f, Some("chain-walk"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].reason, "threat_model lacks harm_path");
+        assert_eq!(out[0].walk.as_deref(), Some("chain-walk"));
+        assert_eq!(out[0].stable_id.as_deref(), Some("sid-1"));
+        assert_eq!(
+            out[0].location,
+            Some(RejectionLocation {
+                file: "src/a.rs".to_string(),
+                line_start: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn non_string_capability_is_rule_1() {
+        let f = candidate(json!({
+            "attacker_capability": 3,
+            "harm_path": "x",
+        }));
+        let out = check_structural(&f, None);
+        assert_eq!(out[0].reason, "threat_model lacks attacker_capability");
+    }
+
+    #[test]
+    fn seed_provenance_changes_no_decision() {
+        let mut seeded = candidate(json!({}));
+        seeded["detection_source"] = json!("static_prescreen");
+        let mut unseeded = candidate(json!({}));
+        unseeded["detection_source"] = json!("model_reasoning");
+        let mut bare = candidate(json!({}));
+        bare.as_object_mut().unwrap().remove("detection_source");
+        assert_eq!(
+            check_structural(&seeded, None),
+            check_structural(&unseeded, None)
+        );
+        assert_eq!(
+            check_structural(&seeded, None),
+            check_structural(&bare, None)
+        );
+    }
 
     #[test]
     fn rule_table_covers_every_number() {
