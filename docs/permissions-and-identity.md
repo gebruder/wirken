@@ -28,7 +28,7 @@ Every verb is pure inspection, identity, or path math with no documented exec es
 
 The allowlist is curated in `crates/gateway/src/permissions.rs::TIER2_ALLOWLIST`. Adding a verb requires reviewing its man page for exec escapes of the kinds listed above.
 
-Matching is on the canonical form of the first whitespace token: `/usr/bin/ls`, `./ls`, and `LS` all match `ls`.
+Matching is on the canonical form of the first whitespace token. A bare token keeps its lexical form, so `LS` matches `ls`. A token carrying a path separator is resolved on the filesystem first and classified on the real file's basename (`resolve_exec_pattern`, `crates/agent/src/tool.rs`), so `/usr/bin/ls` matches `ls`, `./ls` matches `ls` only when it resolves to a file named `ls`, a symlink named `ls` pointing at `bash` lands on Tier 3, and a path that does not resolve falls to the Tier 3 sentinel. The basename is then lowercased (`canonical_exec_prefix`, `crates/gateway/src/permissions.rs`).
 
 ### Pipeline / chain laundering
 
@@ -242,9 +242,9 @@ Each channel adapter extracts the platform sender identity on every inbound mess
 - **Teams**: Bot Framework activity sender id. The `tenant_id` is also captured in the message metadata JSON.
 - **Matrix**: MXID (e.g., `@alice:matrix.example.com`).
 
-The gateway writes this to the audit log as the `actor` field of the `message.inbound` event. The full event carries actor, action, target, channel, conversation id (as session), and a detail payload.
+The gateway writes this to the audit log as the `actor_id` of the `message.inbound` event, with `actor_kind: user` (`AuditEvent` in `crates/audit/src/event.rs`, written by `handle_action` in `crates/cli/src/commands/run.rs`). The full event carries actor kind and id, action, target, channel, conversation id (as session), and a detail payload.
 
-The sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id)` only. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:terraform apply` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, until that grant's window closes.
+The sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id)` only. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:cat` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, until that grant's window closes. Only Tier 2 keys are stored, so this covers the allowlisted inspection verbs, `file:<path>` and `cross-conversation`; a Tier 3 verb such as `terraform` prompts on every call whoever ran it first.
 
 This is a real gap if the deployment uses one shared agent across a team. Workarounds today:
 
@@ -277,9 +277,9 @@ allowed. There is no intersection logic; each agent is checked against itself.
 
 An agent that was never told which logical agent it is gets no persisted
 grants and prompts for every Tier 2 action. That is the safe direction, and it
-means a caller building an agent directly must name it (`set_agent_id`) before
-attaching a permission store. The factory does this at wake for every agent it
-produces, sub-agents included.
+means a caller building an agent directly must name it (`set_agent_id`) right
+after constructing it with its permission store, before any action is gated.
+The factory does this at wake for every agent it produces, sub-agents included.
 
 ### Org-level tool policy
 

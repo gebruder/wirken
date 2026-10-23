@@ -21,7 +21,10 @@ Windows, and it refuses a binary built from source; see
 
 Each release from 2.3.0 on publishes `releases.json` and its signature,
 `releases.json.sig`, beside the binaries. The manifest is cumulative: it
-lists every published release, newest first, with the date it was issued,
+lists every release from 1.0.1 on that has a `## [version] - date` CHANGELOG
+section and published checksums (`scripts/build-releases-json.py`; the
+0.x and 1.0.0 headings are not in that form and are left out), newest first,
+with the date it was issued,
 whether it carries security fixes, a one-line summary, and the sha256 of
 each release artifact. A release is marked as a security release when its
 CHANGELOG section has a `### Security` heading. The manifest as a whole
@@ -37,7 +40,7 @@ and nothing in a manifest is read before its signature verifies.
 
 Releases before 2.3.0 publish no manifest, so `--check` against them fails
 with a message saying so. The first manifest, published with 2.3.0, lists
-the earlier releases too.
+the earlier releases too, back to 1.0.1.
 
 ## wirken update --check
 
@@ -52,8 +55,10 @@ reports:
   and which;
 - every release newer than the installed one, with its summary, marked
   when it carries security fixes;
-- when the latest release publishes no binary for this target, that it
-  does not.
+- when a release newer than the installed one is the latest and publishes
+  no binary for this target, that it does not (`CheckReport::render`,
+  `crates/cli/src/commands/update/mod.rs`; with nothing newer it prints
+  `Up to date.` and stops).
 
 `--check` downloads no binary and changes nothing installed. It does
 record the manifest's `issued_at` (see [Freeze protection](#freeze-protection)).
@@ -95,7 +100,7 @@ Installs the latest release, or the one `--to` names. In order, it:
    one filesystem: the path holds either the old binary or the new one,
    never a partial file.
 10. Records a `binary_installed` row on the `gateway-install` audit lane
-    and seals it (see [Audit](#audit)).
+    and writes a chain head after it (see [Audit](#audit)).
 
 Start the gateway again afterwards; the command prints how.
 
@@ -120,10 +125,12 @@ predates a security release and so hide it.
 Each install keeps the `issued_at` of the newest manifest it has verified,
 with the signing key's fingerprint, in
 `<data_dir>/update/manifest-state.json`. A manifest issued earlier than
-that is refused. A newer one replaces the record. A record that cannot be
-read refuses rather than starting over, so deleting or damaging the file
-is not a quiet way past the check; remove it only knowing why it is
-damaged.
+that is refused. A newer one replaces the record. A record that is present
+but does not parse, or cannot be read, refuses rather than starting over;
+remove it only knowing why it is damaged. A record that is absent is
+treated as no record, so a deleted file starts the protection over at the
+next manifest fetched (`check_and_record_freshness`,
+`crates/cli/src/commands/update/manifest.rs`).
 
 Freeze protection holds a manifest to the newest one this install has
 seen. It cannot tell this install about a release published after the
@@ -133,10 +140,13 @@ manifest the install saw is not detected.
 ## Mirrors
 
 By default release files come from GitHub, fetched with `curl`, which
-`wirken update` needs on the path. From GitHub every hop is HTTPS: a
-release download redirects once to GitHub's asset host, and curl is run
-with `--proto =https --proto-redir =https`, so a redirect to plain http
-fails. Nothing fetched is trusted on its own: the manifest must verify
+`wirken update` needs on the path. From GitHub every hop is HTTPS: the
+manifest and its signature come from the `releases/latest/download/` URL
+and a binary from its release's `releases/download/` URL, both of which
+redirect to GitHub's asset host; curl follows at most five redirects
+(`Source::transport_args`, `crates/cli/src/commands/update/fetch.rs`) and
+is run with `--proto =https --proto-redir =https`, so a redirect to plain
+http fails. Nothing fetched is trusted on its own: the manifest must verify
 against the compiled-in release keys, and the binary must match the
 sha256 the signed manifest carries.
 
@@ -170,8 +180,12 @@ can withhold a release; it cannot substitute one.
 ## Audit
 
 Every install and rollback appends a `binary_installed` row to the
-`gateway-install` lane of the audit log and seals it with a signed chain
-head straight after. The row carries `from_version`, `to_version`,
+`gateway-install` lane of the audit log and then writes a chain head for
+the lane. The head is best effort: when it cannot be written, or when the
+audit signing key could not be loaded and the log opened unsigned, the row
+stays in the unsigned tail, a warning says so, and the command still
+succeeds (`seal_operator_lane` and `open_signed_session_log`,
+`crates/cli/src/commands/mod.rs`). The row carries `from_version`, `to_version`,
 `binary_sha256`, `target`, `verifying_key` (the fingerprint of the release
 key whose manifest checked the sha256) and `rollback`. It is forwarded by
 default; see [audit-cli.md](audit-cli.md).
@@ -202,14 +216,17 @@ tree was dirty, how old that commit is, the target and the binary's
 path. It reads only what was compiled in and makes no network request.
 
 The age comes from the commit's own timestamp, not a build clock, so the
-build embeds no time of its own. A build without the repository takes
-it from `WIRKEN_BUILD_COMMIT_TIME` or `SOURCE_DATE_EPOCH`, in that order,
-and reports it as unknown when neither is set.
+build embeds no time of its own. The build takes `WIRKEN_BUILD_COMMIT_TIME`
+when it is set, else `SOURCE_DATE_EPOCH`, else the commit's timestamp from
+the repository (`crates/cli/build.rs`), and reports it as unknown when none
+is available or the value taken is not a decimal.
 
 ## Inside an exec
 
-`exec` sets `WIRKEN_EXEC` on every command it runs on the host, and
-`wirken update` refuses when it is set. That stops a model from installing
+`exec` sets `WIRKEN_EXEC` on every command it runs on the host, and an
+install or rollback refuses when it is set (`operator_preflight`,
+`crates/cli/src/commands/update/mod.rs`); `--check` does not look for it.
+That stops a model from installing
 a release through an `exec` the operator approved for something else. A
 sandboxed `exec` has no `wirken` binary to run in the first place.
 

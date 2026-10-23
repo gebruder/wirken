@@ -50,7 +50,7 @@ If the entry is signed, re-sign it after any change to it, the `sandbox` block i
 | `limits` | 512 MB, 256 processes, 1 CPU | `memory_mb`, `pids`, `cpus`. Each one given replaces its default; there is no ceiling. |
 | `secrets_in_env` | none | `vault:` variables to deliver in the environment instead of as files. See [Using vault secrets](#using-vault-secrets-in-mcp-config). |
 
-Every container also gets: all Linux capabilities dropped, `no-new-privileges`, Docker's default seccomp profile, a read-only root with a 64 MB tmpfs at `/tmp`, and the operator's own uid and gid (container uid 0 under a rootless runtime, which is the operator). `sandbox.json`'s `mode` chooses the runtime: `gvisor` runs servers under `runsc`, anything else under Docker's default. `"mode": "off"` turns off the `exec` sandbox only. It does not run MCP servers on the host.
+Every server container also gets: all Linux capabilities dropped, `no-new-privileges`, Docker's default seccomp profile, a read-only root with a 64 MB tmpfs at `/tmp`, and the operator's own uid and gid (container uid 0 under a rootless runtime, which is the operator). `sandbox.json`'s `mode` chooses the runtime: `gvisor` runs servers under `runsc`, anything else under Docker's default. `"mode": "off"` turns off the `exec` sandbox only. It does not run MCP servers on the host.
 
 ### Running one server on the host
 
@@ -71,7 +71,7 @@ The proxy refuses a stdio server, logs why and what to change, and writes `mcp_e
 | `image_unavailable` | The image is not on the host. |
 | `egress_unsupported_runtime` | `egress.hosts` is set and the runtime is rootless Docker, Podman, or Windows. |
 
-A refused server is not retried; fix the entry or the host and restart the gateway. `wirken mcp verify` and `wirken doctor` both name stdio entries that will be refused for want of a `sandbox` block, before the gateway starts.
+A refused server is not retried at load; fix the entry or the host and restart the gateway. A server that started and whose restart then meets one of these conditions is retried as a `start_failed` restart with the backoff under [Restarts](#restarts), and no `mcp_entry_refused` row is written for it (`ContainerLife::start`, `crates/mcp-proxy/src/supervise.rs`). `wirken mcp verify` and `wirken doctor` both name stdio entries that will be refused for want of a `sandbox` block, before the gateway starts.
 
 **Entries from before this release** have no `sandbox` block and are refused with `sandbox_config_invalid`. There is no silent fallback to the host. Either add a block naming the server's image (and an `install_dir` in place of `npx -y`), or set `"sandbox": "off"`; then re-sign the entry if it is signed.
 
@@ -119,14 +119,14 @@ A server that lists hosts gets the route `exec` gets under an allowlist ([egress
 - A server that ignores the proxy variables and opens its own socket has no route anywhere.
 - The CONNECT tunnel is not inspected after the target is decided. A client that presents a different TLS server name inside an allowed tunnel reaches whatever the allowed host's address serves for that name.
 
-Proxied egress is verified on rootful Docker on Linux, and refused elsewhere with `egress_unsupported_runtime`. `--network none` works on every runtime.
+Proxied egress is verified on rootful Docker on Linux. It is refused with `egress_unsupported_runtime` on rootless Docker, Podman and Windows (`RuntimeFacts::egress_unsupported`, `crates/sandbox/src/lib.rs`); any other runtime, rootful Docker on macOS included, is not refused and not verified. `--network none` works on every runtime.
 
 ## How it works
 
 On startup, `wirken-mcp-proxy`:
 
-1. Verifies each entry's signature (see [Signing MCP entries](#signing-mcp-entries)).
-2. Removes any container, network and secret file an earlier proxy for the same data directory left behind.
+1. Removes any container, network and secret file an earlier proxy for the same data directory left behind (`container::sweep`, called from `crates/mcp-proxy/src/runner.rs`).
+2. Verifies each entry's signature (see [Signing MCP entries](#signing-mcp-entries)). Each entry is verified and then started (steps 3 and 4) before the next is verified.
 3. Starts each stdio server in its container, one container per agent and server, labelled with the data directory's instance, the agent and the server, and writes `mcp_server_sandboxed`.
 4. Performs the MCP `initialize` handshake and calls `tools/list` to discover tools.
 5. Adds discovered tools to the agent's tool definitions, prefixed with `mcp_{server}_`.
@@ -193,15 +193,16 @@ Treat such a server like a third-party CLI: audit the source and the package pro
 
 **Default build.** `crates/mcp-proxy/src/wirken-mcp-pubkey.pub` ships empty. With no anchor, unsigned entries load (pre-anchor parity); signed entries verify against their inline `signer_key`; an invalid signature is always a hard fail.
 
-**Anchored build.** Populate `wirken-mcp-pubkey.pub` with a hex-encoded 32-byte Ed25519 public key and rebuild. Under an anchor, each entry's `signer_key` must additionally carry a `signer_key_delegation` Ed25519 signature by the anchor over the raw 32-byte signer key. Unsigned entries refuse to load unless `WIRKEN_ALLOW_UNSIGNED_MCP=1` is set, in which case the bypass is logged on every spawn and recorded on the audit chain as `mcp_entry_verified` with signer `<unsigned-bypass>`.
+**Anchored build.** Populate `wirken-mcp-pubkey.pub` with a hex-encoded 32-byte Ed25519 public key and rebuild. Under an anchor, each entry's `signer_key` must additionally carry a `signer_key_delegation` Ed25519 signature by the anchor over the raw 32-byte signer key. Unsigned entries refuse to load unless `WIRKEN_ALLOW_UNSIGNED_MCP=1` is set, in which case the bypass is logged and recorded on the audit chain as `mcp_entry_verified` with signer `<unsigned-bypass>` once per agent and entry, at load (`pre_spawn_verify`, `crates/mcp-proxy/src/mcp_registry.rs`); a supervisor restart of that server is not logged or recorded again.
 
 **Anchor rotation requires rebuilding the binary.** An anchor file at the same UID as the gateway adds no real defense; the anchor is meaningful only when the binary itself is what an attacker cannot replace without operator action.
 
 **Canonical hash layout.** `crates/mcp-proxy/src/mcp_signing.rs::hash_mcp_entry` is the source of truth.
 
-- **Stdio:** `sha256("stdio\0" || name_len_le || name || command_len_le || command || arg_count_le || (per-arg arg_len_le || arg) || env_count_le || (per-env key_len_le || key) || sandbox)`. Env keys, sorted ascending. Env values are not in the payload because they are `vault:NAME` references the proxy resolves at load time; the signature stays stable across vault rotations of the same logical credential.
-- **Stdio `sandbox`:** absent, it adds nothing, so an entry signed before the block existed keeps its signature (and is then refused at start for having no block). Present, it is `"sandbox\0"` followed by `"off\0"`, or by `"container\0"` and every field of the block: `image` and `install_dir` (each a presence byte, then length-prefixed), `egress.hosts` sorted and deduplicated, `mounts` sorted by target, source and `writable` (each as source, target and a `writable` byte), a `scratch` byte, `memory_mb`, `pids` and the bits of `cpus` (each a presence byte, then a little-endian `u64`), and `secrets_in_env` sorted and deduplicated. Lists are a little-endian `u32` count, then each item length-prefixed. Widening a server's hosts or mounts, raising its limits, or moving a secret into its environment changes the hash, so a signed entry no longer verifies until it is re-signed.
-- **Http:** `sha256("http\0" || name_len_le || name || url_len_le || url || auth_kind_le)` where `auth_kind_le` is `u8`: 0 = none, 1 = bearer, 2 = oauth2. The credential ref is not in the payload for the same reason.
+- **Stdio:** `sha256("stdio\0" || name_len_le || name || command_len_le || command || arg_count_le || (per-arg arg_len_le || arg) || env_count_le || (per-env key_len_le || key) || sandbox || costs)`. Env keys, sorted ascending. Env values are not in the payload because they are `vault:NAME` references the proxy resolves at load time; the signature stays stable across vault rotations of the same logical credential.
+- **Stdio `sandbox`:** absent, it adds nothing, so an entry signed before the block existed keeps its signature (and is then refused at start for having no block). Present, it is `"sandbox\0"` followed by `"off\0"`, by `"container\0"` and every field of the block, or, for a block that did not parse, by `"invalid\0"` and the length-prefixed JSON value: `image` and `install_dir` (each a presence byte, then length-prefixed), `egress.hosts` sorted and deduplicated, `mounts` sorted by target, source and `writable` (each as source, target and a `writable` byte), a `scratch` byte, `memory_mb`, `pids` and the bits of `cpus` (each a presence byte, then a little-endian `u64`), and `secrets_in_env` sorted and deduplicated. Lists are a little-endian `u32` count, then each item length-prefixed. Widening a server's hosts or mounts, raising its limits, or moving a secret into its environment changes the hash, so a signed entry no longer verifies until it is re-signed.
+- **Http:** `sha256("http\0" || name_len_le || name || url_len_le || url || auth_kind_le || costs)` where `auth_kind_le` is `u8`: 0 = none, 1 = bearer, 2 = oauth2. The credential ref is not in the payload for the same reason.
+- **`costs`,** on both: nothing when the entry declares no `tool_costs`, so an entry signed before the field existed hashes unchanged; otherwise `"costs\0"`, a little-endian `u32` count, then each tool name length-prefixed followed by its cost as a little-endian `u64`, sorted by name.
 
 **What the signature attests.** "This is the entry config the publisher intended," the sandbox block included: the image reference, what the server may reach, and how its secrets are delivered. It does not attest to the binary at `command` resolving to a specific artifact on disk, nor to an image tag resolving to specific contents; a digest-pinned `image` does that: a signed entry whose `command` is `/usr/local/bin/foo` verifies the same on two operator machines where `foo` is built differently. Per-binary attestation is a separate concern (operator's package manager, sandbox posture).
 
@@ -215,7 +216,7 @@ Treat such a server like a third-party CLI: audit the source and the package pro
 | `mcp_server_unsandboxed` | At every start of a server with `"sandbox": "off"`. |
 | `mcp_server_exited` | A contained server's container exited, with its exit code: on its own, or stopped by the proxy at shutdown (`stopped_by_proxy: true`). |
 | `mcp_server_restart` / `mcp_server_restart_abandoned` | See [Restarts](#restarts). |
-| `sandbox_egress_verdict` | One per request through a server's sidecar, with `mcp_server` set. |
+| `sandbox_egress_verdict` | One per connection the server's sidecar hands to the broker, with `mcp_server` set. A request the sidecar turns away before asking (a head that is too large, times out or does not parse) gets no row. |
 
 The gateway writes one more on its own `gateway-mcp-credentials` lane:
 
@@ -228,12 +229,12 @@ All of them are on the default typed-SIEM forwarded set; consumers can pivot on 
 ## Supported transports
 
 - **stdio**: start the server in its container (or, with `"sandbox": "off"`, as a host process) and communicate via stdin/stdout. Default for local MCP servers.
-- **HTTP**: connect to a remote MCP server over HTTP/HTTPS. Supports three auth modes:
+- **HTTP**: connect to a remote MCP server over HTTPS. Plain `http://` is accepted for `localhost`, `127.0.0.1` and `[::1]` only; any other `http://` URL is refused (`HttpTransport::new`, `crates/mcp-proxy/src/mcp_transport.rs`). Supports three auth modes:
   - `NoAuth`: no authentication header.
   - `BearerAuth`: static bearer token from the vault.
   - `OAuth2Auth`: authorization code flow with PKCE via the `oauth2` crate. Token refresh is automatic. Bootstrap an OAuth credential with `wirken mcp authorize <server>`; see [`credentials.md`](credentials.md) for the interactive scope picker and the inspection / rescoping commands.
 
-The MCP proxy runs as a separate process (`wirken-mcp-proxy`), communicating with the agent over a Unix domain socket. MCP credentials (bearer tokens, OAuth access tokens) are handed to the proxy process by the gateway at spawn and never exposed to the agent; OAuth refresh tokens and client secrets stay in the gateway, which refreshes on the proxy's request. When an HTTP server refuses a credential, with a 401 or a `WWW-Authenticate` challenge carrying `error="invalid_token"`, the call fails and the proxy asks the gateway for that credential's current vault value, so the next call carries a credential the operator rotated with `wirken credentials rotate` or authorized again with `wirken mcp authorize`, without a restart. A refusal for a missing scope (`insufficient_scope`) does not fetch: a new value of the same grant would not help.
+The MCP proxy runs as a separate process (`wirken-mcp-proxy`), communicating with the agent over a Unix domain socket. MCP credentials (bearer tokens, OAuth access tokens) are handed to the proxy process by the gateway at spawn and never exposed to the agent; OAuth refresh tokens and client secrets stay in the gateway, which refreshes on the proxy's request. When an HTTP server refuses a credential, with a 401 or a `WWW-Authenticate` challenge carrying `error="invalid_token"`, the call fails and the proxy asks the gateway for that credential's current vault value, so the next call carries a credential the operator rotated with `wirken credentials rotate` or authorized again with `wirken mcp authorize`, without a restart. A 401 fetches whatever its challenge says; a challenge naming `insufficient_scope` on any other status does not fetch, since a new value of the same grant would not help (`credential_refused`, `crates/mcp-proxy/src/mcp_transport.rs`).
 
 ## Declaring what a tool costs
 

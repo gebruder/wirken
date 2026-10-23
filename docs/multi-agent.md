@@ -25,8 +25,8 @@ configured during `wirken setup`. On `wirken run` the startup output shows the
 routing:
 
 ```
-  Route: slack -> agent:work (anthropic/<model-id>)
-  Route: telegram -> agent:personal (openai/gpt-4o)
+  Route: Slack -> agent:work (anthropic/<model-id>)
+  Route: Telegram -> agent:personal (openai/gpt-4o)
 ```
 
 `wirken agents remove` drops the configuration and channel bindings; the
@@ -91,8 +91,7 @@ see what is broken to fix it.
 error and hard-fail, naming both recovery paths:
 
 ```
-persona 'alice' references preset 'analyst' which is not
-installed at /home/alice/.wirken/presets/analyst.
+persona 'alice' references preset 'analyst' which is not installed at /home/alice/.wirken/presets/analyst.
 Either install the preset:
     wirken preset install analyst
 Or clear the reference:
@@ -151,8 +150,8 @@ allowed. There is no intersection logic; each agent is checked against itself.
 
 An agent that was never told which logical agent it is gets no persisted
 grants and prompts for every Tier 2 action. That is the safe direction, and it
-means a caller building an agent directly must name it (`set_agent_id`) before
-attaching a permission store. The factory does this at wake for every agent it
-produces, sub-agents included.
+means a caller building an agent directly must name it (`set_agent_id`) right
+after constructing it with its permission store, before any action is gated.
+The factory does this at wake for every agent it produces, sub-agents included.
 
 Sub-agents run in the parent's process.

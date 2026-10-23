@@ -48,9 +48,10 @@ inside a compromised adapter can still reach what that user can: the encrypted
 vault file, and the gateway process itself where the operating system lets one
 process of a user inspect another.
 
-The adapter trait is generic over a zero-sized channel marker, so a
-`SessionHandle<Telegram>` is a different type from a `SessionHandle<Discord>`
-and the `Channel` trait is sealed within `wirken-ipc`. Within code that
+`SessionHandle<C>` is generic over a zero-sized channel marker, so a
+`SessionHandle<Telegram>` is a different type from a `SessionHandle<Discord>`.
+The `Channel` trait in `wirken-ipc` is documented as sealed but is a public
+trait with no sealing supertrait (`crates/ipc/src/channel.rs`). Within code that
 carries `SessionHandle<C>`, cross-channel access is a compile error rather
 than a runtime check.
 
@@ -64,9 +65,11 @@ scaffolding. See [enforcement-model.md](enforcement-model.md#channel-isolation).
 **Transport.** Local-only duplex streams behind the `wirken_ipc::Stream`
 trait: Unix domain sockets on Linux and macOS, named pipes on Windows. No TCP
 and no HTTP between adapter and gateway, which removes the network attack
-surface entirely. Peer identity is checked at accept time on both platforms
-(`SO_PEERCRED` on unix, `GetNamedPipeClientProcessId` plus token-SID
-extraction on windows).
+surface entirely. Peer identity is checked at accept time on unix
+(`SO_PEERCRED`, through `peer_principal` under `#[cfg(unix)]` in
+`crates/cli/src/commands/run.rs`). The Windows named-pipe peer check
+(`GetNamedPipeClientProcessId` plus token-SID extraction,
+`crates/ipc/src/stream.rs`) exists but is not called on the accept path.
 
 **Process management.** The gateway spawns adapters with
 `tokio::process::Command`; each is the same binary invoked as
@@ -93,23 +96,26 @@ personal gateway runs three to five adapters, not five hundred.
 **Threat (CWE-256):** plaintext credentials with no rotation or expiry; any
 process with filesystem read can extract them.
 
-All secrets are encrypted at rest under a **device key** derived from the OS
-keychain: macOS Keychain via `security-framework`, Linux Secret Service over
-D-Bus from a dedicated blocking thread to avoid a known tokio deadlock, and an
-age-encrypted file with an Argon2id-derived passphrase as the headless
-fallback. Windows uses the age-file backend.
+All secrets are encrypted at rest under a **device key**. Release binaries
+derive it from an age-encrypted file with an Argon2id-derived passphrase on
+every platform: the vault crate's `keychain-age` feature is its only default,
+and the macOS Keychain (`security-framework`) and Linux Secret Service
+(`secret-service` over D-Bus) backends sit behind the `keychain-macos` and
+`keychain-linux` features, which no workspace crate and no release build
+enables (`crates/vault/Cargo.toml`, `.github/workflows/release.yml`).
 
 Decrypted secrets are wrapped in `VaultSecret` over `SecretString`, which
 implements neither `Display`, `Debug`, `Serialize` nor `Clone`. Logging,
 serializing, printing or cloning a secret is a compile error, not a runtime
-check someone can forget. The only access path returns a short-lived `&str`
-that cannot outlive the wrapper, and memory is zeroed on drop.
+check someone can forget. The plain-text access path returns a short-lived
+`&str` that cannot outlive the wrapper; `into_inner` and `as_secret_string`
+hand back the still-wrapped `SecretString`. Memory is zeroed on drop.
 
 ```rust
-pub struct VaultEntry {
-    secret: VaultSecret,       // cannot be logged, serialized, or printed
-    meta: CredentialMetadata,  // can be freely logged
-}
+// CredentialStore::retrieve, crates/vault/src/store.rs
+pub fn retrieve(&self, name: &str) -> Result<(VaultSecret, CredentialMetadata), VaultError>
+// VaultSecret: cannot be logged, serialized, or printed
+// CredentialMetadata: can be freely logged
 ```
 
 **What this does not cover:** a caller who copies the `&str` into a new
@@ -141,8 +147,12 @@ refresh token, and records an `mcp_credential_refetched` row naming the
 credential, never the value; the refused call fails and the next one carries
 the new value.
 
-No child process holds the vault passphrase or the vault's device key. The
-gateway is the only process that opens the vault; every process it starts,
+No process the gateway starts holds the vault passphrase or the vault's
+device key. The gateway is the only process that opens the vault on a running
+deployment (`wirken ask` and `wirken lyrik` open it in their own process, and
+the `git` and `semgrep` children `wirken lyrik` spawns inherit its environment,
+`WIRKEN_VAULT_PASSPHRASE` included; `crates/cli/src/commands/lyrik_git.rs`,
+`lyrik_semgrep.rs`); every process it starts,
 adapters, the MCP proxy, the host `exec` shell, has `WIRKEN_VAULT_PASSPHRASE`
 removed from its environment or starts with a cleared one. A credential rotated
 in the vault reaches an adapter at its next spawn, an HTTP MCP server at the
@@ -154,7 +164,8 @@ first call it refuses, and a stdio MCP server at the next gateway start. See
 that is a secret rather than an identifier, and it adds each value it decrypts
 later, so a credential rotated since the start is known once it is read. Each
 secret is matched on the parts it can appear as: an OAuth credential on its
-access and refresh tokens, a Bedrock key on its secret access key and session
+access and refresh tokens and its id token when one is stored, a Bedrock key on
+its secret access key and session
 token, anything else whole. Content that carries one is refused before it goes
 further, and a `leak_refused` row names the credential, never the value:
 
@@ -193,10 +204,12 @@ sub-agents. Owned by
 [permissions-and-identity.md](permissions-and-identity.md) and
 [multi-agent.md](multi-agent.md#sub-agent-orchestration).
 
-Each agent gets its own workspace directory, session store, permission set and
-bound channels. Enforcement is runtime, not type-level: lookups key on the
-agent id, session ids are prefixed by it, and the factory names each agent
-before attaching a permission store.
+Each agent gets its own workspace directory, audit session ids, permission
+set and bound channels; `sessions.db` is shared and keyed on channel and
+conversation. Enforcement is runtime, not type-level: lookups key on the agent
+id, audit session ids are prefixed by it, and the factory names each agent
+(`set_agent_id`) right after constructing it with its permission store, before
+any action is gated.
 
 ## 4. Audit
 
@@ -273,7 +286,8 @@ Each agent has its own auth profile, so agent A can run `openai/gpt-4o` and
 agent B `anthropic/<model-id>` with separate keys.
 
 **Direct calls.** The agent's `LlmClient` calls providers over HTTPS with
-`reqwest` and `rustls`; streaming uses `reqwest-eventsource`. Keys are
+`reqwest` and `rustls`; streaming parses the SSE body from `reqwest`'s byte
+stream in `crates/agent/src/llm_stream.rs`. Keys are
 decrypted from the vault at startup and held in memory for the process
 lifetime.
 
@@ -303,10 +317,14 @@ Provider list and confidential-inference deployment:
 **Threat (CWE-307):** exempting localhost when the gateway binds to localhost
 by default leaves the primary attack surface unprotected.
 
-No loopback exemption. Auth: 5 failed attempts per 60 seconds per source, then
-a 10-minute lockout, applied to 127.0.0.1 like anything else. Control plane:
-10 mutations per minute per client. Both via `governor`, GCRA over lock-free
-atomic state, one limiter per scope.
+No loopback exemption. `AuthRateLimiter` (5 failed attempts per 60 seconds
+per source, then a 10-minute lockout) and its `auth_rate_limit_*` config
+fields exist in `crates/gateway/src/rate_limit.rs` and `config.rs`, but no
+production path constructs it, so no auth path is rate-limited today. The
+control-plane limiter is `governor` GCRA over lock-free atomic state in one
+global bucket, not per client: webchat's verify route takes
+`control_plane_rate_limit` (default 10 per minute) and its chat posts a fixed
+60 per minute (`crates/cli/src/commands/webchat.rs`).
 
 There is no per-provider LLM rate limiter. Outbound model calls are bounded by
 the per-turn round cap, the per-agent spend budget
@@ -321,9 +339,13 @@ whose 0o600 permissions are the boundary.
 **Threat (CWE-613):** sessions that persist indefinitely, and session IDs used
 as routing controls rather than security boundaries.
 
-Sessions expire after 24 hours of inactivity, configurable. The session store
-holds metadata only: id, channel, conversation id, timestamps, message count,
-expiry flag. Conversation ids are UUIDv4. Creation and expiry are logged.
+Sessions expire after 24 hours of inactivity (`session_expiry_secs`, read
+only from `GatewayConfig::default`; no file, flag or variable sets it). The
+session store holds metadata only: id, channel, conversation id, timestamps,
+message count, expiry flag. Session ids are UUIDv4; conversation ids come from
+the channel. Expiry is applied lazily in `get_or_create`, and the store itself
+writes no log or audit row for creation or expiry
+(`crates/gateway/src/session.rs`).
 
 Transcripts are durably logged as typed session events in `audit.db`, and the
 `AgentFactory` reconstructs any session from its log on wake.
@@ -351,12 +373,12 @@ runtime.
 
 ## 10. Technology stack
 
-Versions are pinned in the workspace `Cargo.toml` and are not restated here.
+Versions are pinned in the workspace `Cargo.toml` and the crate manifests and are not restated here.
 
 | Component | Crate | Why |
 |-----------|-------|-----|
 | Async runtime | `tokio` | De facto standard; timers, IO, process, signal |
-| HTTP client | `reqwest` | Built on hyper, UDS support, SSE via `reqwest-eventsource` |
+| HTTP client | `reqwest` | Built on hyper, UDS support; SSE parsed in `llm_stream.rs` over its byte stream |
 | SQLite | `rusqlite` | `bundled` compiles SQLite from source, no system dependency |
 | macOS keychain | `security-framework` | Direct bindings to Security.framework |
 | Linux keychain | `secret-service` | D-Bus to GNOME Keyring or KDE Wallet |
@@ -386,7 +408,7 @@ binary with subcommands; one `cargo build --release` produces everything.
 | Threat | CWE/OWASP | Mitigation |
 |--------|-----------|------------|
 | Single token controls all channels | CWE-250 | Per-adapter Ed25519 identity, per-channel credentials |
-| Plaintext credentials on disk | CWE-256, CWE-312 | XChaCha20-Poly1305 vault, OS keychain for the device key |
+| Plaintext credentials on disk | CWE-256, CWE-312 | XChaCha20-Poly1305 vault, age-file device key |
 | No per-channel isolation | CWE-653 | Separate adapter processes |
 | Excessive agent privileges | OWASP T3 | Three-tier model with expiring approvals |
 | Unsandboxed code execution | OWASP T11 | Docker and gVisor sandboxes for `exec`, workspace confinement |

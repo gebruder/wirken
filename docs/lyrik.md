@@ -54,16 +54,22 @@ scorers into a consensus, and does not send findings to any delivery channel.
 - **Scoring against the team's rubric**, in single-call and walk mode, with
   the inline rubric in `SKILL.md` as the fallback. See
   [Writing the scoring guide](#writing-the-scoring-guide).
-- **Team-owned files locked.** A run's agents may write only under the run's
-  own directory, and the runner never writes `.lyrik/rubric.md`,
+- **Team-owned files locked.** A run's agents' `write_file` is confined to the
+  run's own directory by the staged skill's `write_paths`; an approved `exec`
+  runs with the target mounted read-write (`crates/agent/src/sandbox.rs:680`),
+  so the hash check below is the control on that path. The runner never writes `.lyrik/rubric.md`,
   `.lyrik/context.md` or `.lyrik/config.json`. It hashes all three at run
   start and end; if one changed, it records `lyrik.locked_file.changed` with
   the file and both sha256 values and the run fails.
-- **Two-pass scoring.** Each finding is scored by two independent passes. When
-  they disagree by more than one step on any axis the finding carries
-  `scoring_disagreement: true` and the runner picks the lower-implied tier.
-  That is the mechanism behind "will not average": disagreement is recorded
-  and resolved conservatively.
+- **Two-pass scoring.** In single-call mode the skill scores each finding in
+  two independent passes (`skills/lyrik/SKILL.md`); when they disagree by more
+  than one step on any axis the skill sets `scoring_disagreement: true` and
+  picks the lower-implied tier. The runner reads neither field; the SARIF
+  emitter counts the passes (`crates/cli/src/commands/lyrik_sarif.rs`). The
+  staged walk wrapper carries no two-pass instruction, so a walk scores in two
+  passes only when its own text says so. That is the mechanism behind "will
+  not average": disagreement is recorded and resolved conservatively by the
+  skill.
 - **Grade caps at 0.5.** The skill sets `grade: 0.5` when both passes mark
   `real_bug: yes` and `reachable: yes`, and `0` otherwise. The ceiling is by
   design: Lyrik confirms real-and-reachable, and exploit verification is a
@@ -71,12 +77,15 @@ scorers into a consensus, and does not send findings to any delivery channel.
   for every walk: a staged finding whose `grade` is above 0.5 is written at
   0.5, and the per-run log records `lyrik.finding.grade_corrected` with the
   stable ID, the walk, and the original and new value.
-- **Brocard rejections.** Seven rules for dismissing a candidate, adapted from
+- **Brocard rejections.** Eight rules for dismissing a candidate (`RULE_COUNT`,
+  `crates/cli/src/commands/lyrik_brocards.rs`), the first seven adapted from
   the list at <https://vulnbrocards.com/>, where rule N is VB00N. Rule 1 (no
-  threat model) is structural and runs in the gate. Rule 7 (seed provenance
-  earns no credit) has no rejection path: nothing in the gate reads a seed's
-  `detection_source`. Rules 2 to 6 are judgment: the walks apply them under
-  their own wrapper section, writing a file to `staging/<walk>/rejections/`.
+  threat model) is structural and runs in the gate. Rules 2 to 7 are judgment:
+  the walks apply them under their own wrapper section, writing a file to
+  `staging/<walk>/rejections/` (`WALK_RULE_MAX` is 7; nothing in the gate
+  itself reads a seed's `detection_source` for rule 7). Rule 8 (replay
+  disagrees) is the runner's, applied by `replay`; a walk-side rejection naming
+  it is refused.
   Every applied rule is recorded under `rejected_candidates`, with its rule
   number, a one-line reason, and the gate or walk that applied it. The per-run
   log records `lyrik.brocard.rejected`, `lyrik.brocard.refused` for a rejection
@@ -117,7 +126,10 @@ scorers into a consensus, and does not send findings to any delivery channel.
 - **Audit logs.** A per-run NDJSON `<run>/audit.log` for every dispatch
   decision, plus the signed hash-chained gateway chain for cross-session
   integrity. See [audit-cli.md](audit-cli.md).
-- **Provenance, funnel and inference** on every `findings.json`. See
+- **Provenance, funnel and inference** on every `findings.json` a run writes
+  after its walks complete. The no-findings marker path carries neither
+  `funnel` nor `inference`, the rate-limit and context-overflow paths carry
+  `inference` only, and `--use-fixture` carries none. See
   [Reports and audit](#reports-and-audit).
 - **JSON findings schema** with a reference validator and a SARIF emitter.
 
@@ -146,10 +158,13 @@ scorers into a consensus, and does not send findings to any delivery channel.
    refused.
 5. The run writes `findings.json` and `audit.log` under
    `<repo>/.lyrik/state/runs/<run-id>/` and prints the funnel and inference.
-6. The bundled skill does not run Phase 0. When a walk stages context or
-   rubric sections, the runner joins them into
-   `.lyrik/state/runs/<run-id>/proposed/context.md` and `proposed/rubric.md`
-   and prints their paths; it never writes over the committed files.
+6. The bundled skill does not run Phase 0. When the single-call skill stages
+   context or rubric sections under `staging/context/` and `staging/rubric/`,
+   the runner joins them into `.lyrik/state/runs/<run-id>/proposed/context.md`
+   and `proposed/rubric.md` and prints their paths; it never writes over the
+   committed files. Sections a walk writes under `staging/<walk>/context/` and
+   `staging/<walk>/rubric/` are not aggregated (`aggregate_phase0_section`
+   calls in `crates/cli/src/commands/lyrik.rs`).
    Promoting a proposal is a commit the team makes.
 
 ## What lives where
@@ -167,8 +182,8 @@ committed; run state lives under `.lyrik/state/`.
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
 | `<repo>/.lyrik/context.md` | the team's project context |
-| `<repo>/THREAT_MODEL.md`, else `<repo>/docs/threat-model.md` | the target's own threat model, loaded when committed and unmodified; see [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) |
-| `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may write |
+| `<repo>/THREAT_MODEL.md`, else `<repo>/docs/threat-model.md` | the target's own threat model, loaded when committed and unmodified. The first of the two that exists is the one checked; when it is uncommitted or modified it is skipped with its reason and the other path is not tried (`load_target_threat_model`, `crates/cli/src/commands/lyrik.rs`); see [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) |
+| `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may `write_file` |
 
 `.lyrik/config.json` names the provider, not its key:
 `phases.framing.provider: "privatemode"` resolves through the vault. Lyrik
@@ -178,9 +193,12 @@ never sees a credential.
 
 A sample is at [`lyrik.example.json`](lyrik.example.json).
 
-**`scope`**: `include` globs (default `["**/*"]`) and `exclude` globs
-(default `["target/**", "node_modules/**", ".git/**"]`). A user request like
-"assess only `src/`" overrides this for the run.
+**`scope`**: `include` and `exclude` glob lists. The runner does not read
+them; the keys it reads are `bench_mode`, `phases`, `mode`, `scanner`, `walks`,
+`max_concurrent_walks` and `walks_dir`. The single-call skill text tells the
+model to honour them, to treat the whole workspace as in scope when they are
+absent, and to skip `.git/` and `.lyrik/` regardless (`skills/lyrik/SKILL.md`);
+the staged walk prompts do not mention them (`crates/cli/src/commands/lyrik_walks.rs`).
 
 **`phases`**: provider and model pins keyed by phase name. The runner
 resolves one pin for the whole run, `phases.framing`, else `phases.score`,
@@ -240,7 +258,7 @@ installed walk files and never writes them; each run stages its own copy
 under the run directory.
 
 Each walk runs as its own task gated by a semaphore. Every walk's agent shares
-the run-level session id (`lyrik-<run-id>`), so all walk turns land in one
+the run-level session id (`lyrik-<run-id>`, a `/` in a nested run id written as `-`), so all walk turns land in one
 signed audit chain however many run in parallel. Per-walk staging lives under
 `.lyrik/state/runs/<run-id>/staging/<walk-name>/`.
 
@@ -249,8 +267,11 @@ walk text: everything the walk writes goes under its staging directory, and a
 harness the walk text would put in the project's test tree goes under
 `staging/<walk-name>/harness/` instead. Promoting a harness into the test tree
 is an operator step after the run. The staged frontmatter's `write_paths`,
-`<workspace>/.lyrik/state/runs/<run-id>`, is what enforces it; the installed
-walk files are not modified. When the run has a team rubric or context, the
+`<workspace>/.lyrik/state/runs/<run-id>`, confines writes to the run
+directory; keeping to the walk's own staging directory within it is the
+wrapper's instruction, not enforced (`run_write_scope`,
+`crates/cli/src/commands/lyrik_walks.rs`). The installed walk files are not
+modified. When the run has a team rubric or context, the
 staged walk carries it after that section.
 
 **Step records.** Each numbered step of a walk's text ends by writing
@@ -269,7 +290,7 @@ records stand. Accepted records are carried in `findings.json` under
 itself is not edited.
 
 **Target threat model.** When the scanned repository has `THREAT_MODEL.md`
-at its root or `docs/threat-model.md`, committed and unmodified, every staged
+at its root or, failing that file's existence, `docs/threat-model.md`, committed and unmodified, every staged
 walk and the staged Lyrik copy carry its text after the project context, and
 the brocard adjudication checks each finding's `threat_model` against it.
 [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) has the
@@ -282,26 +303,33 @@ staged `fix` skill. Its brief is the finding, the `invariant` the finding
 names (the property the code must hold that the finding shows violated; the
 staged wrapper has every walk emit it), the reproduction, and the revision.
 The patch targets the invariant, not the reproduction's input. The agent
-writes only under `staging/fix/<slug>/`: `fix.patch`, `apply.sh` for the
+is told to write only under `staging/fix/<slug>/`, with `write_paths`
+enforcing the run directory: `fix.patch`, `apply.sh` for the
 operator to run from the project root, and `proof.json`. Nothing is written
 into the project's tree; the arms run in two copies extracted from the scanned
 revision under that directory with `git archive`. The proof has three arms
 against the live build: the reproduction fails in the baseline copy, passes in
 the patched copy, and fails again after `git apply -R` with `diff -r` showing
-the reverted copy identical to the baseline. The runner judges the proof and
-writes `fixes` into `findings.json`: `fix` only when all three arms are
-present in that shape, the patch exists, the invariant is named and the target
-tree did not change during the step; otherwise `inconclusive`, with each
-reason listed. An inconclusive outcome is never recorded as a fix. Exec is
+the reverted copy identical to the baseline. The runner judges the proof as
+`proof.json` reports it, without re-running the arms, and writes `fixes` into
+`findings.json`: `fix` only when all three arms are present in that shape, the
+patch exists, the invariant is named and a target tree that was clean at run
+start is still clean after the step (a tree already dirty at start cannot be
+told apart and adds no reason); otherwise `inconclusive`, with each reason
+listed. An inconclusive outcome is never recorded as a fix. Exec is
 gated as everywhere under `wirken lyrik`: the operator is asked before each
 command, an approval is a one-shot bypass that stores no grant, a refused
 command is a skipped step, and the step's commands are printed before the
-first prompt. With the sandbox off no fix runs and each confirmed finding is
-logged as skipped.
+first prompt. With the sandbox off no replay runs, so no finding is confirmed
+and the run records `lyrik.fix.none_confirmed`; a per-finding
+`lyrik.fix.skipped` is written only when findings were confirmed and `exec` is
+unavailable at the fix step.
 
 **Reproductions and replay.** A command a walk runs to show a finding leaves
 a record under `staging/<walk-name>/reproductions/`. After the walks return,
-the run starts one fresh agent per record, which sees only the record, runs
+the run starts one fresh agent per record, whose prompt holds only the record
+(it is told to read nothing else; the run's `read_paths` still cover the
+target), runs
 the same command, and writes its own observation under
 `staging/<walk-name>/replays/`. The two are carried side by side in
 `findings.json` under `reproductions`; a replay that disagrees is brocard
@@ -353,8 +381,10 @@ removed counts as `brocard_rejected` in the scanner funnel, not `accepted`.
 
 **`bench_mode`**: defaults false. Set it only on benchmark or
 batch-evaluation targets: when true, the run does not ask for a sign-off and
-writes `lyrik.phase_0.signoff` and `lyrik.high_severity_review.signoff` rows
-with `decision: "auto_bench"`, so bench runs are distinguishable after the
+writes a `lyrik.phase_0.signoff` row before dispatch and a
+`lyrik.high_severity_review.signoff` row after the walks and the locked-file
+check succeed, both with `decision: "auto_bench"`, so bench runs are
+distinguishable after the
 fact. When false, the run asks at the terminal (see [Setup](#setup)); without
 a terminal it writes a `lyrik.phase_0.signoff` row with `decision:
 "pending_adapter_route"` and exits non-zero before dispatch. `scoring_disagreement` has no bench handling and no routing; a
@@ -416,8 +446,10 @@ rule are recorded alongside the findings; see [lyrik-brocards.md](lyrik-brocards
 `https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json`.
 The schema is tag-pinned, not release-pinned: wirken releases that do not
 change it do not move the tag, and schema changes cut a new tag and a new
-spec. `wirken lyrik validate --path <path>` embeds the schema bytes and never
-fetches `$id`; the URL is for external JSON Schema validators.
+spec. `wirken lyrik validate --path <path>` checks the 1.1 rules in code
+(`crates/cli/src/commands/lyrik_validate.rs`; the schema file is read only by
+its tests) and never fetches `$id`; the URL is for external JSON Schema
+validators.
 
 Pin the schema, not the CLI. `wirken lyrik` is outside Wirken's stability
 surface: its subcommands, flags, run output, and the fields `findings.json`
@@ -444,8 +476,9 @@ or `"injection"`; `tier` is `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`;
 when the scanner raised the location and the model ruled it a real bug,
 `model_reasoning` when the model raised it without a matching scanner
 candidate, and `both` when the two converged on the same file and line across
-walks. **`both` is produced only by per-walk dedup**, so single-call mode never
-emits it.
+walks. **The runner sets `both` only in per-walk dedup**; a value the model
+staged is kept as written (`annotate_detection_source` inserts only when the
+field is absent), so single-call mode never produces it on its own.
 
 Extra fields at both levels are allowed and ignored, so producers can carry
 `grade`, `stream`, `scoring_passes`, `dedup_sources`, `rubric_silent`,
@@ -474,8 +507,10 @@ framing, a missing or non-integer line.
 edits land above it, so consumer-side fuzzy matchers should fall back to
 file-proximity matching on an exact-ID miss.
 
-`findings[]` is sorted by `(location.file, location.line_start)` ascending,
-stable across runs of the same scope.
+`findings[]` is not sorted: single-call mode keeps staged file-name order, and
+walk mode keeps first-seen group order across walks in config order, with
+findings that have no location at the end. The validator does not check
+order.
 
 **Not in the 1.1 surface**, and consumers must not pin against them: a
 top-level `target`, `funnel`, `concentration` or `observations` block (the
@@ -488,12 +523,17 @@ A run that finds nothing still writes `findings.json`, with an empty `findings`
 array, but only when the agent also wrote a no-findings marker at
 `staging/no-findings.json`. The marker names the framings checked and the files
 read, both as non-empty lists of strings. The runner copies those two lists into
-a top-level `no_findings` key. A run with no findings and no marker fails, and a
-marker beside a finding fails the run.
+a top-level `no_findings` key. In single-call mode a run with no findings and
+no marker fails, and a marker beside a finding fails the run. In walk mode the
+per-walk staging directories always count as consumed, so `findings.json` is
+written even with no findings and no marker, with no `no_findings` key, and a
+marker with zero findings fails the run. A single-call run that ends in
+rate-limit exhaustion or context overflow writes an empty `findings.json`
+without a marker and exits zero.
 
 ### Carried outside schema 1.1
 
-Two additions sit outside the 1.1 contract. The validator tolerates unknown
+Five additions sit outside the 1.1 contract. The validator tolerates unknown
 keys, so they do not change `schema_version`, and a later minor release may
 change them:
 
@@ -530,7 +570,8 @@ Rejected candidates appear in SARIF as suppressed results. See
 
 Every run writes the per-run `audit.log` with no opt-out, each row carrying
 the run ID. The SARIF report carries the same ID as `automationDetails.id`
-(`lyrik/run/<run-id>`) and on every result, so a reader can pull the rows for
+(`lyrik/run/<run-id>`) and on every finding result (a rejection result carries
+`rule`, `walk`, `stable_id` and `applied_by` only), so a reader can pull the rows for
 a finding. `findings.json` carries a `citation_check` block with resolved and
 unresolved counts per citation sub-gate; what the run set aside is in
 `audit.log`, one row each: `lyrik.candidate.declined`,
@@ -554,10 +595,12 @@ and the SARIF report carries it under the run's `properties.lyrik.funnel`:
 
 Before writing, the runner checks emitted - refused - brocard_removed - collapsed = kept, with
 `kept` taken from the written findings list and `collapsed` from dedup's group
-sizes, and that the scanner's three counts sum to its candidates. If either
-check fails, `findings.json` is written without `funnel`, the per-run log
-records `lyrik.funnel.mismatch` with every number, the staging directory is
-kept, and the run exits non-zero.
+sizes, and that the scanner's four counts (accepted, brocard_rejected,
+declined, unaddressed) sum to its candidates. If either check fails,
+`findings.json` is written without `funnel`, the per-run log records
+`lyrik.funnel.mismatch` with every number, the staging directory is kept (its
+`declines/` directories have already been removed by then), and the run exits
+non-zero.
 
 Scanner rows (`lyrik.scanner.dispatched`, `lyrik.scanner.unavailable`,
 `lyrik.candidate.declined`, `lyrik.candidate.unaddressed`) live in the per-run
@@ -597,8 +640,9 @@ summaries included. Each model call is an `llm_request` row naming the
 provider, the model and the size of the messages and tool definitions it sent
 (see [audit-cli.md](audit-cli.md)). `calls` counts distinct requests on the
 chain; a rate-limit retry resends the same request to the same provider and
-appears in the per-run log as `lyrik.dispatch.rate_limited`, not as another
-call.
+is not another call. It appears in the per-run log as
+`lyrik.dispatch.rate_limited` for the single-call agent, the only one with a
+recovery observer attached; walk, replay and fix agents retry without that row.
 
 ## Running on code you don't trust
 
