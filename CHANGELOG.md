@@ -16,6 +16,15 @@ tagged.
   instead of `<data_dir>/signing-key.hex`, and generates nothing.
 - The Scorecard workflow runs on demand (`workflow_dispatch`).
 
+### Dependencies
+
+- slack-morphism 2.31.1. The approval card's buttons set their action id
+  through the builder, as 2.31 requires, and 2.31.1 removes panics from the
+  crate's response handling, including one on an unparseable Content-Type
+  header. Passed a live Slack round-trip before this landed: a message in,
+  an approval card out, Approve and Deny pressed, each decision in the audit
+  rows, and a reply back.
+
 ### Changed
 
 - A `spawn_subagent` call from `wirken ask` returns an error saying that
