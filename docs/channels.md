@@ -137,6 +137,15 @@ unacknowledged; Slack redelivers it (Slack's behaviour, not checked in the
 adapter) and the restarted adapter forwards it again. A message acknowledged
 but not yet written is lost instead.
 
+### Approvals
+
+Tool calls that need approval on a Slack session prompt on the CLI, not in
+Slack. The request appears in `wirken permissions pending list` and is
+decided with `wirken permissions approve <id>` or `wirken permissions deny
+<id>`. Nothing is posted in the channel, the agent's turn waits, and a request
+nobody decides within the CLI gate's timeout (`WIRKEN_CLI_APPROVAL_TIMEOUT_S`,
+300 seconds by default) resolves to deny.
+
 ## Microsoft Teams
 
 ```bash

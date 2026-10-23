@@ -21,9 +21,11 @@ tagged.
 - slack-morphism 2.31.1. The approval card's buttons set their action id
   through the builder, as 2.31 requires, and 2.31.1 removes panics from the
   crate's response handling, including one on an unparseable Content-Type
-  header. Passed a live Slack round-trip before this landed: a message in,
-  an approval card out, Approve and Deny pressed, each decision in the audit
-  rows, and a reply back.
+  header. The live test before this landed: the inbound, outbound and Socket
+  Mode round-trip passed; a Tier 3 tool call on the Slack session fired the
+  approval gate, which routed to the CLI surface, because no Slack approval
+  gate exists; the card's serialization was verified and its buttons were
+  not exercised, since the gateway sends no approval card to Slack.
 
 ### Changed
 
