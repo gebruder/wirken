@@ -1,7 +1,10 @@
 # Threat model
 
 This is Wirken's threat model. It is also the input to automated security
-scans, which work offline in the image `docker/audit.Dockerfile` builds.
+scans, which work offline in the image `docker/audit.Dockerfile` builds, and
+to `wirken lyrik run`, which loads it from this path when it is committed and
+unmodified and holds every candidate against it
+([lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model)).
 
 ## What wirken is
 
@@ -22,6 +25,34 @@ restates a documented gap is not a finding.
 The floor under everything below: a process running as the wirken OS user is
 outside the model. That includes code running inside an adapter, the MCP
 proxy or a hook process, which all run as that user.
+
+## Assets
+
+What the controls protect, in the order a loss matters:
+
+- **The operator's host and the wirken OS user's principal.** Every process
+  wirken starts runs as that user; code running as it is the end of the model.
+- **Vault contents and the passphrase or device key that opens them:** channel
+  tokens, model-provider credentials, MCP credentials, signing seeds. Only the
+  gateway opens the vault; each adapter receives its own channel's credentials
+  on stdin and the MCP proxy only the credentials its configs reference,
+  without refresh tokens.
+- **The permission decision.** The tier a call is classified at, the stored
+  Tier 2 grants in `permissions.db`, the approver allowlist, and the prompt
+  the operator answers. A call that runs without the gate deciding it, or with
+  a decision for a different call, is the loss.
+- **The audit chain and its signing key.** `audit.db` rows, per-session hash
+  chains and signed heads. A row for every action before it runs, and
+  verification that fails on an edit.
+- **Signing anchors:** the skill registry root, the org-config anchor, and the
+  keys MCP entries are signed with. An artifact the anchor did not sign,
+  accepted, is the loss.
+- **Channel isolation.** A session's messages, memory entries, approvals and
+  credentials stay in their channel unless a Tier 3 prompt crosses them.
+- **The workspace.** The one mount `exec` gets; the operator's files in it are
+  what a command can change.
+- **The local sockets** under `<data_dir>/sockets`, each mode 0600 behind a
+  signed handshake.
 
 ## Trust boundaries and adversarial inputs
 
@@ -186,6 +217,69 @@ proxy or a hook process, which all run as that user.
     without `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1`, and a veto `Deny` that does
     not stop dispatch.
 
+## Access controls
+
+Who holds what, so a precondition can be compared with an impact:
+
+- **The operator** is the OS user. They hold the vault passphrase, write the
+  configuration files in the data dir, answer approval prompts on the CLI, and
+  may name approvers for Telegram and Signal, keyed by `(adapter_id, user_id)`
+  in the approver registry. A decision from anyone not on that allowlist is
+  dropped. The operator is the approver: an operator approving a prompt that
+  described the call accurately is not a finding.
+- **Another OS user** holds nothing. The sockets are mode 0600 and every
+  connection takes a signed handshake.
+- **A chat user** can send messages and attachments on their channel. They
+  hold no permission authority. Permissions key on `(action_key, agent_id)`,
+  not on the sender: a Tier 2 grant one user's prompt earned applies to every
+  user of that agent on that channel until it expires
+  ([permissions-and-identity.md](permissions-and-identity.md)). Approvals on
+  Slack, Discord, Teams, WhatsApp, Google Chat, Matrix and iMessage sessions
+  prompt on the operator's CLI, not in the channel.
+- **The model** holds nothing. Every tool call is classified and gated: Tier 1
+  runs, Tier 2 prompts once and may be stored for thirty days under a Tier 2
+  key only, Tier 3 prompts every time and is never stored. A sub-agent runs
+  under its own agent id with a clamped tier, an intersected tool allowlist,
+  and none of the parent's grants.
+- **An adapter** holds its own channel's credentials and is pinned to its
+  channel after the handshake.
+- **The MCP proxy** holds the credentials its configs reference, no refresh
+  tokens, and a per-spawn token the refresh service checks before answering.
+- **A command under `exec`** holds a container with every capability dropped,
+  `no-new-privileges`, a read-only root, a non-root user, the workspace as its
+  only mount, and no network unless the channel's egress grant routes it
+  through the egress proxy.
+- **A skill** holds what its signed permission block grants: tools, egress
+  allow-set, read and write paths. A bundle the anchor did not sign does not
+  load.
+
+## Supported configurations
+
+Severity is rated on the default configuration. What that is:
+
+- **Platforms:** Linux (x86_64, aarch64), macOS (Intel, Apple Silicon) and
+  Windows 11 (x86_64). On Windows the IPC is named pipes, the vault is an
+  age-encrypted file, and `sandbox.json` `mode: off` is a documented default
+  for the single-user profile ([windows.md](windows.md)); a finding that needs
+  that mode is rated as off-default, Tier B. Service and scheduled modes are
+  Linux and macOS only.
+- **Sandbox:** `mode: exec-only` with the default image under Docker is the
+  default; `gvisor` is supported; `off` is opt-in and out of scope while set.
+  With no container runtime `exec` is refused.
+- **Escape hatches unset.** Every `WIRKEN_ALLOW_*` variable,
+  `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN` and `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES`
+  absent, and no `mcp.json` entry with `"sandbox": "off"`.
+- **One gateway per data dir, one operator.** Many chat users reach it through
+  channels; there are no roles and no per-user permissions
+  ([enterprise.md](enterprise.md)). Webhook adapters listen on 127.0.0.1
+  behind the operator's ingress; webchat is served on 127.0.0.1.
+- **Signed artifacts verified:** skills against the registry root, the
+  org-config bundle against its anchor, MCP entries against their signatures.
+- **Offline test image:** `docker/audit.Dockerfile`, where the proof runs.
+
+A path that exists only under a non-default profile, feature flag or escape
+hatch is a Tier B step and is reported as such.
+
 ## Components that matter most / least
 
 - **Most:** `crates/gateway/src/permissions.rs`, `crates/agent/src/tool.rs`,
@@ -228,6 +322,29 @@ proxy or a hook process, which all run as that user.
   `skill_frontmatter`, `injection_scan`, `ipc_frame_decode`. They need nightly
   and `cargo-fuzz`, which that image does not have; replay an input as a unit
   test instead.
+
+## What is and is not a vulnerability
+
+A vulnerability here is a property in "How you rate severity" broken, on the
+default configuration, by an input from one of the trust boundaries above,
+along a path traced to the cited lines, and shown by a failing test. The
+property is the thing: the call was not refused, the row was not on the chain,
+the bytes reached where they must not.
+
+Not a vulnerability, whatever its shape:
+
+- Anything in "Out of scope" below.
+- A fail-closed defect: a control that refuses, errors or denies what it
+  should allow. That is a correctness bug; label it so and rate it Low.
+- A documented gap restated. The Gap columns in
+  [security-properties.md](security-properties.md) and the "What this does
+  not cover" notes in [enforcement-model.md](enforcement-model.md) are known.
+  Showing a gap is wider than stated is a finding.
+- Hardening with no demonstrated path.
+- A finding whose attacker already holds the access the harm needs, or whose
+  precondition is the wirken OS user.
+- The content of a prompt injection. What the gate lets the injected request
+  do is the finding, if anything is.
 
 ## Out of scope
 
@@ -348,10 +465,10 @@ labelled Tier B.
 - **Preconditions:** what the attacker controls, and every setting that is
   not the default.
 - **Proof:** the failing test, the command that runs it, and its output on the
-  scanned commit.
+  scanned commit. This is the evidence; the section below says what counts.
 - **Patch:** as below.
 
-## Proof: a failing test
+## Evidence required for a valid report: a failing test
 
 - A Rust test that fails on the scanned commit and passes with the patch. It
   goes where the crate keeps its tests: the module's `#[cfg(test)]` block or

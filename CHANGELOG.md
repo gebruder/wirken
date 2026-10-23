@@ -56,6 +56,10 @@ tagged.
   `findings.json`; anything short of all three arms is `inconclusive` with
   its reasons, never a fix. Exec stays gated per command with no stored
   grant; a refused command is recorded and skipped.
+- `docs/threat-model.md` carries the six sections the Lyrik adjudication
+  reads: assets, trust boundaries, access controls, supported configurations,
+  what is and is not a vulnerability, and the evidence required for a valid
+  report. It stays at the path the oss-scanner project entry names.
 
 ### Dependencies
 

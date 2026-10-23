@@ -4645,6 +4645,21 @@ mod tests {
         );
     }
 
+    /// The repo's own threat model is the oss-scanner input and the one
+    /// `wirken lyrik run` loads when it scans this repository; it
+    /// carries every section the adjudication reads.
+    #[test]
+    fn the_repo_threat_model_carries_every_expected_section() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/threat-model.md");
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(
+            super::threat_model_sections_present(&text).len(),
+            super::THREAT_MODEL_SECTIONS.len(),
+            "{:?}",
+            super::threat_model_sections_present(&text)
+        );
+    }
+
     #[test]
     fn the_threat_model_section_names_missing_sections_and_the_rule_checks() {
         let scoring = scoring_with_threat_model(
