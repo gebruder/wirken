@@ -129,7 +129,18 @@ impl Archive {
             }
             let declared = entry.size();
             let compressed = entry.compressed_size();
-            let name = entry.name().to_string();
+            // zip decodes a name that is not UTF-8 through CP437, and a
+            // name decoded that way can never be looked up again, since
+            // `by_name` compares the stored bytes. Refuse it here, where
+            // the caller learns why, rather than later as a missing member.
+            let name = match std::str::from_utf8(entry.name_raw()) {
+                Ok(name) => name.to_string(),
+                Err(_) => {
+                    return Err(GatewayError::ArchiveRefused(format!(
+                        "member {idx} has a name that is not UTF-8"
+                    )));
+                }
+            };
             drop(entry);
 
             if declared > limits.max_member_bytes {
@@ -222,7 +233,7 @@ mod tests {
         let path = dir.join(name);
         let file = std::fs::File::create(&path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let opts: zip::write::FileOptions<'_, ()> =
+        let opts: zip::write::SimpleFileOptions =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         for (member, body) in members {
             zip.start_file(*member, opts).unwrap();
@@ -245,6 +256,36 @@ mod tests {
             .read_to_string(&mut body)
             .unwrap();
         assert_eq!(body, "[]");
+    }
+
+    #[test]
+    fn a_member_whose_name_is_not_utf8_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_zip(tmp.path(), "a.zip", &[("conversations.json", b"[]")]);
+        // ZipWriter only takes a str name, so patch the stored bytes.
+        // The name appears in the local header and the central
+        // directory; neither is covered by the member CRC, and the
+        // replacement keeps the length, so the archive stays well
+        // formed everywhere except the name.
+        let bytes = std::fs::read(&path).unwrap();
+        let patched = bytes
+            .windows(18)
+            .enumerate()
+            .filter(|(_, w)| *w == b"conversations.json")
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            patched.len(),
+            2,
+            "name in local header and central directory"
+        );
+        let mut bytes = bytes;
+        for at in patched {
+            bytes[at..at + 18].copy_from_slice(b"conversation\xff.json");
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let err = Archive::open(&path).unwrap_err().to_string();
+        assert!(err.contains("not UTF-8"), "{err}");
     }
 
     #[test]

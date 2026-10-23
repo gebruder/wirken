@@ -72,19 +72,6 @@ ignore = [
     #     -> wirken-adapter-telegram -> wirken-cli
     { id = "RUSTSEC-2026-0173", reason = "Unmaintained advisory, informational rather than a vulnerability. proc-macro-error2 is a proc-macro crate, so it runs in the compiler and contributes no code to the shipped binary. teloxide 0.17 is the current release and there is no version of it without aquamarine. Revisit when teloxide or aquamarine drops the dependency." },
 
-    # zip 8.6.0, used only by wirken-gateway (`cargo tree -i zip` with all
-    # features shows no other dependent), in
-    # crates/gateway/src/imported_archive.rs. Added 2026-10-18. That file
-    # opens archives with ZipArchive::new and hands members to callers
-    # through a capped reader over by_index_raw and by_name; ZipWriter
-    # appears only in its tests. It calls neither ZipArchive::extract nor
-    # ZipStreamReader::extract, the functions all three advisories concern,
-    # and writes no file or link from an archive entry. All three are
-    # revisitable when zip 9.0.0 is adopted through #287.
-    { id = "RUSTSEC-2026-0367", reason = "SUID, SGID and sticky bits from external_attributes are kept when ZipArchive::extract or the stream extraction API writes files. Wirken calls neither; crates/gateway/src/imported_archive.rs reads members through a reader and creates no file from them. Revisit when zip 9.0.0 is adopted (#287)." },
-    { id = "RUSTSEC-2026-0368", reason = "ZipArchive::extract creates symbolic links whose targets point outside the destination directory. Wirken never calls extract and creates no link from an archive entry; crates/gateway/src/imported_archive.rs reads member contents through a reader. Revisit when zip 9.0.0 is adopted (#287)." },
-    { id = "RUSTSEC-2026-0369", reason = "ZipStreamReader::extract and ZipArchive::extract apply Unix permissions through extracted symlinks without confining the target. Wirken uses no ZipStreamReader and calls no extract; crates/gateway/src/imported_archive.rs sets no permission from an archive. Revisit when zip 9.0.0 is adopted (#287)." },
-
     # zbus_names 4.3.1, zvariant 5.10.0 and zvariant_derive 5.10.0, reached
     # only by:
     #   zbus 5.14.0 -> secret-service 5.2.0 -> wirken-vault (keychain-linux)

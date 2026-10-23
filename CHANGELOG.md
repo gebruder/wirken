@@ -30,6 +30,12 @@ tagged.
   in `Choice`, reached through curve25519-dalek under ed25519-dalek and
   through blake2 under argon2. The `deny.toml` entry for RUSTSEC-2026-0381
   is retired: the advisory now lists webpki-roots 0.26.11 as unaffected.
+- zip 9.0.5 closes RUSTSEC-2026-0367, RUSTSEC-2026-0368 and RUSTSEC-2026-0369,
+  the extraction advisories, and their `deny.toml` entries are retired. The
+  import reader never extracted, so no shipped behaviour changes there. An
+  export archive with a member name that is not UTF-8 is now refused at open
+  with the member's index; such a member could never be read before, and
+  failed later as a missing member.
 
 ## [2.5.0] - 2026-10-22
 
