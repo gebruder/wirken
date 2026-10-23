@@ -60,10 +60,17 @@ reports:
   `crates/cli/src/commands/update/mod.rs`; with nothing newer it prints
   `Up to date.` and stops).
 
-`--check` downloads no binary and changes nothing installed. It does
-record the manifest's `issued_at` (see [Freeze protection](#freeze-protection)).
-It does not need a terminal and does not check for a running gateway, so it
-can run from a script or a cron job the operator sets up.
+`--check` downloads no binary and changes nothing installed. The one file
+it can write is the freeze record, and only when the manifest it fetched
+was issued later than the one recorded: then `issued_at` and
+`key_fingerprint` in `<data_dir>/update/manifest-state.json` are replaced,
+and otherwise the file is left byte for byte as it was
+(`check_and_record_freshness`, `crates/cli/src/commands/update/manifest.rs`;
+see [Freeze protection](#freeze-protection) for why a check records). It
+does not need a terminal and does not check for a running gateway, so it
+can run from a script or a cron job the operator sets up. Like every form
+of `wirken update` it refuses inside a Wirken `exec` before fetching
+anything (see [Inside an exec](#inside-an-exec)).
 
 ## wirken update
 
@@ -131,6 +138,13 @@ remove it only knowing why it is damaged. A record that is absent is
 treated as no record, so a deleted file starts the protection over at the
 next manifest fetched (`check_and_record_freshness`,
 `crates/cli/src/commands/update/manifest.rs`).
+
+`--check` records as well as an install, because it is the form that runs
+unattended: an operator's cron job is the path most likely to see a newer
+manifest first, and the baseline it records is what a later install is
+held to. The write is monotonic, a later `issued_at` replacing an earlier
+one, so a source that can answer `--check` can only tighten what an
+install will accept, never loosen it.
 
 Freeze protection holds a manifest to the newest one this install has
 seen. It cannot tell this install about a release published after the
@@ -205,6 +219,12 @@ A rollback row's `verifying_key` is the one recorded when the restored
 binary was kept. A binary kept by a rollback was not checked against a
 manifest at that moment, so rolling back a rollback records none.
 
+A refused invocation under the exec marker writes an `update_refused` row
+to the same lane, carrying `invocation` and `reason`, written and sealed
+by `record_on` as an install row is (`refuse_inside_exec`,
+`crates/cli/src/commands/update/mod.rs`). When the log cannot be opened
+the refusal still stands and a warning says the row was not written.
+
 Every binary also names its build on the chain: the `gateway.start` row's
 detail and each session's opening chain head carry the version, commit
 and whether the tree was dirty. See [audit-cli.md](audit-cli.md).
@@ -223,12 +243,19 @@ is available or the value taken is not a decimal.
 
 ## Inside an exec
 
-`exec` sets `WIRKEN_EXEC` on every command it runs on the host, and an
-install or rollback refuses when it is set (`operator_preflight`,
-`crates/cli/src/commands/update/mod.rs`); `--check` does not look for it.
-That stops a model from installing
-a release through an `exec` the operator approved for something else. A
-sandboxed `exec` has no `wirken` binary to run in the first place.
+`exec` sets `WIRKEN_EXEC` on every command it runs on the host, and every
+form of `wirken update`, `--check`, an install and `--rollback`, refuses
+when it is set, before it fetches, reads or writes anything
+(`refuse_inside_exec`, `crates/cli/src/commands/update/mod.rs`). The
+refusal is recorded on the `gateway-install` lane as an `update_refused`
+row naming what was asked for (`check`, `install` or `rollback`) and the
+reason `inside_exec`, sealed with a chain head like an install row and
+forwarded by default (see [Audit](#audit)). A refusal is not an exit the
+command keeps quiet about: the row is written whether or not the operator
+ever sees the command's stderr. That stops a model from installing a
+release, or advancing the freeze record, through an `exec` the operator
+approved for something else. A sandboxed `exec` has no `wirken` binary to
+run in the first place.
 
 The marker is a guard, not the boundary. A command running at the
 operator's UID can clear its own environment. What an `exec` may run at

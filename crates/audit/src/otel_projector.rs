@@ -476,6 +476,7 @@ impl OtelProjector {
             SessionEvent::ExecLocationDisagreement { .. } => Vec::new(),
             // An operator's install, outside any run.
             SessionEvent::BinaryInstalled { .. } => Vec::new(),
+            SessionEvent::UpdateRefused { .. } => Vec::new(),
             // Grant bookkeeping outside any run.
             SessionEvent::PermissionRevoked { .. } => Vec::new(),
             // Grant bookkeeping outside any run.

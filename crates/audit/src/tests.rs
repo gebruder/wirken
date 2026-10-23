@@ -3400,6 +3400,10 @@ fn every_session_event() -> Vec<SessionEvent> {
             verifying_key: None,
             rollback: false,
         },
+        SessionEvent::UpdateRefused {
+            invocation: String::new(),
+            reason: String::new(),
+        },
         SessionEvent::ExecLocationDisagreement {
             verified_session_id: String::new(),
             approval_seq: 0,
@@ -3840,6 +3844,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::PermissionApprovalRefused { .. } => "PermissionApprovalRefused",
         SessionEvent::ExecLocationDisagreement { .. } => "ExecLocationDisagreement",
         SessionEvent::BinaryInstalled { .. } => "BinaryInstalled",
+        SessionEvent::UpdateRefused { .. } => "UpdateRefused",
         SessionEvent::PermissionRenewed { .. } => "PermissionRenewed",
         SessionEvent::PermissionGrantExpired { .. } => "PermissionGrantExpired",
         SessionEvent::PermissionGrantPruned { .. } => "PermissionGrantPruned",
@@ -3899,7 +3904,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 69;
+const SESSION_EVENT_VARIANTS: usize = 70;
 
 /// The list covers the enum.
 #[test]

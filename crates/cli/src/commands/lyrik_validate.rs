@@ -1,7 +1,9 @@
 //! `wirken lyrik validate <path>`: conformance check for
-//! `findings.json` files against the 1.1 spec at
-//! `docs/lyrik-json-schema.md`. The grammar and the required-field
-//! list live in the spec; this module is the reference enforcement.
+//! `findings.json` files against the 1.1 schema at
+//! `docs/lyrik-json-schema.json`, whose prose is the "Findings schema
+//! (1.1)" section of `docs/lyrik.md`. The grammar and the
+//! required-field list live there; this module is the reference
+//! enforcement.
 //!
 //! The validator embeds the canonical JSON Schema as a static string
 //! so callers can validate offline. The `$id` URL in the schema is

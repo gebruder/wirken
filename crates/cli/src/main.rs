@@ -263,7 +263,8 @@ enum LyrikCommands {
     },
     /// Validate a `findings.json` file against the lyrik 1.1 schema.
     /// Exits non-zero with a structured error list on any conformance
-    /// failure; see `docs/lyrik-json-schema.md` for the spec.
+    /// failure; the schema is `docs/lyrik-json-schema.json` and its
+    /// prose is the "Findings schema (1.1)" section of `docs/lyrik.md`.
     Validate {
         /// Path to findings.json.
         #[arg(long)]

@@ -738,6 +738,7 @@ fn extract_identity_for_sentinel(
         // An operator's command outside any conversation: no adapter,
         // sender or agent.
         SessionEvent::BinaryInstalled { .. } => (None, None, None),
+        SessionEvent::UpdateRefused { .. } => (None, None, None),
         // The approval's own attribution, carried over from its row.
         SessionEvent::ExecLocationDisagreement {
             agent_id,
@@ -1031,6 +1032,9 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
                 "installed"
             };
             format!("{verb} {from_version} -> {to_version}")
+        }
+        SessionEvent::UpdateRefused { invocation, reason } => {
+            format!("update {invocation} refused: {reason}")
         }
         // An action key and the two expiries.
         SessionEvent::PermissionRenewed { .. } => debug_summary(event),

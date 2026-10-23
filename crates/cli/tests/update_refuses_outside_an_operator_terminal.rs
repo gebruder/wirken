@@ -44,13 +44,50 @@ fn a_non_terminal_install_or_rollback_is_refused_before_any_fetch() {
     );
 }
 
+/// Every form of `wirken update`, `--check` included, refuses under
+/// the exec marker before it fetches or writes anything, and each
+/// refusal is an `update_refused` row on the `gateway-install` lane
+/// naming what was asked for.
 #[cfg(not(windows))]
 #[test]
 fn a_run_inside_a_wirken_exec_is_refused_first() {
     let tmp = tempfile::tempdir().unwrap();
-    for args in [&[][..], &["--rollback"][..]] {
+    for (args, invocation) in [
+        (&[][..], "install"),
+        (&["--rollback"][..], "rollback"),
+        (&["--check"][..], "check"),
+        (
+            &["--check", "--base-url", "http://127.0.0.1:9/"][..],
+            "check",
+        ),
+    ] {
         let (ok, err) = run(tmp.path(), args, true);
         assert!(!ok);
         assert!(err.contains("inside a Wirken exec"), "{args:?}: {err}");
+        assert!(
+            refusals(tmp.path()).contains(&invocation.to_string()),
+            "{args:?}"
+        );
     }
+    assert!(
+        !tmp.path().join("update").exists(),
+        "a refused run touched the freeze state"
+    );
+}
+
+/// The `invocation` of every `update_refused` row on the chain.
+fn refusals(data: &std::path::Path) -> Vec<String> {
+    let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
+    db.prepare(
+        "SELECT json_extract(payload, '$.invocation')
+           FROM session_events
+          WHERE json_extract(payload, '$.kind') = 'update_refused'
+            AND json_extract(payload, '$.reason') = 'inside_exec'
+          ORDER BY seq",
+    )
+    .unwrap()
+    .query_map([], |r| r.get(0))
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
 }

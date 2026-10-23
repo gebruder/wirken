@@ -2829,7 +2829,8 @@ async fn dispatch_walks_concurrent(
 /// matches a seed, `model_reasoning` otherwise. Per-walk dedup
 /// upgrades the pair `{static_prescreen, model_reasoning}` to
 /// `both` (single-call mode has no dedup and never produces
-/// `both` — documented in `docs/lyrik-json-schema.md`).
+/// `both`; see the `detection_source` description in
+/// `docs/lyrik-json-schema.json`).
 ///
 /// Counts what each turn emitted and what this step did with it into
 /// the returned [`Funnel`], written to findings.json when it

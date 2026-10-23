@@ -4380,6 +4380,7 @@ pub fn session_events(
             // Written to the verify lane, which no conversation shows.
             SessionEvent::ExecLocationDisagreement { .. } => None,
             SessionEvent::BinaryInstalled { .. } => None,
+            SessionEvent::UpdateRefused { .. } => None,
             // An operator removed a grant out of band, with no turn to draw
             // it against.
             SessionEvent::PermissionRevoked { .. } => None,

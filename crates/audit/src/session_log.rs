@@ -1122,6 +1122,21 @@ pub enum SessionEvent {
         verifying_key: Option<String>,
         rollback: bool,
     },
+    /// `wirken update` was invoked inside a Wirken `exec` (the
+    /// `WIRKEN_EXEC` marker was set) and refused before it fetched,
+    /// read or wrote anything, whichever of its forms was asked for.
+    ///
+    /// Written to the `gateway-install` lane like [`Self::BinaryInstalled`]
+    /// and sealed the same way, so an operator can see that a model
+    /// tried to check for, install or roll back a release through a
+    /// command they approved for something else. Forwarded to a SIEM
+    /// by default.
+    UpdateRefused {
+        /// What was asked for: `check`, `install` or `rollback`.
+        invocation: String,
+        /// Why it was refused: `inside_exec`.
+        reason: String,
+    },
     /// `wirken sessions verify` found an approval whose prompt said one
     /// place for an `exec` while the command ran in another.
     ///

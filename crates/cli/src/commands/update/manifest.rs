@@ -154,8 +154,11 @@ pub fn freeze_state_path(data_dir: &Path) -> PathBuf {
 
 /// Refuse `manifest` if it is older than the newest one this install
 /// has verified, then record it when it is newer. A state file that
-/// cannot be read refuses rather than starting over: deleting the
-/// record of what was seen is not a way past it.
+/// is present but does not parse, or cannot be read, refuses rather
+/// than starting over. A state file that is absent is no record: the
+/// manifest is accepted and becomes the new baseline, so removing the
+/// file starts the protection over. The baseline has no anchor outside
+/// this file.
 pub fn check_and_record_freshness(data_dir: &Path, verified: &VerifiedManifest) -> Result<()> {
     let path = freeze_state_path(data_dir);
     let stored: Option<FreezeState> = match std::fs::read(&path) {

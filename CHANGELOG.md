@@ -33,6 +33,18 @@ tagged.
   other variable the gateway was started with. A test per spawn site shows
   that a passphrase, a `WIRKEN_*` setting and a sentinel secret set on the
   parent side do not reach the child.
+- `wirken update --check` refuses inside a Wirken `exec`. The `WIRKEN_EXEC`
+  marker that an install and `--rollback` refused on is now read first for
+  every form of the command (`refuse_inside_exec`,
+  `crates/cli/src/commands/update/mod.rs`), so a model cannot fetch a
+  manifest or advance the freeze record in `update/manifest-state.json`
+  through an approved command. Each refusal writes an `update_refused` row
+  on the `gateway-install` lane, naming the form asked for (`check`,
+  `install`, `rollback`) and the reason `inside_exec`, sealed with a chain
+  head and forwarded by default; before, no refusal was recorded. Outside
+  an `exec`, `--check` still records a manifest issued later than the one
+  on file and otherwise leaves the file byte for byte as it was.
+
 ## [2.5.1] - 2026-10-23
 
 ### Added

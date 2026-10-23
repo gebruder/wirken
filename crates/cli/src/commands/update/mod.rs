@@ -254,6 +254,14 @@ pub async fn run(
     allow_downgrade: bool,
     base_url: Option<&str>,
 ) -> Result<()> {
+    let invocation = if check {
+        "check"
+    } else if rollback {
+        "rollback"
+    } else {
+        "install"
+    };
+    refuse_inside_exec(invocation)?;
     if check {
         run_check(base_url).await
     } else if rollback {
@@ -261,6 +269,35 @@ pub async fn run(
     } else {
         run_install(base_url, to.as_deref(), allow_downgrade).await
     }
+}
+
+/// Every form of `wirken update` refuses under the `exec` marker, before
+/// it fetches, reads or writes anything, and the refusal is recorded on
+/// the `gateway-install` lane as [`wirken_audit::SessionEvent::UpdateRefused`].
+/// The row is best effort: a log that cannot be opened is reported and
+/// the refusal stands.
+fn refuse_inside_exec(invocation: &str) -> Result<()> {
+    if std::env::var_os(wirken_agent::tool::EXEC_MARKER_ENV).is_none() {
+        return Ok(());
+    }
+    let cfg = super::config();
+    let recorded = super::open_signed_session_log(&cfg).and_then(|log| {
+        record_on(
+            &log,
+            wirken_audit::SessionEvent::UpdateRefused {
+                invocation: invocation.to_string(),
+                reason: "inside_exec".to_string(),
+            },
+        )
+    });
+    if let Err(e) = recorded {
+        tracing::warn!(error = %e, "could not record the refusal on the {INSTALL_LANE} lane");
+    }
+    bail!(
+        "wirken update refuses to run inside a Wirken exec ({} is set); run it yourself, \
+         from a terminal",
+        wirken_agent::tool::EXEC_MARKER_ENV
+    )
 }
 
 /// The gate an install and a rollback pass before anything else.
@@ -595,6 +632,86 @@ mod tests {
             let got = check(tmp.path(), &fetcher, &keys, "2.2.0", TARGET).await;
             assert_eq!(got.is_ok(), ok, "{at}: {got:?}");
         }
+    }
+
+    /// `--check` leaves `update/manifest-state.json` byte-identical
+    /// when the manifest it fetched is not newer than the baseline.
+    /// Run `check` against a mirror serving a manifest issued at `at`.
+    async fn check_against(data_dir: &Path, at: &str) {
+        let keys = [test_key(1).verifying_key().to_bytes()];
+        let body = manifest_body(at, &releases());
+        let sig = sign(&test_key(1), MANIFEST_NAMESPACE, &body);
+        let server = mirror_with(body, sig).await;
+        let fetcher = Fetcher::new(Source::choose(Some(&server.base), None).unwrap());
+        check(data_dir, &fetcher, &keys, "2.2.0", TARGET)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn check_leaves_the_freeze_state_untouched_unless_the_manifest_is_newer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = manifest::freeze_state_path(tmp.path());
+        check_against(tmp.path(), "2026-10-20T00:00:00Z").await;
+        let first = std::fs::read(&path).unwrap();
+        check_against(tmp.path(), "2026-10-20T00:00:00Z").await;
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            first,
+            "an equal manifest rewrote the state"
+        );
+        check_against(tmp.path(), "2026-10-21T00:00:00Z").await;
+        let state: manifest::FreezeState =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // The two fields a newer manifest changes, and nothing else is
+        // in the file.
+        assert_eq!(
+            state.issued_at,
+            "2026-10-21T00:00:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap()
+        );
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut fields: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        fields.sort_unstable();
+        assert_eq!(fields, ["issued_at", "key_fingerprint"]);
+    }
+
+    /// Under the exec marker every form refuses before any fetch or
+    /// write, and the refusal is a row on the gateway-install lane.
+    /// The refusal is driven through the binary, since the marker is
+    /// read from the process environment, in
+    /// `tests/update_refuses_outside_an_operator_terminal.rs`; this is
+    /// the row's shape and sealing.
+    #[test]
+    fn a_refusal_row_is_sealed_on_its_own_lane() {
+        use wirken_audit::SessionLog as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = wirken_audit::AuditSigningKey::load_or_create(tmp.path()).unwrap();
+        let log = wirken_audit::SqliteSessionLog::open_with_signer(
+            &tmp.path().join("audit.db"),
+            std::sync::Arc::new(signer),
+        )
+        .unwrap();
+        record_on(
+            &log,
+            wirken_audit::SessionEvent::UpdateRefused {
+                invocation: "check".into(),
+                reason: "inside_exec".into(),
+            },
+        )
+        .unwrap();
+        let handle = log.handle_for(wirken_audit::SessionId::new(INSTALL_LANE.to_string()));
+        let rows = log.get_since(&handle, 0).unwrap();
+        assert!(rows.iter().any(|r| matches!(
+            &r.event,
+            wirken_audit::SessionEvent::UpdateRefused { invocation, reason }
+                if invocation == "check" && reason == "inside_exec"
+        )));
+        assert!(matches!(
+            rows.last().map(|r| &r.event),
+            Some(wirken_audit::SessionEvent::ChainHead { .. })
+        ));
     }
 
     /// An install row lands on the gateway-install lane, sealed by a
