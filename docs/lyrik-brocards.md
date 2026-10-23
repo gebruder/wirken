@@ -20,6 +20,33 @@ Rule numbers match the source list: rule N is VB00N.
 
 Rules 1 and 7 are structural and run in the gate. Rules 2 to 6 are judgment. Rule 8 is applied by the runner from the replay. Each walk applies the rules listed in its own section of the staged skill.
 
+## The target's threat model
+
+When the scanned repository carries `THREAT_MODEL.md` at its root, or else `docs/threat-model.md`, `wirken lyrik run` loads it the way it loads the team rubric and context: the file must be committed and unmodified against HEAD, or it is skipped with the reason printed and recorded. The run records its path and sha256 in `findings.json` under `target_threat_model`, with the expected sections it carries, and puts its full text into every walk's staged copy and into the staged Lyrik skill, as a "Target threat model" section after the project context. Without the file, nothing changes.
+
+The adjudication is told to check every finding's `threat_model` against it before the brocard rules and to name the section that applied in a rejection reason:
+
+| What the model says | Rule |
+|---|---|
+| The attacker is outside its trust boundaries, or the asset is not one it protects | 1, no threat model here |
+| The attacker already holds an access control the harm needs | 2 |
+| The path is reachable only in a configuration it does not support | 3 |
+| The behaviour is listed as not a vulnerability | 5 |
+| The finding lacks the evidence it requires for a valid report | no rejection; the finding is staged no higher than its evidence supports, and the gap goes in the step record's `open_questions` |
+
+The file is read by its headings for six sections. A heading that contains the words in the second column counts; the first column is how `target_threat_model.sections` names it.
+
+| Section | Heading words |
+|---|---|
+| assets | `asset` |
+| trust boundaries | `trust boundar` |
+| access controls | `access control` |
+| supported configurations | `supported configuration` |
+| what is and is not a vulnerability | `not a vulnerability`, `is and is not` or `what counts` |
+| evidence required | `evidence` |
+
+Each section answers one question the adjudication asks. Assets: what the project protects, so a finding against something else is out of scope. Trust boundaries: where untrusted input enters and which principals are adversaries, so an attacker the model does not admit is no attacker. Access controls: what each principal already holds, so a precondition can be compared with the impact. Supported configurations: which builds, settings and deployments the project stands behind, so a path outside them is outside usage. What is and is not a vulnerability: the project's own line, so documented behaviour is not re-reported. Evidence required for a valid report: what a report must show, so a finding below that bar is not staged above it. A file missing a section still loads; the staged section names what is missing, and a check that needs it goes to `open_questions` instead of a guess.
+
 ## Reproductions and replay
 
 A walk records each command it runs to show a finding at `staging/<walk>/reproductions/repro-NNN.json`: the finding's `stable_id`, the `command` exactly as run, an optional `harness` path under the run's staging directory, what the command shows when the finding holds (`expected`), what it showed (`observed`), the `outcome` (`reproduced` or `not_reproduced`) and the `code_revision`. The staged wrapper tells the walk this; the walk text is not edited.

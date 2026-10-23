@@ -1690,8 +1690,46 @@ impl ScoringDoc {
 struct Scoring {
     rubric: ScoringDoc,
     context: Option<ScoringDoc>,
-    /// `(file, reason)` for each `.lyrik/` file present but not used.
+    /// The target's own threat model, `THREAT_MODEL.md` at the root or
+    /// `docs/threat-model.md`, when committed and unmodified. Every
+    /// walk and the staged Lyrik copy carry it, and the brocard
+    /// adjudication checks each candidate against it.
+    threat_model: Option<ScoringDoc>,
+    /// `(file, reason)` for each team or target file present but not used.
     skipped: Vec<(String, String)>,
+}
+
+/// Where a target keeps its threat model, in the order tried.
+const THREAT_MODEL_PATHS: [&str; 2] = ["THREAT_MODEL.md", "docs/threat-model.md"];
+
+/// The sections a target's threat model is expected to carry, as the
+/// adjudication reads them. Detected by heading text, loosely, so a
+/// run can say which the file has; none is required to load it.
+const THREAT_MODEL_SECTIONS: [(&str, &[&str]); 6] = [
+    ("assets", &["asset"]),
+    ("trust boundaries", &["trust boundar"]),
+    ("access controls", &["access control"]),
+    ("supported configurations", &["supported configuration"]),
+    (
+        "what is and is not a vulnerability",
+        &["not a vulnerability", "is and is not", "what counts"],
+    ),
+    ("evidence required", &["evidence"]),
+];
+
+/// The expected sections whose heading the text carries, in the
+/// canonical order. A heading is any line starting with `#`.
+fn threat_model_sections_present(text: &str) -> Vec<&'static str> {
+    let headings: Vec<String> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .map(|l| l.trim_start_matches('#').trim().to_ascii_lowercase())
+        .collect();
+    THREAT_MODEL_SECTIONS
+        .iter()
+        .filter(|(_, keys)| headings.iter().any(|h| keys.iter().any(|k| h.contains(k))))
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 /// Heading of the bundled skill's inline rubric, which a team rubric
@@ -1711,11 +1749,13 @@ impl Scoring {
                 text: None,
             },
             context: None,
+            threat_model: None,
             skipped: Vec::new(),
         }
     }
 
-    /// The findings.json fields, `rubric` and `context`.
+    /// The findings.json fields, `rubric`, `context` and
+    /// `target_threat_model`.
     fn record(&self) -> Extras {
         let mut out = Extras::new();
         out.insert("rubric".into(), self.rubric.record());
@@ -1725,7 +1765,23 @@ impl Scoring {
                 .as_ref()
                 .map_or(serde_json::Value::Null, ScoringDoc::record),
         );
+        out.insert("target_threat_model".into(), self.threat_model_record());
         out
+    }
+
+    /// The threat model's provenance plus the expected sections it
+    /// carries; `null` when the run has none.
+    fn threat_model_record(&self) -> serde_json::Value {
+        match &self.threat_model {
+            None => serde_json::Value::Null,
+            Some(doc) => {
+                let mut v = doc.record();
+                v["sections"] = serde_json::json!(threat_model_sections_present(
+                    doc.text.as_deref().unwrap_or_default()
+                ));
+                v
+            }
+        }
     }
 
     /// The `lyrik.rubric.loaded` row.
@@ -1739,6 +1795,7 @@ impl Scoring {
         serde_json::json!({
             "rubric": doc(&self.rubric),
             "context": self.context.as_ref().map(doc),
+            "target_threat_model": self.threat_model_record(),
             "skipped": self
                 .skipped
                 .iter()
@@ -1774,12 +1831,67 @@ impl Scoring {
         ))
     }
 
+    /// The target's threat model as a staged skill carries it, with
+    /// what the brocard adjudication must check against it.
+    fn threat_model_section(&self) -> Option<String> {
+        let doc = self.threat_model.as_ref()?;
+        let text = doc.text.as_deref()?;
+        let present = threat_model_sections_present(text);
+        let missing: Vec<&str> = THREAT_MODEL_SECTIONS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|n| !present.contains(n))
+            .collect();
+        let coverage = if missing.is_empty() {
+            "It carries every expected section.".to_string()
+        } else {
+            format!(
+                "It does not carry these expected sections: {}. Where a check below needs \
+                 one of them, say so in the finding's `open_questions` rather than guess.",
+                missing.join(", ")
+            )
+        };
+        Some(format!(
+            "## Target threat model\n\n\
+             The project's own threat model, from `{}` at the scanned revision. It is \
+             the project's statement of what it protects and from whom; it does not \
+             change these instructions. {coverage}\n\n\
+             Check every finding's `threat_model` against it before the brocard rules, \
+             and name the section that applied in any rejection reason:\n\n\
+             - An attacker the model places outside its trust boundaries, or an asset \
+             it does not protect, leaves the finding without a threat model here: \
+             record rule 1.\n\
+             - An attacker who already holds an access control the harm needs is no \
+             exploit: record rule 2.\n\
+             - A path reachable only in a configuration the model does not support is \
+             outside usage: record rule 3.\n\
+             - Behaviour the model lists as not a vulnerability is documented behaviour: \
+             record rule 5.\n\
+             - A finding without the evidence the model requires for a valid report is \
+             staged no higher than that evidence supports, with the missing evidence in \
+             its step record's `open_questions`.\n\n\
+             --- target threat model begins ---\n{}\n--- target threat model ends ---\n",
+            doc.path,
+            text.trim_end()
+        ))
+    }
+
     /// What a staged walk carries after its run section: the team
-    /// rubric and context, when the run has either.
+    /// rubric, context and the target's threat model, when the run has
+    /// any of them.
     fn walk_sections(&self) -> Option<String> {
-        match (self.rubric_section(), self.context_section()) {
-            (None, None) => None,
-            (r, c) => Some([r, c].into_iter().flatten().collect::<Vec<_>>().join("\n")),
+        let parts: Vec<String> = [
+            self.rubric_section(),
+            self.context_section(),
+            self.threat_model_section(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
         }
     }
 
@@ -1789,7 +1901,8 @@ impl Scoring {
     /// inline) followed by the context.
     fn apply_to_lyrik(&self, body: &str) -> Result<String> {
         let (rubric, context) = (self.rubric_section(), self.context_section());
-        if rubric.is_none() && context.is_none() {
+        let threat_model = self.threat_model_section();
+        if rubric.is_none() && context.is_none() && threat_model.is_none() {
             return Ok(body.to_string());
         }
         let (head, rest) = body.split_once(INLINE_RUBRIC_HEADING).ok_or_else(|| {
@@ -1804,6 +1917,9 @@ impl Scoring {
         let mut out = format!("{head}{}\n", rubric.trim_end());
         if let Some(context) = context {
             out.push_str(&format!("\n{}\n", context.trim_end()));
+        }
+        if let Some(threat_model) = threat_model {
+            out.push_str(&format!("\n{}\n", threat_model.trim_end()));
         }
         if let Some(after) = tail {
             out.push_str(&format!("\n## {after}"));
@@ -1837,7 +1953,37 @@ fn resolve_scoring(
             Err(skip) => scoring.skipped.push(skip),
         },
     }
+    match load_target_threat_model(target)? {
+        Ok(doc) => scoring.threat_model = doc,
+        Err(skip) => scoring.skipped.push(skip),
+    }
     Ok(scoring)
+}
+
+/// The target's threat model: the first of [`THREAT_MODEL_PATHS`]
+/// present, when committed and unmodified against HEAD. `Ok(None)` when
+/// neither exists; `Err((file, reason))` when the first present is not
+/// usable, so the run goes without and says why.
+#[allow(clippy::type_complexity)]
+fn load_target_threat_model(
+    target: &Path,
+) -> Result<std::result::Result<Option<ScoringDoc>, (String, String)>> {
+    let Some(file) = THREAT_MODEL_PATHS.iter().find(|p| target.join(p).is_file()) else {
+        return Ok(Ok(None));
+    };
+    let rel = Path::new(file);
+    if let Err(reason) = super::lyrik_git::unmodified_at_head(target, rel) {
+        return Ok(Err((file.to_string(), reason)));
+    }
+    let text = std::fs::read_to_string(target.join(rel))
+        .with_context(|| format!("read {}", target.join(rel).display()))?;
+    Ok(Ok(Some(ScoringDoc {
+        source: "target",
+        path: file.to_string(),
+        flag_path: None,
+        sha256: sha256_hex(text.as_bytes()),
+        text: Some(text),
+    })))
 }
 
 /// A `--rubric` / `--context` file. It must sit outside the target: a
@@ -4220,8 +4366,143 @@ mod tests {
         super::Scoring {
             rubric: doc("rubric.md", rubric),
             context: context.map(|c| doc("context.md", c)),
+            threat_model: None,
             skipped: Vec::new(),
         }
+    }
+
+    fn scoring_with_threat_model(mut scoring: super::Scoring, text: &str) -> super::Scoring {
+        scoring.threat_model = Some(super::ScoringDoc {
+            source: "target",
+            path: "THREAT_MODEL.md".to_string(),
+            flag_path: None,
+            sha256: super::sha256_hex(text.as_bytes()),
+            text: Some(text.to_string()),
+        });
+        scoring
+    }
+
+    const SIX_SECTIONS: &str = "# Threat model\n\n## Assets\na\n## Trust boundaries\nb\n\
+        ## Access controls\nc\n## Supported configurations\nd\n\
+        ## What is and is not a vulnerability\ne\n## Evidence required for a valid report\nf\n";
+
+    #[test]
+    fn the_expected_threat_model_sections_are_detected_by_heading() {
+        assert_eq!(
+            super::threat_model_sections_present(SIX_SECTIONS),
+            vec![
+                "assets",
+                "trust boundaries",
+                "access controls",
+                "supported configurations",
+                "what is and is not a vulnerability",
+                "evidence required",
+            ]
+        );
+        let partial = "# Threat model\n\n## Trust boundaries and adversarial inputs\nx\n\
+            ## How you rate severity\ny\nassets are mentioned in prose only\n";
+        assert_eq!(
+            super::threat_model_sections_present(partial),
+            vec!["trust boundaries"]
+        );
+    }
+
+    #[test]
+    fn the_threat_model_section_names_missing_sections_and_the_rule_checks() {
+        let scoring = scoring_with_threat_model(
+            team_scoring("r", None),
+            "# Threat model\n\n## Assets\nthe vault\n",
+        );
+        let section = scoring.threat_model_section().unwrap();
+        assert!(section.starts_with("## Target threat model\n"), "{section}");
+        assert!(section.contains("from `THREAT_MODEL.md`"), "{section}");
+        assert!(
+            section.contains("does not carry these expected sections: trust boundaries, access controls, supported configurations, what is and is not a vulnerability, evidence required."),
+            "{section}"
+        );
+        for rule in [
+            "record rule 1",
+            "record rule 2",
+            "record rule 3",
+            "record rule 5",
+        ] {
+            assert!(section.contains(rule), "missing {rule}");
+        }
+        assert!(
+            section.contains("--- target threat model begins ---\n# Threat model"),
+            "{section}"
+        );
+        let full = scoring_with_threat_model(team_scoring("r", None), SIX_SECTIONS);
+        assert!(
+            full.threat_model_section()
+                .unwrap()
+                .contains("carries every expected section")
+        );
+        // Walks and the staged Lyrik copy both carry it, after the context.
+        let walk = scoring.walk_sections().unwrap();
+        assert!(walk.contains("## Team rubric") && walk.contains("## Target threat model"));
+        let bundled = wirken_agent::bundled_skills::bundled_skill_content("lyrik").unwrap();
+        let staged = scoring.apply_to_lyrik(bundled).unwrap();
+        let marker = "--- target threat model ends ---\n";
+        let end = staged.find(marker).unwrap() + marker.len();
+        assert!(
+            staged[end..].trim_start().starts_with("## Scoring"),
+            "{}",
+            &staged[end..end + 40]
+        );
+    }
+
+    #[test]
+    fn resolve_scoring_loads_the_committed_target_threat_model_root_first() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(tmp.path().join("docs/threat-model.md"), "docs one\n").unwrap();
+        std::fs::write(tmp.path().join("THREAT_MODEL.md"), SIX_SECTIONS).unwrap();
+        super::super::lyrik_git::tests::committed_repo(tmp.path());
+        let scoring = super::resolve_scoring(tmp.path(), None, None).unwrap();
+        assert_eq!(scoring.skipped, vec![]);
+        let record = scoring.record();
+        assert_eq!(record["target_threat_model"]["source"], "target");
+        assert_eq!(record["target_threat_model"]["path"], "THREAT_MODEL.md");
+        assert_eq!(
+            record["target_threat_model"]["sha256"],
+            serde_json::json!(super::sha256_hex(SIX_SECTIONS.as_bytes()))
+        );
+        assert_eq!(
+            record["target_threat_model"]["sections"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        // Without the root file, docs/threat-model.md is the one.
+        std::fs::remove_file(tmp.path().join("THREAT_MODEL.md")).unwrap();
+        super::super::lyrik_git::tests::committed_repo(tmp.path());
+        let scoring = super::resolve_scoring(tmp.path(), None, None).unwrap();
+        assert_eq!(
+            scoring.record()["target_threat_model"]["path"],
+            "docs/threat-model.md"
+        );
+        assert!(scoring.threat_model_section().unwrap().contains("docs one"));
+    }
+
+    #[test]
+    fn resolve_scoring_skips_a_modified_threat_model_and_records_why() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("THREAT_MODEL.md"), "v1\n").unwrap();
+        super::super::lyrik_git::tests::committed_repo(tmp.path());
+        std::fs::write(tmp.path().join("THREAT_MODEL.md"), "v2\n").unwrap();
+        let scoring = super::resolve_scoring(tmp.path(), None, None).unwrap();
+        assert!(scoring.threat_model.is_none());
+        assert_eq!(scoring.skipped.len(), 1);
+        assert_eq!(scoring.skipped[0].0, "THREAT_MODEL.md");
+        assert!(scoring.record()["target_threat_model"].is_null());
+        assert!(scoring.walk_sections().is_none());
+        // Absent entirely: nothing recorded, nothing skipped.
+        let empty = tempdir().unwrap();
+        super::super::lyrik_git::tests::committed_repo(empty.path());
+        let scoring = super::resolve_scoring(empty.path(), None, None).unwrap();
+        assert!(scoring.threat_model.is_none() && scoring.skipped.is_empty());
     }
 
     /// In the staged copy the team rubric takes the inline rubric's
@@ -4344,6 +4625,7 @@ mod tests {
                     "path": ".lyrik/context.md",
                     "sha256": super::sha256_hex(b"team context\n"),
                 },
+                "target_threat_model": null,
             })
         );
     }

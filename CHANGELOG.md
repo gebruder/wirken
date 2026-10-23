@@ -35,6 +35,15 @@ tagged.
   blocked replay is recorded and is not a disagreement; with the sandbox off
   no replay runs and each record is logged as skipped. Rule 8 is the
   runner's: a walk-side rejection naming it is refused.
+- `wirken lyrik run` loads the scanned repository's `THREAT_MODEL.md`, or
+  else `docs/threat-model.md`, when it is committed and unmodified, and puts
+  its text into every walk and the staged Lyrik skill. The brocard
+  adjudication checks each finding's `threat_model` against it: an attacker
+  outside its trust boundaries is rule 1, one who already holds the access
+  the harm needs is rule 2, a path only in an unsupported configuration is
+  rule 3, and behaviour it lists as not a vulnerability is rule 5. The file's
+  path, sha256 and the expected sections it carries are recorded under
+  `target_threat_model`. Without the file nothing changes.
 
 ### Dependencies
 

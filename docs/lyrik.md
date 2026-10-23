@@ -167,6 +167,7 @@ committed; run state lives under `.lyrik/state/`.
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
 | `<repo>/.lyrik/context.md` | the team's project context |
+| `<repo>/THREAT_MODEL.md`, else `<repo>/docs/threat-model.md` | the target's own threat model, loaded when committed and unmodified; see [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) |
 | `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may write |
 
 `.lyrik/config.json` names the provider, not its key:
@@ -266,6 +267,13 @@ file: it must parse, no field may be blank, `evidence` may not be empty,
 records stand. Accepted records are carried in `findings.json` under
 `step_records`. The staged wrapper tells the walk all of this; the walk text
 itself is not edited.
+
+**Target threat model.** When the scanned repository has `THREAT_MODEL.md`
+at its root or `docs/threat-model.md`, committed and unmodified, every staged
+walk and the staged Lyrik copy carry its text after the project context, and
+the brocard adjudication checks each finding's `threat_model` against it.
+[lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) has the
+sections the file is expected to carry and which rule each check records.
 
 **Reproductions and replay.** A command a walk runs to show a finding leaves
 a record under `staging/<walk-name>/reproductions/`. After the walks return,
@@ -419,8 +427,8 @@ Extra fields at both levels are allowed and ignored, so producers can carry
 `grade`, `stream`, `scoring_passes`, `dedup_sources`, `rubric_silent`,
 `location.line_end` and similar through without the validator enforcing their
 shape. The runner adds run-level extras of its own, outside the 1.1 contract:
-`target_sha`, `target_dirty`, `audit_log_ref`, `rubric`, `context`, `funnel`
-and `citation_check`.
+`target_sha`, `target_dirty`, `audit_log_ref`, `rubric`, `context`,
+`target_threat_model`, `funnel` and `citation_check`.
 
 **Stable-ID grammar.**
 
