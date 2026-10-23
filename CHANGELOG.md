@@ -10,6 +10,16 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- A turn that reaches a ChatGPT plan's usage limit replies, in `wirken chat`
+  and on every adapter channel, with "Usage limit reached. Review your plan
+  or this app's limit in ChatGPT settings. Manage usage:
+  https://chatgpt.com/settings/usage". It used to get the generic
+  internal-error apology. The HTTP status, error code and request id stay in
+  the gateway log and the failed call's `llm_request_failed` row. Found by
+  Tanmay Maka (@maka-tanmay).
+
 ### Security
 
 - Every host-side child process starts from one minimal environment. A

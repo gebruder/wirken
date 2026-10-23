@@ -387,7 +387,9 @@ A refused request keeps the HTTP status, the error code and OpenAI's
 audit row. `subscription_sharing_usage_limit_exceeded` (HTTP 429, or inside
 the stream as `response.failed`) is never retried and reads "Usage limit
 reached. Review your plan or this app's limit in ChatGPT settings." with the
-Manage usage link; WebChat shows it as a usage-limit block with that link. A
+Manage usage link; WebChat shows it as a usage-limit block with that link,
+and `wirken chat` and the adapter channels get that sentence and link as the
+reply. A
 503 (`subscription_sharing_usage_unavailable`,
 `subscription_sharing_user_unavailable`, or a routing refusal) is retried
 after 1, 2 and 4 seconds. The other `subscription_sharing_*` and

@@ -4734,26 +4734,33 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
     Ok(())
 }
 
-/// Run one turn for the terminal, streaming it on the connection as it
-/// runs: the reply's text as `llmChunk` data, each tool call and its
-/// end as `toolActivity`. The reply itself still goes out as the
-/// outbound frame once the turn is over. A write that fails stops the
-/// stream and leaves the turn to finish; the reader sees the
-/// disconnect.
 /// What the channel hears when a turn fails. An unknown `/skill` names the
-/// loaded skills, so its own text is the reply. Every other error stays in
-/// the operator's logs and the audit trail; the reply is a generic apology,
-/// since raw error strings can carry operator-side internals (database
-/// paths, session log locks, provider stack traces).
+/// loaded skills, so its own text is the reply. A plan's usage limit is
+/// something the person on the channel can act on, so they get
+/// [`usage_limit_notice`](wirken_agent::llm_responses::usage_limit_notice);
+/// the provider's status, code and request id stay in the error, which the
+/// caller logs and the failed call's audit row carries. Every other error
+/// stays in the operator's logs and the audit trail; the reply is a generic
+/// apology, since raw error strings can carry operator-side internals
+/// (database paths, session log locks, provider stack traces).
 fn turn_error_reply(e: &wirken_agent::AgentError) -> String {
     match e {
         wirken_agent::AgentError::UnknownSlashSkill { .. } => e.to_string(),
+        wirken_agent::AgentError::PlanRoute(plan) if plan.is_usage_limit() => {
+            wirken_agent::llm_responses::usage_limit_notice()
+        }
         _ => "Sorry, I hit an internal error and could not process that message. \
               The operator has been notified."
             .into(),
     }
 }
 
+/// Run one turn for the terminal, streaming it on the connection as it
+/// runs: the reply's text as `llmChunk` data, each tool call and its
+/// end as `toolActivity`. The reply itself still goes out as the
+/// outbound frame once the turn is over. A write that fails stops the
+/// stream and leaves the turn to finish; the reader sees the
+/// disconnect.
 async fn stream_terminal_turn(
     agent: &mut wirken_agent::Agent,
     text: &str,
@@ -8158,6 +8165,77 @@ mod terminal_channel_tests {
 #[cfg(test)]
 mod turn_error_reply_tests {
     use super::turn_error_reply;
+    use wirken_agent::AgentError;
+    use wirken_agent::llm_responses::{PlanFailure, PlanRouteError, usage_limit_notice};
+    use wirken_agent::plan_auth::USAGE_URL;
+
+    /// What the plan route keeps from a refusal: the status, the code,
+    /// the request id and the provider's message, all operator-side.
+    fn refused(status: u16, code: Option<&str>) -> PlanFailure {
+        PlanFailure {
+            status: Some(status),
+            code: code.map(Into::into),
+            request_id: Some("req_ops_only".into()),
+            message: Some("provider detail".into()),
+            ..Default::default()
+        }
+    }
+
+    fn plan(e: PlanRouteError) -> AgentError {
+        AgentError::PlanRoute(Box::new(e))
+    }
+
+    #[test]
+    fn a_plan_usage_limit_replies_with_the_notice_and_keeps_the_details_for_the_operator() {
+        let e = plan(PlanRouteError::classify(refused(
+            429,
+            Some("subscription_sharing_usage_limit_exceeded"),
+        )));
+        let reply = turn_error_reply(&e);
+        assert_eq!(reply, usage_limit_notice());
+        assert!(reply.contains(USAGE_URL), "{reply}");
+        for detail in [
+            "429",
+            "subscription_sharing_usage_limit_exceeded",
+            "req_ops_only",
+            "provider detail",
+        ] {
+            assert!(!reply.contains(detail), "{detail} in the reply: {reply}");
+        }
+        // The error the caller logs and the audit row carries opens with
+        // the same notice and keeps the rest.
+        let logged = e.to_string();
+        assert!(logged.starts_with(&usage_limit_notice()), "{logged}");
+        assert!(logged.contains("request id req_ops_only"), "{logged}");
+    }
+
+    #[test]
+    fn every_other_plan_refusal_replies_with_the_generic_apology() {
+        let f = || refused(503, None);
+        for e in [
+            PlanRouteError::UsageUnavailable(f()),
+            PlanRouteError::UserNotEligible(f()),
+            PlanRouteError::UnsupportedCapability(f()),
+            PlanRouteError::RouteNotSupported(f()),
+            PlanRouteError::InvalidUser(f()),
+            PlanRouteError::UserUnavailable(f()),
+            PlanRouteError::PermissionContext(f()),
+            PlanRouteError::Admission(f()),
+            PlanRouteError::Incomplete {
+                reason: "max_output_tokens".into(),
+                failure: f(),
+            },
+            PlanRouteError::StreamCut(f()),
+            PlanRouteError::Failed(f()),
+        ] {
+            let reply = turn_error_reply(&plan(e.clone()));
+            assert!(
+                reply.starts_with("Sorry, I hit an internal error"),
+                "{e}: {reply}"
+            );
+            assert!(!reply.contains("req_ops_only"), "{e}: {reply}");
+        }
+    }
 
     #[test]
     fn an_unknown_skill_replies_with_the_loaded_skills() {

@@ -90,15 +90,23 @@ impl std::fmt::Display for PlanFailure {
     }
 }
 
+/// The usage limit as the person on the channel is told it: what
+/// happened, where the limit is set, and the page that shows it. The
+/// error's own text follows it with the provider's status, code and
+/// request id, which are the operator's.
+pub fn usage_limit_notice() -> String {
+    format!(
+        "Usage limit reached. Review your plan or this app's limit in ChatGPT settings. \
+         Manage usage: {USAGE_URL}"
+    )
+}
+
 /// A failed request on the plan route, one variant per recovery the
 /// provider documents.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanRouteError {
     /// `subscription_sharing_usage_limit_exceeded`. Never retried.
-    #[error(
-        "Usage limit reached. Review your plan or this app's limit in ChatGPT settings. \
-         Manage usage: {USAGE_URL}. Not retried. {0}"
-    )]
+    #[error("{notice}. Not retried. {0}", notice = usage_limit_notice())]
     UsageLimitExceeded(PlanFailure),
     /// `subscription_sharing_usage_unavailable`.
     #[error("plan usage could not be checked; the credential is kept, try again later. {0}")]
