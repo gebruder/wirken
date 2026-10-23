@@ -782,6 +782,7 @@ mod env_isolation_tests {
     /// environment: a server sees nothing cargo set on this test
     /// process, and still finds programs.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "starts a process; miri cannot")]
     #[tokio::test]
     async fn a_host_child_starts_from_the_minimal_environment() {
         let dir = tempfile::tempdir().unwrap();
