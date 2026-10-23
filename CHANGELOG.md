@@ -24,6 +24,13 @@ tagged.
 - The chat approval card's hint is "Enter alone refuses.", so it fits beside
   the narrowed panels at 80 columns.
 
+### Security
+
+- ctutils 0.4.5 closes RUSTSEC-2026-0385, non-constant-time mask generation
+  in `Choice`, reached through curve25519-dalek under ed25519-dalek and
+  through blake2 under argon2. The `deny.toml` entry for RUSTSEC-2026-0381
+  is retired: the advisory now lists webpki-roots 0.26.11 as unaffected.
+
 ## [2.5.0] - 2026-10-22
 
 ### Added

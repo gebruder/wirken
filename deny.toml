@@ -60,15 +60,6 @@ ignore = [
     { id = "RUSTSEC-2026-0346", reason = "Derived Debug impls on Tls12ClientSessionValue and Tls13ClientSessionValue print the TLS 1.2 master secret or TLS 1.3 resumption PSK, which leaks only through a custom ClientSessionStore that formats session values with Debug; the built-in session cache is redacted and unaffected. Not reachable on this path: tungstenite 0.21.0 and tokio-tungstenite 0.21.0 build their client config with ClientConfig::builder().with_root_certificates(..).with_no_client_auth(), which keeps the built-in cache, and ClientSessionStore appears in zero files across serenity 0.12.5, tokio-tungstenite 0.21.0, tungstenite 0.21.0 and tokio-rustls 0.25.0. Revisit on a serenity release off rustls 0.22." },
     { id = "RUSTSEC-2026-0349", reason = "The client records the key-exchange group from an unauthenticated ServerHello and predicts it on later connections to that name, so an attacker can steer it off a post-quantum hybrid group (X25519MLKEM768) to classical X25519, losing post-quantum confidentiality. Not reachable on this path: rustls 0.22.4 is built here with the ring provider only, whose groups are X25519, secp256r1 and secp384r1, and the 0.22.4 source has no ML-KEM or Kyber group, so every connection on this path is classical already and there is no hybrid group to lose. Revisit on a serenity release off rustls 0.22." },
 
-    # webpki-roots 0.26.11, reached by:
-    #   wirken-agent -> tinfoil v0.1.1 (git)
-    #   tokio-tungstenite 0.21.0 -> serenity 0.12.5
-    #     -> wirken-adapter-discord -> wirken-cli
-    # 0.26.11 is a shim: its whole lib.rs is
-    # `pub use parent::TLS_SERVER_ROOTS;`, with `parent` the webpki-roots
-    # 1.x the lockfile resolves. Re-derive when the lockfile moves.
-    { id = "RUSTSEC-2026-0381", reason = "Bundled root certificates allow trust in distrusted emSign intermediates. Not reachable as shipped: webpki-roots 0.26.11 holds no roots of its own; it re-exports the webpki-roots 1.x the lockfile resolves, currently 1.0.10, which carries the fix. Pulled in by tinfoil (pinned git dependency) and by tokio-tungstenite 0.21 under serenity. Revisit when either depends on webpki-roots 1.x directly." },
-
     # rsa 0.9.10, reached only by:
     #   wirken-agent -> tinfoil v0.1.1 (git) -> sev 7.1.0 -> rsa
     #   wirken-agent -> tinfoil v0.1.1 (git) -> rsa
