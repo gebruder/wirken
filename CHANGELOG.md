@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-10-23
+
 ### Added
 
 - `wirken skills sign --key <seed>` signs with a named Ed25519 seed file

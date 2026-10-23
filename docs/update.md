@@ -7,7 +7,7 @@ in the background or at gateway start.
 ```bash
 wirken update --check                 # report; changes nothing
 wirken update                         # install the latest release
-wirken update --to 2.5.0              # install this release
+wirken update --to 2.5.1              # install this release
 wirken update --to 2.2.0 --allow-downgrade
 wirken update --rollback              # restore the binary the last update replaced
 wirken status                         # this binary's version and build; no network
