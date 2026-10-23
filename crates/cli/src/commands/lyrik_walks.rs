@@ -333,6 +333,7 @@ pub fn walk_exec_commands(walk_name: &str) -> &'static [&'static str] {
         "crypto-walk" => &["cargo audit"],
         "fuzz-walk" => &["cargo test"],
         "sink-walk" => &["git log", "git blame"],
+        "fix" => super::lyrik_fix::FIX_EXEC_COMMANDS,
         _ => &[],
     }
 }
@@ -483,7 +484,10 @@ fn brocard_section(walk_name: &str) -> String {
         "## Brocard rules\n\n\
          Every finding you emit carries a `threat_model` object: \
          `attacker_capability` and `harm_path`, both non-blank strings. \
-         A finding without both is a rule 1 rejection.\n\n\
+         A finding without both is a rule 1 rejection. Every finding also carries \
+         `invariant`: one sentence naming the property the code must hold that this \
+         finding shows violated. A defender-mode fix targets that property, not the \
+         input that showed it.\n\n\
          A candidate that fails one of the rules below is still written as a \
          finding. Also record the rejection: write a file to \
          `staging/<walk>/rejections/rejection-NNN.json` (zero-padded ordinal) with \

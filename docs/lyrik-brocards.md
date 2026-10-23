@@ -60,7 +60,7 @@ The aggregator pairs each record with the replay of the same ordinal and carries
 The `mode` key in `.lyrik/config.json` chooses what a rejection does to the finding. It defaults to `"pentest"`. Any other value fails the run before any walk runs.
 
 - **`pentest`** keeps the finding in `findings.json` and halves its grade once per distinct rule that applied. Two rules halve it twice. There is no floor, and a positive grade never reaches zero. A finding with no numeric grade is kept unchanged.
-- **`defender`** removes the finding from `findings.json`. The rejection record stays. The funnel counts removed candidates as `brocard_removed`.
+- **`defender`** removes the finding from `findings.json`. The rejection record stays. The funnel counts removed candidates as `brocard_removed`. After aggregation, defender mode runs the fix step on each confirmed finding; see "Fix step" in [lyrik.md](lyrik.md#lyrikconfigjson).
 
 Both modes write every rejection to `rejected_candidates`, and both print the run summary.
 

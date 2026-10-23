@@ -18,6 +18,7 @@ pub mod inbound_scan;
 pub mod lyrik;
 pub mod lyrik_brocards;
 pub mod lyrik_citation;
+pub mod lyrik_fix;
 pub mod lyrik_git;
 pub mod lyrik_preflight;
 pub mod lyrik_replay;

@@ -275,6 +275,30 @@ the brocard adjudication checks each finding's `threat_model` against it.
 [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) has the
 sections the file is expected to carry and which rule each check records.
 
+**Fix step, defender mode only.** After aggregation, a run in `defender`
+mode takes each confirmed finding, one kept by the gate and backed by a
+reproduction the replay agreed with, and starts one fresh agent under a
+staged `fix` skill. Its brief is the finding, the `invariant` the finding
+names (the property the code must hold that the finding shows violated; the
+staged wrapper has every walk emit it), the reproduction, and the revision.
+The patch targets the invariant, not the reproduction's input. The agent
+writes only under `staging/fix/<slug>/`: `fix.patch`, `apply.sh` for the
+operator to run from the project root, and `proof.json`. Nothing is written
+into the project's tree; the arms run in two copies extracted from the scanned
+revision under that directory with `git archive`. The proof has three arms
+against the live build: the reproduction fails in the baseline copy, passes in
+the patched copy, and fails again after `git apply -R` with `diff -r` showing
+the reverted copy identical to the baseline. The runner judges the proof and
+writes `fixes` into `findings.json`: `fix` only when all three arms are
+present in that shape, the patch exists, the invariant is named and the target
+tree did not change during the step; otherwise `inconclusive`, with each
+reason listed. An inconclusive outcome is never recorded as a fix. Exec is
+gated as everywhere under `wirken lyrik`: the operator is asked before each
+command, an approval is a one-shot bypass that stores no grant, a refused
+command is a skipped step, and the step's commands are printed before the
+first prompt. With the sandbox off no fix runs and each confirmed finding is
+logged as skipped.
+
 **Reproductions and replay.** A command a walk runs to show a finding leaves
 a record under `staging/<walk-name>/reproductions/`. After the walks return,
 the run starts one fresh agent per record, which sees only the record, runs
@@ -489,6 +513,10 @@ change them:
   walk wrote, with the fresh-context replay beside it when one ran: `walk`,
   `file`, the record's fields, `replay` and `agreement`. See
   [lyrik-brocards.md](lyrik-brocards.md#reproductions-and-replay).
+- `fixes`, a top-level array present after a defender-mode run with at least
+  one confirmed finding: `stable_id`, `dir` (the fix directory under the run
+  directory), `verdict` (`fix` or `inconclusive`), `reasons`, and the
+  `proof` as the agent wrote it when it parsed.
 
 ## Reports and audit
 

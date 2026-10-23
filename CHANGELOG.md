@@ -44,6 +44,18 @@ tagged.
   rule 3, and behaviour it lists as not a vulnerability is rule 5. The file's
   path, sha256 and the expected sections it carries are recorded under
   `target_threat_model`. Without the file nothing changes.
+- `wirken lyrik run` in `defender` mode runs a fix step after aggregation.
+  Each confirmed finding, one kept by the gate and backed by a reproduction
+  the replay agreed with, gets a fresh agent that writes `fix.patch`,
+  `apply.sh` and `proof.json` under `staging/fix/<slug>/` and nothing into
+  the project's tree. The patch targets the `invariant` the finding names;
+  every walk now emits that field. The proof has three arms against copies
+  extracted from the scanned revision: the reproduction fails on the
+  baseline, passes patched, and fails again after a full revert checked
+  with `diff -r`. The runner judges the proof and writes `fixes` into
+  `findings.json`; anything short of all three arms is `inconclusive` with
+  its reasons, never a fix. Exec stays gated per command with no stored
+  grant; a refused command is recorded and skipped.
 
 ### Dependencies
 
