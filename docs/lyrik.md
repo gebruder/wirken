@@ -252,6 +252,21 @@ is an operator step after the run. The staged frontmatter's `write_paths`,
 walk files are not modified. When the run has a team rubric or context, the
 staged walk carries it after that section.
 
+**Step records.** Each numbered step of a walk's text ends by writing
+`staging/<walk-name>/steps/step-NN.json`, and the next step starts by reading
+that file with `read_file`. The record holds `step`, `claim` (one falsifiable
+sentence), `code_revision` (the revision the dispatch prompt names), `check`
+(the command run, or the file and lines read), `evidence` (raw quoted lines or
+command output, non-empty), `open_questions`, and `prior`, the file name of the
+record the step read first; the first record has none. The runner checks each
+file: it must parse, no field may be blank, `evidence` may not be empty,
+`code_revision` must be the run's `target_sha` when the run has one, and
+`prior` must name the file before it. A file that fails is recorded as
+`lyrik.step.refused` in the audit log with the reason, and the walk's other
+records stand. Accepted records are carried in `findings.json` under
+`step_records`. The staged wrapper tells the walk all of this; the walk text
+itself is not edited.
+
 `exec` stays gated. The staged section lists the commands a walk runs through
 `exec` (`crypto-walk`: `cargo audit`; `fuzz-walk`: `cargo test`; `sink-walk`:
 `git log`, `git blame`), and the run prints the same list before it starts.
@@ -449,6 +464,10 @@ change them:
 - `threat_model` on a finding, an object with the strings
   `attacker_capability` and `harm_path`. Walk runs and the bundled `lyrik`
   skill are told to emit it. A finding without both is a rule 1 rejection.
+- `step_records`, a top-level array, one entry per accepted step record a
+  walk wrote (see "Step records" under `walks` above). Each entry carries
+  `walk`, `file`, `step`, `claim`, `code_revision`, `check`, `evidence`,
+  `open_questions` and, from the second record of a walk on, `prior`.
 
 ## Reports and audit
 

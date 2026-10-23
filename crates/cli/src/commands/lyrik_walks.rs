@@ -285,9 +285,10 @@ pub fn wrap_with_wirken_frontmatter(
     let description =
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
     let mut section = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         run_section(walk_name, exec_available),
-        brocard_section(walk_name)
+        brocard_section(walk_name),
+        step_section(walk_name)
     );
     if let Some(scoring) = scoring {
         section.push('\n');
@@ -502,6 +503,35 @@ fn brocard_section(walk_name: &str) -> String {
     out
 }
 
+/// The step-record rules a walk runs under. Each numbered step of the
+/// walk text ends by writing a record, and the next step begins by
+/// reading it. The runner checks the chain and the revision, so a
+/// step cannot hand the next one a summary in place of the record.
+fn step_section(walk_name: &str) -> String {
+    format!(
+        "## Step records\n\n\
+         Each numbered step in the walk text below ends with one `write_file` call: \
+         `.lyrik/state/runs/<run-id>/staging/{walk_name}/steps/step-NN.json`, with NN the \
+         step's two-digit ordinal, one file per step. The file is a JSON object with \
+         these fields, all required:\n\n\
+         - `step`: the step's name in the walk text.\n\
+         - `claim`: one falsifiable sentence the step established.\n\
+         - `code_revision`: the revision the dispatch prompt names, copied exactly.\n\
+         - `check`: the check the step ran: the command, or the file and line range read.\n\
+         - `evidence`: a non-empty list of strings, each a quoted line with its `file:line` \
+         or the output of the command. Raw, not paraphrased.\n\
+         - `open_questions`: what the step could not settle; an empty list when nothing is \
+         open.\n\
+         - `prior`: the file name of the record read before this step began. The first \
+         record has no `prior`.\n\n\
+         Before a step starts, read the previous step's record with `read_file` and work \
+         from its `claim`, `check` and `evidence`. Do not work from your memory of the \
+         step. A record that does not parse, leaves a field blank, has no evidence, names \
+         the wrong `prior`, or carries a revision the run did not scan is refused and \
+         recorded as such; the walk continues, but that step left no record.\n"
+    )
+}
+
 /// Pull the `description:` line out of a leading `---` frontmatter
 /// block (if any) and return the remainder as the body. Used to
 /// preserve a meaningful description on the staged skill so
@@ -548,7 +578,7 @@ fn strip_leading_frontmatter(source: &str) -> (Option<String>, &str) {
 pub fn ensure_walk_staging(run_dir: &Path, walks: &[String]) -> Result<()> {
     for w in walks {
         let walk_dir = run_dir.join("staging").join(w);
-        for sub in &["context", "rubric", "findings", "rejections"] {
+        for sub in &["context", "rubric", "findings", "rejections", "steps"] {
             let p = walk_dir.join(sub);
             std::fs::create_dir_all(&p).with_context(|| format!("create {}", p.display()))?;
         }
@@ -561,9 +591,20 @@ pub fn ensure_walk_staging(run_dir: &Path, walks: &[String]) -> Result<()> {
 /// the runner only needs to supply the run-id, the staging path,
 /// and the workspace pointer. Walks read the rest from the staged
 /// SKILL.md body.
-pub fn build_walk_prompt(walk_name: &str, run_id: &str, seed_protocol_suffix: &str) -> String {
+pub fn build_walk_prompt(
+    walk_name: &str,
+    run_id: &str,
+    code_revision: Option<&str>,
+    seed_protocol_suffix: &str,
+) -> String {
+    let revision = match code_revision {
+        Some(sha) => format!("Code revision: `{sha}`; every step record carries it."),
+        None => "Code revision: unknown, the target is not a git checkout; step records \
+                 carry `unknown`."
+            .to_string(),
+    };
     format!(
-        "/{walk_name} Run {walk_name} on this workspace. Run-id: `{run_id}`. \
+        "/{walk_name} Run {walk_name} on this workspace. Run-id: `{run_id}`. {revision} \
          Emission is staged. Findings: write each finding to \
          `.lyrik/state/runs/{run_id}/staging/{walk_name}/findings/finding-NNN.json` \
          (zero-padded ordinal; one finding per file). Context (if produced): \
@@ -778,6 +819,30 @@ mod tests {
     }
 
     #[test]
+    fn wrap_puts_step_records_after_the_brocard_rules_and_names_the_walk_path() {
+        let wrapped = wrap_with_wirken_frontmatter("graph-walk", "r1", None, true, "body\n");
+        let brocard = wrapped.find("## Brocard rules").unwrap();
+        let steps = wrapped.find("## Step records").unwrap();
+        let body = wrapped.find("body\n").unwrap();
+        assert!(brocard < steps && steps < body, "{wrapped}");
+        assert!(
+            wrapped.contains("staging/graph-walk/steps/step-NN.json"),
+            "{wrapped}"
+        );
+        for field in [
+            "`step`",
+            "`claim`",
+            "`code_revision`",
+            "`check`",
+            "`evidence`",
+            "`open_questions`",
+            "`prior`",
+        ] {
+            assert!(wrapped.contains(field), "missing {field}");
+        }
+    }
+
+    #[test]
     fn wrap_puts_run_rules_ahead_of_the_walk_text() {
         let src = "---\nname: fuzz-walk\ndescription: d\n---\n\nHarnesses live in the project's test tree.\n";
         let wrapped = wrap_with_wirken_frontmatter("fuzz-walk", "r1", None, true, src);
@@ -890,7 +955,7 @@ mod tests {
         )
         .unwrap();
         for w in ["sink-walk", "graph-walk"] {
-            for sub in ["context", "rubric", "findings", "rejections"] {
+            for sub in ["context", "rubric", "findings", "rejections", "steps"] {
                 assert!(
                     run.path().join("staging").join(w).join(sub).is_dir(),
                     "missing {w}/{sub}"
@@ -901,7 +966,8 @@ mod tests {
 
     #[test]
     fn build_walk_prompt_includes_walk_name_run_id_and_staging_path() {
-        let p = build_walk_prompt("sink-walk", "sample/run-001", "");
+        let p = build_walk_prompt("sink-walk", "sample/run-001", Some("abc123"), "");
+        assert!(p.contains("Code revision: `abc123`"), "{p}");
         assert!(p.starts_with("/sink-walk "));
         assert!(p.contains("Run-id: `sample/run-001`"));
         assert!(p.contains("staging/sink-walk/findings/finding-NNN.json"));
@@ -910,7 +976,8 @@ mod tests {
     #[test]
     fn build_walk_prompt_appends_seed_protocol_suffix_when_supplied() {
         let suffix = " SEEDS-MARKER";
-        let p = build_walk_prompt("sink-walk", "sample/run-001", suffix);
+        let p = build_walk_prompt("sink-walk", "sample/run-001", None, suffix);
+        assert!(p.contains("carry `unknown`"), "{p}");
         assert!(p.ends_with(suffix));
     }
 

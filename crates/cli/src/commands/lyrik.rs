@@ -23,6 +23,7 @@ use super::lyrik_brocards;
 use super::lyrik_semgrep::{
     self, DispatchOutcome, Seed, parse_scanner_config, write_bundled_ruleset, write_seed_files,
 };
+use super::lyrik_steps;
 use super::lyrik_walks::{
     build_walk_prompt, ensure_walk_staging, parse_walks_config, resolve_walks_dir,
     stage_walk_skills,
@@ -1311,6 +1312,10 @@ async fn dispatch_via_agent_runtime(
                     .clone()
                     .expect("walks_staged_dir is Some when walks_cfg is Some"),
                 walk_seed_suffix,
+                extras
+                    .get("target_sha")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
                 terminal.clone(),
                 audit,
             )
@@ -1997,6 +2002,10 @@ async fn dispatch_walks_concurrent(
     // to the prompt when a non-empty seed set was materialised. Empty
     // string when the scanner pass produced no seeds.
     walk_seed_suffix: String,
+    // The target revision the run scanned, named in every walk's
+    // prompt so step records can carry it. `None` when git state was
+    // unavailable.
+    code_revision: Option<String>,
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
@@ -2082,6 +2091,7 @@ async fn dispatch_walks_concurrent(
         // staging path. The template carries a `<walk>` sentinel the
         // dispatch site built once for the whole run.
         let walk_seed_suffix_t = walk_seed_suffix.replace("<walk>", &walk_name);
+        let code_revision_t = code_revision.clone();
 
         let h = tokio::spawn(async move {
             // Permit drops on task exit (success or panic) so a
@@ -2137,7 +2147,12 @@ async fn dispatch_walks_concurrent(
                 };
             }
 
-            let prompt = build_walk_prompt(&walk_name, &run_id_t, &walk_seed_suffix_t);
+            let prompt = build_walk_prompt(
+                &walk_name,
+                &run_id_t,
+                code_revision_t.as_deref(),
+                &walk_seed_suffix_t,
+            );
             let inbound_id = format!("lyrik-walk-{}-{}", walk_name, uuid::Uuid::new_v4());
             match local_agent.process_message(&prompt, inbound_id).await {
                 Ok(r) => {
@@ -2275,6 +2290,13 @@ fn aggregate_findings_multi(
     let mut tagged: Vec<(Option<String>, serde_json::Value)> = Vec::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
     let mut rejected: Vec<lyrik_brocards::Rejection> = Vec::new();
+    let mut step_records: Vec<lyrik_steps::AcceptedStep> = Vec::new();
+    // The revision the run scanned, for checking step records. Absent
+    // when the target's git state could not be read.
+    let scanned_revision: Option<String> = extras
+        .get("target_sha")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let mut literal_claim_resolved: usize = 0;
     let mut literal_claim_unresolved: usize = 0;
     let mut prompt_injection_deferred_resolved: usize = 0;
@@ -2319,6 +2341,26 @@ fn aggregate_findings_multi(
             walk_side = accepted;
             if rej_dir.is_dir() {
                 consumed.push(rej_dir);
+            }
+        }
+        // Step records sit beside the findings too. Accepted ones are
+        // carried in findings.json; a refused file is recorded and the
+        // walk's other records stand.
+        if let Some(steps_dir) = source.parent().map(|d| d.join("steps")) {
+            let (accepted, refused) = lyrik_steps::read_walk_steps(
+                &steps_dir,
+                walk_name.as_deref(),
+                scanned_revision.as_deref(),
+            )?;
+            for r in refused {
+                audit.emit(
+                    "lyrik.step.refused",
+                    serde_json::json!({ "walk": walk_name, "file": r.file, "reason": r.reason }),
+                )?;
+            }
+            step_records.extend(accepted);
+            if steps_dir.is_dir() {
+                consumed.push(steps_dir);
             }
         }
         let mut walk_side_matched = vec![false; walk_side.len()];
@@ -2576,6 +2618,7 @@ fn aggregate_findings_multi(
             },
         },
         "rejected_candidates": rejected,
+        "step_records": step_records,
         "findings": findings,
     });
     write_findings_with_funnel(dest, with_extras(body, extras), &funnel, audit)?;
@@ -4859,6 +4902,52 @@ mod tests {
         )
         .unwrap();
         serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn step_records_are_carried_in_findings_json_and_a_broken_one_is_refused() {
+        let tmp = tempdir().unwrap();
+        let dir = brocard_fixture(tmp.path());
+        let steps = tmp.path().join("staging").join("sink-walk").join("steps");
+        std::fs::create_dir_all(&steps).unwrap();
+        let record = |step: &str, prior: &str| {
+            format!(
+                r#"{{"step":"{step}","claim":"c","code_revision":"abc","check":"read_file src/a.rs:1-20","evidence":["src/a.rs:10: x"],"open_questions":[]{prior}}}"#
+            )
+        };
+        std::fs::write(steps.join("step-01.json"), record("first", "")).unwrap();
+        std::fs::write(
+            steps.join("step-02.json"),
+            record("second", r#","prior":"step-01.json""#),
+        )
+        .unwrap();
+        std::fs::write(steps.join("step-03.json"), record("third", "")).unwrap();
+        let body = run_brocard_fixture(tmp.path(), dir, lyrik_brocards::Mode::Pentest);
+        let carried = body["step_records"].as_array().unwrap();
+        assert_eq!(carried.len(), 2, "{carried:?}");
+        assert_eq!(carried[0]["walk"], "sink-walk");
+        assert_eq!(carried[0]["file"], "step-01.json");
+        assert_eq!(carried[1]["prior"], "step-01.json");
+        assert!(
+            !steps.exists(),
+            "the steps dir is consumed with the rest of staging"
+        );
+        let log = std::fs::read_to_string(tmp.path().join("audit.log")).unwrap();
+        let refused: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|r| r["event"] == "lyrik.step.refused")
+            .collect();
+        assert_eq!(refused.len(), 1, "{log}");
+        assert_eq!(refused[0]["detail"]["file"], "step-03.json");
+        assert!(
+            refused[0]["detail"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("expected step-02.json"),
+            "{}",
+            refused[0]
+        );
     }
 
     #[test]

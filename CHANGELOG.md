@@ -15,6 +15,14 @@ tagged.
 - `wirken skills sign --key <seed>` signs with a named Ed25519 seed file
   instead of `<data_dir>/signing-key.hex`, and generates nothing.
 - The Scorecard workflow runs on demand (`workflow_dispatch`).
+- `wirken lyrik run` walks write a step record after each step of their text,
+  `staging/<walk>/steps/step-NN.json`, with the claim, the code revision, the
+  check run, the raw evidence and the open questions, and read the previous
+  record before the next step. The runner refuses a record that does not
+  parse, leaves a field blank, has no evidence, names the wrong `prior` or a
+  revision the run did not scan, recording `lyrik.step.refused`, and carries
+  the accepted ones in `findings.json` under `step_records`, outside schema
+  1.1. Each walk's dispatch prompt names the scanned revision.
 
 ### Dependencies
 

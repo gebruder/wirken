@@ -22,6 +22,7 @@ pub mod lyrik_git;
 pub mod lyrik_preflight;
 pub mod lyrik_sarif;
 pub mod lyrik_semgrep;
+pub mod lyrik_steps;
 pub mod lyrik_validate;
 pub mod lyrik_walks;
 pub mod mcp;
