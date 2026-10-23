@@ -10,11 +10,17 @@
 //! The egress proxy both use, a policy-free sidecar and a host-side
 //! decision broker, is in [`egress`], and the networks that make the
 //! sidecar the sandbox's only route are built by `egress_net`.
+//!
+//! What a process started outside any container begins with is in
+//! [`child_env`]: every host-side child Wirken spawns starts from that
+//! module's minimal environment and is given, by name, only what it
+//! needs.
 
 // Slicing a str off a character boundary panics. Each slice that
 // stays carries an allow naming why its offsets are boundaries.
 #![cfg_attr(not(test), deny(clippy::string_slice))]
 
+pub mod child_env;
 pub mod egress;
 #[cfg(unix)]
 pub mod egress_net;

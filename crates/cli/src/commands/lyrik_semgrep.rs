@@ -118,9 +118,19 @@ pub enum DispatchOutcome {
 /// otherwise makes on every invocation.
 fn semgrep() -> Command {
     let mut cmd = Command::new("semgrep");
-    cmd.env("SEMGREP_SEND_METRICS", "off")
-        .env("SEMGREP_ENABLE_VERSION_CHECK", "0");
+    semgrep_env(&mut cmd);
     cmd
+}
+
+/// The environment a semgrep child runs with: the minimal host-child
+/// set (`wirken_agent::child_env::minimal`), so nothing else from this
+/// process's environment, the vault passphrase included, reaches it;
+/// plus the two settings that keep it off the network.
+fn semgrep_env(cmd: &mut Command) -> &mut Command {
+    cmd.env_clear()
+        .envs(wirken_agent::child_env::minimal())
+        .env("SEMGREP_SEND_METRICS", "off")
+        .env("SEMGREP_ENABLE_VERSION_CHECK", "0")
 }
 
 /// Run Semgrep against `target` with the bundled ruleset. Writes
@@ -320,6 +330,25 @@ fn parse_semgrep_json(stdout: &[u8], target: &Path) -> Result<Vec<Seed>> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A semgrep child starts from the minimal environment plus the
+    /// two settings that keep it off the network; what the parent
+    /// exported does not reach it.
+    #[cfg(unix)]
+    #[test]
+    fn semgrep_child_inherits_nothing_it_is_not_named() {
+        use crate::commands::child_env_tests::{SENTINELS, assert_inherits_nothing};
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "env"])
+            .envs(SENTINELS.iter().copied())
+            .stdout(std::process::Stdio::piped());
+        semgrep_env(&mut cmd);
+        let env = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
+        assert_inherits_nothing("semgrep", &env);
+        for line in ["SEMGREP_SEND_METRICS=off", "SEMGREP_ENABLE_VERSION_CHECK=0"] {
+            assert!(env.lines().any(|l| l == line), "{line} missing:\n{env}");
+        }
+    }
 
     #[test]
     fn parse_scanner_config_absent_block_disables() {

@@ -179,7 +179,7 @@ The proxy reaches each server through the container runtime's attach stream, not
 
 ### `"sandbox": "off"`
 
-A server with `"sandbox": "off"` runs as a child of `wirken-mcp-proxy` at the operator's UID, with no `cap_drop`, seccomp filter, namespace or resource limit. `StdioTransport::spawn` clears its environment and adds back only allowlisted shell variables and its own `env` block. What is at risk is the operator's blast radius:
+A server with `"sandbox": "off"` runs as a child of `wirken-mcp-proxy` at the operator's UID, with no `cap_drop`, seccomp filter, namespace or resource limit. `StdioTransport::spawn` clears its environment and adds back the minimal host-child set (`child_env::BASE`, `crates/sandbox/src/child_env.rs`), a short list of locale, time-zone and XDG directory variables (`SAFE_ENV_PASSTHROUGH`, `crates/mcp-proxy/src/mcp_transport.rs`) and its own `env` block. What is at risk is the operator's blast radius:
 
 - **Operator UID filesystem.** It can read or write anything the operator can, `audit.db` and the home directory included. Byte-tampering of `audit.db` is detected by `wirken sessions verify`, after the fact.
 - **Operator UID network reach.** Outbound to any host the operator can reach.

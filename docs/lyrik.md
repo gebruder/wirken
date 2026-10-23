@@ -628,8 +628,12 @@ No program the target repository configures runs on the host. The runner asks
 git only `rev-parse` and `ls-tree`, which read refs, config and objects and
 neither refresh the index nor convert content, and `config --get` and
 `check-attr`, which read config and attribute files, each with
-`core.fsmonitor=false`, `protocol.allow=never`, no pager and inherited `GIT_*`
-variables removed, and compares the work tree against HEAD in-process. It does
+`core.fsmonitor=false`, `protocol.allow=never`, no pager and a child
+environment that starts from the minimal host-child set and carries only the
+three `GIT_*` settings the operation needs (`git_env`,
+`crates/cli/src/commands/lyrik_git.rs`), so no `GIT_*` the operator exported
+and no vault passphrase reaches it, and compares the work tree against HEAD
+in-process. It does
 not use `git status` or `git diff`, which can run a repository's clean
 filters.
 
@@ -661,7 +665,9 @@ binary with a scripted model doing what a steered model would.
   one is refused at the tool gate, recorded on the chain, and the turn carries
   on. The runner refuses to attach a staged skill that grants any other tool,
   any egress or a credential, and runs Semgrep with metrics and its update
-  check off. `lyrik_run_reaches_no_network.rs`.
+  check off, in a child environment that starts from the minimal host-child
+  set and carries only those two settings (`semgrep_env`,
+  `crates/cli/src/commands/lyrik_semgrep.rs`). `lyrik_run_reaches_no_network.rs`.
 - **No program the repository configures runs.** Provenance and the team-file
   check use only the git commands above; an fsmonitor hook and a clean filter
   set in the target's `.git/config` stay unrun.

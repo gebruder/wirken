@@ -191,14 +191,74 @@ pub(crate) fn configure_adapter_command<'a>(
     data_dir: &Path,
     socket: &Path,
 ) -> &'a mut Command {
+    use wirken_agent::child_env;
     cmd.arg("adapter")
         .arg(adapter_id)
+        .env_clear()
+        .envs(child_env::minimal())
+        .envs(child_env::inherit(child_env::NETWORK_CLIENT))
+        .envs(child_env::inherit(ADAPTER_PASSTHROUGH))
         .env("WIRKEN_DATA_DIR", data_dir)
         .env("WIRKEN_SOCKET", socket)
-        .env_remove("WIRKEN_VAULT_PASSPHRASE")
         .stdin(std::process::Stdio::piped())
         .kill_on_drop(true)
 }
+
+/// What an adapter process reads from the gateway's environment beyond
+/// the minimal set and the network-client variables: its log filter
+/// and the per-channel knobs `wirken adapter` and the Signal adapter
+/// read. Everything else the gateway was started with stays with the
+/// gateway.
+pub(crate) const ADAPTER_PASSTHROUGH: &[&str] = &[
+    "RUST_LOG",
+    "WIRKEN_TEAMS_PORT",
+    "WIRKEN_WHATSAPP_PORT",
+    "WIRKEN_GOOGLE_CHAT_PORT",
+    "WIRKEN_IMESSAGE_PORT",
+    "WIRKEN_SIGNAL_RECONNECT_WAIT_S",
+    "WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS",
+];
+
+/// Configure `cmd` to run as the MCP proxy for `data_dir`, answering
+/// on `socket` and asking the gateway for refreshes on
+/// `refresh_socket`. Like an adapter it starts from the minimal
+/// environment and gets, by name, the network-client variables, its
+/// log filter, the signing bypass and sidecar override the proxy
+/// reads, the memory-backed directory it keeps secret files in, and
+/// the Docker connection variables `bollard` reads.
+pub(crate) fn configure_mcp_proxy_command<'a>(
+    cmd: &'a mut Command,
+    data_dir: &Path,
+    socket: &Path,
+    refresh_socket: &Path,
+) -> &'a mut Command {
+    use wirken_agent::child_env;
+    cmd.arg("mcp-proxy")
+        .env_clear()
+        .envs(child_env::minimal())
+        .envs(child_env::inherit(child_env::NETWORK_CLIENT))
+        .envs(child_env::inherit(MCP_PROXY_PASSTHROUGH))
+        .env("WIRKEN_DATA_DIR", data_dir)
+        .env("WIRKEN_MCP_SOCKET", socket)
+        .env(
+            wirken_mcp_proxy::credentials::GATEWAY_SOCKET_ENV,
+            refresh_socket,
+        )
+        .stdin(std::process::Stdio::piped())
+        .kill_on_drop(true)
+}
+
+/// What the MCP proxy reads from the gateway's environment beyond the
+/// minimal set and the network-client variables.
+pub(crate) const MCP_PROXY_PASSTHROUGH: &[&str] = &[
+    "RUST_LOG",
+    "WIRKEN_ALLOW_UNSIGNED_MCP",
+    "WIRKEN_SIDECAR_BINARY",
+    "XDG_RUNTIME_DIR",
+    "DOCKER_HOST",
+    "DOCKER_CERT_PATH",
+    "DOCKER_TLS_VERIFY",
+];
 
 /// Spawn `cmd`, write `handoff` to its stdin and close the pipe. The
 /// write runs on its own task; the payload is zeroed when it finishes.
@@ -476,29 +536,61 @@ mod tests {
         assert!(Handoff::read_from(&good[..]).is_ok());
     }
 
-    /// The child environment carries no vault passphrase even when the
-    /// gateway's own environment does: `sh -c env` stands in for the
-    /// adapter binary, with the passphrase set on the command first the
-    /// way an inherited variable would be.
+    /// An adapter starts from the minimal environment plus what it is
+    /// named for; nothing else the gateway holds, the vault passphrase
+    /// and any other `WIRKEN_*` included, reaches it. `sh -c env`
+    /// stands in for the adapter binary, with the sentinels set on the
+    /// command first the way an inherited variable would be.
     #[cfg(unix)]
     #[tokio::test]
-    async fn adapter_child_environment_has_no_passphrase() {
+    async fn adapter_child_inherits_nothing_it_is_not_named() {
+        use crate::commands::child_env_tests::{SENTINELS, assert_inherits_nothing};
         let dir = tempfile::tempdir().unwrap();
         for (adapter, _) in BEFORE {
             let mut cmd = Command::new("sh");
             cmd.arg("-c")
                 .arg("env")
-                .env("WIRKEN_VAULT_PASSPHRASE", "inherited-passphrase")
+                .envs(SENTINELS.iter().copied())
                 .stdout(std::process::Stdio::piped());
             configure_adapter_command(&mut cmd, adapter, dir.path(), &dir.path().join("gw.sock"));
             let out = cmd.output().await.unwrap();
             let env = String::from_utf8(out.stdout).unwrap();
-            assert!(
-                !env.contains("WIRKEN_VAULT_PASSPHRASE"),
-                "{adapter} child inherited the passphrase"
-            );
+            assert_inherits_nothing(adapter, &env);
             assert!(env.contains("WIRKEN_DATA_DIR="), "{adapter}");
+            assert!(env.contains("WIRKEN_SOCKET="), "{adapter}");
         }
+    }
+
+    /// The MCP proxy starts the same way, with its own named set.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_proxy_child_inherits_nothing_it_is_not_named() {
+        use crate::commands::child_env_tests::{SENTINELS, assert_inherits_nothing};
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("env")
+            .envs(SENTINELS.iter().copied())
+            .env("WIRKEN_ALLOW_UNSIGNED_MCP", "set-on-the-command")
+            .stdout(std::process::Stdio::piped());
+        configure_mcp_proxy_command(
+            &mut cmd,
+            dir.path(),
+            &dir.path().join("mcp.sock"),
+            &dir.path().join("refresh.sock"),
+        );
+        let out = cmd.output().await.unwrap();
+        let env = String::from_utf8(out.stdout).unwrap();
+        assert_inherits_nothing("mcp-proxy", &env);
+        for name in ["WIRKEN_DATA_DIR", "WIRKEN_MCP_SOCKET"] {
+            assert!(env.contains(&format!("{name}=")), "{name} missing:\n{env}");
+        }
+        // A named variable comes from the parent process, not from what
+        // happened to be set on the command.
+        assert!(
+            !env.contains("WIRKEN_ALLOW_UNSIGNED_MCP=set-on-the-command"),
+            "{env}"
+        );
     }
 
     /// `spawn_with_handoff` delivers the hand-off once and closes the

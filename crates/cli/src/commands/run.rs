@@ -1223,16 +1223,12 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         tokio::spawn(async move {
             tracing::info!("Spawning MCP proxy");
             let mut cmd = Command::new(&exe);
-            cmd.arg("mcp-proxy")
-                .env("WIRKEN_DATA_DIR", &data_dir)
-                .env("WIRKEN_MCP_SOCKET", &socket)
-                .env(
-                    wirken_mcp_proxy::credentials::GATEWAY_SOCKET_ENV,
-                    &refresh_socket,
-                )
-                .env_remove("WIRKEN_VAULT_PASSPHRASE")
-                .stdin(std::process::Stdio::piped())
-                .kill_on_drop(true);
+            adapter_handoff::configure_mcp_proxy_command(
+                &mut cmd,
+                &data_dir,
+                &socket,
+                &refresh_socket,
+            );
             let result = adapter_handoff::spawn_with_handoff(&mut cmd, proxy_handoff);
             match result {
                 Ok(mut child) => {

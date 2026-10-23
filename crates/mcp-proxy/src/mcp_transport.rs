@@ -41,42 +41,33 @@ pub struct JsonRpcError {
     pub message: String,
 }
 
-/// Inherited environment variables a spawned MCP server is allowed to
-/// see. Anything outside this list is dropped before the child starts.
+/// What a stdio MCP server with its sandbox off inherits beyond the
+/// minimal host-child set (`wirken_sandbox::child_env::BASE`), which
+/// every host-side child starts from. Anything outside the two lists
+/// is dropped before the child starts.
 ///
-/// The list is the small set real-world MCP servers (npx-based,
-/// python/uvx-based, native binaries) need to find their interpreter
-/// and config dirs. Notably **excluded**:
+/// These are the extra variables real-world MCP servers (npx-based,
+/// python/uvx-based, native binaries) read for locale, time zone and
+/// their config and cache directories. Notably **excluded**:
 ///
-/// - `WIRKEN_VAULT_PASSPHRASE` — mcp-proxy reads this on startup
-///   (`crates/mcp-proxy/src/runner.rs::open_vault`) and it would
-///   otherwise stay in mcp-proxy's environ for the proxy's lifetime.
-///   Without env-clearing, every MCP child would inherit it, read it
-///   from its own env, open `~/.wirken/vault.db` at the same UID,
-///   and decrypt every credential — provider API keys, adapter
-///   secrets, channel tokens.
-/// - `SSH_*`, `AWS_*`, `GOOGLE_*`, `AZURE_*`, etc. — cloud and SSH
+/// - `WIRKEN_VAULT_PASSPHRASE`, and every other `WIRKEN_*` variable
+///   the proxy was started with. The proxy itself has not held the
+///   passphrase since 2.0.0; a child that inherited one from an
+///   operator's shell could open `~/.wirken/vault.db` at the same UID.
+/// - `SSH_*`, `AWS_*`, `GOOGLE_*`, `AZURE_*`, etc.: cloud and SSH
 ///   credentials the operator may have in their shell.
-/// - `DISPLAY`, `XAUTHORITY` — X11 authority handles.
+/// - `DISPLAY`, `XAUTHORITY`: X11 authority handles.
 /// - Any other operator-environment leak.
 ///
 /// Per-MCP `env` from `mcp.json` (including `vault:`-resolved
-/// secrets) is applied AFTER this allowlist, so the operator can
-/// override any of these per-server if they need to.
+/// secrets) is applied AFTER both lists, so the operator can override
+/// any of these per-server if they need to.
 const SAFE_ENV_PASSTHROUGH: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "LC_ALL",
     "LC_CTYPE",
     "LC_MESSAGES",
     "LC_TIME",
     "LC_NUMERIC",
-    "TERM",
     "TZ",
-    "TMPDIR",
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
@@ -100,11 +91,17 @@ pub(crate) fn build_spawn_env(
     parent_env: impl IntoIterator<Item = (String, String)>,
     mcp_env: &HashMap<String, String>,
 ) -> HashMap<String, String> {
+    use wirken_sandbox::child_env;
+    let parent: Vec<(std::ffi::OsString, std::ffi::OsString)> = parent_env
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
     let mut out = HashMap::new();
-    for (k, v) in parent_env {
-        if SAFE_ENV_PASSTHROUGH.iter().any(|allowed| *allowed == k) {
-            out.insert(k, v);
-        }
+    for (k, v) in child_env::inherit_from(child_env::BASE, parent.iter().cloned())
+        .into_iter()
+        .chain(child_env::inherit_from(SAFE_ENV_PASSTHROUGH, parent))
+    {
+        out.insert(k, v.to_string_lossy().into_owned());
     }
     for (k, v) in mcp_env {
         out.insert(k.clone(), v.clone());
@@ -721,13 +718,18 @@ mod env_isolation_tests {
     fn allowlisted_shell_vars_pass_through() {
         // npx, python, uvx need PATH and HOME to find their
         // interpreter and config dirs; locale + tz keep date /
-        // string handling sane. The list is exhaustive.
-        let inputs: Vec<(String, String)> = SAFE_ENV_PASSTHROUGH
+        // string handling sane. The two lists are exhaustive.
+        let names: Vec<&str> = wirken_sandbox::child_env::BASE
+            .iter()
+            .chain(SAFE_ENV_PASSTHROUGH)
+            .copied()
+            .collect();
+        let inputs: Vec<(String, String)> = names
             .iter()
             .map(|name| ((*name).to_string(), format!("val-{name}")))
             .collect();
         let out = build_spawn_env(inputs, &HashMap::new());
-        for name in SAFE_ENV_PASSTHROUGH {
+        for name in &names {
             assert_eq!(
                 out.get(*name),
                 Some(&format!("val-{name}")),
@@ -769,9 +771,43 @@ mod env_isolation_tests {
             ("WIRKEN_DATA_DIR", "/home/me/.wirken"),
             ("WIRKEN_LOG", "debug"),
             ("WIRKEN_VAULT_PASSPHRASE", "secret"),
+            ("WIRKEN_SENTINEL", "inherited-wirken-setting"),
+            ("SENTINEL_SECRET", "inherited-secret"),
         ]);
         let out = build_spawn_env(p, &HashMap::new());
-        assert!(out.is_empty());
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// The spawn path applies the mapping to the real process
+    /// environment: a server sees nothing cargo set on this test
+    /// process, and still finds programs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_host_child_starts_from_the_minimal_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("env");
+        let args = vec![
+            "-c".to_string(),
+            "env > \"$1\"".to_string(),
+            "sh".to_string(),
+            out.display().to_string(),
+        ];
+        let _transport = super::StdioTransport::spawn("sh", &args, &HashMap::new())
+            .await
+            .unwrap();
+        let mut env = String::new();
+        for _ in 0..200 {
+            env = std::fs::read_to_string(&out).unwrap_or_default();
+            if !env.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            !env.lines().any(|l| l.starts_with("CARGO_PKG_NAME=")),
+            "the proxy's environment reached the server:\n{env}"
+        );
+        assert!(env.contains("PATH="), "{env}");
     }
 
     #[test]
@@ -784,19 +820,11 @@ mod env_isolation_tests {
         // author has to argue why the new key is safe to cross
         // the gateway → MCP child trust boundary.
         let expected: &[&str] = &[
-            "PATH",
-            "HOME",
-            "USER",
-            "LOGNAME",
-            "LANG",
-            "LC_ALL",
             "LC_CTYPE",
             "LC_MESSAGES",
             "LC_TIME",
             "LC_NUMERIC",
-            "TERM",
             "TZ",
-            "TMPDIR",
             "XDG_CONFIG_HOME",
             "XDG_CACHE_HOME",
             "XDG_DATA_HOME",

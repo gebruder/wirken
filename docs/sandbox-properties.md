@@ -70,11 +70,14 @@ A gated `exec` call does not leave work running after it returns.
   are not tracked.
 
 Under `Off` the command does not inherit the gateway's environment: it starts
-from an empty one plus an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`,
-`LANG`, `LC_ALL`, `TERM`, `TMPDIR`; on Windows the system locations a shell
-needs) and the `WIRKEN_EXEC` marker that `wirken update` refuses on
-([update.md](update.md#inside-an-exec)), so a passphrase or key the gateway
-was started with is not passed on.
+from an empty one plus the minimal host-child set (`PATH`, `HOME`, `USER`,
+`LOGNAME`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`; on Windows the system
+locations a shell needs; `child_env::BASE` in
+[`crates/sandbox/src/child_env.rs`](../crates/sandbox/src/child_env.rs), the
+set every host-side child Wirken spawns begins with) and the `WIRKEN_EXEC`
+marker that `wirken update` refuses on ([update.md](update.md#inside-an-exec))
+(`host_exec_env`, [`crates/agent/src/tool.rs`](../crates/agent/src/tool.rs)),
+so a passphrase or key the gateway was started with is not passed on.
 Its stdin is `/dev/null`, not the operator's terminal. The command still runs
 as the gateway's user and can read whatever that user can.
 

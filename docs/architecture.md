@@ -147,14 +147,19 @@ refresh token, and records an `mcp_credential_refetched` row naming the
 credential, never the value; the refused call fails and the next one carries
 the new value.
 
-No process the gateway starts holds the vault passphrase or the vault's
-device key. The gateway is the only process that opens the vault on a running
-deployment (`wirken ask` and `wirken lyrik` open it in their own process, and
-the `git` and `semgrep` children `wirken lyrik` spawns inherit its environment,
-`WIRKEN_VAULT_PASSPHRASE` included; `crates/cli/src/commands/lyrik_git.rs`,
-`lyrik_semgrep.rs`); every process it starts,
-adapters, the MCP proxy, the host `exec` shell, has `WIRKEN_VAULT_PASSPHRASE`
-removed from its environment or starts with a cleared one. A credential rotated
+No process Wirken starts holds the vault passphrase or the vault's device
+key. The gateway is the only process that opens the vault on a running
+deployment (`wirken ask` and `wirken lyrik` open it in their own process).
+Every host-side child, the adapters, the MCP proxy, a stdio MCP server with
+its sandbox off, the host `exec` shell, and the `git`, `semgrep`, `curl`,
+`crontab` and service-manager invocations the CLI makes, starts from a
+cleared environment plus one minimal set (`child_env::minimal`,
+`crates/sandbox/src/child_env.rs`) and is given, by name at its spawn, only
+the variables it reads (`configure_adapter_command` and
+`configure_mcp_proxy_command`, `crates/cli/src/commands/adapter_handoff.rs`;
+`host_exec_env`, `crates/agent/src/tool.rs`; `git_env`, `semgrep_env`,
+`curl_env`, `crontab_env`, `service_env` in `crates/cli/src/commands/`;
+`build_spawn_env`, `crates/mcp-proxy/src/mcp_transport.rs`). A credential rotated
 in the vault reaches an adapter at its next spawn, an HTTP MCP server at the
 first call it refuses, and a stdio MCP server at the next gateway start. See
 [credentials.md](credentials.md).

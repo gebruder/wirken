@@ -783,13 +783,7 @@ impl ToolRegistry {
         // them. Stdin is closed for the same reason: under
         // `wirken ask` it is the operator's terminal, where approval
         // answers are typed.
-        cmd.env_clear();
-        for name in HOST_EXEC_ENV_ALLOWLIST {
-            if let Some(value) = std::env::var_os(name) {
-                cmd.env(name, value);
-            }
-        }
-        cmd.env(EXEC_MARKER_ENV, "1");
+        host_exec_env(&mut cmd);
         // The shell leads a process group of its own, so everything it
         // starts and does not move out of the group (`&`, `nohup`, a
         // double fork) can be ended with it. See `HostGroup`.
@@ -1812,32 +1806,19 @@ pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
 pub const EXEC_MARKER_ENV: &str = "WIRKEN_EXEC";
 
 /// Environment variables a host `exec` keeps from the gateway's
-/// environment. Everything else is dropped. See [`ToolRegistry`]'s
-/// `exec_command`.
-#[cfg(not(windows))]
-pub const HOST_EXEC_ENV_ALLOWLIST: &[&str] = &[
-    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR",
-];
+/// environment: the shared minimal set, [`wirken_sandbox::child_env::BASE`].
+/// Everything else is dropped. See [`host_exec_env`].
+pub const HOST_EXEC_ENV_ALLOWLIST: &[&str] = wirken_sandbox::child_env::BASE;
 
-/// Environment variables a host `exec` keeps on Windows, where a shell
-/// cannot start without the system locations.
-#[cfg(windows)]
-pub const HOST_EXEC_ENV_ALLOWLIST: &[&str] = &[
-    "PATH",
-    "PATHEXT",
-    "SystemRoot",
-    "SystemDrive",
-    "WINDIR",
-    "COMSPEC",
-    "TEMP",
-    "TMP",
-    "USERPROFILE",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "USERNAME",
-];
+/// The environment a host `exec` (`mode: off`) runs its command with:
+/// [`HOST_EXEC_ENV_ALLOWLIST`] from this process, plus the
+/// [`EXEC_MARKER_ENV`] marker. Nothing else the gateway was started
+/// with, the vault passphrase among it, is passed on.
+pub fn host_exec_env(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    cmd.env_clear()
+        .envs(wirken_sandbox::child_env::minimal())
+        .env(EXEC_MARKER_ENV, "1")
+}
 
 /// The process group a host `exec` started, killed when the call
 /// returns on any path: completion, timeout, or error. A command does

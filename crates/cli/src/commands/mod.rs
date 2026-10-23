@@ -962,6 +962,40 @@ pub fn read_secret(prompt: &str) -> anyhow::Result<String> {
     Ok(input)
 }
 
+/// What every host-side child spawn test checks: the variables set on
+/// the command before its environment is configured stand in for what
+/// the parent process had exported, and `CARGO_PKG_NAME`, which cargo
+/// sets on every test process, stands in for anything else inherited.
+#[cfg(test)]
+pub(crate) mod child_env_tests {
+    /// Set on the command before the site configures it, the way an
+    /// inherited variable would be.
+    pub(crate) const SENTINELS: &[(&str, &str)] = &[
+        ("WIRKEN_VAULT_PASSPHRASE", "inherited-passphrase"),
+        ("WIRKEN_SENTINEL", "inherited-wirken-setting"),
+        ("SENTINEL_SECRET", "inherited-secret"),
+    ];
+
+    /// `env` is a child's `env` output. None of the sentinels and
+    /// nothing cargo set reached it, and it can still find programs.
+    pub(crate) fn assert_inherits_nothing(site: &str, env: &str) {
+        for (name, _) in SENTINELS {
+            assert!(
+                !env.lines().any(|l| l.starts_with(&format!("{name}="))),
+                "{site}: {name} reached the child:\n{env}"
+            );
+        }
+        assert!(
+            !env.lines().any(|l| l.starts_with("CARGO_PKG_NAME=")),
+            "{site}: the parent's environment reached the child:\n{env}"
+        );
+        assert!(
+            env.contains("PATH="),
+            "{site}: a child still finds programs:\n{env}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

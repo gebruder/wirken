@@ -180,8 +180,21 @@ pub(crate) fn without_managed_entry(current: &str, preset: &str) -> (String, boo
     (joined, removed)
 }
 
+/// A `crontab` invocation with the minimal host-child environment
+/// (`wirken_agent::child_env::minimal`): nothing else from this
+/// process's environment, the vault passphrase included, reaches it.
+fn crontab() -> std::process::Command {
+    let mut cmd = std::process::Command::new("crontab");
+    crontab_env(&mut cmd);
+    cmd
+}
+
+fn crontab_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd.env_clear().envs(wirken_agent::child_env::minimal())
+}
+
 fn read_crontab() -> Result<String> {
-    let output = std::process::Command::new("crontab")
+    let output = crontab()
         .arg("-l")
         .output()
         .with_context(|| "invoke `crontab -l` (is the crontab binary on PATH?)")?;
@@ -203,7 +216,7 @@ fn read_crontab() -> Result<String> {
 
 fn write_crontab(contents: &str) -> Result<()> {
     use std::io::Write;
-    let mut child = std::process::Command::new("crontab")
+    let mut child = crontab()
         .arg("-")
         .stdin(std::process::Stdio::piped())
         .spawn()
@@ -224,6 +237,21 @@ fn write_crontab(contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// crontab starts from the minimal environment; what the parent
+    /// exported does not reach it.
+    #[cfg(unix)]
+    #[test]
+    fn crontab_child_inherits_nothing_it_is_not_named() {
+        use crate::commands::child_env_tests::{SENTINELS, assert_inherits_nothing};
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "env"])
+            .envs(SENTINELS.iter().copied())
+            .stdout(std::process::Stdio::piped());
+        crontab_env(&mut cmd);
+        let env = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
+        assert_inherits_nothing("crontab", &env);
+    }
 
     #[test]
     fn with_managed_entry_appends_to_empty() {

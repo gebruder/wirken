@@ -208,6 +208,7 @@ impl Fetcher {
         scratch: &PathBuf,
     ) -> Result<()> {
         let mut cmd = tokio::process::Command::new("curl");
+        curl_env(&mut cmd);
         cmd.args(["--fail", "--show-error"])
             .arg("--connect-timeout")
             .arg(CONNECT_TIMEOUT.as_secs().to_string())
@@ -266,6 +267,20 @@ fn scratch_path() -> PathBuf {
         std::process::id(),
         SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+/// The environment curl runs with: the minimal host-child set
+/// (`wirken_agent::child_env::minimal`), so nothing else from this
+/// process's environment, the vault passphrase included, reaches it;
+/// plus the proxy and CA variables an operator's shell sets for
+/// outbound HTTP (`child_env::NETWORK_CLIENT`) and curl's own CA
+/// bundle override.
+pub(crate) fn curl_env(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    use wirken_agent::child_env;
+    cmd.env_clear()
+        .envs(child_env::minimal())
+        .envs(child_env::inherit(child_env::NETWORK_CLIENT))
+        .envs(child_env::inherit(&["CURL_CA_BUNDLE"]))
 }
 
 #[cfg(test)]
@@ -457,6 +472,21 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("larger than"), "{err:#}");
+    }
+
+    /// curl starts from the minimal environment plus the proxy and CA
+    /// variables; what the parent exported does not reach it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn curl_child_inherits_nothing_it_is_not_named() {
+        use crate::commands::child_env_tests::{SENTINELS, assert_inherits_nothing};
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "env"])
+            .envs(SENTINELS.iter().copied())
+            .stdout(std::process::Stdio::piped());
+        super::curl_env(&mut cmd);
+        let env = String::from_utf8(cmd.output().await.unwrap().stdout).unwrap();
+        assert_inherits_nothing("curl", &env);
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ pub fn detect_platform() -> Platform {
         "macos" => Platform::MacOsLaunchd,
         "linux" => {
             // Check for systemd
-            let has_systemd = std::process::Command::new("systemctl")
+            let has_systemd = service_command("systemctl")
                 .arg("--version")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -240,8 +240,34 @@ pub fn uninstall_service() -> Result<()> {
     }
 }
 
+/// A service-manager invocation with the minimal host-child
+/// environment (`wirken_agent::child_env::minimal`), so nothing else
+/// from this process's environment, the vault passphrase included,
+/// reaches it. `systemctl --user` also needs the session bus to find
+/// the user manager, so it gets those two variables by name.
+fn service_command(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    service_env(&mut cmd, program);
+    cmd
+}
+
+fn service_env<'a>(
+    cmd: &'a mut std::process::Command,
+    program: &str,
+) -> &'a mut std::process::Command {
+    use wirken_agent::child_env;
+    cmd.env_clear().envs(child_env::minimal());
+    if program == "systemctl" {
+        cmd.envs(child_env::inherit(&[
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ]));
+    }
+    cmd
+}
+
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new(cmd)
+    let status = service_command(cmd)
         .args(args)
         .status()
         .context(format!("Failed to run {cmd}"))?;
@@ -260,6 +286,44 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// A service-manager child starts from the minimal environment;
+    /// `systemctl` alone gets the session-bus pair, and only from the
+    /// parent process. What was set on the command, standing in for
+    /// an inherited variable, does not reach either.
+    #[cfg(unix)]
+    #[test]
+    fn service_child_inherits_nothing_it_is_not_named() {
+        use crate::commands::child_env_tests::{SENTINELS, assert_inherits_nothing};
+        for program in ["systemctl", "launchctl"] {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", "env"])
+                .envs(SENTINELS.iter().copied())
+                .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/inherited")
+                .stdout(std::process::Stdio::piped());
+            service_env(&mut cmd, program);
+            let env = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
+            assert_inherits_nothing(program, &env);
+            let bus = env
+                .lines()
+                .find_map(|l| l.strip_prefix("DBUS_SESSION_BUS_ADDRESS="))
+                .map(str::to_string);
+            assert_ne!(
+                bus.as_deref(),
+                Some("unix:path=/inherited"),
+                "{program}: {env}"
+            );
+            if program == "launchctl" {
+                assert_eq!(bus, None, "{program}: {env}");
+            } else {
+                assert_eq!(
+                    bus,
+                    std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+                    "{program}: {env}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn systemd_unit_content() {

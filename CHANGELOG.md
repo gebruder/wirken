@@ -10,6 +10,29 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- Every host-side child process starts from one minimal environment. A
+  process Wirken starts outside a container, an adapter, the MCP proxy, a
+  stdio MCP server with its sandbox off, a host `exec` under `mode: off`,
+  and the `git`, `semgrep`, `curl`, `crontab`, `systemctl` and `launchctl`
+  invocations the CLI makes, now begins with its environment cleared and
+  `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TERM` and `TMPDIR`
+  put back (`child_env::minimal`, `crates/sandbox/src/child_env.rs`; the
+  Windows list is the system locations a shell needs), and is given, by
+  name at its spawn, only what it reads: an adapter its data directory,
+  socket, log filter, the proxy and CA variables an HTTP client honours,
+  and the per-channel port and Signal settings; the MCP proxy the same plus
+  its signing bypass, sidecar override, runtime directory and the Docker
+  connection variables; `git` three `GIT_*` settings that keep it off the
+  network; `semgrep` its two metrics settings; `curl` the proxy and CA
+  variables; `systemctl` the session-bus pair. Before, `wirken lyrik`
+  spawned `git` with only `GIT_*` removed and `semgrep` with the whole
+  environment, so both inherited `WIRKEN_VAULT_PASSPHRASE` when the
+  operator had exported it, and adapters and the proxy inherited every
+  other variable the gateway was started with. A test per spawn site shows
+  that a passphrase, a `WIRKEN_*` setting and a sentinel secret set on the
+  parent side do not reach the child.
 ## [2.5.1] - 2026-10-23
 
 ### Added

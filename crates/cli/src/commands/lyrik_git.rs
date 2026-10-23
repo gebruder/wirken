@@ -210,11 +210,7 @@ pub fn unmodified_at_head(target: &Path, rel: &Path) -> Result<(), String> {
 /// A git invocation under the rule above.
 fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            cmd.env_remove(key);
-        }
-    }
+    git_env(&mut cmd);
     cmd.current_dir(dir)
         .args([
             "--no-pager",
@@ -223,11 +219,22 @@ fn git(dir: &Path) -> Command {
             "-c",
             "protocol.allow=never",
         ])
+        .stdin(Stdio::null());
+    cmd
+}
+
+/// The environment a git child runs with: the minimal host-child set
+/// (`wirken_agent::child_env::minimal`), so no `GIT_*` the operator
+/// exported and nothing else from this process's environment, the
+/// vault passphrase included, reaches it; plus the three `GIT_*`
+/// settings the operation needs, which keep it off the network, off
+/// any prompt and off the index lock.
+fn git_env(cmd: &mut Command) -> &mut Command {
+    cmd.env_clear()
+        .envs(wirken_agent::child_env::minimal())
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null());
-    cmd
 }
 
 fn run_git(dir: &Path, args: &[&str], path: Option<&Path>) -> Result<Vec<u8>, String> {
@@ -444,6 +451,32 @@ fn path_from_bytes(bytes: &[u8]) -> PathBuf {
 pub(crate) mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A git child starts from the minimal environment plus the three
+    /// `GIT_*` settings the operation needs; what the parent exported,
+    /// the vault passphrase and every other `GIT_*` included, does not
+    /// reach it.
+    #[cfg(unix)]
+    #[test]
+    fn git_child_inherits_nothing_it_is_not_named() {
+        use crate::commands::child_env_tests::{SENTINELS, assert_inherits_nothing};
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "env"])
+            .envs(SENTINELS.iter().copied())
+            .env("GIT_CONFIG_GLOBAL", "/inherited/gitconfig")
+            .stdout(Stdio::piped());
+        git_env(&mut cmd);
+        let env = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
+        assert_inherits_nothing("git", &env);
+        assert!(!env.contains("GIT_CONFIG_GLOBAL="), "{env}");
+        for line in [
+            "GIT_NO_LAZY_FETCH=1",
+            "GIT_TERMINAL_PROMPT=0",
+            "GIT_OPTIONAL_LOCKS=0",
+        ] {
+            assert!(env.lines().any(|l| l == line), "{line} missing:\n{env}");
+        }
+    }
 
     /// Run git in `dir` for test setup, with the operator's identity
     /// and config kept out of it.

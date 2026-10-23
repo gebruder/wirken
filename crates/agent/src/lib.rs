@@ -45,6 +45,10 @@ pub mod yaml;
 /// The control-sequence strip, kept at this path for its callers; it
 /// lives with the approval card in the adapter core.
 pub use wirken_adapter_core::ansi;
+/// The environment every host-side child starts from; see
+/// `wirken_sandbox::child_env`. Re-exported so the CLI reaches it
+/// through the crate it already depends on.
+pub use wirken_sandbox::child_env;
 
 pub use context::ContextEngine;
 pub use error::{AgentError, PermissionDenialContext};
