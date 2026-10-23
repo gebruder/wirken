@@ -267,6 +267,15 @@ records stand. Accepted records are carried in `findings.json` under
 `step_records`. The staged wrapper tells the walk all of this; the walk text
 itself is not edited.
 
+**Reproductions and replay.** A command a walk runs to show a finding leaves
+a record under `staging/<walk-name>/reproductions/`. After the walks return,
+the run starts one fresh agent per record, which sees only the record, runs
+the same command, and writes its own observation under
+`staging/<walk-name>/replays/`. The two are carried side by side in
+`findings.json` under `reproductions`; a replay that disagrees is brocard
+rule 8 against the finding. [lyrik-brocards.md](lyrik-brocards.md#reproductions-and-replay)
+has the fields and the rule.
+
 `exec` stays gated. The staged section lists the commands a walk runs through
 `exec` (`crypto-walk`: `cargo audit`; `fuzz-walk`: `cargo test`; `sink-walk`:
 `git log`, `git blame`), and the run prints the same list before it starts.
@@ -456,7 +465,7 @@ Two additions sit outside the 1.1 contract. The validator tolerates unknown
 keys, so they do not change `schema_version`, and a later minor release may
 change them:
 
-- `rejected_candidates`, a top-level array. Each entry carries `rule` (1 to 7),
+- `rejected_candidates`, a top-level array. Each entry carries `rule` (1 to 8),
   `walk` (absent in single-call mode), `stable_id`, `title`, `location`,
   `reason`, and `applied_by`. In SARIF each entry is a result under rule
   `lyrik.brocard.<rule>`, with a `suppressions` entry of kind `external` whose
@@ -468,6 +477,10 @@ change them:
   walk wrote (see "Step records" under `walks` above). Each entry carries
   `walk`, `file`, `step`, `claim`, `code_revision`, `check`, `evidence`,
   `open_questions` and, from the second record of a walk on, `prior`.
+- `reproductions`, a top-level array, one entry per reproduction record a
+  walk wrote, with the fresh-context replay beside it when one ran: `walk`,
+  `file`, the record's fields, `replay` and `agreement`. See
+  [lyrik-brocards.md](lyrik-brocards.md#reproductions-and-replay).
 
 ## Reports and audit
 

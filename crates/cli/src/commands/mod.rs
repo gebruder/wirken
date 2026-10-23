@@ -20,6 +20,7 @@ pub mod lyrik_brocards;
 pub mod lyrik_citation;
 pub mod lyrik_git;
 pub mod lyrik_preflight;
+pub mod lyrik_replay;
 pub mod lyrik_sarif;
 pub mod lyrik_semgrep;
 pub mod lyrik_steps;

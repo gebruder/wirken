@@ -285,10 +285,11 @@ pub fn wrap_with_wirken_frontmatter(
     let description =
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
     let mut section = format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
         run_section(walk_name, exec_available),
         brocard_section(walk_name),
-        step_section(walk_name)
+        step_section(walk_name),
+        reproduction_section(walk_name)
     );
     if let Some(scoring) = scoring {
         section.push('\n');
@@ -426,7 +427,7 @@ pub fn brocard_rules_for(walk_name: &str) -> Vec<u8> {
 
 /// Source page per brocard rule, indexed by `rule - 1`. The rule text
 /// is written in this repo's words; the pages are the reference.
-const BROCARD_SOURCES: [&str; 7] = [
+const BROCARD_SOURCES: [&str; 8] = [
     "https://vulnbrocards.com/brocards/vb001-no-vuln-report-without-threat-model/",
     "https://vulnbrocards.com/brocards/vb002-no-exploit-from-heavens/",
     "https://vulnbrocards.com/brocards/vb003-no-vuln-outside-of-usage/",
@@ -434,6 +435,7 @@ const BROCARD_SOURCES: [&str; 7] = [
     "https://vulnbrocards.com/brocards/vb005-no-vuln-from-documented-behavior/",
     "https://vulnbrocards.com/brocards/vb006-no-cure-worse-than-disease/",
     "https://vulnbrocards.com/brocards/vb007-report-neither-necessary-nor-sufficient/",
+    "docs/lyrik-brocards.md, rule 8, this repository",
 ];
 
 /// One rule's walk instruction, in this repo's words.
@@ -532,6 +534,35 @@ fn step_section(walk_name: &str) -> String {
     )
 }
 
+/// The reproduction rules a walk runs under. A command that demonstrates
+/// a finding leaves a record the runner replays in a fresh context; the
+/// replay's disagreement is brocard rule 8 against the finding.
+fn reproduction_section(walk_name: &str) -> String {
+    format!(
+        "## Reproductions\n\n\
+         When a step runs a command through `exec` to show that a finding holds, or that \
+         it does not, write one record for it: \
+         `.lyrik/state/runs/<run-id>/staging/{walk_name}/reproductions/repro-NNN.json`, \
+         zero-padded three-digit ordinal, one file per command run. The fields, all \
+         required unless noted:\n\n\
+         - `stable_id`: the finding the command bears on.\n\
+         - `command`: the command exactly as run.\n\
+         - `harness`: the harness or input file the command uses, as a path under the \
+         run's staging directory. Optional.\n\
+         - `expected`: what the command shows when the finding holds.\n\
+         - `observed`: what it showed: the output line, exit status or diagnostic, \
+         quoted.\n\
+         - `outcome`: `reproduced` or `not_reproduced`.\n\
+         - `code_revision`: the revision the dispatch prompt names.\n\n\
+         After this walk returns, the runner starts a separate agent for each record. It \
+         sees the record and nothing else of this walk, runs the same command, and writes \
+         what it observed beside yours. A replay that observes the other outcome is a \
+         rule 8 rejection of the finding the record names, applied by the runner; a \
+         replay that could not run the command is recorded and is not a disagreement. \
+         Write the record so that a reader with only the record can run it.\n"
+    )
+}
+
 /// Pull the `description:` line out of a leading `---` frontmatter
 /// block (if any) and return the remainder as the body. Used to
 /// preserve a meaningful description on the staged skill so
@@ -578,7 +609,15 @@ fn strip_leading_frontmatter(source: &str) -> (Option<String>, &str) {
 pub fn ensure_walk_staging(run_dir: &Path, walks: &[String]) -> Result<()> {
     for w in walks {
         let walk_dir = run_dir.join("staging").join(w);
-        for sub in &["context", "rubric", "findings", "rejections", "steps"] {
+        for sub in &[
+            "context",
+            "rubric",
+            "findings",
+            "rejections",
+            "steps",
+            "reproductions",
+            "replays",
+        ] {
             let p = walk_dir.join(sub);
             std::fs::create_dir_all(&p).with_context(|| format!("create {}", p.display()))?;
         }
@@ -823,8 +862,16 @@ mod tests {
         let wrapped = wrap_with_wirken_frontmatter("graph-walk", "r1", None, true, "body\n");
         let brocard = wrapped.find("## Brocard rules").unwrap();
         let steps = wrapped.find("## Step records").unwrap();
+        let repros = wrapped.find("## Reproductions").unwrap();
         let body = wrapped.find("body\n").unwrap();
-        assert!(brocard < steps && steps < body, "{wrapped}");
+        assert!(
+            brocard < steps && steps < repros && repros < body,
+            "{wrapped}"
+        );
+        assert!(
+            wrapped.contains("staging/graph-walk/reproductions/repro-NNN.json"),
+            "{wrapped}"
+        );
         assert!(
             wrapped.contains("staging/graph-walk/steps/step-NN.json"),
             "{wrapped}"
@@ -955,7 +1002,15 @@ mod tests {
         )
         .unwrap();
         for w in ["sink-walk", "graph-walk"] {
-            for sub in ["context", "rubric", "findings", "rejections", "steps"] {
+            for sub in [
+                "context",
+                "rubric",
+                "findings",
+                "rejections",
+                "steps",
+                "reproductions",
+                "replays",
+            ] {
                 assert!(
                     run.path().join("staging").join(w).join(sub).is_dir(),
                     "missing {w}/{sub}"

@@ -1,6 +1,6 @@
 //! Brocard rejection record for Lyrik candidates.
 //!
-//! A candidate that fails one of the seven brocard rules is recorded
+//! A candidate that fails one of the brocard rules is recorded
 //! in `findings.json` under `rejected_candidates`, never silently
 //! dropped. Each record names the rule, a one-line reason, and the
 //! gate or walk that applied it. SARIF carries the same records as
@@ -22,8 +22,13 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Brocard rule numbers, in the order the walks apply them.
-pub const RULE_COUNT: u8 = 7;
+/// Brocard rule numbers. Rules 1 to 7 are the source list; rule 8 is
+/// this repo's, applied by the fresh-context replay.
+pub const RULE_COUNT: u8 = 8;
+
+/// The highest rule a walk may record itself. Rule 8 is applied by the
+/// runner from a replay, never by the walk whose reproduction it checks.
+pub const WALK_RULE_MAX: u8 = 7;
 
 /// Short name and one-line statement for each rule, indexed by
 /// `rule - 1`. Rule 1 runs first.
@@ -55,6 +60,10 @@ pub const RULES: [(&str, &str); RULE_COUNT as usize] = [
     (
         "The report is neither necessary nor sufficient",
         "A scanner seed records provenance and earns no credit for existing.",
+    ),
+    (
+        "Replay disagrees",
+        "A reproduction a fresh context could not repeat is not evidence of the finding.",
     ),
 ];
 
@@ -102,7 +111,7 @@ struct WalkRejection {
 
 /// Read the walk-side rejections in `dir`, in file-name order. Returns
 /// the accepted records and the file names that did not parse or named
-/// a rule outside `1..=RULE_COUNT`. The caller records the refusals.
+/// a rule outside `1..=WALK_RULE_MAX`. The caller records the refusals.
 /// A missing directory is an empty result.
 pub fn read_walk_rejections(
     dir: &Path,
@@ -126,7 +135,7 @@ pub fn read_walk_rejections(
             .unwrap_or_default();
         let body = std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
         match serde_json::from_str::<WalkRejection>(&body) {
-            Ok(w) if (1..=RULE_COUNT).contains(&w.rule) => accepted.push(Rejection {
+            Ok(w) if (1..=WALK_RULE_MAX).contains(&w.rule) => accepted.push(Rejection {
                 rule: w.rule,
                 walk: walk.map(str::to_string),
                 stable_id: w.stable_id,
@@ -516,13 +525,26 @@ mod tests {
         )
         .unwrap();
         std::fs::write(rej.join("rejection-003.json"), "not json").unwrap();
+        // Rule 8 is the runner's, from a replay; a walk may not claim it.
+        std::fs::write(
+            rej.join("rejection-004.json"),
+            r#"{"rule":8,"stable_id":"sid-1","reason":"replay disagreed"}"#,
+        )
+        .unwrap();
         let (accepted, refused) = read_walk_rejections(&rej, Some("doc-walk")).unwrap();
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].rule, 5);
         assert_eq!(accepted[0].walk.as_deref(), Some("doc-walk"));
         assert_eq!(accepted[0].applied_by, "walk:doc-walk");
         assert_eq!(accepted[0].stable_id.as_deref(), Some("sid-1"));
-        assert_eq!(refused, vec!["rejection-002.json", "rejection-003.json"]);
+        assert_eq!(
+            refused,
+            vec![
+                "rejection-002.json",
+                "rejection-003.json",
+                "rejection-004.json"
+            ]
+        );
     }
 
     #[test]

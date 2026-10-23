@@ -982,6 +982,7 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(rules.iter().any(|r| r["id"] == "lyrik.brocard.7"));
+        assert!(rules.iter().any(|r| r["id"] == "lyrik.brocard.8"));
     }
 
     #[test]
@@ -1001,10 +1002,10 @@ mod tests {
     }
 
     #[test]
-    fn brocard_rules_are_numbered_one_to_seven() {
+    fn brocard_rules_are_numbered_one_to_eight() {
         let ids: Vec<String> = (1..=RULES.len() as u8).map(sarif_rule_id).collect();
         assert_eq!(ids.first().unwrap(), "lyrik.brocard.1");
-        assert_eq!(ids.last().unwrap(), "lyrik.brocard.7");
+        assert_eq!(ids.last().unwrap(), "lyrik.brocard.8");
     }
 
     #[test]

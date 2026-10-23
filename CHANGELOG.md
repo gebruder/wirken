@@ -23,6 +23,18 @@ tagged.
   revision the run did not scan, recording `lyrik.step.refused`, and carries
   the accepted ones in `findings.json` under `step_records`, outside schema
   1.1. Each walk's dispatch prompt names the scanned revision.
+- `wirken lyrik run` replays each reproduction a walk records. A walk that
+  runs a command to show a finding writes
+  `staging/<walk>/reproductions/repro-NNN.json`; after the walks return, one
+  agent per record, with a fresh context that sees only the record, runs the
+  command again and writes `staging/<walk>/replays/replay-NNN.json`. Both are
+  carried in `findings.json` under `reproductions`. A replay that observes
+  the other outcome is brocard rule 8, "Replay disagrees", applied by
+  `replay`: it halves the grade in pentest mode and removes the finding in
+  defender mode, and is written to `rejections.jsonl` like the rest. A
+  blocked replay is recorded and is not a disagreement; with the sandbox off
+  no replay runs and each record is logged as skipped. Rule 8 is the
+  runner's: a walk-side rejection naming it is refused.
 
 ### Dependencies
 

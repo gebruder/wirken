@@ -20,6 +20,7 @@ use wirken_gateway::permissions::PermissionStore;
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::lyrik_brocards;
+use super::lyrik_replay;
 use super::lyrik_semgrep::{
     self, DispatchOutcome, Seed, parse_scanner_config, write_bundled_ruleset, write_seed_files,
 };
@@ -1323,6 +1324,33 @@ async fn dispatch_via_agent_runtime(
             total_response_len = outcomes.iter().map(|o| o.response_len).sum();
             total_denials = outcomes.iter().map(|o| o.denials).sum();
             walk_outcomes = Some(outcomes);
+            // Fresh-context replay of every reproduction the walks
+            // recorded: one agent per record, which sees the record and
+            // nothing of the walk that wrote it. The aggregator below
+            // pairs the replays with the records.
+            dispatch_replays(
+                &wc.walks,
+                wc.max_concurrent_walks,
+                agent_id.clone(),
+                target.to_path_buf(),
+                run_id.to_string(),
+                llm_config.clone(),
+                api_key.clone(),
+                api_key_credential.clone(),
+                session_log.clone(),
+                super::load_sandbox_config(&cfg.data_dir),
+                perms_arc.clone(),
+                leak_matcher.clone(),
+                lyrik_staged_dir.clone(),
+                walks_staged_dir
+                    .clone()
+                    .expect("walks_staged_dir is Some when walks_cfg is Some"),
+                &run_dir,
+                exec_available,
+                terminal.clone(),
+                audit,
+            )
+            .await?;
         }
         None => {
             let seed_protocol = if seeds_present {
@@ -1943,6 +1971,169 @@ fn aggregate_phase0_section(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Run a fresh-context replay for each reproduction record the walks
+/// wrote. The replay skill is staged beside the walks and self-signed;
+/// each record gets its own Agent, built like a walk's, whose prompt is
+/// the record and the path of the replay to write. With `exec`
+/// unavailable no replay runs: each record is recorded as skipped and
+/// the aggregator carries it with no replay beside it.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_replays(
+    walks: &[String],
+    max_concurrent: u32,
+    agent_id: String,
+    target: PathBuf,
+    run_id: String,
+    llm_config: LlmConfig,
+    api_key: Option<String>,
+    api_key_credential: Option<String>,
+    session_log: Arc<dyn wirken_audit::SessionLog>,
+    sandbox: wirken_agent::sandbox::SandboxConfig,
+    permissions: Arc<Mutex<PermissionStore>>,
+    leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
+    lyrik_staged_dir: PathBuf,
+    walks_staged_dir: PathBuf,
+    run_dir: &Path,
+    exec_available: bool,
+    terminal: Option<
+        Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
+    >,
+    audit: &mut AuditLogger,
+) -> Result<()> {
+    // Every record first, so the skill is staged only when one exists
+    // and a refused file is on the log whether or not exec is on.
+    let mut jobs: Vec<(String, String, lyrik_replay::ReproductionRecord)> = Vec::new();
+    for walk in walks {
+        let dir = run_dir.join("staging").join(walk).join("reproductions");
+        let (accepted, refused) = lyrik_replay::read_reproductions(&dir)?;
+        for r in refused {
+            audit.emit(
+                "lyrik.reproduction.refused",
+                serde_json::json!({ "walk": walk, "file": r.file, "reason": r.reason }),
+            )?;
+        }
+        for (file, record) in accepted {
+            jobs.push((walk.clone(), file, record));
+        }
+    }
+    if jobs.is_empty() {
+        return Ok(());
+    }
+    if !exec_available {
+        for (walk, file, _) in &jobs {
+            audit.emit(
+                "lyrik.replay.skipped",
+                serde_json::json!({ "walk": walk, "file": file, "reason": "exec unavailable" }),
+            )?;
+        }
+        return Ok(());
+    }
+    let replay_dir = walks_staged_dir.join("replay");
+    std::fs::create_dir_all(&replay_dir)
+        .with_context(|| format!("create {}", replay_dir.display()))?;
+    std::fs::write(
+        replay_dir.join("SKILL.md"),
+        lyrik_replay::replay_skill_text(&run_id, super::lyrik_walks::run_tools(true)),
+    )
+    .with_context(|| format!("write {}", replay_dir.join("SKILL.md").display()))?;
+    wirken_agent::bundled_skills::self_sign_skill_dir(&replay_dir)
+        .with_context(|| format!("sign staged replay skill at {}", replay_dir.display()))?;
+    use tokio::sync::Semaphore;
+    let permits = std::cmp::max(1, std::cmp::min(max_concurrent, jobs.len() as u32));
+    let sem = Arc::new(Semaphore::new(permits as usize));
+    let mut handles = Vec::with_capacity(jobs.len());
+    for (walk, file, record) in jobs {
+        audit.emit(
+            "lyrik.replay.started",
+            serde_json::json!({ "walk": walk, "file": file, "stable_id": record.stable_id }),
+        )?;
+        let sem_handle = sem.clone();
+        let agent_id_t = agent_id.clone();
+        let target_t = target.clone();
+        let run_id_t = run_id.clone();
+        let llm_config_t = llm_config.clone();
+        let api_key_t = api_key.clone();
+        let api_key_credential_t = api_key_credential.clone();
+        let session_log_t = session_log.clone();
+        let sandbox_t = sandbox.clone();
+        let permissions_t = permissions.clone();
+        let leak_t = leak_matcher.clone();
+        let terminal_t = terminal.clone();
+        let lyrik_staged_dir_t = lyrik_staged_dir.clone();
+        let walks_staged_dir_t = walks_staged_dir.clone();
+        let h = tokio::spawn(async move {
+            let _permit = sem_handle.acquire_owned().await.expect("semaphore closed");
+            let mut agent = match Agent::new_with_sandbox(
+                agent_id_t.clone(),
+                target_t,
+                llm_config_t,
+                api_key_t,
+                api_key_credential_t,
+                session_log_t,
+                sandbox_t,
+                permissions_t,
+            ) {
+                Ok(a) => a,
+                Err(e) => return (walk, file, Err(format!("agent_construct: {e}"))),
+            };
+            agent.set_agent_id(agent_id_t);
+            agent.set_leak_matcher(leak_t);
+            if let Some(terminal) = terminal_t {
+                agent.set_approval_gate(Arc::new(super::stdin_approval::LyrikPromptGate::new(
+                    "replay", terminal,
+                )));
+            }
+            let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()));
+            if let Err(e) = attached {
+                return (walk, file, Err(format!("attach_skills: {e}")));
+            }
+            let prompt = lyrik_replay::build_replay_prompt(&walk, &file, &record, &run_id_t);
+            let inbound_id = format!("lyrik-replay-{}-{}", walk, uuid::Uuid::new_v4());
+            match agent.process_message(&prompt, inbound_id).await {
+                Ok(r) => {
+                    let skipped: Vec<String> = r
+                        .denials
+                        .iter()
+                        .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
+                        .collect();
+                    (walk, file, Ok(skipped))
+                }
+                Err(e) => (walk, file, Err(format!("turn: {e}"))),
+            }
+        });
+        handles.push(h);
+    }
+    for h in handles {
+        let (walk, file, result) = match h.await {
+            Ok(r) => r,
+            Err(e) => {
+                audit.emit(
+                    "lyrik.replay.completed",
+                    serde_json::json!({ "status": "transient_failure", "reason": format!("join: {e}") }),
+                )?;
+                continue;
+            }
+        };
+        let (status, reason, skipped) = match result {
+            Ok(skipped) => ("success", None, skipped),
+            Err(reason) => ("transient_failure", Some(reason), Vec::new()),
+        };
+        audit.emit(
+            "lyrik.replay.completed",
+            serde_json::json!({
+                "walk": walk,
+                "file": file,
+                "status": status,
+                "reason": reason,
+                "skipped": skipped,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
 /// Per-walk dispatch outcome. Captured per turn and rolled up into
 /// the runner's overall exit decision (commit 2 wires the exit
 /// logic). The shape is committed in commit 1 so commit 2's
@@ -2291,6 +2482,7 @@ fn aggregate_findings_multi(
     let mut consumed: Vec<PathBuf> = Vec::new();
     let mut rejected: Vec<lyrik_brocards::Rejection> = Vec::new();
     let mut step_records: Vec<lyrik_steps::AcceptedStep> = Vec::new();
+    let mut reproductions: Vec<lyrik_replay::Reproduction> = Vec::new();
     // The revision the run scanned, for checking step records. Absent
     // when the target's git state could not be read.
     let scanned_revision: Option<String> = extras
@@ -2361,6 +2553,35 @@ fn aggregate_findings_multi(
             step_records.extend(accepted);
             if steps_dir.is_dir() {
                 consumed.push(steps_dir);
+            }
+        }
+        // Reproductions and their fresh-context replays. A replay that
+        // observed the other outcome is a rule 8 rejection of the
+        // finding the record names, matched below like a walk's own.
+        if let Some(walk_dir) = source.parent() {
+            let repro_dir = walk_dir.join("reproductions");
+            let replay_dir = walk_dir.join("replays");
+            let (repros, refused) = lyrik_replay::read_reproductions(&repro_dir)?;
+            for r in refused {
+                audit.emit(
+                    "lyrik.reproduction.refused",
+                    serde_json::json!({ "walk": walk_name, "file": r.file, "reason": r.reason }),
+                )?;
+            }
+            let (replays, refused) = lyrik_replay::read_replays(&replay_dir)?;
+            for r in refused {
+                audit.emit(
+                    "lyrik.replay.refused",
+                    serde_json::json!({ "walk": walk_name, "file": r.file, "reason": r.reason }),
+                )?;
+            }
+            let paired = lyrik_replay::pair(walk_name.as_deref(), repros, &replays);
+            walk_side.extend(paired.iter().filter_map(lyrik_replay::rejection_for));
+            reproductions.extend(paired);
+            for d in [repro_dir, replay_dir] {
+                if d.is_dir() {
+                    consumed.push(d);
+                }
             }
         }
         let mut walk_side_matched = vec![false; walk_side.len()];
@@ -2619,6 +2840,7 @@ fn aggregate_findings_multi(
         },
         "rejected_candidates": rejected,
         "step_records": step_records,
+        "reproductions": reproductions,
         "findings": findings,
     });
     write_findings_with_funnel(dest, with_extras(body, extras), &funnel, audit)?;
@@ -4948,6 +5170,59 @@ mod tests {
             "{}",
             refused[0]
         );
+    }
+
+    #[test]
+    fn a_replay_that_disagrees_is_a_rule_eight_rejection_carried_beside_the_record() {
+        let tmp = tempdir().unwrap();
+        let walk = tmp.path().join("staging").join("sink-walk");
+        let dir = walk.join("findings");
+        let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+        f["grade"] = serde_json::json!(0.5);
+        f["threat_model"] = serde_json::json!({
+            "attacker_capability": "sends a request",
+            "harm_path": "the length check is skipped"
+        });
+        write_finding(&dir, "finding-001.json", &f);
+        let repros = walk.join("reproductions");
+        let replays = walk.join("replays");
+        std::fs::create_dir_all(&repros).unwrap();
+        std::fs::create_dir_all(&replays).unwrap();
+        let repro = |n: &str| {
+            format!(
+                r#"{{"stable_id":"auth::src/a.rs:10","command":"cargo test -p x {n}","expected":"the test fails","observed":"assertion failed","outcome":"reproduced","code_revision":"abc"}}"#
+            )
+        };
+        std::fs::write(repros.join("repro-001.json"), repro("one")).unwrap();
+        std::fs::write(repros.join("repro-002.json"), repro("two")).unwrap();
+        std::fs::write(
+            replays.join("replay-001.json"),
+            r#"{"command_run":"cargo test -p x one","observed":"assertion failed","outcome":"reproduced"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            replays.join("replay-002.json"),
+            r#"{"command_run":"cargo test -p x two","observed":"test passed","outcome":"not_reproduced"}"#,
+        )
+        .unwrap();
+        let body = run_brocard_fixture(tmp.path(), dir, lyrik_brocards::Mode::Pentest);
+        // One distinct rule applied, rule 8: one halving.
+        assert_eq!(body["findings"][0]["grade"], serde_json::json!(0.25));
+        let rejected = body["rejected_candidates"].as_array().unwrap();
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0]["rule"], 8);
+        assert_eq!(rejected[0]["applied_by"], "replay");
+        assert_eq!(rejected[0]["walk"], "sink-walk");
+        assert_eq!(rejected[0]["title"], f["title"]);
+        let carried = body["reproductions"].as_array().unwrap();
+        assert_eq!(carried.len(), 2);
+        assert_eq!(carried[0]["agreement"], true);
+        assert_eq!(carried[1]["agreement"], false);
+        assert_eq!(carried[1]["replay"]["outcome"], "not_reproduced");
+        assert_eq!(carried[1]["file"], "repro-002.json");
+        assert!(!repros.exists() && !replays.exists(), "staging consumed");
+        let jsonl = std::fs::read_to_string(tmp.path().join("rejections.jsonl")).unwrap();
+        assert!(jsonl.contains(r#""rule":8"#), "{jsonl}");
     }
 
     #[test]

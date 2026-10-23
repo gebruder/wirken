@@ -1,10 +1,10 @@
 # Brocard rejections in Lyrik
 
-The seven rules below are William Woodruff's list at [vulnbrocards.com](https://vulnbrocards.com/). This page restates them in this repo's words and links each rule's source page.
+Rules 1 to 7 below are William Woodruff's list at [vulnbrocards.com](https://vulnbrocards.com/). This page restates them in this repo's words and links each rule's source page. Rule 8 is this repo's own, applied by the fresh-context replay.
 
 Lyrik records every candidate it declines with the rule that applied and a one-line reason. A declined candidate is never dropped silently.
 
-## The seven rules
+## The rules
 
 Rule numbers match the source list: rule N is VB00N.
 
@@ -16,7 +16,17 @@ Rule numbers match the source list: rule N is VB00N.
 6. **No cure worse than the disease.** Severity weighs remediation cost against impact. A ReDoS in a context the caller can cancel locally is the reference case. Source: [VB006](https://vulnbrocards.com/brocards/vb006-no-cure-worse-than-disease/). Judged by every walk.
 7. **The report is neither necessary nor sufficient.** A Semgrep seed records provenance and earns no credit for existing. A seed is not evidence in either direction. Source: [VB007](https://vulnbrocards.com/brocards/vb007-report-neither-necessary-nor-sufficient/). Structural: nothing in the gate reads a seed's `detection_source`, so a seed changes no decision. A seed whose only candidates were removed is counted as `brocard_rejected` in the scanner funnel.
 
-Rules 1 and 7 are structural and run in the gate. Rules 2 to 6 are judgment. Each walk applies the rules listed in its own section of the staged skill.
+8. **Replay disagrees.** A walk that runs a command to show a finding writes a reproduction record. The runner re-runs the command in a separate agent that sees the record and nothing else of the walk. A replay that observes the other outcome is a rejection of the finding the record names. A replay that could not run the command is recorded and is not a disagreement. Source: this page. Applied by the runner, `applied_by` is `replay`; a walk may not record rule 8 itself.
+
+Rules 1 and 7 are structural and run in the gate. Rules 2 to 6 are judgment. Rule 8 is applied by the runner from the replay. Each walk applies the rules listed in its own section of the staged skill.
+
+## Reproductions and replay
+
+A walk records each command it runs to show a finding at `staging/<walk>/reproductions/repro-NNN.json`: the finding's `stable_id`, the `command` exactly as run, an optional `harness` path under the run's staging directory, what the command shows when the finding holds (`expected`), what it showed (`observed`), the `outcome` (`reproduced` or `not_reproduced`) and the `code_revision`. The staged wrapper tells the walk this; the walk text is not edited.
+
+After the walks return, `wirken lyrik run` starts one agent per record under a staged `replay` skill with the same tools and write scope as a walk. Its prompt is the record and the path of the replay to write; it is not given the walk's findings, context or reasoning. It runs the record's command and writes `staging/<walk>/replays/replay-NNN.json` with `command_run`, `observed`, `outcome` (`reproduced`, `not_reproduced` or `blocked`) and, when blocked, `note`. Each command is put to the operator like a walk's; a refused command leaves the replay blocked. With the sandbox off no replay runs: each record is logged as `lyrik.replay.skipped`.
+
+The aggregator pairs each record with the replay of the same ordinal and carries both in `findings.json` under `reproductions`, with `agreement` `true`, `false`, or absent when no replay ran or it was blocked. A `false` is a rule 8 rejection, written to `rejected_candidates` and `rejections.jsonl` like any other, so pentest mode halves the finding's grade and defender mode removes it. A record or replay file that does not parse, or a record with a blank field, is refused and logged as `lyrik.reproduction.refused` or `lyrik.replay.refused`.
 
 ## Modes
 
@@ -33,9 +43,9 @@ Both modes write every rejection to `rejected_candidates`, and both print the ru
 
 | Field | Meaning |
 |---|---|
-| `rule` | Brocard rule number, 1 to 7 |
+| `rule` | Brocard rule number, 1 to 8 |
 | `reason` | One line: why the rule applies |
-| `applied_by` | `brocard_structural` for the gate, or `walk:<name>` for a walk's judgment |
+| `applied_by` | `brocard_structural` for the gate, `walk:<name>` for a walk's judgment, or `replay` for rule 8 |
 | `walk` | The walk that emitted the candidate. Absent in single-call mode |
 | `stable_id` | The finding's stable ID, when it has one |
 | `title` | The finding's title, when it has one |
@@ -49,7 +59,7 @@ The array sits outside the findings schema's contract. The validator accepts it,
 
 `wirken lyrik report --format sarif` writes each rejection as a result after the kept findings:
 
-- `ruleId` is `lyrik.brocard.<rule>`. Rules `lyrik.brocard.1` to `lyrik.brocard.7` are in the driver's rule list.
+- `ruleId` is `lyrik.brocard.<rule>`. Rules `lyrik.brocard.1` to `lyrik.brocard.8` are in the driver's rule list.
 - `level` is `note`.
 - `message` is the reason, prefixed by the title when there is one.
 - `suppressions` is `[{"kind": "external", "justification": "<reason>"}]`. A SARIF consumer shows the result as suppressed, with the reason as its justification.
