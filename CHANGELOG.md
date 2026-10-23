@@ -34,6 +34,12 @@ tagged.
   the route. It said "agent has no factory bound".
 - The chat approval card's hint is "Enter alone refuses.", so it fits beside
   the narrowed panels at 80 columns.
+- The channel approval gate is attached to Telegram and Signal only. A tool
+  call on a Discord, Slack, Teams, WhatsApp, Google Chat, Matrix or iMessage
+  session that needs approval prompts on the CLI surface and resolves to
+  deny when nobody decides it. The 1.7.0 entry announcing an approval gate
+  for those adapters described code in the adapters that `wirken run` has
+  never routed a request to; the docs now say so.
 
 ### Security
 

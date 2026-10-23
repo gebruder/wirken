@@ -1,9 +1,14 @@
 //! Matrix adapter for Wirken. Bridges the Matrix Client-Server
-//! API to the gateway IPC. Approval gating uses m.reaction events
-//! with a closed-enum decision set (✅ allow, ❌ deny) and a
-//! per-room correlation table mapping the bot's outbound
-//! approval-request event id to the gateway's `request_id`. The
-//! umbrella convention is documented at #119.
+//! API to the gateway IPC.
+//!
+//! The approval path in this crate (an `ApprovalRequest` frame
+//! rendered as a room message, and an m.reaction with a closed
+//! decision set, ✅ allow or ❌ deny, correlated per room to the
+//! gateway's `request_id`) is reached only by this crate's tests.
+//! `wirken run` attaches no Matrix approval gate, so a tool call on
+//! a Matrix session that needs approval prompts on the CLI surface
+//! and resolves to deny when nobody decides it. The umbrella
+//! convention is documented at #119.
 //!
 //! ## Cross-adapter ack/feedback taxonomy (closed eight-adapter set)
 //!

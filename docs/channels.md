@@ -217,10 +217,15 @@ connection, so the automatic restart does not cover them.
 the adapter, a restart included, begins with an initial sync, and its
 timeline events are forwarded like any others. Recent DMs and mentions in
 each joined room reach the agent again; how many depends on the homeserver's
-default timeline limit, which the adapter does not set. A ✅ or ❌ reaction to
-an approval prompt sent before the restart is no longer matched and is
-dropped, and the request waits out its timeout. Each start also logs in
-without a device id, which creates a new device on the homeserver.
+default timeline limit, which the adapter does not set. Each start also logs
+in without a device id, which creates a new device on the homeserver.
+
+**Approvals.** Tool calls that need approval on a Matrix session prompt on
+the CLI, not in the room. The request appears in `wirken permissions pending
+list` and is decided with `wirken permissions approve <id>` or `wirken
+permissions deny <id>`. `wirken run` attaches no Matrix approval gate, so the
+adapter's reaction handling is never reached; a request nobody decides within
+the CLI gate's timeout resolves to deny.
 
 ## Signal
 
@@ -439,8 +444,14 @@ URL (BlueBubbles' behaviour, not checked in the adapter), each message is then
 posted, and forwarded, once per registration; check the server's webhook
 settings after a restart. Each POST is answered with 200 only after the
 message is written to the gateway, so a POST cut off by a kill may be
-retried and forwarded again. `!approve <prefix>` for a prompt sent before the
-restart is no longer matched and is dropped without a reply.
+retried and forwarded again.
+
+**Approvals.** Tool calls that need approval on an iMessage session prompt on
+the CLI, not in the chat. The request appears in `wirken permissions pending
+list` and is decided with `wirken permissions approve <id>` or `wirken
+permissions deny <id>`. `wirken run` attaches no iMessage approval gate, so
+the adapter's `!approve <prefix>` parsing is never reached; a request nobody
+decides within the CLI gate's timeout resolves to deny.
 
 ## WhatsApp
 
