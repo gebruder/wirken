@@ -24,6 +24,15 @@ tagged.
 - The chat approval card's hint is "Enter alone refuses.", so it fits beside
   the narrowed panels at 80 columns.
 
+### Fixed
+
+- A turn that hits a ChatGPT plan's usage limit now replies, on every channel
+  and in `wirken chat`, with "Usage limit reached. Review your plan or this
+  app's limit in ChatGPT settings." and the Manage usage link. It used to get
+  the generic internal-error apology. The reply leaves out the HTTP status,
+  error code and request id, which stay in the log and the failed call's audit
+  row.
+
 ## [2.5.0] - 2026-10-22
 
 ### Added

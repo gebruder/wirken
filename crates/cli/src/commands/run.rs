@@ -4738,26 +4738,34 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
     Ok(())
 }
 
-/// Run one turn for the terminal, streaming it on the connection as it
-/// runs: the reply's text as `llmChunk` data, each tool call and its
-/// end as `toolActivity`. The reply itself still goes out as the
-/// outbound frame once the turn is over. A write that fails stops the
-/// stream and leaves the turn to finish; the reader sees the
-/// disconnect.
 /// What the channel hears when a turn fails. An unknown `/skill` names the
-/// loaded skills, so its own text is the reply. Every other error stays in
-/// the operator's logs and the audit trail; the reply is a generic apology,
-/// since raw error strings can carry operator-side internals (database
-/// paths, session log locks, provider stack traces).
+/// loaded skills, so its own text is the reply. A plan's usage limit gets
+/// the sentence and link WebChat's usage-limit block shows, not the error's
+/// own text, which carries the HTTP status, error code and request id.
+/// Every other error stays in the operator's logs and the audit trail; the
+/// reply is a generic apology, since raw error strings can carry
+/// operator-side internals (database paths, session log locks, provider
+/// stack traces).
 fn turn_error_reply(e: &wirken_agent::AgentError) -> String {
     match e {
         wirken_agent::AgentError::UnknownSlashSkill { .. } => e.to_string(),
+        wirken_agent::AgentError::PlanRoute(plan) if plan.is_usage_limit() => format!(
+            "Usage limit reached. Review your plan or this app's limit in ChatGPT settings. \
+             Manage usage: {}",
+            wirken_agent::plan_auth::USAGE_URL
+        ),
         _ => "Sorry, I hit an internal error and could not process that message. \
               The operator has been notified."
             .into(),
     }
 }
 
+/// Run one turn for the terminal, streaming it on the connection as it
+/// runs: the reply's text as `llmChunk` data, each tool call and its
+/// end as `toolActivity`. The reply itself still goes out as the
+/// outbound frame once the turn is over. A write that fails stops the
+/// stream and leaves the turn to finish; the reader sees the
+/// disconnect.
 async fn stream_terminal_turn(
     agent: &mut wirken_agent::Agent,
     text: &str,
@@ -8184,5 +8192,47 @@ mod turn_error_reply_tests {
             "{reply}"
         );
         assert!(!reply.contains("/var/x"), "{reply}");
+    }
+
+    /// A refusal as the plan route builds one from the provider's answer:
+    /// status, error code, request id and message.
+    fn plan_refusal(code: Option<&str>) -> wirken_agent::AgentError {
+        use wirken_agent::llm_responses::{PlanFailure, PlanRouteError};
+        wirken_agent::AgentError::PlanRoute(Box::new(PlanRouteError::classify(PlanFailure {
+            status: Some(429),
+            code: code.map(String::from),
+            request_id: Some("req_7f3a9c".into()),
+            message: Some("The ChatGPT user has reached their usage limit.".into()),
+            ..Default::default()
+        })))
+    }
+
+    #[test]
+    fn a_plan_usage_limit_replies_with_the_limit_and_the_manage_usage_link() {
+        let e = plan_refusal(Some("subscription_sharing_usage_limit_exceeded"));
+        assert!(e.to_string().contains("req_7f3a9c"), "{e}");
+        assert_eq!(
+            turn_error_reply(&e),
+            "Usage limit reached. Review your plan or this app's limit in ChatGPT \
+             settings. Manage usage: https://chatgpt.com/settings/usage"
+        );
+    }
+
+    #[test]
+    fn any_other_plan_refusal_replies_with_the_generic_apology() {
+        for code in [
+            Some("subscription_sharing_usage_unavailable"),
+            Some("subscription_sharing_user_not_eligible"),
+            Some("subscription_sharing_invalid_user"),
+            Some("chatpass_v2_scope_not_authorized"),
+            None,
+        ] {
+            let reply = turn_error_reply(&plan_refusal(code));
+            assert!(
+                reply.starts_with("Sorry, I hit an internal error"),
+                "{code:?}: {reply}"
+            );
+            assert!(!reply.contains("req_7f3a9c"), "{code:?}: {reply}");
+        }
     }
 }
