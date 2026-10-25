@@ -457,6 +457,12 @@ adapter), the restarted adapter forwards it again.
 
 ## iMessage (BlueBubbles)
 
+**Not verified against a live BlueBubbles server.** The adapter's API calls
+(the webhook route, the password as a query parameter, the message send) and
+its webhook check follow BlueBubbles Server's source, cited below; no run
+against a running server has confirmed them. Treat this channel as untested
+until one has.
+
 ```bash
 wirken channel add imessage
 ```
