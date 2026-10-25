@@ -63,6 +63,7 @@ channel.
 wirken senders refused telegram          # ids the gateway has dropped
 wirken senders add telegram 123456789 --label me
 wirken senders add slack C0123ABCD --group --label team-channel
+wirken senders add telegram -1001234567890 --group   # a Telegram group
 wirken senders list
 wirken senders remove telegram 123456789
 ```

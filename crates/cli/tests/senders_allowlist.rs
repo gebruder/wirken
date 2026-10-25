@@ -121,6 +121,46 @@ fn add_and_remove_change_the_allowlist_and_leave_sealed_rows() {
     assert!(out.contains("every message on it is dropped"), "{out}");
 }
 
+/// A Telegram group's chat id is negative. It is taken as the id, not
+/// as a flag, and `--group` after it still applies.
+#[cfg(not(windows))]
+#[test]
+fn a_negative_group_id_is_taken_as_it_is() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path();
+    let (ok, out, err) = run(
+        data,
+        &["add", "telegram", "-100123456789", "--group"],
+        false,
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("group '-100123456789'"), "{out}");
+    let (ok, out, err) = run(
+        data,
+        &["remove", "telegram", "-100123456789", "--group"],
+        false,
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("Removed group '-100123456789'"), "{out}");
+    assert_eq!(
+        rows(data),
+        vec![
+            (
+                "inbound_sender_added".into(),
+                "telegram".into(),
+                "-100123456789".into(),
+                true
+            ),
+            (
+                "inbound_sender_removed".into(),
+                "telegram".into(),
+                "-100123456789".into(),
+                true
+            ),
+        ]
+    );
+}
+
 #[cfg(not(windows))]
 #[test]
 fn an_unknown_channel_or_a_padded_id_is_refused() {

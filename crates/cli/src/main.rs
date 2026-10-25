@@ -1201,6 +1201,8 @@ enum SenderCommands {
         /// telegram, discord, slack, teams, matrix, whatsapp, signal,
         /// google-chat or imessage.
         channel: String,
+        /// A Telegram group's id is negative and is taken as it is.
+        #[arg(allow_hyphen_values = true)]
         sender_id: String,
         /// The id is a group, room, channel or space id instead, and
         /// admits every member of it.
@@ -1213,6 +1215,7 @@ enum SenderCommands {
     /// Take an entry off a channel. Pass `--group` for a group entry.
     Remove {
         channel: String,
+        #[arg(allow_hyphen_values = true)]
         sender_id: String,
         #[arg(long)]
         group: bool,

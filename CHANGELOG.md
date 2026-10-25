@@ -19,9 +19,10 @@ takes yet; it is revisited when both do.
 
 ### Fixed
 
-- `wirken approvers set-chat`, `add` and `remove` take an id with a leading
-  hyphen as it is, so a Telegram group's negative chat id is accepted; before,
-  it was read as an unknown flag.
+- `wirken approvers set-chat`, `add` and `remove`, and `wirken senders add`
+  and `remove`, take an id with a leading hyphen as it is, so a Telegram
+  group's negative chat id is accepted; before, it was read as an unknown
+  flag.
 - A turn that reaches a ChatGPT plan's usage limit replies, in `wirken chat`
   and on every adapter channel, with "Usage limit reached. Review your plan
   or this app's limit in ChatGPT settings. Manage usage:
