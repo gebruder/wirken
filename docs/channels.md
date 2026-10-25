@@ -93,6 +93,27 @@ authenticate the person behind it; an entry trusts the platform's account.
 The terminal (`wirken chat`) and webchat are not channels the allowlist
 applies to.
 
+### Checking the allowlist live
+
+`scripts/live-test/sender-gate.sh` walks a running gateway through the
+allowlist on the channels you name, with your own account as the sender:
+unknown, admitted, removed, then restored as it was found. It checks the audit
+rows and asks whether the bot replied.
+
+```bash
+scripts/live-test/sender-gate.sh \
+  --restart 'systemctl --user restart wirken.service' \
+  --log-cmd 'journalctl --user -u wirken.service -n 200 --no-pager' \
+  signal slack
+scripts/live-test/sender-gate.sh --from removed signal slack   # resume
+```
+
+Without `--restart` it asks you to restart the gateway, and without
+`--log-cmd` it asks whether the startup warnings appeared. State and the
+transcript go to `~/.local/state/wirken/live-test/sender-gate`, or under
+`$XDG_STATE_HOME` (`--state-dir`, `--transcript`). Run it as the gateway's
+user with the same `WIRKEN_DATA_DIR`. Needs `python3`.
+
 ## Telegram
 
 ```bash
