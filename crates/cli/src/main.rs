@@ -335,7 +335,8 @@ enum ChannelCommands {
         /// WIRKEN_SIGNAL_PHONE_NUMBER if not supplied.
         #[arg(long)]
         phone_number: Option<String>,
-        /// Signal: signal-cli socket path (default /tmp/signal-cli.sock).
+        /// Signal: signal-cli socket path (default
+        /// $XDG_RUNTIME_DIR/signal-cli/socket).
         /// Reads WIRKEN_SIGNAL_ENDPOINT if not supplied.
         #[arg(long)]
         endpoint: Option<String>,

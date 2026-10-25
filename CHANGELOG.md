@@ -72,6 +72,12 @@ Revisited when both move to p256/p384 0.14.
   only the variables it reads, by name.
 - `wirken update --check` refuses inside a Wirken `exec`, like an install and
   `--rollback`, and records an `update_refused` row.
+- The Signal adapter refuses a signal-cli socket served by another user. The
+  default socket path is `$XDG_RUNTIME_DIR/signal-cli/socket`, signal-cli's own
+  `daemon --socket` default, instead of `/tmp/signal-cli.sock`. **Operator
+  action:** an install set up with the old default keeps `/tmp/signal-cli.sock`
+  and is warned at start; move signal-cli to `daemon --socket` and run
+  `wirken channel add signal` again.
 - A veto or egress hook registered when `wirken run` starts must be
   connected: while one is not, tool calls are refused and outputs withheld,
   with a hook row of decision `unavailable`. **For wirken-siem:** accept

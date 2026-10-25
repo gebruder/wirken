@@ -180,7 +180,7 @@ pub async fn run(channel: &str) -> Result<()> {
             #[cfg(unix)]
             {
                 let endpoint = optional(&mut creds, &format!("{channel}-endpoint"))
-                    .unwrap_or_else(|| "/tmp/signal-cli.sock".into());
+                    .unwrap_or_else(|| super::channel::default_signal_endpoint(&data_dir));
 
                 let phone_number = required(
                     &mut creds,

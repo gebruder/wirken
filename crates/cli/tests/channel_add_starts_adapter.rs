@@ -90,7 +90,7 @@ const CASES: &[Case] = &[
     Case {
         adapter: "signal",
         flags: &["--phone-number", "+15550000000"],
-        env: &[],
+        env: &[("XDG_RUNTIME_DIR", "/run/user/4242")],
         writes: &[
             ("signal-token", "signal"),
             ("signal-phone-number", "signal"),
@@ -99,8 +99,8 @@ const CASES: &[Case] = &[
             ("signal-adapter-key", "signal"),
         ],
         values: &[
-            ("signal-token", "/tmp/signal-cli.sock"),
-            ("signal-endpoint", "/tmp/signal-cli.sock"),
+            ("signal-token", "/run/user/4242/signal-cli/socket"),
+            ("signal-endpoint", "/run/user/4242/signal-cli/socket"),
             ("signal-allowed-senders", ""),
         ],
     },

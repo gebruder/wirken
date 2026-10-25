@@ -14,6 +14,12 @@ pub enum SignalError {
     #[error("signal-cli error: {0}")]
     Signal(String),
 
+    /// The socket is served by another user.
+    #[error(
+        "the signal-cli socket is served by uid {peer}, not this user (uid {own}); refusing it"
+    )]
+    ForeignPeer { peer: u32, own: u32 },
+
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
 
@@ -48,10 +54,9 @@ pub enum SignalError {
     /// rather than looping in reconnect with a cryptic UnixStream error.
     #[error(
         "signal endpoint is an HTTP URL ('{0}'); the adapter now speaks \
-         JSON-RPC over a Unix socket. Run signal-cli with `daemon --socket \
-         /tmp/signal-cli.sock` and set the endpoint to the socket path \
-         (e.g. /tmp/signal-cli.sock or unix:///tmp/signal-cli.sock). See \
-         docs/channels.md"
+         JSON-RPC over a Unix socket. Run signal-cli with `daemon --socket` \
+         and set the endpoint to the socket path, by default \
+         $XDG_RUNTIME_DIR/signal-cli/socket. See docs/channels.md"
     )]
     HttpEndpointRejected(String),
 }

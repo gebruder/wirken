@@ -182,7 +182,7 @@ struct Connection {
 
 impl SignalAdapter {
     /// Construct an adapter. `endpoint` accepts a bare filesystem path
-    /// (e.g. `/tmp/signal-cli.sock`) or the `unix://` scheme. HTTP URLs
+    /// or the `unix://` scheme. HTTP URLs
     /// are rejected with a migration error message.
     /// Override the reconnect cap this adapter was constructed with.
     ///
@@ -292,6 +292,16 @@ impl SignalAdapter {
             self.socket_path.display(),
             self.phone_number
         );
+        if let Some(dir) = self.socket_path.parent()
+            && let Ok(meta) = std::fs::metadata(dir)
+            && std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o002 != 0
+        {
+            tracing::warn!(
+                dir = %dir.display(),
+                "the signal-cli socket is in a directory other users can write; \
+                 run signal-cli with `daemon --socket` and its default path instead"
+            );
+        }
 
         // First signal-cli connect happens BEFORE spawning the
         // outbound handler. If signal-cli is unreachable at
@@ -371,6 +381,7 @@ impl SignalAdapter {
         self: &Arc<Self>,
     ) -> Result<tokio::task::JoinHandle<Result<(), SignalError>>, SignalError> {
         let stream = UnixStream::connect(&self.socket_path).await?;
+        check_peer_is_self(&stream)?;
         let (read, write) = stream.into_split();
         let conn = Arc::new(Connection {
             writer: Mutex::new(write),
@@ -1066,6 +1077,7 @@ fn classify_send_error(e: &SignalError) -> &'static str {
         SignalError::Handshake(_) => "network_error",
         SignalError::HttpEndpointRejected(_) => "signal_rpc_error",
         SignalError::BadSubscribeResponse => "signal_rpc_error",
+        SignalError::ForeignPeer { .. } => "signal_socket_foreign_peer",
     }
 }
 
@@ -1116,6 +1128,20 @@ impl SignalAdapter {
 
 /// A `syncMessage.sentMessage` whose destination is the own number.
 /// Exact match; both are E.164.
+/// Refuse a signal-cli socket served by another user.
+pub(crate) fn check_peer_is_self(stream: &UnixStream) -> Result<(), SignalError> {
+    let peer = stream.peer_cred()?.uid();
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    require_same_uid(peer, unsafe { libc::geteuid() })
+}
+
+pub(crate) fn require_same_uid(peer: u32, own: u32) -> Result<(), SignalError> {
+    if peer != own {
+        return Err(SignalError::ForeignPeer { peer, own });
+    }
+    Ok(())
+}
+
 pub(crate) fn is_note_to_self(envelope: &Value, own_number: &str) -> bool {
     let Some(sent) = envelope.pointer("/syncMessage/sentMessage") else {
         return false;

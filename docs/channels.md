@@ -326,12 +326,13 @@ the background over a few minutes. Registering a new number instead makes
 signal-cli the primary device for it, which kicks any existing install on that
 number offline.
 
-Run the daemon on a socket:
+Run the daemon on its default socket, `$XDG_RUNTIME_DIR/signal-cli/socket`:
 
 ```bash
-signal-cli -a +15551234567 daemon --socket /tmp/signal-cli.sock
-ls -l /tmp/signal-cli.sock   # srw------- , owned by you
-echo '{"jsonrpc":"2.0","method":"version","id":1}' | socat - UNIX-CONNECT:/tmp/signal-cli.sock
+signal-cli -a +15551234567 daemon --socket
+ls -l "$XDG_RUNTIME_DIR/signal-cli/socket"   # srw------- , owned by you
+echo '{"jsonrpc":"2.0","method":"version","id":1}' \
+  | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/signal-cli/socket"
 ```
 
 Keep it under a supervisor such as systemd or launchd: `wirken run` restarts
@@ -345,9 +346,10 @@ You are prompted for the registered E.164 number, the socket path (bare path
 or `unix:///absolute/path`; HTTP URLs are rejected), and the sender allowlist.
 To skip the prompts, pass `--phone-number`, `--endpoint` and
 `--allowed-senders`, or set `WIRKEN_SIGNAL_PHONE_NUMBER`,
-`WIRKEN_SIGNAL_ENDPOINT` and `WIRKEN_SIGNAL_ALLOWED_SENDERS`. With no terminal,
-an endpoint not given is `/tmp/signal-cli.sock` and an allowlist not given is
-empty, which drops every inbound message.
+`WIRKEN_SIGNAL_ENDPOINT` and `WIRKEN_SIGNAL_ALLOWED_SENDERS`. The default
+socket path is `$XDG_RUNTIME_DIR/signal-cli/socket`, or
+`<data_dir>/signal-cli.sock` when `XDG_RUNTIME_DIR` is unset. With no
+terminal, an allowlist not given is empty, which drops every inbound message.
 
 ### Approvals
 
@@ -407,8 +409,10 @@ echo "+15551234567,+15559876543,group-abc-xyz=" \
 
 - **The signal-cli socket is unauthenticated.** Any local process that can
   open it sends Signal messages as you. Filesystem permissions do the work:
-  keep the socket in a directory you own, `chmod 700` on shared hosts, or run
-  signal-cli as a dedicated user.
+  keep the socket in a directory you own, `chmod 700` on shared hosts. The
+  adapter refuses a socket served by another user, so signal-cli must run as
+  the same user as `wirken run`, and it warns when the socket's directory is
+  writable by other users, as `/tmp` is.
 - **signal-cli stores your Signal identity in cleartext** at
   `~/.local/share/signal-cli/data/`. Whoever holds that directory can
   impersonate you on Signal until you unlink the device from your phone. Back

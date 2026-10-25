@@ -2596,3 +2596,27 @@ fn the_approval_message_is_the_shared_card() {
     assert!(!text.contains("runs:"), "{text}");
     assert!(!text.contains("runtime:"), "{text}");
 }
+
+#[test]
+fn a_socket_served_by_another_uid_is_refused() {
+    use crate::adapter::require_same_uid;
+    assert!(require_same_uid(1000, 1000).is_ok());
+    assert!(matches!(
+        require_same_uid(1001, 1000),
+        Err(crate::error::SignalError::ForeignPeer {
+            peer: 1001,
+            own: 1000
+        })
+    ));
+}
+
+#[tokio::test]
+async fn a_socket_served_by_this_user_passes_the_peer_check() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("s");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+    let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    accept.await.unwrap();
+    crate::adapter::check_peer_is_self(&stream).unwrap();
+}

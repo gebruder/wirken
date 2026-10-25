@@ -76,6 +76,7 @@ pub struct SignalCreds {
 }
 
 pub fn collect_signal_creds(
+    data_dir: &std::path::Path,
     phone: Option<String>,
     endpoint: Option<String>,
     allowed_senders: Option<String>,
@@ -100,12 +101,12 @@ pub fn collect_signal_creds(
             e
         }
         None if !std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
-            DEFAULT_SIGNAL_ENDPOINT.to_string()
+            default_signal_endpoint(data_dir)
         }
         None => loop {
             let e: String = dialoguer::Input::new()
                 .with_prompt("  signal-cli socket path")
-                .default(DEFAULT_SIGNAL_ENDPOINT.into())
+                .default(default_signal_endpoint(data_dir))
                 .interact_text()?;
             let trimmed = e.trim();
             match validate_signal_endpoint(trimmed) {
@@ -156,8 +157,16 @@ pub fn collect_signal_creds(
     })
 }
 
-/// The signal-cli socket path when none is given.
-const DEFAULT_SIGNAL_ENDPOINT: &str = "/tmp/signal-cli.sock";
+/// The signal-cli socket path when none is given: signal-cli's own
+/// `daemon --socket` default, else `<data_dir>/signal-cli.sock`.
+pub(crate) fn default_signal_endpoint(data_dir: &std::path::Path) -> String {
+    match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => std::path::Path::new(&dir).join("signal-cli/socket"),
+        None => data_dir.join("signal-cli.sock"),
+    }
+    .display()
+    .to_string()
+}
 
 /// The Signal adapter speaks JSON-RPC over a Unix socket: refuse an
 /// empty path and an HTTP URL.
@@ -212,7 +221,12 @@ pub fn store_signal_creds(store: &CredentialStore, creds: &SignalCreds) -> Resul
 }
 
 async fn add_signal(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags) -> Result<()> {
-    let creds = collect_signal_creds(flags.phone_number, flags.endpoint, flags.allowed_senders)?;
+    let creds = collect_signal_creds(
+        data,
+        flags.phone_number,
+        flags.endpoint,
+        flags.allowed_senders,
+    )?;
     // register_channel stores signal-token (value is the endpoint) and
     // the adapter keypair. Must run before store_signal_creds so both
     // writes share the same cached vault passphrase.
