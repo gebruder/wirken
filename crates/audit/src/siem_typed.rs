@@ -146,6 +146,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::McpServerRestart { .. } => true,
         SessionEvent::McpServerRestartAbandoned { .. } => true,
         SessionEvent::McpCredentialRefetched { .. } => true,
+        // A refresh that lost to a removal or a new sign-in.
+        SessionEvent::McpCredentialRefreshDiscarded { .. } => true,
         SessionEvent::LeakRefused { .. } => true,
         SessionEvent::EgressHookDispatched { .. } => true,
         SessionEvent::ToolOutputRedacted { .. } => true,
@@ -335,6 +337,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::McpServerRestart { .. } => "mcp_server_restart",
         SessionEvent::McpServerRestartAbandoned { .. } => "mcp_server_restart_abandoned",
         SessionEvent::McpCredentialRefetched { .. } => "mcp_credential_refetched",
+        SessionEvent::McpCredentialRefreshDiscarded { .. } => "mcp_credential_refresh_discarded",
         SessionEvent::LeakRefused { .. } => "leak_refused",
         SessionEvent::EgressHookDispatched { .. } => "egress_hook_dispatched",
         SessionEvent::SandboxEgressVerdict { .. } => "sandbox_egress_verdict",

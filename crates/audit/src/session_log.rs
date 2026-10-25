@@ -2093,6 +2093,14 @@ pub enum SessionEvent {
     /// refused it. Names the credential, never its value. Written on
     /// the [`MCP_CREDENTIAL_SESSION`] lane.
     McpCredentialRefetched { credential: String },
+    /// The gateway refreshed an MCP OAuth credential and did not write
+    /// the result, because the vault entry no longer held the refresh
+    /// token the refresh started from: `reason` is `removed` when the
+    /// entry was gone, `reauthorized` when it held another
+    /// authorization, which is kept, or `unreadable`. Names the
+    /// credential, never a value. Written on the
+    /// [`MCP_CREDENTIAL_SESSION`] lane.
+    McpCredentialRefreshDiscarded { credential: String, reason: String },
     /// Content contained a stored secret and was refused before it
     /// went further: a tool's output before it entered the
     /// conversation, a tool call's arguments as the model wrote them,

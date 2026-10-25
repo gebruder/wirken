@@ -3853,6 +3853,10 @@ fn every_session_event() -> Vec<SessionEvent> {
             user_id: String::new(),
             removed_by: String::new(),
         },
+        SessionEvent::McpCredentialRefreshDiscarded {
+            credential: String::new(),
+            reason: String::new(),
+        },
         SessionEvent::ApprovalChatSet {
             adapter_id: String::new(),
             previous_conversation_id: None,
@@ -3928,6 +3932,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::ApproverAdded { .. } => "ApproverAdded",
         SessionEvent::ApproverRemoved { .. } => "ApproverRemoved",
         SessionEvent::ApprovalChatSet { .. } => "ApprovalChatSet",
+        SessionEvent::McpCredentialRefreshDiscarded { .. } => "McpCredentialRefreshDiscarded",
         SessionEvent::OperatorCommandRefused { .. } => "OperatorCommandRefused",
         SessionEvent::HookDispatched { .. } => "HookDispatched",
         SessionEvent::EgressHookDispatched { .. } => "EgressHookDispatched",
@@ -3955,7 +3960,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 77;
+const SESSION_EVENT_VARIANTS: usize = 78;
 
 /// The list covers the enum.
 #[test]

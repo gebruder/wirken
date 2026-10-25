@@ -903,6 +903,7 @@ fn extract_identity_for_sentinel(
         }
         // A credential name; none of the three.
         SessionEvent::McpCredentialRefetched { .. } => (None, None, None),
+        SessionEvent::McpCredentialRefreshDiscarded { .. } => (None, None, None),
         // Refused content in one agent's session, from a channel when
         // a sender's message drove it.
         SessionEvent::LeakRefused {
@@ -1226,6 +1227,9 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::McpCredentialRefetched { credential } => {
             format!("mcp_credential_refetched credential={credential}")
         }
+        SessionEvent::McpCredentialRefreshDiscarded { credential, reason } => {
+            format!("mcp_credential_refresh_discarded credential={credential} reason={reason}")
+        }
         SessionEvent::LeakRefused {
             credential,
             surface,
@@ -1312,6 +1316,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
         },
         SessionEvent::AdapterRestartAbandoned { .. } => "error",
         SessionEvent::InboundSenderRefused { .. } => "warn",
+        SessionEvent::McpCredentialRefreshDiscarded { .. } => "warn",
         SessionEvent::OperatorCommandRefused { .. } => "warn",
         SessionEvent::McpServerExited {
             stopped_by_proxy, ..

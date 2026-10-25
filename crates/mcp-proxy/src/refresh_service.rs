@@ -28,7 +28,7 @@ use crate::credentials::{
     HandedOAuth, RefreshReply, RefreshRequest, RequestKind, without_refresh_token,
 };
 use crate::error::ProxyError;
-use crate::oauth::{OAuthCredential, load_oauth, refresh_oauth_token, store_oauth};
+use crate::oauth::{OAuthCredential, load_oauth, refresh_oauth_token};
 
 /// Cap on a request line.
 const MAX_REQUEST_BYTES: u64 = 16 * 1024;
@@ -298,11 +298,68 @@ impl RefreshService {
             .refresh(&cred)
             .await
             .map_err(|e| e.to_string())?;
-        {
-            let store = store
-                .lock()
-                .map_err(|_| "vault mutex poisoned".to_string())?;
-            store_oauth(&store, name, &refreshed).map_err(|e| e.to_string())?;
+        // Write it only if the entry still holds the refresh token this
+        // refresh started from. The provider call can take seconds, and
+        // in that time the operator can remove the entry or sign it in
+        // again; an unconditional write would bring a removed entry back
+        // or put the old sign-in over the new one. The check and the
+        // write run under the vault's write lock, and only the value
+        // changes, so the entry keeps its channel and host binding.
+        let json = Zeroizing::new(
+            serde_json::to_string(&refreshed)
+                .map_err(|e| format!("serialize oauth credential: {e}"))?,
+        );
+        let swapped =
+            {
+                let store = store
+                    .lock()
+                    .map_err(|_| "vault mutex poisoned".to_string())?;
+                store.update_exclusive(name, REFRESH_WRITE_WAIT, |current| {
+                    match serde_json::from_str::<OAuthCredential>(current.expose()) {
+                        Ok(now)
+                            if same_bytes(
+                                now.refresh_token.as_bytes(),
+                                cred.refresh_token.as_bytes(),
+                            ) =>
+                        {
+                            (
+                                Some(wirken_vault::VaultSecret::new(json.to_string())),
+                                Swap::Written,
+                            )
+                        }
+                        Ok(now) => (None, Swap::Reauthorized(Box::new(now))),
+                        Err(_) => (None, Swap::Unreadable),
+                    }
+                })
+            };
+        match swapped {
+            Ok(update) => {
+                update
+                    .written
+                    .map_err(|e| format!("write refreshed oauth credential '{name}': {e}"))?;
+                match update.value {
+                    Swap::Written => {}
+                    Swap::Reauthorized(now) => {
+                        self.record_discarded(name, "reauthorized");
+                        return Ok(*now);
+                    }
+                    Swap::Unreadable => {
+                        self.record_discarded(name, "unreadable");
+                        return Err(format!(
+                            "oauth credential '{name}' changed during the refresh and no longer \
+                             parses; the refreshed token is discarded"
+                        ));
+                    }
+                }
+            }
+            Err(wirken_vault::VaultError::NotFound(_)) => {
+                self.record_discarded(name, "removed");
+                return Err(format!(
+                    "oauth credential '{name}' was removed during the refresh; the refreshed \
+                     token is discarded"
+                ));
+            }
+            Err(e) => return Err(format!("write refreshed oauth credential '{name}': {e}")),
         }
         if let Some(leak) = &self.leak {
             let json =
@@ -311,6 +368,40 @@ impl RefreshService {
         }
         tracing::info!("refreshed oauth credential '{name}' for the MCP proxy");
         Ok(refreshed)
+    }
+}
+
+/// How long the refresh write waits for the vault's write lock.
+const REFRESH_WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What the refresh write found in the entry.
+enum Swap {
+    /// It held the refresh token the refresh started from; the refreshed
+    /// credential replaced it.
+    Written,
+    /// It held another authorization, which stays.
+    Reauthorized(Box<OAuthCredential>),
+    /// It no longer parsed as an OAuth credential.
+    Unreadable,
+}
+
+impl RefreshService {
+    /// Record that a refresh's result was not written, and why.
+    fn record_discarded(&self, name: &str, reason: &str) {
+        tracing::warn!(
+            "discarded the refresh of oauth credential '{name}': the entry was {reason} \
+             during it"
+        );
+        if let Some(log) = &self.audit {
+            let lane = log.handle_for(SessionId::new(MCP_CREDENTIAL_SESSION));
+            let event = SessionEvent::McpCredentialRefreshDiscarded {
+                credential: name.to_string(),
+                reason: reason.to_string(),
+            };
+            if let Err(e) = log.append(&lane, TrustLevel::System, event) {
+                tracing::warn!("could not record the discarded refresh of '{name}': {e}");
+            }
+        }
     }
 }
 
@@ -326,6 +417,7 @@ mod tests {
     use super::*;
     use crate::auth::{AuthProvider, OAuth2Auth};
     use crate::credentials::{GatewayLink, ProxyCredentials, without_refresh_token};
+    use crate::oauth::store_oauth;
     use wirken_vault::VaultSecret;
 
     /// Stands in for the provider: checks it was handed the vault's
@@ -768,5 +860,155 @@ mod tests {
 
         assert!(gateway.rows().is_empty());
         assert!(other.rows().is_empty());
+    }
+
+    /// What a provider stand-in does to the vault while the refresh it
+    /// was asked for is in flight.
+    enum Meanwhile {
+        Remove,
+        Reauthorize,
+    }
+
+    /// Answers a refresh after changing the vault under it, the way an
+    /// operator's `wirken mcp` command would during a slow provider call.
+    struct Interfering {
+        store: Arc<std::sync::Mutex<CredentialStore>>,
+        meanwhile: Meanwhile,
+    }
+
+    #[async_trait::async_trait]
+    impl Refresher for Interfering {
+        async fn refresh(&self, cred: &OAuthCredential) -> Result<OAuthCredential, ProxyError> {
+            {
+                let store = self.store.lock().unwrap();
+                match self.meanwhile {
+                    Meanwhile::Remove => store.delete("linear-oauth").unwrap(),
+                    Meanwhile::Reauthorize => store_oauth(
+                        &store,
+                        "linear-oauth",
+                        &OAuthCredential {
+                            access_token: "AT-NEW".into(),
+                            refresh_token: "RT-NEW".into(),
+                            expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+                            scope: "read".into(),
+                            provider: "linear".into(),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+                }
+            }
+            Ok(OAuthCredential {
+                access_token: "AT-OLD-LINE".into(),
+                refresh_token: "RT-OLD-LINE".into(),
+                expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+                scope: cred.scope.clone(),
+                provider: cred.provider.clone(),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// A refresh service over a vault holding an expired credential,
+    /// refreshing through a stand-in that does `meanwhile` first.
+    fn interfered(
+        meanwhile: Meanwhile,
+    ) -> (
+        tempfile::TempDir,
+        Arc<std::sync::Mutex<CredentialStore>>,
+        Arc<dyn SessionLog>,
+        RefreshService,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &dir.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        store_oauth(
+            &store,
+            "linear-oauth",
+            &OAuthCredential {
+                access_token: "AT-1".into(),
+                refresh_token: "RT-1".into(),
+                expires_at: 1,
+                scope: "read".into(),
+                provider: "linear".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let store = Arc::new(std::sync::Mutex::new(store));
+        let audit: Arc<dyn SessionLog> =
+            Arc::new(wirken_audit::SqliteSessionLog::open_in_memory().unwrap());
+        let service = RefreshService::new(
+            Some(store.clone()),
+            BTreeSet::from(["linear-oauth".to_string()]),
+            BTreeSet::from(["linear-oauth".to_string()]),
+            Zeroizing::new("t".into()),
+            Arc::new(AtomicU32::new(0)),
+            Some(audit.clone()),
+        )
+        .with_refresher(Arc::new(Interfering {
+            store: store.clone(),
+            meanwhile,
+        }));
+        (dir, store, audit, service)
+    }
+
+    fn discarded(audit: &Arc<dyn SessionLog>) -> Vec<String> {
+        let lane = audit.handle_for(SessionId::new(MCP_CREDENTIAL_SESSION));
+        audit
+            .get_since(&lane, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.event {
+                SessionEvent::McpCredentialRefreshDiscarded { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_entry_removed_during_a_refresh_stays_removed() {
+        let (_dir, store, audit, service) = interfered(Meanwhile::Remove);
+        let err = service.refresh("linear-oauth").await.unwrap_err();
+        assert!(err.contains("removed during the refresh"), "{err}");
+        assert!(
+            load_oauth(&store.lock().unwrap(), "linear-oauth").is_err(),
+            "the refreshed token did not bring the entry back"
+        );
+        assert_eq!(discarded(&audit), ["removed"]);
+    }
+
+    #[tokio::test]
+    async fn an_entry_reauthorized_during_a_refresh_keeps_the_new_authorization() {
+        let (_dir, store, audit, service) = interfered(Meanwhile::Reauthorize);
+        let answered = service.refresh("linear-oauth").await.unwrap();
+        assert_eq!(
+            answered.access_token, "AT-NEW",
+            "the proxy gets the new sign-in"
+        );
+        let stored = load_oauth(&store.lock().unwrap(), "linear-oauth").unwrap();
+        assert_eq!(stored.refresh_token, "RT-NEW");
+        assert_eq!(stored.access_token, "AT-NEW");
+        assert_eq!(discarded(&audit), ["reauthorized"]);
+    }
+
+    #[tokio::test]
+    async fn an_untouched_entry_takes_the_refresh_and_keeps_its_channel() {
+        let (_dir, store, audit, service) = interfered(Meanwhile::Reauthorize);
+        // The same, without the interference: a plain provider.
+        let service = service.with_refresher(Arc::new(FakeProvider));
+        let answered = service.refresh("linear-oauth").await.unwrap();
+        assert_eq!(answered.refresh_token, "RT-2");
+        let store = store.lock().unwrap();
+        assert_eq!(
+            load_oauth(&store, "linear-oauth").unwrap().refresh_token,
+            "RT-2"
+        );
+        let (_, meta) = store.peek("linear-oauth").unwrap();
+        assert_eq!(meta.channel, "oauth");
+        assert!(discarded(&audit).is_empty());
     }
 }

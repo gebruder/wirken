@@ -223,6 +223,7 @@ The gateway writes one more on its own `gateway-mcp-credentials` lane:
 | Kind | Written |
 |---|---|
 | `mcp_credential_refetched` | The gateway sent the proxy a credential's current vault value after an HTTP server refused it. Names the credential, never the value. |
+| `mcp_credential_refresh_discarded` | The gateway refreshed an OAuth credential and did not write the result, because the entry was removed or signed in again during the refresh (`reason`); the removal or the new sign-in stands. Names the credential, never the value. |
 
 All of them are on the default typed-SIEM forwarded set; consumers can pivot on `kind == "mcp_entry_refused"` without an opt-in.
 

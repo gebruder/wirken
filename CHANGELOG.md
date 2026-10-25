@@ -41,6 +41,17 @@ takes yet; it is revisited when both do.
 
 ### Security
 
+- The gateway writes a refreshed MCP OAuth credential only if the vault
+  entry still holds the refresh token the refresh started from, checked and
+  written under the vault's write lock (`RefreshService::refresh`,
+  `crates/mcp-proxy/src/refresh_service.rs`, through
+  `CredentialStore::update_exclusive`). Otherwise the result is discarded and
+  an `mcp_credential_refresh_discarded` row says why: an entry removed during
+  the refresh stays removed, and one signed in again keeps the new sign-in,
+  which is what the proxy is answered with. Before, the write was an
+  unconditional replace, so a removal or a new sign-in made while the
+  provider call was in flight was undone, and the write reset the entry's
+  channel and host binding.
 - Every webchat response carries `Content-Security-Policy: frame-ancestors
   'none'` and `X-Frame-Options: DENY`: the page, every `/api` answer, the
   login, a miss, and the head of a turn's event stream. Before, nothing

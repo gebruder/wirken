@@ -4613,6 +4613,7 @@ pub fn session_events(
             // A credential the gateway sent the MCP proxy again; on the
             // gateway's own lane, not a conversation's.
             SessionEvent::McpCredentialRefetched { .. } => None,
+            SessionEvent::McpCredentialRefreshDiscarded { .. } => None,
             // Without the credential's name, which the page withholds as
             // it does on the `http_request` row.
             SessionEvent::LeakRefused {
