@@ -22,6 +22,43 @@ tagged.
 
 ### Security
 
+- The gateway admits an inbound message from a channel adapter only when its
+  sender, or the group it arrived in, is on the sender allowlist for that
+  channel (`InboundGate::check`, `crates/gateway/src/sender_registry.rs`).
+  The check runs on every adapter's messages, after the channel match and
+  before the injection scan, the `message.inbound` row, the session and the
+  route, so a message from anyone else reaches none of them and no agent. A
+  channel with no entries admits nobody. The allowlist lives in
+  `senders.db` and is read on every message: `wirken senders add|remove`
+  applies to the next message with no restart. A sender entry matches the
+  platform sender id exactly; a `--group` entry matches the conversation id
+  and admits every member of it; an entry applies on its own channel only.
+  Before, the gateway routed every message on a bound channel to the agent,
+  so anyone who could reach the bot on Telegram, WhatsApp or iMessage, and
+  any member of the workspace, tenant, guild, room or space on the others,
+  drove it with the operator's Tier 1 tools, the agent's shared workspace and
+  channel memory, and any Tier 2 grants stored for it. Signal's adapter-side
+  allowlist stays, and a Signal message now passes both. The terminal and
+  webchat are not channels the allowlist applies to.
+  **Operator action, for every channel adapter:** after the upgrade every
+  channel drops all inbound messages until it has an entry, and `wirken run`
+  warns at startup for each bound channel without one. Send the bot a
+  message, read the ids it was dropped with in `wirken senders refused
+  <channel>`, and admit them with `wirken senders add <channel> <sender-id>`,
+  or `--group` with the conversation id. A Signal deployment does the same:
+  its adapter-side `signal-allowed-senders` is unchanged and not copied.
+  Each drop is an `inbound_sender_refused` row on the `gateway-inbound` lane
+  carrying the channel, adapter, sender and conversation ids and never the
+  text, forwarded by default at `warn`; rows are limited to one per sender
+  per minute and thirty per minute across all senders, and each row counts
+  the drops written without one since the previous. Each allowlist change is
+  an `inbound_sender_added` or `inbound_sender_removed` row on the signed
+  `gateway-senders` lane, sealed by a chain head; an add whose row cannot be
+  written is undone. `wirken senders` refuses inside a Wirken `exec`.
+  `tests/hostile/corpus.jsonl` gains inbound lines replayed through the
+  check: an unknown sender beside an allowed one, a sender id equal to an
+  allowed group, a conversation id equal to an allowed sender, an allowed id
+  on another channel, and a case variant of an allowed id.
 - Every host-side child process starts from one minimal environment. A
   process Wirken starts outside a container, an adapter, the MCP proxy, a
   stdio MCP server with its sandbox off, a host `exec` under `mode: off`,

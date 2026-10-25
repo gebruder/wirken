@@ -540,6 +540,11 @@ impl OtelProjector {
             SessionEvent::AdapterDisconnect { .. } => Vec::new(),
             SessionEvent::AdapterRestart { .. } => Vec::new(),
             SessionEvent::AdapterRestartAbandoned { .. } => Vec::new(),
+            // A message dropped before any run, and the operator's edits
+            // to the allowlist that decides it.
+            SessionEvent::InboundSenderRefused { .. } => Vec::new(),
+            SessionEvent::InboundSenderAdded { .. } => Vec::new(),
+            SessionEvent::InboundSenderRemoved { .. } => Vec::new(),
             // The verdict lands on the tool result the tool span already
             // times.
             SessionEvent::HookDispatched { .. } => Vec::new(),

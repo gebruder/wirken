@@ -62,7 +62,17 @@ Spawns an adapter process per channel, serves the WebChat UI at
 `http://localhost:18790`, and waits for messages. All local services bind to
 127.0.0.1.
 
-Send a test message from a configured channel, or open WebChat in a browser.
+Open WebChat in a browser, or use a configured channel. A channel admits only
+the senders on its allowlist, and starts with none, so the first message you
+send is dropped. Admit yourself with the sender id it recorded:
+
+```bash
+wirken senders refused telegram          # your id, from the dropped message
+wirken senders add telegram <SENDER_ID> --label me
+```
+
+The next message is answered; no restart is needed. See
+[channels.md](channels.md#who-reaches-the-agent).
 
 ## Without a channel
 

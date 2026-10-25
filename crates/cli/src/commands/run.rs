@@ -1635,6 +1635,37 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         }
     }
 
+    // --- Inbound sender allowlist ---
+    //
+    // Every adapter's messages pass it before anything else happens
+    // to them; a channel with no entries admits nobody. Read from
+    // SQLite on every message, so `wirken senders` changes apply
+    // without a restart.
+    let inbound_gate = Arc::new(wirken_gateway::sender_registry::InboundGate::new(
+        wirken_gateway::sender_registry::SenderRegistry::open(&cfg.senders_db_path())
+            .context("Failed to open the inbound sender allowlist")?,
+        wirken_gateway::sender_registry::RefusalLimits::default(),
+    ));
+    {
+        let mut channels: Vec<String> = registry
+            .lock()
+            .await
+            .list()
+            .into_iter()
+            .map(|entry| entry.channel)
+            .collect();
+        channels.extend(router.list_bindings().into_iter().map(|b| b.channel));
+        for channel in channels_without_senders(inbound_gate.registry(), channels) {
+            tracing::warn!(
+                channel = %channel,
+                "the inbound sender allowlist for '{channel}' is empty, so every message on it \
+                 is dropped. Admit a sender with `wirken senders add {channel} <sender-id>`, \
+                 or a whole group with `--group`; `wirken senders refused {channel}` lists \
+                 the ids it has dropped."
+            );
+        }
+    }
+
     // --- Webchat ---
     if wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN") {
         tracing::warn!(
@@ -1832,6 +1863,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let accept_dispatcher = dispatcher.clone();
     let accept_pending = pending_approval_queue.clone();
     let accept_approvers = approver_registry.clone();
+    let accept_inbound_gate = inbound_gate.clone();
     let accept_lifelines = lifelines.clone();
     let accept_session_log = session_log.clone();
     let accept_terminal = TerminalSetup {
@@ -1916,6 +1948,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     let disp = accept_dispatcher.clone();
                     let pend = accept_pending.clone();
                     let apprv = accept_approvers.clone();
+                    let gate = accept_inbound_gate.clone();
                     let lines = accept_lifelines.clone();
                     let lane_log = accept_session_log.clone();
                     let terms = accept_terminal.clone();
@@ -1934,6 +1967,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                             disp,
                             pend,
                             apprv,
+                            gate,
                             lines,
                             slot,
                             lane_log,
@@ -2803,6 +2837,31 @@ async fn supervise_adapter<S>(
     }
 }
 
+/// Append an inbound refusal to the gateway's inbound lane. A failed
+/// write is logged, not returned: the message is dropped either way.
+fn record_inbound_refusal(session_log: &dyn wirken_audit::SessionLog, event: SessionEvent) {
+    let lane = session_log.handle_for(SessionId::new(wirken_audit::INBOUND_SENDERS_SESSION));
+    if let Err(e) = session_log.append(&lane, TrustLevel::System, event) {
+        tracing::error!("inbound refusal write failed: {e}");
+    }
+}
+
+/// The channels in `channels` the allowlist applies to and has no
+/// entry for, each once, in order. An allowlist that cannot be read
+/// counts as empty.
+fn channels_without_senders(
+    registry: &wirken_gateway::sender_registry::SenderRegistry,
+    channels: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    channels
+        .into_iter()
+        .filter(|c| wirken_gateway::sender_registry::CHANNELS.contains(&c.as_str()))
+        .filter(|c| seen.insert(c.clone()))
+        .filter(|c| registry.count(c).unwrap_or(0) == 0)
+        .collect()
+}
+
 /// Append an adapter lifecycle event to the gateway's adapter lane. A
 /// failed write is logged, not returned: the restart loop and the
 /// teardown that call this have nowhere to send it.
@@ -2903,6 +2962,7 @@ async fn handle_adapter_connection(
     dispatcher: Arc<OutboundDispatcher>,
     pending_approvals: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
     approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
+    inbound_gate: Arc<wirken_gateway::sender_registry::InboundGate>,
     lifelines: Lifelines,
     adapter_id_slot: super::connection_tasks::AdapterIdSlot,
     session_log: Arc<dyn wirken_audit::SessionLog>,
@@ -3052,6 +3112,7 @@ async fn handle_adapter_connection(
         detector,
         pending_approvals,
         approver_registry,
+        inbound_gate,
         dispatcher.clone(),
         terminal,
     )
@@ -3901,6 +3962,7 @@ struct Conn<'a> {
     detector: &'a InjectionDetector,
     pending_approvals: &'a wirken_gateway::pending_approvals::PendingApprovalQueue,
     approver_registry: &'a wirken_gateway::approver_registry::ApproverRegistry,
+    inbound_gate: &'a wirken_gateway::sender_registry::InboundGate,
     dispatcher: &'a OutboundDispatcher,
     /// `Some` on the terminal channel, with the connection the
     /// terminal approval gate reaches it through.
@@ -3955,6 +4017,7 @@ async fn message_loop(
     detector: Arc<InjectionDetector>,
     pending_approvals: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
     approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
+    inbound_gate: Arc<wirken_gateway::sender_registry::InboundGate>,
     dispatcher: Arc<OutboundDispatcher>,
     terminal: Option<TerminalPeer>,
 ) -> Result<()> {
@@ -3972,6 +4035,7 @@ async fn message_loop(
         detector: &detector,
         pending_approvals: &pending_approvals,
         approver_registry: &approver_registry,
+        inbound_gate: &inbound_gate,
         dispatcher: &dispatcher,
         terminal: terminal.as_ref().zip(terminal_connection.as_ref()),
     };
@@ -4294,6 +4358,60 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                 return Ok(());
             }
 
+            // The sender check, before the scan, the inbound row, the
+            // session and the route: a message nobody admitted reaches
+            // none of them. The terminal is out of it; its sender is
+            // the operator key the handshake verified.
+            let admitted = match conn.terminal {
+                Some(_) => None,
+                None => match conn.inbound_gate.check(
+                    authenticated_channel.as_str(),
+                    &sender_id,
+                    &conversation_id,
+                ) {
+                    wirken_gateway::sender_registry::Verdict::Admitted(admission) => {
+                        Some(admission)
+                    }
+                    wirken_gateway::sender_registry::Verdict::Refused { reason, record } => {
+                        // At info when the drop gets a row, which the
+                        // limiter bounds; the rest at debug, so a flood
+                        // does not flood the log either.
+                        if record.is_some() {
+                            tracing::info!(
+                                channel = authenticated_channel.as_str(),
+                                sender = %sender_id,
+                                conversation = %conversation_id,
+                                reason = ?reason,
+                                "inbound message dropped at the sender allowlist"
+                            );
+                        } else {
+                            tracing::debug!(
+                                channel = authenticated_channel.as_str(),
+                                sender = %sender_id,
+                                conversation = %conversation_id,
+                                reason = ?reason,
+                                "inbound message dropped at the sender allowlist"
+                            );
+                        }
+                        if let Some(counts) = record {
+                            record_inbound_refusal(
+                                factory.session_log().as_ref(),
+                                SessionEvent::InboundSenderRefused {
+                                    channel: authenticated_channel.as_str().to_string(),
+                                    adapter_id: adapter_id.to_string(),
+                                    sender_id,
+                                    conversation_id,
+                                    reason,
+                                    suppressed: counts.suppressed,
+                                    suppressed_on_lane: counts.suppressed_on_lane,
+                                },
+                            );
+                        }
+                        return Ok(());
+                    }
+                },
+            };
+
             // On the terminal the sender is whoever holds the operator key,
             // which the handshake verified; the id the client wrote is not
             // what the chain attributes the message to.
@@ -4328,6 +4446,13 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                     "platform_ts_millis".into(),
                     serde_json::Value::from(platform_ts_millis),
                 );
+            }
+            // Which allowlist entry let it in: the sender's own, or the
+            // group it arrived in. Absent on the terminal.
+            if let Some(admission) = admitted
+                && let Some(obj) = inbound_detail.as_object_mut()
+            {
+                obj.insert("admitted_by".into(), admission.as_str().into());
             }
 
             // Scan for prompt injection patterns. Caught, so
@@ -7137,6 +7262,21 @@ mod gateway_start_row_tests {
 
 /// A model on a loopback port for tests that drive a whole turn
 /// through the gateway's connection handler.
+/// An inbound gate over a fresh allowlist in `dir` admitting each
+/// `(channel, sender)`.
+#[cfg(all(test, unix))]
+fn test_inbound_gate(
+    dir: &std::path::Path,
+    senders: &[(&str, &str)],
+) -> wirken_gateway::sender_registry::InboundGate {
+    let registry =
+        wirken_gateway::sender_registry::SenderRegistry::open(&dir.join("senders.db")).unwrap();
+    for (channel, sender) in senders {
+        registry.add(channel, sender, false, "").unwrap();
+    }
+    wirken_gateway::sender_registry::InboundGate::new(registry, Default::default())
+}
+
 #[cfg(all(test, unix))]
 mod scripted_model {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7366,6 +7506,7 @@ mod same_connection_approval_tests {
             dispatcher,
             queue.clone(),
             approvers,
+            Arc::new(test_inbound_gate(tmp.path(), &[("signal", "U1")])),
             Arc::new(HashMap::new()),
             super::super::connection_tasks::AdapterIdSlot::default(),
             log.clone(),
@@ -7457,6 +7598,386 @@ mod same_connection_approval_tests {
     }
 }
 
+/// The inbound sender check end to end through the gateway's own
+/// connection handler, on each channel a bundled adapter delivers: a
+/// message from a sender nobody admitted is dropped before the scan,
+/// the inbound row, the session and the route, and leaves one refusal
+/// row; an admitted sender is answered.
+#[cfg(all(test, unix))]
+mod inbound_sender_gate_tests {
+    use super::*;
+    use std::time::Duration;
+    use wirken_audit::{AuditLog, AuditQuery, SessionLog, SqliteSessionLog};
+    use wirken_gateway::sender_registry::{CHANNELS, InboundGate, SenderRegistry};
+    use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, test_pair};
+
+    const DEADLINE: Duration = Duration::from_secs(15);
+
+    /// One adapter connected to a gateway whose model answers each
+    /// request with `"hello"`, and what the gateway wrote.
+    struct Gateway {
+        tmp: tempfile::TempDir,
+        channel: &'static str,
+        reader: IpcFrameReader,
+        writer: IpcFrameWriter,
+        connection: tokio::task::JoinHandle<Result<()>>,
+        log: Arc<SqliteSessionLog>,
+        sessions: Arc<Mutex<SessionStore>>,
+        audit: Arc<AuditWriter>,
+        audit_task: tokio::task::JoinHandle<()>,
+        sent: u64,
+    }
+
+    impl Gateway {
+        /// Connect a `channel` adapter. `admit` runs on the allowlist
+        /// before the gateway opens it. `replies` is how many model
+        /// calls the test expects: a message that reached the model
+        /// past them would find no answer and the turn would fail.
+        async fn start(
+            channel: &'static str,
+            replies: usize,
+            admit: impl FnOnce(&SenderRegistry),
+        ) -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let model =
+                super::scripted_model::serve(vec![
+                    super::scripted_model::text_completion("hello");
+                    replies
+                ])
+                .await;
+            let workspace = tmp.path().join("workspace");
+            std::fs::create_dir_all(&workspace).unwrap();
+            let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("sessions.db")).unwrap());
+            let factory = AgentFactory::new(
+                super::scripted_model::default_agent(model, workspace),
+                log.clone(),
+                Arc::new(std::sync::Mutex::new(
+                    wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
+                        ":memory:",
+                    ))
+                    .unwrap(),
+                )),
+            );
+            let identity = AdapterIdentity::generate(channel);
+            let registry = AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap();
+            registry
+                .register(channel, &identity.public_key_bytes(), channel)
+                .unwrap();
+            let senders = SenderRegistry::open(&tmp.path().join("senders.db")).unwrap();
+            admit(&senders);
+            let gate = Arc::new(InboundGate::new(
+                SenderRegistry::open(&tmp.path().join("senders.db")).unwrap(),
+                Default::default(),
+            ));
+            let sessions = Arc::new(Mutex::new(
+                SessionStore::open(&tmp.path().join("store.db"), 3600).unwrap(),
+            ));
+            let (audit, audit_task) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
+            let audit = Arc::new(audit);
+            let (gateway_end, adapter_end) = test_pair().unwrap();
+            let connection = tokio::spawn(handle_adapter_connection(
+                gateway_end,
+                Arc::new(Mutex::new(registry)),
+                factory,
+                audit.clone(),
+                sessions.clone(),
+                Arc::new(Router::new()),
+                Arc::new(InjectionDetector::new()),
+                Arc::new(OutboundDispatcher::new()),
+                Arc::new(wirken_gateway::pending_approvals::PendingApprovalQueue::new()),
+                Arc::new(
+                    wirken_gateway::approver_registry::ApproverRegistry::open(
+                        &tmp.path().join("approvers.db"),
+                    )
+                    .unwrap(),
+                ),
+                gate,
+                Arc::new(HashMap::new()),
+                super::super::connection_tasks::AdapterIdSlot::default(),
+                log.clone(),
+                None,
+                TerminalSetup {
+                    sessions: Arc::new(TerminalSessions::new()),
+                    log: log.clone(),
+                    data_dir: tmp.path().to_path_buf(),
+                },
+            ));
+            let (mut reader, mut writer) = split_stream(adapter_end);
+            perform_adapter_handshake(&mut reader, &mut writer, &identity)
+                .await
+                .unwrap();
+            Self {
+                tmp,
+                channel,
+                reader,
+                writer,
+                connection,
+                log,
+                sessions,
+                audit,
+                audit_task,
+                sent: 0,
+            }
+        }
+
+        /// The allowlist the gateway reads, opened a second time the
+        /// way `wirken senders` opens it.
+        fn senders(&self) -> SenderRegistry {
+            SenderRegistry::open(&self.tmp.path().join("senders.db")).unwrap()
+        }
+
+        async fn send(&mut self, sender: &str, conversation: &str) {
+            self.sent += 1;
+            let mut msg = capnp::message::Builder::new_default();
+            {
+                let mut m = msg.init_root::<frame::Builder<'_>>().init_inbound();
+                m.set_id(format!("m-{}", self.sent));
+                m.set_sender_id(sender);
+                m.set_sender_name(sender);
+                m.set_channel(self.channel);
+                m.set_conversation_id(conversation);
+                m.set_text("hi");
+                m.set_metadata("{}");
+            }
+            self.writer.write_message(&msg).await.unwrap();
+        }
+
+        /// The next outbound reply's text. Messages are handled in the
+        /// order they arrive, so once it is here every message sent
+        /// before the one it answers has been handled too.
+        async fn reply(&mut self) -> String {
+            tokio::time::timeout(DEADLINE, async {
+                loop {
+                    let msg = self.reader.read_message().await.unwrap();
+                    if let frame::Outbound(o) = msg
+                        .get_root::<frame::Reader<'_>>()
+                        .unwrap()
+                        .which()
+                        .unwrap()
+                    {
+                        return o.unwrap().get_text().unwrap().to_string().unwrap();
+                    }
+                }
+            })
+            .await
+            .expect("an admitted message is answered")
+        }
+
+        fn refusals(&self) -> Vec<SessionEvent> {
+            let lane = self
+                .log
+                .handle_for(SessionId::new(wirken_audit::INBOUND_SENDERS_SESSION));
+            self.log
+                .get_since(&lane, 0)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.event)
+                .collect()
+        }
+
+        async fn conversations(&self) -> Vec<String> {
+            let mut ids: Vec<String> = self
+                .sessions
+                .lock()
+                .await
+                .list_active(None)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.conversation_id)
+                .collect();
+            ids.sort();
+            ids
+        }
+
+        fn agent_rows(&self, conversation: &str) -> usize {
+            let handle = self.log.handle_for(SessionId::new(session_id_for(
+                "default",
+                self.channel,
+                conversation,
+            )));
+            self.log.get_since(&handle, 0).unwrap().len()
+        }
+
+        /// Close the connection and return the `message.inbound` rows'
+        /// actors, in order.
+        async fn finish(self) -> Vec<String> {
+            let Self {
+                tmp,
+                reader,
+                writer,
+                connection,
+                audit,
+                audit_task,
+                ..
+            } = self;
+            drop((reader, writer));
+            tokio::time::timeout(DEADLINE, connection)
+                .await
+                .expect("the connection handler returns")
+                .unwrap()
+                .unwrap();
+            drop(audit);
+            audit_task.await.unwrap();
+            let mut inbound = AuditLog::open(&tmp.path().join("audit.db"))
+                .unwrap()
+                .query(&AuditQuery {
+                    action: Some("message.inbound".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            inbound.reverse();
+            inbound.into_iter().map(|e| e.event.actor_id).collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_sender_is_dropped_before_anything_on_every_channel() {
+        for channel in CHANNELS {
+            let mut gw = Gateway::start(channel, 1, |s| {
+                s.add(channel, "known", false, "").unwrap();
+            })
+            .await;
+            gw.send("stranger", "conv-stranger").await;
+            gw.send("known", "conv-known").await;
+            assert_eq!(gw.reply().await, "hello", "{channel}: the admitted sender");
+
+            assert_eq!(
+                gw.conversations().await,
+                vec!["conv-known".to_string()],
+                "{channel}: no session for the stranger"
+            );
+            assert_eq!(
+                gw.agent_rows("conv-stranger"),
+                0,
+                "{channel}: nothing routed to an agent"
+            );
+            let refusals = gw.refusals();
+            assert_eq!(refusals.len(), 1, "{channel}: {refusals:?}");
+            assert_eq!(
+                refusals[0],
+                SessionEvent::InboundSenderRefused {
+                    channel: channel.to_string(),
+                    adapter_id: channel.to_string(),
+                    sender_id: "stranger".into(),
+                    conversation_id: "conv-stranger".into(),
+                    reason: wirken_audit::InboundRefusalReason::NotAllowed,
+                    suppressed: 0,
+                    suppressed_on_lane: 0,
+                },
+                "{channel}"
+            );
+            assert_eq!(
+                gw.finish().await,
+                vec!["known".to_string()],
+                "{channel}: only the admitted message has an inbound row"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_allowlist_drops_everyone() {
+        let mut gw = Gateway::start("telegram", 0, |_| {}).await;
+        gw.send("111", "111").await;
+        gw.send("222", "-100").await;
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        while gw.refusals().len() < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "two refusal rows");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gw.conversations().await.is_empty());
+        assert!(gw.finish().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_group_entry_admits_any_member_of_that_group_only() {
+        let mut gw = Gateway::start("matrix", 2, |s| {
+            s.add("matrix", "!room:example.org", true, "team").unwrap();
+        })
+        .await;
+        gw.send("@alice:example.org", "!room:example.org").await;
+        assert_eq!(gw.reply().await, "hello");
+        gw.send("@bob:example.org", "!other:example.org").await;
+        gw.send("@bob:example.org", "!room:example.org").await;
+        assert_eq!(gw.reply().await, "hello");
+
+        let refusals = gw.refusals();
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert!(matches!(
+            &refusals[0],
+            SessionEvent::InboundSenderRefused { sender_id, conversation_id, .. }
+                if sender_id == "@bob:example.org" && conversation_id == "!other:example.org"
+        ));
+        assert_eq!(
+            gw.conversations().await,
+            vec!["!room:example.org".to_string()]
+        );
+        gw.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_removed_sender_is_dropped_on_the_next_message_without_a_restart() {
+        let mut gw = Gateway::start("telegram", 2, |s| {
+            s.add("telegram", "111", false, "").unwrap();
+            s.add("telegram", "999", false, "").unwrap();
+        })
+        .await;
+        gw.send("111", "111").await;
+        assert_eq!(gw.reply().await, "hello");
+
+        // `wirken senders remove`, on its own connection, while the
+        // gateway runs.
+        assert!(gw.senders().remove("telegram", "111", false).unwrap());
+
+        gw.send("111", "111").await;
+        gw.send("999", "999").await;
+        assert_eq!(gw.reply().await, "hello");
+        let refusals = gw.refusals();
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert!(matches!(
+            &refusals[0],
+            SessionEvent::InboundSenderRefused { sender_id, .. } if sender_id == "111"
+        ));
+        assert_eq!(
+            gw.finish().await,
+            vec!["111".to_string(), "999".to_string()],
+            "the second message from 111 has no inbound row"
+        );
+    }
+
+    /// The startup warning names each bound channel with no entry once,
+    /// and nothing it does not enforce on.
+    #[test]
+    fn the_startup_warning_names_each_empty_channel_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let registry = SenderRegistry::open(&tmp.path().join("senders.db")).unwrap();
+        registry.add("slack", "U1", false, "").unwrap();
+        let channels = [
+            "telegram", "slack", "terminal", "telegram", "webchat", "signal",
+        ]
+        .map(String::from);
+        assert_eq!(
+            super::channels_without_senders(&registry, channels),
+            vec!["telegram".to_string(), "signal".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flood_from_one_sender_leaves_one_row() {
+        let mut gw = Gateway::start("whatsapp", 1, |s| {
+            s.add("whatsapp", "15550000001", false, "").unwrap();
+        })
+        .await;
+        for _ in 0..25 {
+            gw.send("15559999999", "15559999999").await;
+        }
+        gw.send("15550000001", "15550000001").await;
+        assert_eq!(gw.reply().await, "hello");
+        let refusals = gw.refusals();
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        gw.finish().await;
+    }
+}
+
 /// The terminal channel end to end through the gateway's own connection
 /// handler: the handshake, the message loop, the factory, the gate and
 /// the audit rows, against a scripted model on a loopback port. The
@@ -7534,6 +8055,9 @@ mod terminal_channel_tests {
                     )
                     .unwrap(),
                 ),
+                // Empty: the terminal is not a channel the allowlist
+                // applies to, so every test here passes with nobody on it.
+                Arc::new(test_inbound_gate(tmp.path(), &[])),
                 Arc::new(HashMap::new()),
                 super::super::connection_tasks::AdapterIdSlot::default(),
                 log.clone(),

@@ -867,6 +867,18 @@ fn extract_identity_for_sentinel(
         | SessionEvent::AdapterRestartAbandoned { adapter_id, .. } => {
             (Some(adapter_id.clone()), None, None)
         }
+        // The adapter that delivered the message and the sender it
+        // named. No agent: the message was dropped before routing.
+        SessionEvent::InboundSenderRefused {
+            adapter_id,
+            sender_id,
+            ..
+        } => (Some(adapter_id.clone()), Some(sender_id.clone()), None),
+        // An operator's command outside any conversation. The entry is
+        // not a sender who acted, and `added_by` / `removed_by` are
+        // operator labels, off the sender column like `revoked_by`.
+        SessionEvent::InboundSenderAdded { .. } => (None, None, None),
+        SessionEvent::InboundSenderRemoved { .. } => (None, None, None),
         // A hook id and an error; none of the three.
         SessionEvent::HookCrashed { .. } => (None, None, None),
         // A server name and a signer; none of the three.
@@ -1113,6 +1125,23 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         } => format!(
             "adapter_restart_abandoned adapter={adapter_id} attempts={attempts} last_cause={last_cause:?}"
         ),
+        SessionEvent::InboundSenderRefused {
+            channel,
+            sender_id,
+            conversation_id,
+            reason,
+            suppressed,
+            ..
+        } => format!(
+            "inbound_sender_refused channel={channel} sender={sender_id} \
+             conversation={conversation_id} reason={reason:?} suppressed={suppressed}"
+        ),
+        SessionEvent::InboundSenderAdded {
+            channel, id, group, ..
+        } => format!("inbound_sender_added channel={channel} id={id} group={group}"),
+        SessionEvent::InboundSenderRemoved {
+            channel, id, group, ..
+        } => format!("inbound_sender_removed channel={channel} id={id} group={group}"),
         // A hook id, a tool and a decision.
         SessionEvent::HookDispatched { .. } => debug_summary(event),
         // A hook id and an error.
@@ -1250,6 +1279,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
             Cause::ConnectionPanicked | Cause::SpawnFailed => "error",
         },
         SessionEvent::AdapterRestartAbandoned { .. } => "error",
+        SessionEvent::InboundSenderRefused { .. } => "warn",
         SessionEvent::McpServerExited {
             stopped_by_proxy, ..
         } => {

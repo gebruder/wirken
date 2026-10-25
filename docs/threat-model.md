@@ -76,13 +76,18 @@ What the controls protect, in the order a loss matters:
    at 64M words and nesting at 64 levels (`crates/ipc/src/transport.rs`). After
    the handshake the gateway pins the adapter's channel and rejects a frame
    declaring another (`adapter.channel_mismatch`, `message_loop`,
-   `crates/cli/src/commands/run.rs`). Approval decisions arriving as frames are
+   `crates/cli/src/commands/run.rs`). A message frame then passes the inbound
+   sender allowlist (`InboundGate::check`,
+   `crates/gateway/src/sender_registry.rs`): unless its sender or its
+   conversation is an entry for the channel, it is dropped before the scan,
+   the inbound row, the session and the route, and an `inbound_sender_refused`
+   row is written, rate-limited per sender and per lane. Approval decisions arriving as frames are
    checked against the gateway-side approver allowlist keyed by
    `(adapter_id, user_id)` (`crates/gateway/src/approver_registry.rs`). In
    scope: platform-controlled bytes, forwarded by an adapter working as
-   written, that make the gateway misroute a message, cross a channel, resolve
-   an approval for someone not on the allowlist, crash or allocate without
-   bound.
+   written, that make the gateway misroute a message, cross a channel, admit a
+   sender the sender allowlist does not list, resolve an approval for someone
+   not on the approver allowlist, crash or allocate without bound.
 
 3. **Model output to tools.** Tool names and arguments the model emits are
    attacker-influenced through anything that reaches its context: messages,
@@ -229,8 +234,11 @@ Who holds what, so a precondition can be compared with an impact:
   described the call accurately is not a finding.
 - **Another OS user** holds nothing. The sockets are mode 0600 and every
   connection takes a signed handshake.
-- **A chat user** can send messages and attachments on their channel. They
-  hold no permission authority. Permissions key on `(action_key, agent_id)`,
+- **A chat user** reaches the agent only when the sender allowlist admits
+  them, by their own platform id or by a group entry for the conversation they
+  write in; anyone else's messages are dropped at the gateway before they
+  reach a session. An admitted chat user can send messages and attachments on
+  their channel. They hold no permission authority. Permissions key on `(action_key, agent_id)`,
   not on the sender: a Tier 2 grant one user's prompt earned applies to every
   user of that agent on that channel until it expires
   ([permissions-and-identity.md](permissions-and-identity.md)). Approvals on
@@ -402,6 +410,8 @@ inputs above.
   - A channel crossing without the Tier 3 prompt: a frame, session, memory
     entry or credential reaching another channel; an approval resolved by a
     user not on the allowlist.
+  - A message from a sender the sender allowlist does not admit reaching the
+    injection scan, an inbound row, a session, the router or an agent.
   - A modified, deleted or reordered chain that verification passes; an
     action with no row; a forged chain head accepted.
   - `exec`, `http_request` or an MCP server reaching a host its grant or

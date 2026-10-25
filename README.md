@@ -169,7 +169,8 @@ graph TD
     Channels -- "UDS · Ed25519 · Cap'n Proto" --> Registry[Adapter Registry]
 
     subgraph Wirken
-        Registry --> Detect[Injection Detection]
+        Registry --> Senders["Sender Allowlist · adapter channels"]
+        Senders --> Detect[Injection Detection]
         Detect --> Router
         Router -- "resolve" --> Factory[AgentFactory]
         Factory --> Agent[Agent Runtime]

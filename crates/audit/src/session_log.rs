@@ -1864,6 +1864,46 @@ pub enum SessionEvent {
         last_cause: AdapterRestartCause,
         last_exit: String,
     },
+    /// The gateway dropped an inbound message before it created a
+    /// session or routed it, because neither its sender nor its
+    /// conversation is an allowed entry for its channel. Written on
+    /// the [`INBOUND_SENDERS_SESSION`] lane. The message text is not
+    /// on the row.
+    ///
+    /// Rows are rate-limited per sender and per lane, so a flood
+    /// cannot fill the chain. A row counts what was dropped without
+    /// one since the previous row: `suppressed` for this sender,
+    /// `suppressed_on_lane` for every sender. Forwarded to a SIEM by
+    /// default.
+    InboundSenderRefused {
+        channel: String,
+        adapter_id: String,
+        sender_id: String,
+        conversation_id: String,
+        reason: InboundRefusalReason,
+        suppressed: u64,
+        suppressed_on_lane: u64,
+    },
+    /// `wirken senders add` admitted `id` on `channel`: a platform
+    /// sender id, or with `group` a group, room or space id that
+    /// admits every member. Written on the
+    /// [`OPERATOR_SENDERS_SESSION`] lane and sealed by a chain head.
+    InboundSenderAdded {
+        channel: String,
+        id: String,
+        group: bool,
+        label: String,
+        /// The local operator, as `wirken permissions` records it.
+        added_by: String,
+    },
+    /// `wirken senders remove` took `id` off `channel`. Same lane and
+    /// sealing as [`Self::InboundSenderAdded`].
+    InboundSenderRemoved {
+        channel: String,
+        id: String,
+        group: bool,
+        removed_by: String,
+    },
     /// One veto-hook invocation completed. Emitted per hook per tool
     /// call (in series, in `hook_registry` insertion order). The
     /// invocation runs after Wirken's tier and per-skill permission
@@ -2360,6 +2400,27 @@ pub const ADAPTER_LIFECYCLE_SESSION: &str = "gateway-adapters";
 /// requests on: [`SessionEvent::McpCredentialRefetched`]. The proxy
 /// writes its own rows on `gateway-mcp`; each lane has one writer.
 pub const MCP_CREDENTIAL_SESSION: &str = "gateway-mcp-credentials";
+
+/// The session lane the gateway writes inbound refusals on:
+/// [`SessionEvent::InboundSenderRefused`].
+pub const INBOUND_SENDERS_SESSION: &str = "gateway-inbound";
+
+/// The session lane `wirken senders` writes allowlist changes on:
+/// [`SessionEvent::InboundSenderAdded`] and
+/// [`SessionEvent::InboundSenderRemoved`]. The gateway only reads the
+/// allowlist, so each lane keeps one writer.
+pub const OPERATOR_SENDERS_SESSION: &str = "gateway-senders";
+
+/// Why the gateway dropped an inbound message at the sender check.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundRefusalReason {
+    /// Neither the sender nor the conversation is an allowed entry
+    /// for the channel. An empty allowlist refuses everyone.
+    NotAllowed,
+    /// The allowlist could not be read, so nobody was admitted.
+    AllowlistUnreadable,
+}
 
 /// Why an adapter's gateway connection ended.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

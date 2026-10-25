@@ -27,6 +27,7 @@ pub mod rate_limit;
 pub mod release_keys;
 pub mod router;
 pub mod scheduler;
+pub mod sender_registry;
 pub mod session;
 pub mod skill_registry;
 pub mod sse_approval_registry;

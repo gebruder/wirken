@@ -46,7 +46,7 @@ def exec_classifier() -> int:
         if not line.strip():
             continue
         entry = json.loads(line)
-        if entry["tool"] != "exec":
+        if entry.get("tool") != "exec":
             continue
         command = entry["args"].get("command")
         if isinstance(command, str):

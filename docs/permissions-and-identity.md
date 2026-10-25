@@ -234,7 +234,7 @@ approve? [y/N]:
 The command is cleaned the same way, so it occupies its one line and no
 other.
 
-### Platform sender identity is audited, not authorized
+### Platform sender identity is admitted and audited, not authenticated
 
 Each channel adapter extracts the platform sender identity on every inbound message and forwards it to the gateway over the IPC frame:
 
@@ -242,9 +242,11 @@ Each channel adapter extracts the platform sender identity on every inbound mess
 - **Teams**: Bot Framework activity sender id. The `tenant_id` is also captured in the message metadata JSON.
 - **Matrix**: MXID (e.g., `@alice:matrix.example.com`).
 
-The gateway writes this to the audit log as the `actor_id` of the `message.inbound` event, with `actor_kind: user` (`AuditEvent` in `crates/audit/src/event.rs`, written by `handle_action` in `crates/cli/src/commands/run.rs`). The full event carries actor kind and id, action, target, channel, conversation id (as session), and a detail payload.
+Before anything else, the gateway checks the sender id, and the conversation id, against the inbound sender allowlist for the channel (`InboundGate::check`, `crates/gateway/src/sender_registry.rs`, called from `handle_action` in `crates/cli/src/commands/run.rs`). A message neither admits is dropped before the injection scan, the inbound row, the session and the route, and leaves an `inbound_sender_refused` row instead; a channel with no entries admits nobody. The id is the one the platform reported to the adapter: Wirken trusts the platform's account and does not authenticate the person behind it. See [channels.md](channels.md#who-reaches-the-agent).
 
-The sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id)` only. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:cat` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, until that grant's window closes. Only Tier 2 keys are stored, so this covers the allowlisted inspection verbs, `file:<path>` and `cross-conversation`; a Tier 3 verb such as `terraform` prompts on every call whoever ran it first.
+For an admitted message, the gateway writes this to the audit log as the `actor_id` of the `message.inbound` event, with `actor_kind: user` (`AuditEvent` in `crates/audit/src/event.rs`, written by `handle_action` in `crates/cli/src/commands/run.rs`). The full event carries actor kind and id, action, target, channel, conversation id (as session), and a detail payload.
+
+Past admission, the sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id)` only. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:cat` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, until that grant's window closes. Only Tier 2 keys are stored, so this covers the allowlisted inspection verbs, `file:<path>` and `cross-conversation`; a Tier 3 verb such as `terraform` prompts on every call whoever ran it first.
 
 This is a real gap if the deployment uses one shared agent across a team. Workarounds today:
 
@@ -311,5 +313,5 @@ string. Nothing on the wire to the provider carries it.
 
 Wirken is not an identity provider. It issues no identities, manages no user
 accounts, and has no login flow. There is no SAML, no OIDC, no SCIM. Platform
-sender identity is recorded on every inbound audit event and is not an
-identity Wirken authenticates.
+sender identity is checked against the inbound sender allowlist and recorded
+on every inbound audit event; it is not an identity Wirken authenticates.

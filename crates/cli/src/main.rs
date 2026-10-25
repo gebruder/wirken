@@ -117,6 +117,14 @@ enum Commands {
     #[command(subcommand)]
     Approvers(ApproverCommands),
 
+    /// Manage the inbound sender allowlist. The gateway drops every
+    /// message on a channel adapter unless its sender, or the group it
+    /// arrived in, is admitted here; a channel with no entries admits
+    /// nobody. Changes apply to the next message, without a restart,
+    /// and each is a row on the signed `gateway-senders` lane.
+    #[command(subcommand)]
+    Senders(SenderCommands),
+
     /// Manage agents
     #[command(subcommand)]
     Agents(AgentCommands),
@@ -1173,6 +1181,45 @@ enum ApproverCommands {
 }
 
 #[derive(Subcommand)]
+enum SenderCommands {
+    /// Admit a sender on a channel. `sender_id` is the platform id
+    /// the adapter reports, exactly: a Telegram numeric user id, a
+    /// Slack or Discord user id, an E.164 number on Signal, the
+    /// number without `+` on WhatsApp, a Matrix MXID, a Teams user
+    /// id, a Google Chat `users/<id>` path, an iMessage handle. `wirken senders
+    /// refused` shows the ids it has dropped.
+    Add {
+        /// telegram, discord, slack, teams, matrix, whatsapp, signal,
+        /// google-chat or imessage.
+        channel: String,
+        sender_id: String,
+        /// The id is a group, room, channel or space id instead, and
+        /// admits every member of it.
+        #[arg(long)]
+        group: bool,
+        /// A label for `list`. Not matched on.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Take an entry off a channel. Pass `--group` for a group entry.
+    Remove {
+        channel: String,
+        sender_id: String,
+        #[arg(long)]
+        group: bool,
+    },
+    /// List the admitted entries, optionally for one channel.
+    List { channel: Option<String> },
+    /// List the most recent inbound messages the gateway refused,
+    /// newest first, with the sender and conversation ids to admit.
+    Refused {
+        channel: Option<String>,
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum HookCommands {
     /// Register an external hook process by its Ed25519 public key.
     /// The hook process must run independently and connect to
@@ -1556,6 +1603,23 @@ async fn main() -> Result<()> {
             } => commands::approvers::set_chat(&adapter_id, &conversation_id),
             ApproverCommands::ShowChat { adapter_id } => {
                 commands::approvers::show_chat(&adapter_id)
+            }
+        },
+        Commands::Senders(cmd) => match cmd {
+            SenderCommands::Add {
+                channel,
+                sender_id,
+                group,
+                label,
+            } => commands::senders::add(&channel, &sender_id, group, label.as_deref()),
+            SenderCommands::Remove {
+                channel,
+                sender_id,
+                group,
+            } => commands::senders::remove(&channel, &sender_id, group),
+            SenderCommands::List { channel } => commands::senders::list(channel.as_deref()),
+            SenderCommands::Refused { channel, limit } => {
+                commands::senders::refused(channel.as_deref(), limit)
             }
         },
         Commands::Hooks(cmd) => match cmd {

@@ -36,8 +36,8 @@ with a distinct name. Tokens are loaded once when the adapter process starts,
 so a rotated one takes effect at the next start: a restart of `wirken run`, or
 an automatic restart after the adapter's gateway connection ends. No command
 restarts one adapter on demand. Permissions are scoped per agent, not per
-platform user: any sender who can reach the bot inherits every Tier 2 approval
-that agent already holds. See
+platform user: every admitted sender inherits every Tier 2 approval that agent
+already holds. See
 [permissions-and-identity.md](permissions-and-identity.md).
 
 **Restarts.** `wirken run` restarts an adapter process when it exits or its
@@ -48,6 +48,48 @@ repeat only when it is the latest message in its conversation and carries a
 platform message id: it answers from the session log instead of running a
 second turn, and the stored reply is sent again. A repeat of an older message
 runs a new turn.
+
+## Who reaches the agent
+
+The gateway admits an inbound message only when its sender, or the group it
+arrived in, is on the sender allowlist for its channel. It checks before it
+scans the message, writes the inbound row, creates a session or routes it, so
+a message from anyone else reaches none of those, and no agent. A channel with
+no entries drops every message, including on an install upgraded from a
+release without the allowlist; `wirken run` warns at startup for each such
+channel.
+
+```bash
+wirken senders refused telegram          # ids the gateway has dropped
+wirken senders add telegram 123456789 --label me
+wirken senders add slack C0123ABCD --group --label team-channel
+wirken senders list
+wirken senders remove telegram 123456789
+```
+
+To find your own id, send the bot a message: it is dropped, and
+`wirken senders refused` shows the sender and conversation ids it carried.
+A sender entry matches the platform sender id the adapter reports, exactly:
+a Telegram user id, a Slack or Discord user id, a Teams user id, a Google Chat
+`users/<id>` path, a Matrix MXID, the E.164 number (or UUID) on Signal, the number without
+`+` on WhatsApp, the iMessage handle. A `--group` entry matches the
+conversation id instead (a Telegram group chat id, a Slack or Discord channel,
+a Matrix room, a Signal group, a Google Chat space, an iMessage chat) and
+admits every member of it; membership of that conversation is then the access
+control. An entry applies on its own channel only.
+
+The allowlist is read on every message: an add or a remove applies to the
+next message, with no restart. Each change is an `inbound_sender_added` or
+`inbound_sender_removed` row on the signed `gateway-senders` lane, and each
+drop an `inbound_sender_refused` row on `gateway-inbound`, at most one per
+sender a minute and thirty a minute in all, with the rest counted on the next
+row ([audit-cli.md](audit-cli.md)). `wirken senders` refuses to run inside a
+Wirken `exec`.
+
+The sender id is the one the platform reports to the adapter. Wirken does not
+authenticate the person behind it; an entry trusts the platform's account.
+The terminal (`wirken chat`) and webchat are not channels the allowlist
+applies to.
 
 ## Telegram
 
@@ -310,10 +352,14 @@ as sync messages from your other device, and wirken drops them unless
 
 ### The allowlist is the perimeter
 
-The adapter is fail-closed: an empty allowlist drops every inbound message.
-There is no per-sender authentication in Signal, so anyone who has your linked
-number can send to it, and the allowlist is the entire authorization boundary.
-Everything past it is inside the trust boundary.
+Signal has two allowlists, and a message must pass both. The adapter's own
+(`signal-allowed-senders`, below) drops a message before it leaves the
+adapter process; the gateway's sender allowlist
+([Who reaches the agent](#who-reaches-the-agent)) drops it before anything
+else happens to it. Both are fail-closed: an empty one drops every inbound
+message. There is no per-sender authentication in Signal, so anyone who has
+your linked number can send to it, and these allowlists are the entire
+authorization boundary. Everything past them is inside the trust boundary.
 
 - **1:1 DMs**: the sender's E.164 number must be listed.
 - **Group messages**: the Signal group ID must be listed. The sender inside

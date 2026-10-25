@@ -21,6 +21,12 @@
 //! - `refused` the classifier places the name nowhere, so the runtime's
 //!   default-deny (`UnknownTool`, Tier 3) is what runs.
 //!
+//! A line with an `inbound` object instead of a `tool` is a message
+//! arriving from a channel adapter, replayed through the gateway's
+//! inbound sender check (`InboundGate::check`) against an allowlist
+//! holding the line's `allow` entries. It expects `dropped` or
+//! `admitted`.
+//!
 //! A mismatch is a finding about the gate, not a stale expectation.
 //! The rule for this file is that a line is changed only when the
 //! classification it asserts was wrong to begin with, and never to
@@ -38,6 +44,7 @@ use wirken_agent::tool::{ToolConfig, ToolRegistry, tool_to_action};
 use wirken_gateway::permissions::{
     Action, ApprovalScope, PermissionCheck, PermissionStore, PermissionTier,
 };
+use wirken_gateway::sender_registry::{InboundGate, SenderRegistry, Verdict};
 
 const CORPUS: &str = include_str!("../../../tests/hostile/corpus.jsonl");
 
@@ -210,6 +217,10 @@ fn parse_corpus(fixtures: &Path) -> Vec<Entry> {
             "{CORPUS_PATH}:{lineno}: duplicate id '{id}'. Ids name a case in a \
              failure message, so two lines sharing one make the message ambiguous."
         );
+        // Replayed by `hostile_inbound_lines_replay_to_their_expected_outcome`.
+        if entry.get("inbound").is_some() {
+            continue;
+        }
         let expect_raw = text(&entry, "expect", lineno);
         let expect = Outcome::parse(&expect_raw).unwrap_or_else(|| {
             panic!(
@@ -274,6 +285,115 @@ fn report(entry: &Entry, observed: Outcome, action: &Action, detail: &str) -> St
         key = action.approval_key(),
         why = entry.why,
     )
+}
+
+/// One inbound line: a message and the allowlist it meets.
+struct InboundEntry {
+    lineno: usize,
+    id: String,
+    channel: String,
+    sender_id: String,
+    conversation_id: String,
+    /// `(channel, id, group)`.
+    allow: Vec<(String, String, bool)>,
+    admitted: bool,
+    why: String,
+}
+
+fn parse_inbound() -> Vec<InboundEntry> {
+    let mut entries = Vec::new();
+    for (idx, raw) in CORPUS.lines().enumerate() {
+        let lineno = idx + 1;
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let entry: Value = serde_json::from_str(raw)
+            .unwrap_or_else(|e| panic!("{CORPUS_PATH}:{lineno}: not valid JSON: {e}"));
+        let Some(inbound) = entry.get("inbound") else {
+            continue;
+        };
+        let admitted = match text(&entry, "expect", lineno).as_str() {
+            "dropped" => false,
+            "admitted" => true,
+            other => panic!(
+                "{CORPUS_PATH}:{lineno}: unknown inbound expect '{other}'. \
+                 One of: dropped, admitted."
+            ),
+        };
+        let allow = field(&entry, "allow", lineno)
+            .as_array()
+            .unwrap_or_else(|| panic!("{CORPUS_PATH}:{lineno}: 'allow' must be an array"))
+            .iter()
+            .map(|a| {
+                (
+                    text(a, "channel", lineno),
+                    text(a, "id", lineno),
+                    field(a, "group", lineno)
+                        .as_bool()
+                        .unwrap_or_else(|| panic!("{CORPUS_PATH}:{lineno}: 'group' is a bool")),
+                )
+            })
+            .collect();
+        let why = text(&entry, "why", lineno);
+        assert!(
+            !why.trim().is_empty(),
+            "{CORPUS_PATH}:{lineno}: 'why' may not be empty."
+        );
+        entries.push(InboundEntry {
+            lineno,
+            id: text(&entry, "id", lineno),
+            channel: text(inbound, "channel", lineno),
+            sender_id: text(inbound, "sender_id", lineno),
+            conversation_id: text(inbound, "conversation_id", lineno),
+            allow,
+            admitted,
+            why,
+        });
+    }
+    entries
+}
+
+/// Replay every inbound line, each against a fresh allowlist.
+#[test]
+fn hostile_inbound_lines_replay_to_their_expected_outcome() {
+    let entries = parse_inbound();
+    assert!(
+        entries.iter().any(|e| !e.admitted),
+        "{CORPUS_PATH} has no inbound line expected to be dropped"
+    );
+    for entry in entries {
+        let scratch = tempfile::tempdir().unwrap();
+        let registry = SenderRegistry::open(&scratch.path().join("senders.db")).unwrap();
+        for (channel, id, group) in &entry.allow {
+            registry.add(channel, id, *group, "").unwrap();
+        }
+        let gate = InboundGate::new(registry, Default::default());
+        let verdict = gate.check(&entry.channel, &entry.sender_id, &entry.conversation_id);
+        let admitted = matches!(verdict, Verdict::Admitted(_));
+        assert_eq!(
+            admitted,
+            entry.admitted,
+            "\n{CORPUS_PATH}:{lineno}  id={id}\n  \
+             message   {channel} sender={sender} conversation={conversation}\n  \
+             allow     {allow:?}\n  \
+             expected  {expected}\n  \
+             observed  {verdict:?}\n  \
+             why       {why}\n\n\
+             This is a finding about the gate, not a stale expectation.\n",
+            lineno = entry.lineno,
+            id = entry.id,
+            channel = entry.channel,
+            sender = entry.sender_id,
+            conversation = entry.conversation_id,
+            allow = entry.allow,
+            expected = if entry.admitted {
+                "admitted"
+            } else {
+                "dropped"
+            },
+            why = entry.why,
+        );
+    }
 }
 
 /// Replay every line. Fails on the first mismatch.

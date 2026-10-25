@@ -340,6 +340,26 @@ wirken approvers list [--adapter A]
 wirken approvers remove <ADAPTER_ID> <USER_ID>
 ```
 
+## wirken senders
+
+The inbound sender allowlist: who may drive an agent through a channel
+adapter. A channel with no entries drops every message on it.
+
+```bash
+wirken senders add <CHANNEL> <SENDER_ID> [--group] [--label NAME]
+wirken senders remove <CHANNEL> <SENDER_ID> [--group]
+wirken senders list [CHANNEL]
+wirken senders refused [CHANNEL] [-n N]
+```
+
+`CHANNEL` is one of `telegram`, `discord`, `slack`, `teams`, `matrix`,
+`whatsapp`, `signal`, `google-chat`, `imessage`. With `--group` the id is a
+conversation id and admits every member of it. `refused` lists the most recent
+messages the gateway dropped, newest first, with the sender and conversation
+ids to admit. Changes apply to the next message without a restart. Every
+subcommand refuses inside a Wirken `exec`. See
+[channels.md](channels.md#who-reaches-the-agent).
+
 ## wirken cron
 
 ```bash

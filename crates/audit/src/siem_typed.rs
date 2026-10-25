@@ -230,6 +230,11 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::AdapterDisconnect { .. } => true,
         SessionEvent::AdapterRestart { .. } => true,
         SessionEvent::AdapterRestartAbandoned { .. } => true,
+        // A gate outcome that turned a message away before any session.
+        SessionEvent::InboundSenderRefused { .. } => true,
+        // Who can drive an agent changed, by the operator's hand.
+        SessionEvent::InboundSenderAdded { .. } => true,
+        SessionEvent::InboundSenderRemoved { .. } => true,
         // The tool-call hook's verdict; EgressHookDispatched is the egress
         // half the set carries.
         SessionEvent::HookDispatched { .. } => false,
@@ -306,6 +311,9 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::AdapterDisconnect { .. } => "adapter_disconnect",
         SessionEvent::AdapterRestart { .. } => "adapter_restart",
         SessionEvent::AdapterRestartAbandoned { .. } => "adapter_restart_abandoned",
+        SessionEvent::InboundSenderRefused { .. } => "inbound_sender_refused",
+        SessionEvent::InboundSenderAdded { .. } => "inbound_sender_added",
+        SessionEvent::InboundSenderRemoved { .. } => "inbound_sender_removed",
         SessionEvent::HookDispatched { .. } => "hook_dispatched",
         SessionEvent::HookCrashed { .. } => "hook_crashed",
         SessionEvent::McpEntryVerified { .. } => "mcp_entry_verified",

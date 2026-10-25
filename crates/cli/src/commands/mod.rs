@@ -36,6 +36,7 @@ pub mod plan_sign_in;
 pub mod preset;
 pub mod provider_pick;
 pub mod run;
+pub mod senders;
 pub mod service;
 pub mod session;
 pub mod setup;

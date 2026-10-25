@@ -3820,6 +3820,28 @@ fn every_session_event() -> Vec<SessionEvent> {
             last_cause: crate::session_log::AdapterRestartCause::ProcessExited,
             last_exit: String::new(),
         },
+        SessionEvent::InboundSenderRefused {
+            channel: String::new(),
+            adapter_id: String::new(),
+            sender_id: String::new(),
+            conversation_id: String::new(),
+            reason: crate::session_log::InboundRefusalReason::NotAllowed,
+            suppressed: 0,
+            suppressed_on_lane: 0,
+        },
+        SessionEvent::InboundSenderAdded {
+            channel: String::new(),
+            id: String::new(),
+            group: false,
+            label: String::new(),
+            added_by: String::new(),
+        },
+        SessionEvent::InboundSenderRemoved {
+            channel: String::new(),
+            id: String::new(),
+            group: false,
+            removed_by: String::new(),
+        },
     ]
 }
 
@@ -3878,6 +3900,9 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::AdapterDisconnect { .. } => "AdapterDisconnect",
         SessionEvent::AdapterRestart { .. } => "AdapterRestart",
         SessionEvent::AdapterRestartAbandoned { .. } => "AdapterRestartAbandoned",
+        SessionEvent::InboundSenderRefused { .. } => "InboundSenderRefused",
+        SessionEvent::InboundSenderAdded { .. } => "InboundSenderAdded",
+        SessionEvent::InboundSenderRemoved { .. } => "InboundSenderRemoved",
         SessionEvent::HookDispatched { .. } => "HookDispatched",
         SessionEvent::EgressHookDispatched { .. } => "EgressHookDispatched",
         SessionEvent::ToolOutputRedacted { .. } => "ToolOutputRedacted",
@@ -3904,7 +3929,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 70;
+const SESSION_EVENT_VARIANTS: usize = 73;
 
 /// The list covers the enum.
 #[test]

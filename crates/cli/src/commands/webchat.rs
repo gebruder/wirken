@@ -4439,6 +4439,11 @@ pub fn session_events(
             SessionEvent::AdapterDisconnect { .. } => None,
             SessionEvent::AdapterRestart { .. } => None,
             SessionEvent::AdapterRestartAbandoned { .. } => None,
+            // Written on the gateway's own lanes, never in a conversation:
+            // a message dropped before it had one, and allowlist edits.
+            SessionEvent::InboundSenderRefused { .. } => None,
+            SessionEvent::InboundSenderAdded { .. } => None,
+            SessionEvent::InboundSenderRemoved { .. } => None,
             // The hook's verdict is already the outcome on the tool row it
             // gated.
             SessionEvent::HookDispatched { .. } => None,
