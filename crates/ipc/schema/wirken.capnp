@@ -370,12 +370,9 @@ struct ApprovalDecision {
   # actor field. Falls back to the user id when the display is
   # empty.
   actorDisplay @3 :Text;
-  # The platform conversation the decision arrived in: the chat,
-  # channel, room, space or DM the button press, reaction or text
-  # command came from, in the same encoding the adapter uses for an
-  # inbound message's `conversationId`. The gateway takes a decision
-  # only from the conversation the approval prompt was posted in, and
-  # an empty value matches none.
+  # Conversation the decision came from, encoded as an inbound
+  # message's `conversationId`. Must match the prompt's conversation;
+  # empty matches none.
   conversationId @4 :Text;
 }
 

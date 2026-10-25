@@ -271,9 +271,7 @@ pub struct ApprovalPress {
     /// `user_name` when the event omits a display name; keeps the
     /// audit row's display field populated.
     pub user_display: String,
-    /// The space the press came from (`"spaces/<id>"`), the
-    /// conversation the gateway checks the decision against. Empty
-    /// when the event names none.
+    /// Space the press came from (`"spaces/<id>"`); empty if none.
     pub space_name: String,
     /// Cross-adapter encoded approval payload from
     /// `event.common.parameters.wirken_approval`. Decoded at the

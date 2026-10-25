@@ -578,15 +578,8 @@ pub fn build_webhook_typed_request(
     Ok((body, signature))
 }
 
-/// Who decided an approval request, by the identity the deciding
-/// surface verified: `approved_by` on an approval, `denied_by` on a
-/// denial someone made. This is the decider column the paragraph on
-/// [`extract_identity_for_sentinel`] leaves room for, and it holds a
-/// verified identity only: a channel approver's platform user id,
-/// `operator:<key id>`, `webchat:<label>`, or a surface label when the
-/// surface names no one. Display labels, refused callers, revokers and
-/// import actors are not decisions anyone was verified for, and stay in
-/// the payload.
+/// The verified decider of an approval (`approved_by`) or denial
+/// (`denied_by`). Display labels stay in the payload.
 fn extract_decider(event: &crate::session_log::SessionEvent) -> Option<String> {
     use crate::session_log::SessionEvent;
     match event {
@@ -609,8 +602,7 @@ fn extract_decider(event: &crate::session_log::SessionEvent) -> Option<String> {
 ///
 /// Those labels are not lost: the Sentinel and webhook envelopes
 /// carry the typed payload beside these columns, so every field stays
-/// on the row. Who decided an approval request has a column of its
-/// own, [`extract_decider`], holding a verified identity only.
+/// on the row. The decider is [`extract_decider`].
 fn extract_identity_for_sentinel(
     event: &crate::session_log::SessionEvent,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -885,25 +877,20 @@ fn extract_identity_for_sentinel(
         | SessionEvent::AdapterRestartAbandoned { adapter_id, .. } => {
             (Some(adapter_id.clone()), None, None)
         }
-        // The adapter that delivered the message and the sender it
-        // named. No agent: the message was dropped before routing.
+        // Adapter and sender; no agent, dropped before routing.
         SessionEvent::InboundSenderRefused {
             adapter_id,
             sender_id,
             ..
         } => (Some(adapter_id.clone()), Some(sender_id.clone()), None),
-        // An operator's command outside any conversation. The entry is
-        // not a sender who acted, and `added_by` / `removed_by` are
-        // operator labels, off the sender column like `revoked_by`.
+        // Operator command; `added_by` / `removed_by` stay off the
+        // sender column.
         SessionEvent::InboundSenderAdded { .. } => (None, None, None),
         SessionEvent::InboundSenderRemoved { .. } => (None, None, None),
-        // An operator's command outside any conversation. The approver
-        // is not a sender who acted, and `added_by` / `removed_by` are
-        // operator labels.
+        // Operator command; no sender.
         SessionEvent::ApproverAdded { .. } => (None, None, None),
         SessionEvent::ApproverRemoved { .. } => (None, None, None),
         SessionEvent::ApprovalChatSet { .. } => (None, None, None),
-        // An operator's command refused outside any conversation.
         SessionEvent::OperatorCommandRefused { .. } => (None, None, None),
         // A hook id and an error; none of the three.
         SessionEvent::HookCrashed { .. } => (None, None, None),
@@ -1770,9 +1757,6 @@ mod identity_tests {
         }
     }
 
-    /// The Sentinel row's `DecidedBy` holds the verified decider of an
-    /// approval or a denial, and nothing else: not the display label
-    /// beside it, not the requester, and on no other kind of row.
     #[test]
     fn decided_by_is_the_verified_decider_only() {
         use crate::session_log::{

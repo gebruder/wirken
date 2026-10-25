@@ -28,10 +28,9 @@ use crate::error::PermissionDenialContext;
 
 /// Outcome of a single approval-gate consult.
 ///
-/// `actor` carries who decided, as the surface verified them
-/// ([`DecisionActor`]): its `id` becomes the audit row's
-/// `approved_by` / `denied_by` and its `display`, when there is one,
-/// `approver_display` / `denier_display`. When `None`, the
+/// `actor` ([`DecisionActor`]): `id` becomes `approved_by` /
+/// `denied_by`, `display` becomes `approver_display` /
+/// `denier_display`. When `None`, the
 /// runtime falls back to the surface-derived default label
 /// (`"stdin"`, `"cli"`, etc.) so the chain always has a non-empty
 /// value. The structured `approved_via` / `denied_via` field on the

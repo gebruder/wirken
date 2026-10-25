@@ -1636,11 +1636,6 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     }
 
     // --- Inbound sender allowlist ---
-    //
-    // Every adapter's messages pass it before anything else happens
-    // to them; a channel with no entries admits nobody. Read from
-    // SQLite on every message, so `wirken senders` changes apply
-    // without a restart.
     let inbound_gate = Arc::new(wirken_gateway::sender_registry::InboundGate::new(
         wirken_gateway::sender_registry::SenderRegistry::open(&cfg.senders_db_path())
             .context("Failed to open the inbound sender allowlist")?,
@@ -2837,8 +2832,7 @@ async fn supervise_adapter<S>(
     }
 }
 
-/// Append an inbound refusal to the gateway's inbound lane. A failed
-/// write is logged, not returned: the message is dropped either way.
+/// Append an inbound refusal row. A failed write is logged.
 fn record_inbound_refusal(session_log: &dyn wirken_audit::SessionLog, event: SessionEvent) {
     let lane = session_log.handle_for(SessionId::new(wirken_audit::INBOUND_SENDERS_SESSION));
     if let Err(e) = session_log.append(&lane, TrustLevel::System, event) {
@@ -2846,9 +2840,7 @@ fn record_inbound_refusal(session_log: &dyn wirken_audit::SessionLog, event: Ses
     }
 }
 
-/// The channels in `channels` the allowlist applies to and has no
-/// entry for, each once, in order. An allowlist that cannot be read
-/// counts as empty.
+/// Allowlisted channels in `channels` with no entry, deduplicated.
 fn channels_without_senders(
     registry: &wirken_gateway::sender_registry::SenderRegistry,
     channels: impl IntoIterator<Item = String>,
@@ -3651,8 +3643,6 @@ fn process_permissions_request(
         } => {
             let result = queue.resolve(
                 &request_id,
-                // The key is the verified identity; the name beside it is
-                // the client's to give.
                 PendingDecision::Allow {
                     actor: Some(
                         wirken_gateway::pending_approvals::DecisionActor::new(format!(
@@ -4376,10 +4366,8 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                 return Ok(());
             }
 
-            // The sender check, before the scan, the inbound row, the
-            // session and the route: a message nobody admitted reaches
-            // none of them. The terminal is out of it; its sender is
-            // the operator key the handshake verified.
+            // Sender allowlist, before anything else. The terminal is
+            // authenticated by the operator key and skips it.
             let admitted = match conn.terminal {
                 Some(_) => None,
                 None => match conn.inbound_gate.check(
@@ -4391,9 +4379,7 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                         Some(admission)
                     }
                     wirken_gateway::sender_registry::Verdict::Refused { reason, record } => {
-                        // At info when the drop gets a row, which the
-                        // limiter bounds; the rest at debug, so a flood
-                        // does not flood the log either.
+                        // Info when the drop gets a row, debug otherwise.
                         if record.is_some() {
                             tracing::info!(
                                 channel = authenticated_channel.as_str(),
@@ -4465,8 +4451,7 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                     serde_json::Value::from(platform_ts_millis),
                 );
             }
-            // Which allowlist entry let it in: the sender's own, or the
-            // group it arrived in. Absent on the terminal.
+            // Which entry admitted it: sender or group.
             if let Some(admission) = admitted
                 && let Some(obj) = inbound_detail.as_object_mut()
             {
@@ -4793,12 +4778,8 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                 );
                 return Ok(());
             }
-            // An approver decides on the channel the request was raised
-            // on, in the conversation its prompt was posted in, and
-            // nowhere else, as webchat and the terminal already hold.
-            // An approver on one adapter who learned another channel's
-            // request id, or a press from a chat the prompt was never
-            // sent to, is refused with a row.
+            // The decision must come from the request's channel and the
+            // conversation its prompt was posted in.
             if terminal_actor.is_none()
                 && let Some(reason) = adapter_decision_misplaced(
                     pending_approvals,
@@ -4824,11 +4805,8 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                 );
                 return Ok(());
             }
-            // The verified platform user id is the actor, and the row's
-            // `approved_by` / `denied_by`. The display name rides beside
-            // it: the wire-supplied one, which the adapter took from the
-            // platform and anyone can set, else the one the operator gave
-            // the registry. It never stands in for the id.
+            // The verified user id is the actor; the display name, from the
+            // wire or the registry, is kept beside it.
             let actor = if let Some(actor) = terminal_actor {
                 actor
             } else {
@@ -5011,11 +4989,8 @@ fn turn_event_frame(
 /// that turn spawned. Anything else is refused and counted, as a
 /// decision from the wrong conversation is on any channel. `None` means
 /// the decision is dropped.
-/// Why a channel adapter's decision does not belong to the request it
-/// names, or `None` when it does: the request was raised on
-/// `channel`, and its prompt was posted in `conversation`. A request
-/// the queue no longer holds is left to the resolve, which answers it
-/// as unknown.
+/// Why an adapter's decision does not belong to the request, or `None`.
+/// An unknown request is left to the resolve.
 fn adapter_decision_misplaced(
     queue: &wirken_gateway::pending_approvals::PendingApprovalQueue,
     request_id: &str,
@@ -5073,8 +5048,7 @@ fn terminal_decision_actor(
         );
         return None;
     }
-    // The key is the verified identity, the gateway's; the display name
-    // is the client's to give, as the name is on the permissions socket.
+    // The operator key is the identity; the client's name is the display.
     let display = wirken_agent::ansi::strip_control_sequences(user_display);
     Some(wirken_gateway::pending_approvals::DecisionActor::new(caller).with_display(display.trim()))
 }
@@ -5122,8 +5096,7 @@ enum InboundAction {
         decision: ApprovalDecisionKind,
         user_id: String,
         user_display: String,
-        /// The conversation the decision arrived in, empty when the
-        /// adapter named none.
+        /// The conversation the decision arrived in; may be empty.
         conversation_id: String,
     },
     /// Adapter could not deliver the outbound approval message.
@@ -7679,10 +7652,8 @@ mod same_connection_approval_tests {
     }
 }
 
-/// Channel approvals end to end through the gateway's own connection
-/// handler, on a Signal adapter whose approval group is `group-1` and
-/// whose one approver is `U1`: what the signed row records about who
-/// decided, and who is refused.
+/// Channel approvals through the gateway's connection handler: a Signal
+/// adapter, approval group `group-1`, approver `U1`.
 #[cfg(all(test, unix))]
 mod approver_removed_mid_run_tests {
     use super::*;
@@ -7690,8 +7661,6 @@ mod approver_removed_mid_run_tests {
     use wirken_audit::SqliteSessionLog;
     use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, test_pair};
 
-    /// Long enough for an answer that is read to land well inside it,
-    /// short enough that a refused request's wait ends the test.
     const GATE_TIMEOUT: Duration = Duration::from_secs(3);
     const TURN_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -7810,9 +7779,8 @@ mod approver_removed_mid_run_tests {
             }
         }
 
-        /// Send a message from U1 and answer every approval request it
-        /// raises with `answer`, until the turn's reply, which is
-        /// returned.
+        /// Send a message from U1, answer its approval requests, return the
+        /// reply.
         async fn turn(&mut self, id: &str, answer: &Answer) -> String {
             let mut msg = capnp::message::Builder::new_default();
             {
@@ -7856,8 +7824,7 @@ mod approver_removed_mid_run_tests {
                         d.set_request_id(&request_id);
                         d.set_actor_user_id(answer.user);
                         d.set_actor_display(answer.display);
-                        // From the chat the prompt was posted in, as a
-                        // press on it would be.
+                        // From the chat the prompt was posted in.
                         d.set_conversation_id(&posted_in);
                         if answer.allow {
                             d.init_decision().set_allow(());
@@ -7946,8 +7913,7 @@ mod approver_removed_mid_run_tests {
                 .unwrap()
         );
 
-        // U1 answers the next request the same way, and is refused: the
-        // gate waits out its timeout and the call does not run.
+        // Refused; the gate times out and the call does not run.
         assert_eq!(h.turn("m-2", &U1_ALLOWS).await, "Not run.");
         assert!(h.queue.is_empty(), "the refused request timed out");
         assert_eq!(
@@ -7966,9 +7932,7 @@ mod approver_removed_mid_run_tests {
         h.finish().await;
     }
 
-    /// An approver who sends a display name of their choosing is still
-    /// recorded by the id the allowlist verified; the name is kept in
-    /// its own field.
+    /// The row records the verified id, not the display name sent.
     #[tokio::test]
     async fn an_approver_spoofing_a_display_name_is_recorded_by_their_true_id() {
         let mut h = Harness::start(exec_then("Done.")).await;
@@ -8027,8 +7991,7 @@ mod approver_removed_mid_run_tests {
             self.writer.write_message(&decision).await.unwrap();
         }
 
-        /// Wait for the `n`th refusal row and return each refusal's
-        /// `(caller, reason)`.
+        /// Wait for `n` refusal rows; return `(caller, reason)` of each.
         async fn refusals(&self, n: usize) -> Vec<(Option<String>, Option<String>)> {
             let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
             loop {
@@ -8046,8 +8009,7 @@ mod approver_removed_mid_run_tests {
         }
     }
 
-    /// An approver on the Signal adapter cannot decide a request raised
-    /// on Telegram, however it learned the id.
+    /// A Signal approver cannot decide a Telegram request.
     #[tokio::test]
     async fn a_cross_channel_decision_is_refused() {
         let mut h = Harness::start(Vec::new()).await;
@@ -8061,9 +8023,7 @@ mod approver_removed_mid_run_tests {
         h.finish().await;
     }
 
-    /// On its own channel, a decision counts only from the chat the
-    /// prompt was posted in; one from another chat, or naming none, is
-    /// refused, and the right one then resolves the request.
+    /// Only the prompt's conversation can decide the request.
     #[tokio::test]
     async fn a_decision_from_another_conversation_is_refused() {
         let mut h = Harness::start(Vec::new()).await;
@@ -8094,8 +8054,7 @@ mod approver_removed_mid_run_tests {
         h.finish().await;
     }
 
-    /// A request whose prompt went to no channel is decided on no
-    /// channel adapter.
+    /// A request not prompted on a channel is not decided by an adapter.
     #[tokio::test]
     async fn a_request_prompted_elsewhere_is_not_decided_by_an_adapter() {
         let mut h = Harness::start(Vec::new()).await;
@@ -8109,7 +8068,7 @@ mod approver_removed_mid_run_tests {
         h.finish().await;
     }
 
-    /// A denial records who declined, by verified id, and their display.
+    /// A denial records who declined.
     #[tokio::test]
     async fn a_deny_records_its_actor() {
         let mut h = Harness::start(exec_then("Not run.")).await;
@@ -8132,11 +8091,7 @@ mod approver_removed_mid_run_tests {
     }
 }
 
-/// The inbound sender check end to end through the gateway's own
-/// connection handler, on each channel a bundled adapter delivers: a
-/// message from a sender nobody admitted is dropped before the scan,
-/// the inbound row, the session and the route, and leaves one refusal
-/// row; an admitted sender is answered.
+/// The inbound sender check through the gateway's connection handler.
 #[cfg(all(test, unix))]
 mod inbound_sender_gate_tests {
     use super::*;
@@ -8147,8 +8102,7 @@ mod inbound_sender_gate_tests {
 
     const DEADLINE: Duration = Duration::from_secs(15);
 
-    /// One adapter connected to a gateway whose model answers each
-    /// request with `"hello"`, and what the gateway wrote.
+    /// One adapter connected to a gateway whose model answers `"hello"`.
     struct Gateway {
         tmp: tempfile::TempDir,
         channel: &'static str,
@@ -8163,10 +8117,8 @@ mod inbound_sender_gate_tests {
     }
 
     impl Gateway {
-        /// Connect a `channel` adapter. `admit` runs on the allowlist
-        /// before the gateway opens it. `replies` is how many model
-        /// calls the test expects: a message that reached the model
-        /// past them would find no answer and the turn would fail.
+        /// Connect a `channel` adapter. `admit` seeds the allowlist;
+        /// `replies` is the number of model calls expected.
         async fn start(
             channel: &'static str,
             replies: usize,
@@ -8254,8 +8206,7 @@ mod inbound_sender_gate_tests {
             }
         }
 
-        /// The allowlist the gateway reads, opened a second time the
-        /// way `wirken senders` opens it.
+        /// A second handle on the allowlist, as `wirken senders` opens it.
         fn senders(&self) -> SenderRegistry {
             SenderRegistry::open(&self.tmp.path().join("senders.db")).unwrap()
         }
@@ -8276,9 +8227,8 @@ mod inbound_sender_gate_tests {
             self.writer.write_message(&msg).await.unwrap();
         }
 
-        /// The next outbound reply's text. Messages are handled in the
-        /// order they arrive, so once it is here every message sent
-        /// before the one it answers has been handled too.
+        /// The next reply's text. Messages are handled in order, so earlier
+        /// ones are done once it arrives.
         async fn reply(&mut self) -> String {
             tokio::time::timeout(DEADLINE, async {
                 loop {
@@ -8332,8 +8282,7 @@ mod inbound_sender_gate_tests {
             self.log.get_since(&handle, 0).unwrap().len()
         }
 
-        /// Close the connection and return the `message.inbound` rows'
-        /// actors, in order.
+        /// Close the connection; return the `message.inbound` actors.
         async fn finish(self) -> Vec<String> {
             let Self {
                 tmp,
@@ -8478,8 +8427,7 @@ mod inbound_sender_gate_tests {
         );
     }
 
-    /// The startup warning names each bound channel with no entry once,
-    /// and nothing it does not enforce on.
+    /// The startup warning lists each empty allowlisted channel once.
     #[test]
     fn the_startup_warning_names_each_empty_channel_once() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -8589,8 +8537,7 @@ mod terminal_channel_tests {
                     )
                     .unwrap(),
                 ),
-                // Empty: the terminal is not a channel the allowlist
-                // applies to, so every test here passes with nobody on it.
+                // Empty: the terminal skips the allowlist.
                 Arc::new(test_inbound_gate(tmp.path(), &[])),
                 Arc::new(HashMap::new()),
                 super::super::connection_tasks::AdapterIdSlot::default(),

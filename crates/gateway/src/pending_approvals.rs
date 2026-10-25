@@ -31,16 +31,9 @@ use chrono::{DateTime, Utc};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-/// Who decided an approval request.
-///
-/// `id` is the identity the surface verified: a channel approver's
-/// platform user id, checked against the approver allowlist; a
-/// terminal or CLI operator's `operator:<key id>`, checked by the
-/// operator-key handshake; a webchat login's `webchat:<label>`. It is
-/// what the audit row's `approved_by` or `denied_by` holds. `display`
-/// is a human label the surface supplied beside it, a platform display
-/// name or the local user, which anyone can set and nothing checks; it
-/// is recorded in a field of its own and never in place of the id.
+/// Who decided an approval request. `id` is the verified identity
+/// (`approved_by` / `denied_by`); `display` is an unverified label,
+/// recorded separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionActor {
     pub id: String,
@@ -67,10 +60,7 @@ impl DecisionActor {
 /// Decision communicated from the queue back to the awaiting gate.
 /// Same three-valued shape as `agent::approval_gate::ApprovalOutcome`;
 /// the gate maps `Allow ↔ Approved`, `Deny ↔ Denied`, `Timeout`
-/// passes through. `actor` is who decided, as the surface verified
-/// them; the gate threads it into `ApprovalOutcome.actor` so the audit
-/// row's `approved_by` or `denied_by` carries that identity rather than
-/// the surface-derived default.
+/// passes through. `actor` becomes `ApprovalOutcome.actor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingDecision {
     Allow {
@@ -107,11 +97,8 @@ pub struct PendingRequest {
     /// `host`). `None` for other tools.
     pub exec_location: Option<String>,
     pub exec_runtime: Option<String>,
-    /// The conversation the approval prompt was posted in, for a gate
-    /// that posts it on a channel (the configured approval chat on
-    /// Telegram and Signal). A decision arriving through a channel
-    /// adapter must come from this conversation; `None` means the
-    /// prompt went to no channel, and no adapter's decision resolves it.
+    /// Conversation the prompt was posted in. An adapter decision must
+    /// come from it; `None` accepts no adapter decision.
     pub prompt_conversation: Option<String>,
 }
 

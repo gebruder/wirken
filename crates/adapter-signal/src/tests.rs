@@ -1345,8 +1345,6 @@ async fn adapter_drops_messages_from_unknown_senders() {
     fake_signal.abort();
 }
 
-/// Note to Self is a sync-sent envelope whose destination is the
-/// account's own number; a sync send to anyone else is not.
 #[test]
 fn note_to_self_is_a_sync_send_to_the_own_number() {
     use crate::adapter::is_note_to_self;
@@ -1372,18 +1370,13 @@ fn note_to_self_is_a_sync_send_to_the_own_number() {
         &envelope(fixtures::sync_sent_subscribed(1, 1, own, "hi")),
         ""
     ));
-    // A data message from the own number is not a sync send at all.
+    // Not a sync send.
     assert!(!is_note_to_self(
         &envelope(fixtures::data_message_from(1, 1, "hi", own)),
         own
     ));
 }
 
-/// The operator messaging their own number from their phone, with
-/// signal-cli linked to that number and the number on the allowlist,
-/// reaches the gateway by default, attributed to the own number. A
-/// message the operator sends from the phone to someone else does not,
-/// without `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS`.
 #[tokio::test]
 async fn a_note_to_self_from_an_allowlisted_own_number_reaches_the_gateway() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1409,8 +1402,7 @@ async fn a_note_to_self_from_an_allowlisted_own_number_reaches_the_gateway() {
             .write_all(fixtures::subscribe_response(req_id, sub_id).as_bytes())
             .await
             .unwrap();
-        // First the operator writing to a contact, which must stay with
-        // the phone; then Note to Self, which must reach the agent.
+        // A send to a contact (dropped), then Note to Self (forwarded).
         for (ts, destination, text) in [
             (1711900000001, fixtures::FIXTURE_SOURCE, "to a contact"),
             (1711900000002, fixtures::FIXTURE_ACCOUNT, "note to self"),

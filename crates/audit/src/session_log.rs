@@ -1000,13 +1000,11 @@ pub enum SessionEvent {
         /// `None` for other tools and for denials no operator saw.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exec_location: Option<ExecLocation>,
-        /// Who declined, as the deciding surface verified them, in the
-        /// same terms as `PermissionApproved.approved_by`. Absent on a
-        /// denial no one made: a policy, tier or timeout denial.
+        /// Verified identity of who declined, as for `approved_by`.
+        /// Absent on a policy, tier or timeout denial.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         denied_by: Option<String>,
-        /// The decider's display label as the surface supplied it.
-        /// Unverified.
+        /// Unverified display name of who declined.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         denier_display: Option<String>,
     },
@@ -1020,24 +1018,15 @@ pub enum SessionEvent {
     /// `session_id` is populated iff `scope == Session`; the field
     /// is omitted from the wire shape otherwise so SIEM consumers
     /// pivoting on it do not match persisted approvals by accident.
-    /// `approved_by` is the identity the deciding surface verified: a
-    /// channel approver's platform user id (checked against the
-    /// approver allowlist), `operator:<key id>` from the terminal or
-    /// the permissions socket, `webchat:<label>` for a webchat login,
-    /// the surface label (`stdin`, `cli`) when the surface names no one,
-    /// or for a grant written by `wirken permissions approve` the local
-    /// OS user. `approver_display` is the label the surface supplied
-    /// beside it, which nothing checks. Before 3.0.0 a channel
-    /// approval's `approved_by` held that display label instead; the
-    /// session's `session_start` chain head names the build that wrote
-    /// the row.
+    /// `approved_by` is the verified identity of who approved: a channel
+    /// approver's platform user id, `operator:<key id>`, `webchat:<label>`,
+    /// a surface label, or the local OS user for a CLI grant. Rows written
+    /// before 3.0.0 hold the display name here.
     PermissionApproved {
         action_key: String,
         agent_id: String,
         approved_by: String,
-        /// The decider's display label as the surface supplied it, a
-        /// platform display name or the local user. Unverified; absent
-        /// when the surface gave none.
+        /// Unverified display name of who approved.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approver_display: Option<String>,
         #[serde(default)]
@@ -1886,17 +1875,10 @@ pub enum SessionEvent {
         last_cause: AdapterRestartCause,
         last_exit: String,
     },
-    /// The gateway dropped an inbound message before it created a
-    /// session or routed it, because neither its sender nor its
-    /// conversation is an allowed entry for its channel. Written on
-    /// the [`INBOUND_SENDERS_SESSION`] lane. The message text is not
-    /// on the row.
-    ///
-    /// Rows are rate-limited per sender and per lane, so a flood
-    /// cannot fill the chain. A row counts what was dropped without
-    /// one since the previous row: `suppressed` for this sender,
-    /// `suppressed_on_lane` for every sender. Forwarded to a SIEM by
-    /// default.
+    /// An inbound message dropped at the sender allowlist, on the
+    /// [`INBOUND_SENDERS_SESSION`] lane. Rate-limited; `suppressed` and
+    /// `suppressed_on_lane` count drops since the previous row for this
+    /// sender and for the lane.
     InboundSenderRefused {
         channel: String,
         adapter_id: String,
@@ -1906,10 +1888,7 @@ pub enum SessionEvent {
         suppressed: u64,
         suppressed_on_lane: u64,
     },
-    /// `wirken senders add` admitted `id` on `channel`: a platform
-    /// sender id, or with `group` a group, room or space id that
-    /// admits every member. Written on the
-    /// [`OPERATOR_SENDERS_SESSION`] lane and sealed by a chain head.
+    /// `wirken senders add`, on the [`OPERATOR_SENDERS_SESSION`] lane.
     InboundSenderAdded {
         channel: String,
         id: String,
@@ -1918,17 +1897,14 @@ pub enum SessionEvent {
         /// The local operator, as `wirken permissions` records it.
         added_by: String,
     },
-    /// `wirken senders remove` took `id` off `channel`. Same lane and
-    /// sealing as [`Self::InboundSenderAdded`].
+    /// `wirken senders remove`, on the same lane.
     InboundSenderRemoved {
         channel: String,
         id: String,
         group: bool,
         removed_by: String,
     },
-    /// `wirken approvers add` let `user_id` answer approvals on
-    /// `adapter_id`. Written on the [`OPERATOR_APPROVERS_SESSION`] lane
-    /// and sealed by a chain head.
+    /// `wirken approvers add`, on the [`OPERATOR_APPROVERS_SESSION`] lane.
     ApproverAdded {
         adapter_id: String,
         user_id: String,
@@ -1936,16 +1912,13 @@ pub enum SessionEvent {
         /// The local operator, as `wirken permissions` records it.
         added_by: String,
     },
-    /// `wirken approvers remove` took `user_id` off `adapter_id`. Same
-    /// lane and sealing as [`Self::ApproverAdded`].
+    /// `wirken approvers remove`, on the same lane.
     ApproverRemoved {
         adapter_id: String,
         user_id: String,
         removed_by: String,
     },
-    /// `wirken approvers set-chat` changed where `adapter_id`'s approval
-    /// prompts are sent. `previous_conversation_id` is absent when none
-    /// was set. Same lane and sealing as [`Self::ApproverAdded`].
+    /// `wirken approvers set-chat`, on the same lane.
     ApprovalChatSet {
         adapter_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1953,21 +1926,12 @@ pub enum SessionEvent {
         conversation_id: String,
         set_by: String,
     },
-    /// An allowlist command refused before it opened anything, because
-    /// it ran inside a Wirken `exec` (the `WIRKEN_EXEC` marker was
-    /// set). Written on that command's own lane,
-    /// [`OPERATOR_SENDERS_SESSION`] for `wirken senders` and
-    /// [`OPERATOR_APPROVERS_SESSION`] for `wirken approvers`, and sealed by
-    /// a chain head, like [`Self::UpdateRefused`], so an operator can
-    /// see that a model tried to change or read who may drive or
-    /// approve for an agent through a command approved for something
-    /// else. Forwarded to a SIEM by default.
+    /// `wirken senders` or `wirken approvers` refused inside a Wirken
+    /// `exec`, on that command's lane.
     OperatorCommandRefused {
         /// `senders` or `approvers`.
         command: String,
-        /// The subcommand asked for: `add`, `remove`, `list`, and
-        /// `refused` for senders or `set-chat` and `show-chat` for
-        /// approvers.
+        /// The subcommand.
         invocation: String,
         /// Why it was refused: `inside_exec`.
         reason: String,
@@ -2115,13 +2079,9 @@ pub enum SessionEvent {
     /// refused it. Names the credential, never its value. Written on
     /// the [`MCP_CREDENTIAL_SESSION`] lane.
     McpCredentialRefetched { credential: String },
-    /// The gateway refreshed an MCP OAuth credential and did not write
-    /// the result, because the vault entry no longer held the refresh
-    /// token the refresh started from: `reason` is `removed` when the
-    /// entry was gone, `reauthorized` when it held another
-    /// authorization, which is kept, or `unreadable`. Names the
-    /// credential, never a value. Written on the
-    /// [`MCP_CREDENTIAL_SESSION`] lane.
+    /// A refreshed MCP OAuth credential not written because the entry
+    /// changed during the refresh. `reason`: `removed`, `reauthorized` or
+    /// `unreadable`. On the [`MCP_CREDENTIAL_SESSION`] lane.
     McpCredentialRefreshDiscarded { credential: String, reason: String },
     /// Content contained a stored secret and was refused before it
     /// went further: a tool's output before it entered the
@@ -2477,29 +2437,22 @@ pub const ADAPTER_LIFECYCLE_SESSION: &str = "gateway-adapters";
 /// writes its own rows on `gateway-mcp`; each lane has one writer.
 pub const MCP_CREDENTIAL_SESSION: &str = "gateway-mcp-credentials";
 
-/// The session lane the gateway writes inbound refusals on:
-/// [`SessionEvent::InboundSenderRefused`].
+/// Lane for [`SessionEvent::InboundSenderRefused`].
 pub const INBOUND_SENDERS_SESSION: &str = "gateway-inbound";
 
-/// The session lane `wirken senders` writes allowlist changes on:
-/// [`SessionEvent::InboundSenderAdded`] and
-/// [`SessionEvent::InboundSenderRemoved`]. The gateway only reads the
-/// allowlist, so each lane keeps one writer.
+/// Lane for `wirken senders` changes.
 pub const OPERATOR_SENDERS_SESSION: &str = "gateway-senders";
 
-/// The session lane `wirken approvers` writes approver allowlist changes
-/// on: [`SessionEvent::ApproverAdded`] and
-/// [`SessionEvent::ApproverRemoved`].
+/// Lane for `wirken approvers` changes.
 pub const OPERATOR_APPROVERS_SESSION: &str = "gateway-approvers";
 
-/// Why the gateway dropped an inbound message at the sender check.
+/// Why an inbound message was dropped at the sender allowlist.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InboundRefusalReason {
-    /// Neither the sender nor the conversation is an allowed entry
-    /// for the channel. An empty allowlist refuses everyone.
+    /// No entry matches.
     NotAllowed,
-    /// The allowlist could not be read, so nobody was admitted.
+    /// The allowlist could not be read.
     AllowlistUnreadable,
 }
 

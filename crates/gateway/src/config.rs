@@ -62,8 +62,7 @@ impl GatewayConfig {
         self.data_dir.join("adapters.db")
     }
 
-    /// The inbound sender allowlist, read by the gateway on every
-    /// message and written by `wirken senders`.
+    /// Inbound sender allowlist, written by `wirken senders`.
     pub fn senders_db_path(&self) -> PathBuf {
         self.data_dir.join("senders.db")
     }

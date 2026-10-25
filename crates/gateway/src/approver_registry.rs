@@ -11,11 +11,7 @@
 //! adapter. The adapter forwards every callback press to the
 //! gateway via the `ApprovalDecision` frame; the gateway calls
 //! `verify` against this registry before resolving the
-//! `PendingApprovalQueue`. The alternative, caching the allowlist
-//! at the adapter and validating before forwarding, would create
-//! a synchronization problem (invalidation on `remove`, sync on
-//! reconnect, race between `remove` and a button press) for no
-//! operational benefit. Single source of truth.
+//! `PendingApprovalQueue`.
 //!
 //! The approval-conversation configuration lives alongside in a
 //! sibling `adapter_approval_conversations` table keyed by
@@ -23,9 +19,8 @@
 //! TEXT (Telegram serializes its `i64` chat_id; Signal carries
 //! the base64 group_id or E.164/UUID for DM channels; other
 //! adapters whatever their conversation primitive is). Same
-//! schema-file and connection as the `approvers` table, and read
-//! the same way: on every call, so a change from the CLI's process
-//! applies without a restart.
+//! schema-file and connection as the `approvers` table, also read
+//! on every call.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -48,15 +43,8 @@ pub struct ApproverEntry {
     pub display_name: String,
 }
 
-/// SQLite-backed approver allowlist, read on every call.
-///
-/// There is no cache: `verify`, `display_name` and
-/// `approval_conversation` query the database each time, so a change
-/// `wirken approvers` makes from its own process applies to the next
-/// decision without a restart, and a removed approver cannot answer the
-/// next request. A read that fails admits nobody: `verify` answers
-/// false and `approval_conversation` none, which the channel gates
-/// already treat as fail-closed.
+/// SQLite-backed approver allowlist, read on every call so CLI changes
+/// apply without a restart. A failed read admits nobody.
 ///
 /// `Connection` is `!Sync` because rusqlite holds a `RefCell` for
 /// statement caching. Wrapping it in a `Mutex` inside the struct
@@ -66,9 +54,7 @@ pub struct ApproverRegistry {
     conn: Mutex<Connection>,
 }
 
-/// How long SQLite waits on a lock before an operation fails. The CLI
-/// writes while the gateway reads; WAL lets those run together, and
-/// this covers the brief write lock a checkpoint takes.
+/// SQLite lock wait; covers a checkpoint's write lock.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl ApproverRegistry {
@@ -140,10 +126,7 @@ impl ApproverRegistry {
     }
 
     /// True iff `(adapter_id, user_id)` is in the allowlist now.
-    /// Called by the gateway's `ApprovalDecision` handler before
-    /// resolving the queue entry. Unauthorized presses are silently
-    /// dropped at the call site; this method just answers yes/no. A
-    /// read that fails answers no.
+    /// A failed read answers false.
     pub fn verify(&self, adapter_id: &str, user_id: &str) -> bool {
         match self
             .conn()
@@ -210,9 +193,7 @@ impl ApproverRegistry {
         Ok(previous)
     }
 
-    /// Remove `adapter_id`'s approval conversation, so its gate fails
-    /// closed. Used to undo a `set-chat` whose audit row could not be
-    /// written when none was set before it.
+    /// Remove `adapter_id`'s approval conversation.
     pub fn clear_approval_conversation(&self, adapter_id: &str) -> Result<bool, GatewayError> {
         let changes = self.conn().execute(
             "DELETE FROM adapter_approval_conversations WHERE adapter_id = ?1",
@@ -222,9 +203,7 @@ impl ApproverRegistry {
     }
 
     /// Approval conversation id for `adapter_id`, or `None` when
-    /// none is configured or it could not be read. `None` triggers a
-    /// startup `tracing::warn` at `wirken run` and a fail-closed
-    /// preflight in the gate.
+    /// none is configured or the read failed.
     pub fn approval_conversation(&self, adapter_id: &str) -> Option<String> {
         match self
             .conn()
@@ -389,9 +368,6 @@ mod tests {
         assert_eq!(all.len(), 3);
     }
 
-    /// The gateway and `wirken approvers` hold separate connections. A
-    /// change from the CLI's is seen on the gateway's next read, with no
-    /// reopen.
     #[test]
     fn a_change_from_another_connection_is_seen_on_the_next_read() {
         let tmp = TempDir::new().unwrap();

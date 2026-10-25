@@ -109,21 +109,15 @@ enum Commands {
     #[command(subcommand)]
     Hooks(HookCommands),
 
-    /// Manage channel-adapter approver allowlist and per-adapter
-    /// approval chat configuration. Operators allowed to approve
-    /// tool-call requests on a given channel adapter live here;
-    /// the gateway validates every callback press against the
-    /// allowlist, reading it on every decision, so a change applies
-    /// without a restart. Each add and remove is a row on the signed
-    /// `gateway-approvers` lane. Refuses inside a Wirken `exec`.
+    /// Manage the channel approver allowlist and each adapter's
+    /// approval chat. Changes apply without a restart. Refuses inside
+    /// a Wirken `exec`.
     #[command(subcommand)]
     Approvers(ApproverCommands),
 
-    /// Manage the inbound sender allowlist. The gateway drops every
-    /// message on a channel adapter unless its sender, or the group it
-    /// arrived in, is admitted here; a channel with no entries admits
-    /// nobody. Changes apply to the next message, without a restart,
-    /// and each is a row on the signed `gateway-senders` lane.
+    /// Manage the inbound sender allowlist. A channel with no entries
+    /// admits nobody. Changes apply without a restart. Refuses inside
+    /// a Wirken `exec`.
     #[command(subcommand)]
     Senders(SenderCommands),
 
@@ -1196,9 +1190,7 @@ enum ApproverCommands {
 
 #[derive(Subcommand)]
 enum WebchatCommands {
-    /// Print a login URL for the running gateway's webchat. It carries
-    /// a one-time token that works once, within 60 seconds, and is
-    /// exchanged for a cookie; run this again for another login.
+    /// Print a one-time webchat login URL, valid for 60 seconds.
     Open {
         /// Open the URL in the default browser as well.
         #[arg(long)]

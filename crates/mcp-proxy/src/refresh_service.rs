@@ -298,13 +298,9 @@ impl RefreshService {
             .refresh(&cred)
             .await
             .map_err(|e| e.to_string())?;
-        // Write it only if the entry still holds the refresh token this
-        // refresh started from. The provider call can take seconds, and
-        // in that time the operator can remove the entry or sign it in
-        // again; an unconditional write would bring a removed entry back
-        // or put the old sign-in over the new one. The check and the
-        // write run under the vault's write lock, and only the value
-        // changes, so the entry keeps its channel and host binding.
+        // Write only if the entry still holds the refresh token this
+        // refresh started from, under the vault's write lock. Only the
+        // value changes.
         let json = Zeroizing::new(
             serde_json::to_string(&refreshed)
                 .map_err(|e| format!("serialize oauth credential: {e}"))?,
@@ -376,12 +372,11 @@ const REFRESH_WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(5
 
 /// What the refresh write found in the entry.
 enum Swap {
-    /// It held the refresh token the refresh started from; the refreshed
-    /// credential replaced it.
+    /// Held the starting refresh token; replaced.
     Written,
-    /// It held another authorization, which stays.
+    /// Held another authorization; kept.
     Reauthorized(Box<OAuthCredential>),
-    /// It no longer parsed as an OAuth credential.
+    /// No longer an OAuth credential.
     Unreadable,
 }
 
@@ -862,15 +857,13 @@ mod tests {
         assert!(other.rows().is_empty());
     }
 
-    /// What a provider stand-in does to the vault while the refresh it
-    /// was asked for is in flight.
+    /// Vault change made while the refresh is in flight.
     enum Meanwhile {
         Remove,
         Reauthorize,
     }
 
-    /// Answers a refresh after changing the vault under it, the way an
-    /// operator's `wirken mcp` command would during a slow provider call.
+    /// Provider stand-in that applies a `Meanwhile` before answering.
     struct Interfering {
         store: Arc<std::sync::Mutex<CredentialStore>>,
         meanwhile: Meanwhile,
@@ -909,8 +902,7 @@ mod tests {
         }
     }
 
-    /// A refresh service over a vault holding an expired credential,
-    /// refreshing through a stand-in that does `meanwhile` first.
+    /// Refresh service over an expired credential and that stand-in.
     fn interfered(
         meanwhile: Meanwhile,
     ) -> (

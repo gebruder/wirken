@@ -4493,8 +4493,7 @@ impl Agent {
         match outcome {
             Some(crate::approval_gate::ApprovalOutcome::Approved { actor }) => {
                 if let Some(src) = source.clone() {
-                    // The verified identity, or the surface's own label
-                    // when the surface names no one.
+                    // Verified identity, else the surface label.
                     let approved_by = actor
                         .as_ref()
                         .map(|a| a.id.clone())
@@ -4560,9 +4559,7 @@ impl Agent {
                 }
             }
             Some(crate::approval_gate::ApprovalOutcome::Denied { reason, actor }) => {
-                // Who declined, in the same terms as an approval's
-                // `approved_by`: the verified identity, or the surface's
-                // own label when the surface names no one.
+                // Verified identity, else the surface label.
                 let denied_by = actor
                     .as_ref()
                     .map(|a| a.id.clone())

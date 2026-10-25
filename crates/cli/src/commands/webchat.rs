@@ -514,8 +514,7 @@ const HTML: &str = r#"<!DOCTYPE html>
 </div>
 <script>
 'use strict';
-// Every API call takes the login cookie. A 401 means this browser has
-// none, or one from an earlier gateway start: say how to log in.
+// Show the login banner on a 401.
 const loginBanner = document.getElementById('login-banner');
 const apiFetch = window.fetch.bind(window);
 window.fetch = async (...args) => {
@@ -2640,10 +2639,7 @@ pub async fn serve(
 ) -> Result<()> {
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     let cfg = super::config();
-    // A fresh session token every start, written 0600 for `wirken
-    // webchat open` and never logged. Without the file nobody can log
-    // in, so a failure to write it stops webchat rather than serving a
-    // page every API call would refuse.
+    // New session token per start; webchat does not start without the file.
     let auth = Arc::new(super::webchat_auth::WebchatAuth::generate());
     auth.write_file(&cfg.data_dir, port)
         .map_err(|e| anyhow::anyhow!("write the webchat credential: {e}"))?;
@@ -2749,8 +2745,7 @@ struct Shared {
     /// The bound port, which the preflight checks `Origin` and `Host`
     /// against.
     port: u16,
-    /// The credential every `/api` route takes: a login's cookie, or
-    /// the session token as a bearer. See [`super::webchat_auth`].
+    /// `/api` credentials.
     auth: Arc<super::webchat_auth::WebchatAuth>,
     /// The gateway's config, read once at startup. Every route that
     /// reaches a database reaches it through this, so a test can
@@ -2815,14 +2810,10 @@ async fn route(req: &Request<'_>, shared: &Shared) -> Response {
     }
 }
 
-/// Headers every webchat response carries, so no other page can frame
-/// it: `frame-ancestors 'none'` for browsers that read CSP, and
-/// `X-Frame-Options: DENY` for those that do not. A page that could
-/// frame this one could overlay it and trick a click on an approval.
+/// Anti-framing headers on every response.
 const FRAME_PROTECTION: &str =
     "Content-Security-Policy: frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\n";
 
-/// `response` with [`FRAME_PROTECTION`] after its status line.
 fn with_frame_protection(response: String) -> String {
     match response.split_once("\r\n") {
         Some((status, rest)) => format!("{status}\r\n{FRAME_PROTECTION}{rest}"),
@@ -2830,8 +2821,7 @@ fn with_frame_protection(response: String) -> String {
     }
 }
 
-/// The head of a chat turn's event stream, which [`run_turn`] writes
-/// itself.
+/// Status line and headers for a turn's event stream.
 fn turn_stream_head() -> String {
     with_frame_protection(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
@@ -2840,7 +2830,6 @@ fn turn_stream_head() -> String {
     )
 }
 
-/// Route one request; [`route`] adds the frame headers to the answer.
 async fn dispatch(req: &Request<'_>, shared: &Shared) -> Response {
     match (req.method, req.path) {
         ("GET", "/") => return route_page(),
@@ -2849,8 +2838,7 @@ async fn dispatch(req: &Request<'_>, shared: &Shared) -> Response {
         ("POST", "/api/login-tokens") => return route_login_token(req, shared),
         _ => {}
     }
-    // Every other route is under `/api` and takes a credential, checked
-    // before the route does anything. A path that is not is no route.
+    // Every other route is under `/api` and requires a credential.
     if !req.path.starts_with("/api/") {
         return not_found();
     }
@@ -2877,7 +2865,6 @@ async fn dispatch(req: &Request<'_>, shared: &Shared) -> Response {
     }
 }
 
-/// The answer to an `/api` request with no valid credential.
 fn unauthorized() -> String {
     let body = r#"{"error":"not logged in: run `wirken webchat open` on the gateway host"}"#;
     format!(
@@ -2887,11 +2874,8 @@ fn unauthorized() -> String {
     )
 }
 
-/// `GET /login?token=<login token>` exchanges a one-time login token
-/// for a session cookie and redirects to the page, so the token leaves
-/// the address bar. A token that is unknown, used or expired gets a
-/// 403. The `Host` check applies, and `Origin` when the browser sends
-/// one; nothing about this answer is cached or sent on as a referrer.
+/// `GET /login?token=`: redeem a login token for a cookie and redirect
+/// to `/`.
 fn route_login(req: &Request<'_>, shared: &Shared) -> Response {
     if let Some(resp) = api_preflight(req.raw, shared.port, false) {
         return Response::Complete(resp);
@@ -2922,9 +2906,7 @@ fn route_login(req: &Request<'_>, shared: &Shared) -> Response {
     }
 }
 
-/// `POST /api/login-tokens` mints a one-time login token for `wirken
-/// webchat open`. It takes the session token as a bearer and nothing
-/// else: a logged-in browser cannot mint logins.
+/// `POST /api/login-tokens`: mint a login token. Bearer only.
 fn route_login_token(req: &Request<'_>, shared: &Shared) -> Response {
     if let Some(resp) = api_preflight(req.raw, shared.port, false) {
         return Response::Complete(resp);
@@ -3497,8 +3479,6 @@ async fn route_decision(
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
-    // The actor names the login that decided, `webchat:<label>`, or
-    // `webchat:bearer` for a caller holding the session token.
     let actor = caller.actor();
     let decision = match decision_str {
         "allow" => PendingDecision::Allow {
@@ -4587,12 +4567,11 @@ pub fn session_events(
             SessionEvent::AdapterDisconnect { .. } => None,
             SessionEvent::AdapterRestart { .. } => None,
             SessionEvent::AdapterRestartAbandoned { .. } => None,
-            // Written on the gateway's own lanes, never in a conversation:
-            // a message dropped before it had one, and allowlist edits.
+            // Gateway lanes, not conversations.
             SessionEvent::InboundSenderRefused { .. } => None,
             SessionEvent::InboundSenderAdded { .. } => None,
             SessionEvent::InboundSenderRemoved { .. } => None,
-            // Written on the approvers lane, never in a conversation.
+            // Approvers lane, not a conversation.
             SessionEvent::ApproverAdded { .. } => None,
             SessionEvent::ApproverRemoved { .. } => None,
             SessionEvent::ApprovalChatSet { .. } => None,
@@ -8901,8 +8880,7 @@ mod tests {
         )
     }
 
-    /// The same, carrying the session token as a bearer, which every
-    /// `/api` route takes.
+    /// With the session token as a bearer.
     fn request_with_headers(line: &str, headers: &str, body: &str) -> String {
         request_with_credential(
             line,
@@ -8911,8 +8889,7 @@ mod tests {
         )
     }
 
-    /// A request with exactly `headers`: no credential unless they
-    /// carry one.
+    /// With exactly `headers`.
     fn request_with_credential(line: &str, headers: &str, body: &str) -> String {
         format!(
             "{line} HTTP/1.1\r\n{headers}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -9839,7 +9816,6 @@ mod tests {
         }
     }
 
-    /// The full response text, for a route that answers in one piece.
     fn complete(resp: &Response) -> &str {
         match resp {
             Response::Complete(text) => text,
@@ -9859,14 +9835,12 @@ mod tests {
             })
     }
 
-    /// Loopback `Host` and a matching `Origin`, as the page sends them,
-    /// with no credential.
+    /// Page headers, no credential.
     fn page_headers() -> String {
         format!("Host: 127.0.0.1:{TEST_PORT}\r\nOrigin: http://127.0.0.1:{TEST_PORT}")
     }
 
-    /// Every `/api` route the router names, with a body each would
-    /// accept, so a refusal can only come from the missing credential.
+    /// Every `/api` route, with a valid body.
     fn every_api_route() -> Vec<(&'static str, &'static str, &'static str)> {
         vec![
             (
@@ -9900,8 +9874,7 @@ mod tests {
         ]
     }
 
-    /// Log in through the routes: mint with the bearer, redeem at
-    /// `/login`. Returns the cookie value and the redirect response.
+    /// Log in; returns the cookie and the redirect response.
     async fn log_in(routes: &Routes) -> (String, String) {
         let minted = routes.call(&request("POST /api/login-tokens", "")).await;
         let (head, body) = answered(&minted);
@@ -9923,8 +9896,6 @@ mod tests {
         (cookie, text)
     }
 
-    /// No `/api` route answers without a credential, or with a wrong
-    /// one. Forcing the check open fails this test.
     #[tokio::test]
     async fn every_api_route_refuses_without_a_credential() {
         let routes = Routes::open();
@@ -9952,8 +9923,6 @@ mod tests {
         }
     }
 
-    /// The session token in a query string is no credential, on an
-    /// `/api` route or at `/login`.
     #[tokio::test]
     async fn the_session_token_in_a_query_string_is_refused() {
         let routes = Routes::open();
@@ -9981,9 +9950,6 @@ mod tests {
         assert!(header_of(text, "set-cookie").is_none());
     }
 
-    /// The bearer and a login's cookie each pass. The login redirects
-    /// to the page with nothing of the token left in the address, and
-    /// its answer is neither cached nor sent on as a referrer.
     #[tokio::test]
     async fn a_correct_cookie_and_a_correct_bearer_each_pass() {
         let routes = Routes::open();
@@ -10012,7 +9978,6 @@ mod tests {
         assert!(complete(&resp).starts_with("HTTP/1.1 200 OK"));
     }
 
-    /// A login token works once.
     #[tokio::test]
     async fn a_second_use_of_a_login_token_is_refused() {
         let routes = Routes::open();
@@ -10031,7 +9996,6 @@ mod tests {
         assert!(header_of(text, "set-cookie").is_none());
     }
 
-    /// A login token left unused past its lifetime is refused.
     #[tokio::test]
     async fn an_expired_login_token_is_refused() {
         let routes = Routes::open();
@@ -10051,7 +10015,6 @@ mod tests {
         assert!(complete(&resp).starts_with("HTTP/1.1 403"));
     }
 
-    /// `/login` takes the `Host` check: a rebinding page cannot log in.
     #[tokio::test]
     async fn a_login_from_another_host_is_refused() {
         let routes = Routes::open();
@@ -10066,8 +10029,6 @@ mod tests {
         assert!(complete(&resp).starts_with("HTTP/1.1 403"));
     }
 
-    /// A decision is recorded against the login that made it, and a
-    /// bearer's against `webchat:bearer`.
     #[tokio::test]
     async fn a_decision_names_the_login_that_made_it() {
         let routes = Routes::open();
@@ -10116,9 +10077,6 @@ mod tests {
         }
     }
 
-    /// Every answer, the page, the API in each of its outcomes, the
-    /// login and a miss, and the head of a turn's event stream, forbids
-    /// framing.
     #[tokio::test]
     async fn every_response_forbids_framing() {
         let routes = Routes::open();

@@ -168,8 +168,7 @@ async fn handle_callback_query(
         decision_is_allow,
         user_id,
         &user_display,
-        // The chat the pressed message is in; the gateway takes the
-        // decision only from the chat the prompt was posted to.
+        // Chat of the pressed message.
         &q.message
             .as_ref()
             .map(|m| m.chat().id.0.to_string())

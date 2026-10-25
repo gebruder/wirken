@@ -21,11 +21,9 @@
 //! - `refused` the classifier places the name nowhere, so the runtime's
 //!   default-deny (`UnknownTool`, Tier 3) is what runs.
 //!
-//! A line with an `inbound` object instead of a `tool` is a message
-//! arriving from a channel adapter, replayed through the gateway's
-//! inbound sender check (`InboundGate::check`) against an allowlist
-//! holding the line's `allow` entries. It expects `dropped` or
-//! `admitted`.
+//! A line with `inbound` instead of `tool` is replayed through
+//! `InboundGate::check` against its `allow` entries and expects
+//! `dropped` or `admitted`.
 //!
 //! A mismatch is a finding about the gate, not a stale expectation.
 //! The rule for this file is that a line is changed only when the

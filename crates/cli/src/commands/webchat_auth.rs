@@ -1,29 +1,12 @@
-//! Webchat's credential.
+//! Webchat credentials.
 //!
-//! The server binds 127.0.0.1, which any local process can reach, so
-//! every `/api` route takes a credential on top of the `Origin` and
-//! `Host` checks. There are three secrets, each 256 bits from the OS
-//! generator:
+//! - Session token: per gateway start, in `webchat.json` (0600), sent as a
+//!   bearer by non-browser callers.
+//! - Login token: one-time, in-memory, valid for [`LOGIN_TOKEN_TTL`];
+//!   exchanged at `/login` for a cookie.
+//! - Cookie: per login, with a public label used as the approval actor.
 //!
-//! - The **session token**, made when the gateway starts and written,
-//!   with the port, to `<data_dir>/webchat.json` at mode 0600. It is
-//!   never logged and never put in a URL. A non-browser caller sends it
-//!   as `Authorization: Bearer <token>`, and `wirken webchat open` uses
-//!   it that way to ask for a login token.
-//! - A **login token**, minted for `wirken webchat open` and carried in
-//!   the login URL it prints. `GET /login?token=...` exchanges it, once,
-//!   for a cookie and discards it: a second use is refused, and one
-//!   left unused for [`LOGIN_TOKEN_TTL`] is refused too. It is held
-//!   only in this process's memory. This is the one-time
-//!   browser-launch token Jupyter Server uses.
-//! - A **cookie secret** per login, sent `HttpOnly; SameSite=Strict`.
-//!   Each login also gets a short public label, which is what an
-//!   approval row names (`webchat:<label>`); the cookie itself never
-//!   reaches the chain.
-//!
-//! Stored secrets are kept as SHA-256 digests and compared in constant
-//! time, so neither a lookup nor a comparison takes longer for a closer
-//! guess.
+//! Secrets are stored as SHA-256 digests and compared in constant time.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -33,20 +16,19 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-/// The file under the data dir holding the port and the session token.
+/// Port and session token, under the data dir.
 pub const LOGIN_FILE: &str = "webchat.json";
 
-/// The cookie a login sets.
+/// Login cookie name.
 pub const COOKIE: &str = "wirken_webchat";
 
-/// How long a login token stays redeemable.
+/// Login token lifetime.
 pub const LOGIN_TOKEN_TTL: Duration = Duration::from_secs(60);
 
-/// Login tokens outstanding at once. Minting past it drops the oldest.
+/// Max outstanding login tokens.
 const MAX_LOGIN_TOKENS: usize = 16;
 
-/// Logged-in browser sessions at once. Logging in past it ends the
-/// oldest.
+/// Max browser sessions.
 const MAX_SESSIONS: usize = 32;
 
 type Digest32 = [u8; 32];
@@ -61,17 +43,17 @@ fn random_hex(bytes: usize) -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Who made an authenticated request.
+/// An authenticated caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Caller {
-    /// A browser that logged in, by its login's public label.
+    /// A logged-in browser.
     Session { label: String },
-    /// A non-browser caller holding the session token.
+    /// A session-token bearer.
     Bearer,
 }
 
 impl Caller {
-    /// The actor an approval row records.
+    /// Approval actor id.
     pub fn actor(&self) -> String {
         match self {
             Self::Session { label } => format!("webchat:{label}"),
@@ -91,7 +73,7 @@ struct State {
     sessions: VecDeque<Session>,
 }
 
-/// The webchat credential for one gateway start.
+/// Credentials for one gateway start.
 pub struct WebchatAuth {
     token: String,
     token_digest: Digest32,
@@ -99,12 +81,11 @@ pub struct WebchatAuth {
 }
 
 impl WebchatAuth {
-    /// A fresh session token.
     pub fn generate() -> Self {
         Self::with_token(random_hex(32))
     }
 
-    /// The credential for a given session token. Tests use a fixed one.
+    /// With a fixed session token.
     pub fn with_token(token: String) -> Self {
         Self {
             token_digest: digest(&token),
@@ -117,9 +98,7 @@ impl WebchatAuth {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Write the port and session token to `<data_dir>/webchat.json`,
-    /// created at mode 0600 and renamed into place, so no reader sees a
-    /// partial file or a wider mode.
+    /// Write `webchat.json` atomically at mode 0600.
     pub fn write_file(&self, data_dir: &Path, port: u16) -> std::io::Result<PathBuf> {
         let path = data_dir.join(LOGIN_FILE);
         let tmp = data_dir.join(format!(".{LOGIN_FILE}.tmp"));
@@ -142,7 +121,7 @@ impl WebchatAuth {
         Ok(path)
     }
 
-    /// Mint a login token, redeemable once within [`LOGIN_TOKEN_TTL`].
+    /// Mint a one-time login token.
     pub fn mint_login(&self, now: Instant) -> String {
         let login = random_hex(32);
         let mut state = self.state();
@@ -156,9 +135,8 @@ impl WebchatAuth {
         login
     }
 
-    /// Redeem a login token for a session. Returns the cookie value and
-    /// the session's label, or `None` for a token that is unknown,
-    /// already used or expired. The token is gone either way.
+    /// Redeem a login token; returns `(cookie, label)`. The token is
+    /// consumed either way.
     pub fn redeem_login(&self, presented: &str, now: Instant) -> Option<(String, String)> {
         let presented = digest(presented);
         let mut state = self.state();
@@ -184,9 +162,7 @@ impl WebchatAuth {
         Some((cookie, label))
     }
 
-    /// The caller a request's credential names: the session cookie, or
-    /// the session token as a bearer. Nothing else counts; in
-    /// particular a token in the query string does not.
+    /// The caller named by the cookie or bearer header, if valid.
     pub fn authenticate(&self, raw_request: &str) -> Option<Caller> {
         if let Some(bearer) = bearer_token(raw_request)
             && bool::from(digest(bearer).ct_eq(&self.token_digest))
@@ -204,15 +180,12 @@ impl WebchatAuth {
         label.map(|label| Caller::Session { label })
     }
 
-    /// Whether `raw_request` carries the session token as a bearer.
-    /// Minting a login token takes the session token itself, not a
-    /// browser session.
+    /// Whether the request carries the session token as a bearer.
     pub fn is_bearer(&self, raw_request: &str) -> bool {
         matches!(self.authenticate(raw_request), Some(Caller::Bearer))
     }
 }
 
-/// Header lines of a raw request, up to the blank line.
 fn header_lines(raw: &str) -> impl Iterator<Item = &str> {
     raw.split("\r\n")
         .skip(1)
@@ -245,7 +218,7 @@ fn cookie_value(raw: &str, name: &str) -> Option<String> {
         })
 }
 
-/// The port and session token `wirken run` wrote for this data dir.
+/// Read `webchat.json`.
 pub fn read_file(data_dir: &Path) -> anyhow::Result<(u16, String)> {
     use anyhow::Context;
     let path = data_dir.join(LOGIN_FILE);
@@ -268,9 +241,7 @@ pub fn read_file(data_dir: &Path) -> anyhow::Result<(u16, String)> {
     Ok((port, token))
 }
 
-/// `wirken webchat open`: ask the running gateway for a login token
-/// with the session token, and print the login URL; with `browser`,
-/// open it too. The URL carries only the one-time login token.
+/// `wirken webchat open`: mint a login token and print the login URL.
 pub async fn open(browser: bool) -> anyhow::Result<()> {
     use anyhow::{Context, bail};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -396,7 +367,6 @@ mod tests {
             a.authenticate(&get(&format!("Authorization: Basic {token}"))),
             None
         );
-        // The token as a cookie value is not a session.
         assert_eq!(
             a.authenticate(&get(&format!("Cookie: {COOKIE}={token}"))),
             None
@@ -439,7 +409,6 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        // Written again at the next start, still 0600.
         a.write_file(dir.path(), 18791).unwrap();
         assert_eq!(read_file(dir.path()).unwrap(), (18791, "t0ken".repeat(13)));
         assert_eq!(

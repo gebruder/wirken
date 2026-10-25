@@ -426,9 +426,6 @@ fn webhook_access_takes_the_secret_and_nothing_else() {
     );
 }
 
-/// A webhook without the secret is refused before its body is read and
-/// reaches the gateway as nothing; with the secret, the same body is
-/// forwarded.
 #[tokio::test]
 async fn a_webhook_is_forwarded_only_with_the_secret() {
     use std::sync::Arc;
@@ -484,7 +481,7 @@ async fn a_webhook_is_forwarded_only_with_the_secret() {
         );
     }
 
-    // Exactly one frame reached the gateway: the one with the secret.
+    // Only the frame with the secret was forwarded.
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), gr.read_message())
         .await
         .expect("the accepted webhook was forwarded")
@@ -795,8 +792,6 @@ fn the_approval_message_is_the_shared_card() {
     assert!(!text.contains("runtime:"), "{text}");
 }
 
-/// Every BlueBubbles API call carries the password in the query string,
-/// where its authentication middleware reads it, and not in the body.
 #[test]
 fn bluebubbles_requests_carry_the_password_in_the_query() {
     use crate::adapter::{TEXT_PATH, WEBHOOK_PATH, bluebubbles_post};

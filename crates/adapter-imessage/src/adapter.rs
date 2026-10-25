@@ -46,16 +46,13 @@ pub struct IMessageAdapter {
     bluebubbles_url: String,
     server_password: String,
     listen_port: u16,
-    /// The secret the registered webhook URL carries and every inbound
-    /// webhook must present. See [`webhook_secret`].
+    /// Required on every inbound webhook. See [`webhook_secret`].
     webhook_secret: String,
 }
 
 impl IMessageAdapter {
     /// Construct an iMessage adapter. Fails with `IMessageError::Config`
-    /// when `server_password` is empty: every BlueBubbles API call takes
-    /// it, and the webhook secret every inbound webhook must present is
-    /// derived from it ([`webhook_secret`]).
+    /// when `server_password` is empty.
     pub fn new(
         identity: AdapterIdentity,
         bluebubbles_url: String,
@@ -91,10 +88,8 @@ impl IMessageAdapter {
 
         let writer = Arc::new(Mutex::new(writer));
 
-        // Register the webhook with BlueBubbles. The URL carries the
-        // secret every inbound webhook is checked for; it is the same on
-        // every start, so BlueBubbles, which keeps one registration per
-        // URL, does not collect a new one each time.
+        // Register the webhook; the URL carries the secret and is stable
+        // across starts.
         let webhook_url = format!(
             "http://localhost:{}/webhook?secret={}",
             self.listen_port, self.webhook_secret
@@ -125,13 +120,7 @@ impl IMessageAdapter {
             heartbeat_loop(hb_writer).await;
         });
 
-        // Run HTTP webhook listener. Loopback-only by construction, and
-        // every POST must present the webhook secret: BlueBubbles posts
-        // its webhooks with only `Content-Type: application/json` (no
-        // HMAC, header or signature; `webhookService/index.ts` in
-        // bluebubbles-server), so the secret rides in the URL it was
-        // registered with, which it posts to as given. Without it any
-        // local process could post a message as any sender.
+        // Webhook listener: loopback only, secret required.
         tracing::info!(
             "Starting iMessage webhook listener on 127.0.0.1:{} (loopback-only)",
             self.listen_port
@@ -186,7 +175,7 @@ impl IMessageAdapter {
             )));
         }
 
-        // The URL less its query: the secret stays out of the log.
+        // Log without the query string.
         tracing::info!(
             "Registered webhook with BlueBubbles: {}",
             webhook_url.split('?').next().unwrap_or("")
@@ -195,17 +184,8 @@ impl IMessageAdapter {
     }
 }
 
-/// The secret the iMessage webhook URL carries: HMAC-SHA256 of a fixed
-/// label keyed by the BlueBubbles server password, hex.
-///
-/// BlueBubbles authenticates nothing on its webhooks
-/// (`packages/server/src/server/services/webhookService/index.ts`
-/// posts with only `Content-Type: application/json`), so the URL it is
-/// given is the one thing a receiver can check. Deriving the secret
-/// from the server password makes it per install and stable across
-/// restarts with no state of its own, and the one-way MAC means a copy
-/// of the URL (BlueBubbles logs it at debug level) does not give the
-/// password away. Rotating the password changes it.
+/// Webhook URL secret: hex HMAC-SHA256 of a fixed label, keyed by the
+/// server password.
 pub fn webhook_secret(server_password: &str) -> String {
     use hmac::{Hmac, KeyInit, Mac};
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(server_password.as_bytes())
@@ -218,20 +198,15 @@ pub fn webhook_secret(server_password: &str) -> String {
         .collect()
 }
 
-/// What an inbound request line is, given the webhook secret.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WebhookAccess {
-    /// `POST /webhook` with the secret.
     Accepted,
-    /// `POST /webhook` without it, or with another.
     Refused,
-    /// Not `POST /webhook` at all.
     NotFound,
 }
 
-/// Decide a request by its request line: the path must be `/webhook`
-/// and its `secret` query parameter must equal `secret`, compared in
-/// constant time.
+/// Check the request line: `POST /webhook` with a matching `secret`
+/// query parameter, compared in constant time.
 pub(crate) fn webhook_access(first_line: &str, secret: &str) -> WebhookAccess {
     use subtle::ConstantTimeEq;
     let mut parts = first_line.split_whitespace();
@@ -253,9 +228,7 @@ pub(crate) fn webhook_access(first_line: &str, secret: &str) -> WebhookAccess {
     }
 }
 
-/// Handle an incoming webhook request from BlueBubbles. The request must
-/// present the webhook secret ([`webhook_access`]); one that does not is
-/// answered 403 and its body is not read.
+/// Handle an inbound webhook. Without the secret: 403, body unread.
 pub(crate) async fn handle_webhook(
     stream: &mut tokio::net::TcpStream,
     writer: Arc<Mutex<IpcFrameWriter>>,
@@ -282,12 +255,7 @@ pub(crate) async fn handle_webhook(
             return Ok(());
         }
         WebhookAccess::Refused => {
-            // Not the value: the log names the refusal, never a secret.
-            tracing::warn!(
-                "iMessage webhook refused: missing or wrong secret. A webhook registered by \
-                 an earlier version, without the secret, stays in BlueBubbles until it is \
-                 deleted there."
-            );
+            tracing::warn!("iMessage webhook refused: missing or wrong secret");
             let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = stream.write_all(resp.as_bytes()).await;
             return Ok(());
@@ -535,18 +503,13 @@ pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields, prefix: &st
     )
 }
 
-/// BlueBubbles' route for registering a webhook (`prefix: "webhook"` in
-/// its `httpRoutes.ts`).
+/// BlueBubbles webhook registration route.
 pub(crate) const WEBHOOK_PATH: &str = "/api/v1/webhook";
 
-/// BlueBubbles' route for sending a text message.
+/// BlueBubbles send-text route.
 pub(crate) const TEXT_PATH: &str = "/api/v1/message/text";
 
-/// A POST to the BlueBubbles API at `path` with a JSON `body`. Its
-/// authentication middleware reads the server password from the query
-/// string only (`guid`, `password` or `token`, in
-/// `packages/server/src/server/api/http/api/v1/middleware/authMiddleware.ts`),
-/// so the password goes there and not in the body.
+/// POST to the BlueBubbles API; the password goes in the query string.
 pub(crate) fn bluebubbles_post(
     http: &reqwest::Client,
     bluebubbles_url: &str,
@@ -561,7 +524,6 @@ pub(crate) fn bluebubbles_post(
                 .append_pair("password", server_password);
             http.post(url).json(body)
         }
-        // Not a URL: the request fails when sent, naming why.
         Err(_) => http.post(raw).json(body),
     }
 }

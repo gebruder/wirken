@@ -1,10 +1,4 @@
-//! `wirken approvers` writes the approver allowlist the gateway reads on
-//! every decision. Each add and remove is a row on the signed
-//! `gateway-approvers` lane; every subcommand refuses under the `exec`
-//! marker and records the refusal there, so an agent's own command
-//! cannot change who may approve its calls.
-//!
-//! Driven through the binary with stdin closed.
+//! `wirken approvers`, driven through the binary with stdin closed.
 
 mod common;
 
@@ -109,8 +103,7 @@ fn add_and_remove_leave_sealed_rows_and_need_no_restart() {
         "{out}"
     );
 
-    // A Telegram group's chat id is negative, and is taken as it is.
-    // Each change is a row naming the chat it replaced.
+    // Negative Telegram group id.
     let (ok, _, err) = run(data, &["set-chat", "telegram", "-100123456789"], false);
     assert!(ok, "{err}");
     let (ok, _, err) = run(data, &["set-chat", "telegram", "-100999"], false);
@@ -146,9 +139,6 @@ fn add_and_remove_leave_sealed_rows_and_need_no_restart() {
     );
 }
 
-/// Every subcommand refuses under the exec marker before it opens the
-/// allowlist, and each refusal is an `operator_command_refused` row on
-/// the sealed lane naming what was asked for.
 #[cfg(not(windows))]
 #[test]
 fn every_subcommand_refuses_inside_a_wirken_exec() {

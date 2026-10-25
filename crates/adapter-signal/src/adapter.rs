@@ -98,14 +98,11 @@ pub struct SignalAdapter {
     phone_number: String,
     allowlist: SignalAllowlist,
     /// When false (default), `syncMessage.sentMessage` notifications are
-    /// dropped, except Note to Self: one whose destination is this
-    /// account's own number is the operator writing in their own chat
-    /// and is forwarded. When true, every one is forwarded, still
-    /// filtered by the self-echo cache. Controlled by
+    /// dropped except Note to Self. When true, all are forwarded, still
+    /// filtered by the self-echo cache.
     /// `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1`.
     forward_linked_device_sends: bool,
-    /// Set once the first linked-device send is dropped and logged at
-    /// warn; later drops log at debug.
+    /// First drop logs at warn, later ones at debug.
     warned_linked_device_drop: std::sync::atomic::AtomicBool,
     /// Cap on how long `send_message` waits for reconnect. Read once
     /// here rather than on every send, for the same reason
@@ -562,12 +559,8 @@ impl SignalAdapter {
             return;
         }
 
-        // Filter 3: linked-device-send gate. The operator sending from
-        // their phone is visible here as a SyncSent envelope. Sent to
-        // their own number (Note to Self), it is the operator writing to
-        // the agent in their own chat, and goes on to the allowlist like
-        // any message. Sent to anyone else, it is the operator talking
-        // to someone else, and is dropped unless the operator opted in.
+        // Filter 3: linked-device sends. Note to Self goes on to the
+        // allowlist; sends to anyone else are dropped unless opted in.
         if is_sync_sent
             && !self.forward_linked_device_sends
             && !is_note_to_self(envelope, &self.phone_number)
@@ -719,8 +712,7 @@ impl SignalAdapter {
             &deny_reason_wire,
             &actor_user_id,
             &actor_display,
-            // The group, or for a direct message the sender, as on an
-            // inbound message.
+            // Group id, else sender.
             inbound.group_id.as_deref().unwrap_or(&inbound.sender),
         );
         {
@@ -1122,9 +1114,8 @@ impl SignalAdapter {
     }
 }
 
-/// Whether a `syncMessage.sentMessage` envelope is Note to Self: sent by
-/// this account to its own number. Compared exactly with the number the
-/// adapter was configured with, as signal-cli writes both in E.164.
+/// A `syncMessage.sentMessage` whose destination is the own number.
+/// Exact match; both are E.164.
 pub(crate) fn is_note_to_self(envelope: &Value, own_number: &str) -> bool {
     let Some(sent) = envelope.pointer("/syncMessage/sentMessage") else {
         return false;

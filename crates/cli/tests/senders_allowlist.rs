@@ -1,9 +1,4 @@
-//! `wirken senders` writes the inbound sender allowlist the gateway
-//! reads on every message. Each add and remove is a row on the signed
-//! `gateway-senders` lane; every subcommand refuses under the `exec`
-//! marker, so an agent's own command cannot change who may drive it.
-//!
-//! Driven through the binary with stdin closed.
+//! `wirken senders`, driven through the binary with stdin closed.
 
 mod common;
 
@@ -121,8 +116,6 @@ fn add_and_remove_change_the_allowlist_and_leave_sealed_rows() {
     assert!(out.contains("every message on it is dropped"), "{out}");
 }
 
-/// A Telegram group's chat id is negative. It is taken as the id, not
-/// as a flag, and `--group` after it still applies.
 #[cfg(not(windows))]
 #[test]
 fn a_negative_group_id_is_taken_as_it_is() {
@@ -183,10 +176,6 @@ fn an_unknown_channel_or_a_padded_id_is_refused() {
     assert!(out.contains("No senders admitted on any channel"), "{out}");
 }
 
-/// Every subcommand refuses under the exec marker before it opens the
-/// allowlist, so nothing is created and nothing is admitted, and each
-/// refusal is an `operator_command_refused` row on the sealed
-/// `gateway-senders` lane naming what was asked for.
 #[cfg(not(windows))]
 #[test]
 fn every_subcommand_refuses_inside_a_wirken_exec() {
@@ -227,8 +216,6 @@ fn refusals(data: &std::path::Path) -> Vec<String> {
     .collect()
 }
 
-/// `refused` reads the gateway's refusal rows back, newest first, with
-/// the ids to admit, and filters by channel.
 #[cfg(not(windows))]
 #[test]
 fn refused_lists_the_ids_the_gateway_dropped() {

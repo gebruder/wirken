@@ -1,33 +1,11 @@
 //! Inbound sender allowlist for channel adapters.
 //!
-//! The gateway admits an inbound message only when its sender, or the
-//! group it arrived in, is an entry for its channel. It checks before
-//! it scans, records, creates a session or routes, so a message from
-//! anyone else reaches nothing past the check. A channel with no
-//! entries admits nobody.
+//! An inbound message is admitted when its sender id is a sender entry for
+//! its channel, or its conversation id is a group entry. A channel with no
+//! entries admits nobody. Ids are compared exactly.
 //!
-//! Two kinds of entry, keyed by `(channel, id)`:
-//!
-//! - a **sender** entry matches the platform sender id the adapter put
-//!   on the message (a Telegram user id, a Slack `U…` id, an E.164
-//!   number on Signal and WhatsApp, a Matrix MXID);
-//! - a **group** entry matches the conversation id instead (a Telegram
-//!   group chat id, a Slack or Discord channel id, a Matrix room, a
-//!   Signal group id, a Google Chat space) and admits every member of
-//!   it, whoever they are. Group membership is then the access control,
-//!   as it is for a Signal group in the adapter's own allowlist.
-//!
-//! A sender entry never matches a conversation id, nor a group entry a
-//! sender id, so an id that happens to be both is admitted only in the
-//! role it was added in. Ids are compared exactly: the gateway does no
-//! normalization, and the id to add is the one a refusal row recorded.
-//!
-//! The registry is read from SQLite on every message, with no cache, so
-//! `wirken senders remove` takes effect on the next message without a
-//! restart. `wirken senders` is the only writer.
-//!
-//! Refusals are recorded through [`RefusalLimiter`], which bounds how
-//! many rows a flood can write and counts the rest.
+//! The registry is read on every message, so `wirken senders` changes apply
+//! without a restart. [`RefusalLimiter`] bounds the refusal rows.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
@@ -39,9 +17,8 @@ use wirken_audit::InboundRefusalReason;
 
 use crate::error::GatewayError;
 
-/// The channels the gateway enforces the allowlist on: every channel a
-/// bundled adapter delivers. The terminal and webchat take their own
-/// authentication and are not channels an entry can name.
+/// Channels the allowlist applies to. The terminal and webchat are not
+/// among them.
 pub const CHANNELS: [&str; 9] = [
     "telegram",
     "discord",
@@ -54,9 +31,7 @@ pub const CHANNELS: [&str; 9] = [
     "imessage",
 ];
 
-/// How long SQLite waits on a lock before an operation fails. The CLI
-/// writes while the gateway reads; WAL lets those run together, and
-/// this covers the brief write lock a checkpoint takes.
+/// How long SQLite waits on a lock held by another connection.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Refuse a channel no bundled adapter delivers.
@@ -71,8 +46,8 @@ pub fn validate_channel(channel: &str) -> Result<(), GatewayError> {
     }
 }
 
-/// Refuse an id that could never match what an adapter sends: empty,
-/// padded with whitespace, or carrying a control character.
+/// Refuse an empty id, one padded with whitespace, or one with a control
+/// character.
 pub fn validate_id(id: &str) -> Result<(), GatewayError> {
     if id.is_empty() {
         return Err(GatewayError::Config("the id is empty".into()));
@@ -95,10 +70,9 @@ pub fn validate_id(id: &str) -> Result<(), GatewayError> {
 pub struct SenderEntry {
     pub channel: String,
     pub id: String,
-    /// The id is a conversation (group, room, space) and admits every
-    /// member of it.
+    /// The id is a conversation id; admits every member.
     pub group: bool,
-    /// Operator-supplied, for `wirken senders list`. Not matched on.
+    /// Operator label. Not matched on.
     pub label: String,
     pub added_at: String,
 }
@@ -122,9 +96,6 @@ impl Admission {
 }
 
 /// SQLite-backed allowlist at `<data_dir>/senders.db`.
-///
-/// `Connection` is `!Sync`; the mutex makes `Arc<SenderRegistry>`
-/// shareable across the gateway's connection tasks.
 pub struct SenderRegistry {
     conn: Mutex<Connection>,
 }
@@ -229,9 +200,8 @@ impl SenderRegistry {
         Ok(usize::try_from(n).unwrap_or(0))
     }
 
-    /// Which entry admits a message from `sender_id` in
-    /// `conversation_id` on `channel`, or `None` when none does. A
-    /// sender entry is preferred when both match.
+    /// The entry that admits a message, or `None`. A sender entry wins
+    /// when both match.
     pub fn admits(
         &self,
         channel: &str,
@@ -258,18 +228,14 @@ impl SenderRegistry {
     }
 }
 
-/// Bounds on refusal rows. A sender gets at most one row per
-/// [`Self::per_sender`]; the lane gets at most [`Self::lane_cap`] rows
-/// per [`Self::lane_window`], across all senders, so a flood from many
-/// ids is bounded too.
+/// Bounds on refusal rows: one per sender per `per_sender`, and at most
+/// `lane_cap` per `lane_window` across all senders.
 #[derive(Debug, Clone, Copy)]
 pub struct RefusalLimits {
     pub per_sender: Duration,
     pub lane_window: Duration,
     pub lane_cap: u32,
-    /// Senders tracked at once. Past this, senders whose row is older
-    /// than `per_sender` are forgotten; a sender that cannot be
-    /// tracked is still refused and counted on the lane.
+    /// Senders tracked at once. Past this, stale entries are dropped.
     pub max_tracked: usize,
 }
 
@@ -284,7 +250,7 @@ impl Default for RefusalLimits {
     }
 }
 
-/// What a refusal row reports as dropped without a row of its own.
+/// Refusals counted without a row of their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefusalCounts {
     /// This sender's refusals since its previous row.
@@ -320,9 +286,7 @@ impl RefusalLimiter {
         }
     }
 
-    /// Note one refusal of `sender_id` on `channel` at `now`. Returns
-    /// the counts to write when this refusal gets a row, `None` when
-    /// it is only counted.
+    /// Count a refusal. Returns the counts to record when it gets a row.
     pub fn refuse(
         &mut self,
         channel: &str,
@@ -373,10 +337,8 @@ impl RefusalLimiter {
         })
     }
 
-    /// Whether another sender can be tracked, forgetting the ones
-    /// whose last row is older than the per-sender interval when the
-    /// table is full. A forgotten sender's pending count is still in
-    /// the lane's.
+    /// Whether another sender can be tracked, dropping stale entries
+    /// when full.
     fn make_room(&mut self, now: Instant) -> bool {
         if self.senders.len() < self.limits.max_tracked {
             return true;
@@ -401,8 +363,7 @@ pub enum Verdict {
     },
 }
 
-/// The one inbound sender check every adapter's messages pass: the
-/// allowlist and the limiter on refusal rows.
+/// The inbound sender check: the allowlist and the refusal limiter.
 pub struct InboundGate {
     registry: SenderRegistry,
     limiter: Mutex<RefusalLimiter>,
@@ -420,8 +381,7 @@ impl InboundGate {
         &self.registry
     }
 
-    /// Decide a message from `sender_id` in `conversation_id` on
-    /// `channel`. An allowlist that cannot be read admits nobody.
+    /// Decide a message. An unreadable allowlist admits nobody.
     pub fn check(&self, channel: &str, sender_id: &str, conversation_id: &str) -> Verdict {
         self.check_at(channel, sender_id, conversation_id, Instant::now())
     }

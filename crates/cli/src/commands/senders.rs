@@ -1,17 +1,8 @@
 //! `wirken senders`: the inbound sender allowlist.
 //!
-//! The gateway drops every inbound message whose sender, or the group
-//! it arrived in, is not an entry for its channel, and reads the
-//! allowlist on every message, so a change here applies to the next
-//! message without a restart. Each add and remove is a row on the
-//! signed `gateway-senders` lane, sealed by a chain head. `refused`
-//! reads the `gateway-inbound` lane the gateway records drops on,
-//! which is where the id to add comes from.
-//!
-//! Every subcommand refuses under the `exec` marker: the allowlist
-//! decides who can drive an agent, so an agent's own command cannot be
-//! what changes it. The refusal is an `operator_command_refused` row on
-//! the same lane.
+//! Read by the gateway on every message. Adds and removes are rows on
+//! the signed `gateway-senders` lane. `refused` reads drops from the
+//! `gateway-inbound` lane. Refused under the `exec` marker.
 
 use anyhow::{Context, Result, bail};
 
@@ -23,9 +14,7 @@ use wirken_gateway::sender_registry::{SenderRegistry, validate_channel, validate
 
 use super::{config, local_operator, open_signed_session_log, seal_operator_lane};
 
-/// Refuse under the `exec` marker, before the allowlist is opened, and
-/// record the refusal on the lane. The row is best effort: a log that
-/// cannot be opened is reported and the refusal stands.
+/// Refuse under the `exec` marker and record it; the row is best effort.
 fn refuse_inside_exec(invocation: &str) -> Result<()> {
     if std::env::var_os(wirken_agent::tool::EXEC_MARKER_ENV).is_some() {
         let recorded = open_signed_session_log(&config()).and_then(|log| {
@@ -72,10 +61,7 @@ fn record(log: &SqliteSessionLog, event: SessionEvent) -> Result<()> {
     Ok(())
 }
 
-/// Admit `id` on `channel`. The entry is written first and the row
-/// after it, so the row records what is in the allowlist; a new entry
-/// whose row cannot be written is taken out again, so nobody is
-/// admitted without one.
+/// Admit `id` on `channel`. A new entry whose row fails is removed.
 pub fn add(channel: &str, id: &str, group: bool, label: Option<&str>) -> Result<()> {
     refuse_inside_exec("add")?;
     validate_channel(channel).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -122,8 +108,7 @@ pub fn add(channel: &str, id: &str, group: bool, label: Option<&str>) -> Result<
     Ok(())
 }
 
-/// Take `id` off `channel`. The removal stands even if its row cannot
-/// be written: failing to record it is no reason to keep admitting.
+/// Remove `id` from `channel`. Stands even if the row fails.
 pub fn remove(channel: &str, id: &str, group: bool) -> Result<()> {
     refuse_inside_exec("remove")?;
     validate_channel(channel).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -204,8 +189,7 @@ pub fn list(channel: Option<&str>) -> Result<()> {
 /// Rows read per step when walking the lane back from its end.
 const PAGE: u64 = 512;
 
-/// Print the most recent refusal rows, newest first, optionally for
-/// one channel.
+/// Print recent refusal rows, newest first.
 pub fn refused(channel: Option<&str>, limit: usize) -> Result<()> {
     refuse_inside_exec("refused")?;
     if let Some(c) = channel {

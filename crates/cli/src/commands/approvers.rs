@@ -1,15 +1,9 @@
 //! `wirken approvers` subcommand surface for managing the channel-
 //! adapter approval allowlist plus per-adapter approval-chat
 //! configuration. Direct SQLite writes against
-//! `<data_dir>/approvers.db`, which the gateway reads on every
-//! decision, so a change applies to the next one without a restart.
-//! Each add, remove and set-chat is a row on the signed
-//! `gateway-approvers` lane, sealed by a chain head.
-//!
-//! Every subcommand refuses under the `exec` marker: the allowlist
-//! decides who can approve an agent's actions, so an agent's own
-//! command cannot be what changes it. The refusal is an
-//! `operator_command_refused` row on the same lane.
+//! `<data_dir>/approvers.db`, read by the gateway on every decision.
+//! Changes are rows on the signed `gateway-approvers` lane. Refused
+//! under the `exec` marker.
 
 use anyhow::{Context, Result, bail};
 
@@ -21,9 +15,7 @@ use wirken_gateway::approver_registry::ApproverRegistry;
 
 use super::{config, local_operator, open_signed_session_log, seal_operator_lane};
 
-/// Refuse under the `exec` marker, before the allowlist is opened, and
-/// record the refusal on the lane. The row is best effort: a log that
-/// cannot be opened is reported and the refusal stands.
+/// Refuse under the `exec` marker and record it; the row is best effort.
 fn refuse_inside_exec(invocation: &str) -> Result<()> {
     if std::env::var_os(wirken_agent::tool::EXEC_MARKER_ENV).is_some() {
         let recorded = open_signed_session_log(&config()).and_then(|log| {
@@ -67,10 +59,8 @@ fn record(log: &SqliteSessionLog, event: SessionEvent) -> Result<()> {
     Ok(())
 }
 
-/// Let `user_id` approve on `adapter_id`. The entry is written first
-/// and the row after it, so the row records what is in the allowlist; a
-/// new entry whose row cannot be written is taken out again, so nobody
-/// can approve without one.
+/// Add `user_id` as an approver on `adapter_id`. A new entry whose row
+/// fails is removed.
 pub fn add(adapter_id: &str, user_id: &str, display: Option<&str>) -> Result<()> {
     refuse_inside_exec("add")?;
     let display = display.unwrap_or("");
@@ -129,9 +119,7 @@ pub fn list(adapter_id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Take `user_id` off `adapter_id`. The removal stands even if its row
-/// cannot be written: failing to record it is no reason to keep letting
-/// them approve.
+/// Remove `user_id` from `adapter_id`. Stands even if the row fails.
 pub fn remove(adapter_id: &str, user_id: &str) -> Result<()> {
     refuse_inside_exec("remove")?;
     let removed = open_registry()?
@@ -164,9 +152,7 @@ pub fn remove(adapter_id: &str, user_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Send `adapter_id`'s approval prompts to `conversation_id`. The new
-/// value is written first and the row after it, naming the old and new
-/// ids; a change whose row cannot be written is put back.
+/// Set `adapter_id`'s approval conversation. Reverted if the row fails.
 pub fn set_chat(adapter_id: &str, conversation_id: &str) -> Result<()> {
     refuse_inside_exec("set-chat")?;
     let log = open_signed_session_log(&config())?;
