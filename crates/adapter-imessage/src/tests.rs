@@ -374,15 +374,133 @@ fn new_accepts_non_empty_server_password() {
     );
 }
 
-// The verify_password and extract_webhook_password tests that
-// previously lived here are deleted along with the helpers. See
-// the comment on `handle_webhook` in adapter.rs for the protocol
-// reality: BlueBubbles posts webhooks with no authentication, so a
-// receiver-side password check was always going to fail (and did,
-// silently, in 0.7.6). The trust boundary moved to the listener
-// binding; tests on the loopback-only invariant belong at the
-// integration level (the `run` method refuses to start if the
-// bound local_addr is not loopback) rather than here.
+// ---------------------------------------------------------------------------
+// Webhook secret
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_webhook_secret_is_stable_per_password_and_not_the_password() {
+    use crate::adapter::webhook_secret;
+    let a = webhook_secret("pw-one");
+    assert_eq!(a, webhook_secret("pw-one"), "the same on every start");
+    assert_ne!(a, webhook_secret("pw-two"));
+    assert_eq!(a.len(), 64);
+    assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(!a.contains("pw-one"));
+}
+
+#[test]
+fn webhook_access_takes_the_secret_and_nothing_else() {
+    use crate::adapter::{WebhookAccess as A, webhook_access};
+    let s = "ab".repeat(32);
+    let line = |target: &str| format!("POST {target} HTTP/1.1");
+    assert_eq!(
+        webhook_access(&line(&format!("/webhook?secret={s}")), &s),
+        A::Accepted
+    );
+    assert_eq!(
+        webhook_access(&line(&format!("/webhook?x=1&secret={s}")), &s),
+        A::Accepted
+    );
+    assert_eq!(webhook_access(&line("/webhook"), &s), A::Refused);
+    assert_eq!(webhook_access(&line("/webhook?secret="), &s), A::Refused);
+    assert_eq!(
+        webhook_access(&line(&format!("/webhook?secret={}", "cd".repeat(32))), &s),
+        A::Refused
+    );
+    assert_eq!(
+        webhook_access(&line(&format!("/webhook?secret={s}00")), &s),
+        A::Refused
+    );
+    assert_eq!(
+        webhook_access(&line(&format!("/webhook?secret={}", &s[..62])), &s),
+        A::Refused
+    );
+    assert_eq!(
+        webhook_access(&line(&format!("/webhookx?secret={s}")), &s),
+        A::NotFound
+    );
+    assert_eq!(
+        webhook_access(&format!("GET /webhook?secret={s} HTTP/1.1"), &s),
+        A::NotFound
+    );
+}
+
+/// A webhook without the secret is refused before its body is read and
+/// reaches the gateway as nothing; with the secret, the same body is
+/// forwarded.
+#[tokio::test]
+async fn a_webhook_is_forwarded_only_with_the_secret() {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
+
+    let secret = crate::adapter::webhook_secret("pw");
+    let (adapter_end, gateway_end) = wirken_ipc::test_pair().unwrap();
+    let (_ar, aw) = split_stream(adapter_end);
+    let (mut gr, _gw) = split_stream(gateway_end);
+    let writer = Arc::new(Mutex::new(aw));
+    let map = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = serde_json::json!({
+        "type": "new-message",
+        "data": {
+            "guid": "MSG-1",
+            "text": "hi",
+            "handle": { "address": "+15550001111" },
+            "chats": [{ "guid": "iMessage;-;+15550001111" }],
+            "isFromMe": false
+        }
+    })
+    .to_string();
+
+    for (target, status) in [
+        ("/webhook".to_string(), "403"),
+        ("/webhook?secret=wrong".to_string(), "403"),
+        (format!("/webhook?secret={secret}"), "200"),
+    ] {
+        let request = format!(
+            "POST {target} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let client = tokio::spawn(async move {
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            c.write_all(request.as_bytes()).await.unwrap();
+            let mut out = String::new();
+            c.read_to_string(&mut out).await.unwrap();
+            out
+        });
+        let (mut stream, _) = listener.accept().await.unwrap();
+        crate::adapter::handle_webhook(&mut stream, writer.clone(), map.clone(), &secret)
+            .await
+            .unwrap();
+        drop(stream);
+        let answer = client.await.unwrap();
+        assert!(
+            answer.starts_with(&format!("HTTP/1.1 {status}")),
+            "{target}: {answer}"
+        );
+    }
+
+    // Exactly one frame reached the gateway: the one with the secret.
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), gr.read_message())
+        .await
+        .expect("the accepted webhook was forwarded")
+        .unwrap();
+    let frame = msg.get_root::<frame::Reader<'_>>().unwrap();
+    match frame.which().unwrap() {
+        frame::Inbound(m) => assert_eq!(m.unwrap().get_id().unwrap().to_str().unwrap(), "MSG-1"),
+        _ => panic!("expected an inbound frame"),
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), gr.read_message())
+            .await
+            .is_err(),
+        "nothing else was forwarded"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Approval gate (slice: imessage text-command approval per umbrella #119)

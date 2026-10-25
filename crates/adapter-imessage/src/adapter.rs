@@ -46,14 +46,16 @@ pub struct IMessageAdapter {
     bluebubbles_url: String,
     server_password: String,
     listen_port: u16,
+    /// The secret the registered webhook URL carries and every inbound
+    /// webhook must present. See [`webhook_secret`].
+    webhook_secret: String,
 }
 
 impl IMessageAdapter {
     /// Construct an iMessage adapter. Fails with `IMessageError::Config`
-    /// when `server_password` is empty: previously an empty password
-    /// combined with a missing inbound-auth check turned the adapter
-    /// into an unauthenticated POST endpoint. The password is now
-    /// required and verified on every inbound webhook.
+    /// when `server_password` is empty: every BlueBubbles API call takes
+    /// it, and the webhook secret every inbound webhook must present is
+    /// derived from it ([`webhook_secret`]).
     pub fn new(
         identity: AdapterIdentity,
         bluebubbles_url: String,
@@ -63,15 +65,17 @@ impl IMessageAdapter {
         if server_password.is_empty() {
             return Err(IMessageError::Config(
                 "iMessage adapter requires a non-empty server_password; \
-                 inbound BlueBubbles webhooks are authenticated with it"
+                 BlueBubbles API calls take it and the webhook secret is derived from it"
                     .into(),
             ));
         }
+        let webhook_secret = webhook_secret(&server_password);
         Ok(Self {
             identity,
             bluebubbles_url,
             server_password,
             listen_port,
+            webhook_secret,
         })
     }
 
@@ -87,8 +91,14 @@ impl IMessageAdapter {
 
         let writer = Arc::new(Mutex::new(writer));
 
-        // Register webhook with BlueBubbles
-        let webhook_url = format!("http://localhost:{}/webhook", self.listen_port);
+        // Register the webhook with BlueBubbles. The URL carries the
+        // secret every inbound webhook is checked for; it is the same on
+        // every start, so BlueBubbles, which keeps one registration per
+        // URL, does not collect a new one each time.
+        let webhook_url = format!(
+            "http://localhost:{}/webhook?secret={}",
+            self.listen_port, self.webhook_secret
+        );
         self.register_webhook(&webhook_url).await?;
 
         // Approval-command prefix map. Lives for the duration of
@@ -115,19 +125,13 @@ impl IMessageAdapter {
             heartbeat_loop(hb_writer).await;
         });
 
-        // Run HTTP webhook listener. Loopback-only by construction.
-        // BlueBubbles posts outbound webhooks with only
-        // `Content-Type: application/json` (no HMAC, bearer, or
-        // shared-secret — verified against
-        // https://github.com/BlueBubblesApp/bluebubbles-server/blob/master/packages/server/src/server/services/webhookService/index.ts).
-        // So the adapter has no request-authentication handle on
-        // the inbound path. The trust boundary is therefore the
-        // host: the listener binds to 127.0.0.1 only and we assert
-        // the bound local address is a loopback IP. Exposing the
-        // adapter to a non-loopback interface (direct or via a
-        // reverse proxy that doesn't add its own auth) makes every
-        // iMessage message spoofable by anyone reachable to the
-        // port.
+        // Run HTTP webhook listener. Loopback-only by construction, and
+        // every POST must present the webhook secret: BlueBubbles posts
+        // its webhooks with only `Content-Type: application/json` (no
+        // HMAC, header or signature; `webhookService/index.ts` in
+        // bluebubbles-server), so the secret rides in the URL it was
+        // registered with, which it posts to as given. Without it any
+        // local process could post a message as any sender.
         tracing::info!(
             "Starting iMessage webhook listener on 127.0.0.1:{} (loopback-only)",
             self.listen_port
@@ -137,9 +141,8 @@ impl IMessageAdapter {
         if !local.ip().is_loopback() {
             return Err(IMessageError::Config(format!(
                 "iMessage webhook listener bound to non-loopback address {local}; \
-                 BlueBubbles webhooks are unauthenticated so the adapter must \
-                 bind to 127.0.0.1 only. Put a trusted reverse proxy in front if \
-                 remote delivery is required."
+                 the adapter binds to 127.0.0.1 only. Put a trusted reverse proxy \
+                 in front if remote delivery is required."
             )));
         }
 
@@ -147,9 +150,10 @@ impl IMessageAdapter {
             let (mut stream, _) = listener.accept().await?;
             let w = writer.clone();
             let m = approval_map.clone();
+            let secret = self.webhook_secret.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_webhook(&mut stream, w, m).await {
+                if let Err(e) = handle_webhook(&mut stream, w, m, &secret).await {
                     tracing::error!("Webhook error: {e}");
                 }
             });
@@ -182,31 +186,81 @@ impl IMessageAdapter {
             )));
         }
 
-        tracing::info!("Registered webhook with BlueBubbles: {webhook_url}");
+        // The URL less its query: the secret stays out of the log.
+        tracing::info!(
+            "Registered webhook with BlueBubbles: {}",
+            webhook_url.split('?').next().unwrap_or("")
+        );
         Ok(())
     }
 }
 
-/// Handle an incoming webhook request from BlueBubbles.
+/// The secret the iMessage webhook URL carries: HMAC-SHA256 of a fixed
+/// label keyed by the BlueBubbles server password, hex.
 ///
-/// BlueBubbles' webhook service posts outbound events with only
-/// `Content-Type: application/json` and no authentication of any
-/// kind (verified against the upstream server source; see the
-/// comment in [`IMessageAdapter::run`]). There is therefore
-/// nothing this handler can verify on the request itself. The
-/// trust boundary is enforced at the listener level: the socket
-/// is bound to 127.0.0.1 only.
-///
-/// A previous iteration of this handler tried to extract a
-/// password from the JSON body and `X-BlueBubbles-Password`
-/// headers, but BlueBubbles does not send either — the check
-/// always failed, silently rejecting every legitimate event. That
-/// code is removed: it claimed a security control the protocol
-/// does not provide and broke the adapter in the process.
+/// BlueBubbles authenticates nothing on its webhooks
+/// (`packages/server/src/server/services/webhookService/index.ts`
+/// posts with only `Content-Type: application/json`), so the URL it is
+/// given is the one thing a receiver can check. Deriving the secret
+/// from the server password makes it per install and stable across
+/// restarts with no state of its own, and the one-way MAC means a copy
+/// of the URL (BlueBubbles logs it at debug level) does not give the
+/// password away. Rotating the password changes it.
+pub fn webhook_secret(server_password: &str) -> String {
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(server_password.as_bytes())
+        .expect("HMAC takes a key of any length");
+    mac.update(b"wirken imessage webhook v1");
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// What an inbound request line is, given the webhook secret.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WebhookAccess {
+    /// `POST /webhook` with the secret.
+    Accepted,
+    /// `POST /webhook` without it, or with another.
+    Refused,
+    /// Not `POST /webhook` at all.
+    NotFound,
+}
+
+/// Decide a request by its request line: the path must be `/webhook`
+/// and its `secret` query parameter must equal `secret`, compared in
+/// constant time.
+pub(crate) fn webhook_access(first_line: &str, secret: &str) -> WebhookAccess {
+    use subtle::ConstantTimeEq;
+    let mut parts = first_line.split_whitespace();
+    let (Some("POST"), Some(target)) = (parts.next(), parts.next()) else {
+        return WebhookAccess::NotFound;
+    };
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if path != "/webhook" {
+        return WebhookAccess::NotFound;
+    }
+    let presented = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("secret="))
+        .unwrap_or("");
+    if bool::from(presented.as_bytes().ct_eq(secret.as_bytes())) {
+        WebhookAccess::Accepted
+    } else {
+        WebhookAccess::Refused
+    }
+}
+
+/// Handle an incoming webhook request from BlueBubbles. The request must
+/// present the webhook secret ([`webhook_access`]); one that does not is
+/// answered 403 and its body is not read.
 pub(crate) async fn handle_webhook(
     stream: &mut tokio::net::TcpStream,
     writer: Arc<Mutex<IpcFrameWriter>>,
     approval_map: ApprovalPrefixMap,
+    secret: &str,
 ) -> Result<(), IMessageError> {
     let mut buf = vec![0u8; 65536];
     let n = stream
@@ -220,10 +274,24 @@ pub(crate) async fn handle_webhook(
     let request = String::from_utf8_lossy(&buf[..n]);
     let first_line = request.lines().next().unwrap_or("");
 
-    if !first_line.starts_with("POST /webhook") {
-        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        let _ = stream.write_all(resp.as_bytes()).await;
-        return Ok(());
+    match webhook_access(first_line, secret) {
+        WebhookAccess::Accepted => {}
+        WebhookAccess::NotFound => {
+            let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return Ok(());
+        }
+        WebhookAccess::Refused => {
+            // Not the value: the log names the refusal, never a secret.
+            tracing::warn!(
+                "iMessage webhook refused: missing or wrong secret. A webhook registered by \
+                 an earlier version, without the secret, stays in BlueBubbles until it is \
+                 deleted there."
+            );
+            let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return Ok(());
+        }
     }
 
     let body = request.split("\r\n\r\n").nth(1).unwrap_or("");

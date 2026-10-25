@@ -6239,9 +6239,12 @@ name = "wirken-adapter-imessage"
 version = "2.5.1"
 dependencies = [
  "capnp",
+ "hmac 0.13.0",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
+ "subtle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
