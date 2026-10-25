@@ -59,6 +59,8 @@ pub enum InternalDecision {
         reason: String,
     },
     Timeout,
+    /// Registered but not connected.
+    Unavailable,
     /// An earlier `Deny` short-circuited the iteration. The runtime
     /// translates this to "no audit row" so the chain reads
     /// honestly: only invoked-or-timed-out hooks leave a trace.
@@ -76,6 +78,7 @@ impl InternalDecision {
                 reason: reason.clone(),
             }),
             Self::Timeout => Some(HookDecision::Timeout),
+            Self::Unavailable => Some(HookDecision::Unavailable),
             Self::Skipped => None,
         }
     }
@@ -109,6 +112,8 @@ pub struct VetoOutcome {
     /// runtime distinguish "budget exhausted or hook slow" from
     /// "hook denied" for the dev-mode fail-open path.
     pub any_timeout: bool,
+    /// True iff a registered hook was not connected. Always refused.
+    pub any_unavailable: bool,
 }
 
 /// Trait the agent runtime calls. Default impl is the in-process
@@ -132,6 +137,7 @@ impl VetoDispatcher for NoopDispatcher {
             all_allow: true,
             first_deny_reason: None,
             any_timeout: false,
+            any_unavailable: false,
         }
     }
 }
@@ -150,6 +156,8 @@ struct DispatcherInner {
     /// dispatch in registration order; the audit chain reads in the
     /// same order so an operator can reason about hook precedence.
     active: Vec<VetoHook>,
+    /// Registered veto hook ids. One not in `active` fails every call.
+    expected: Vec<String>,
 }
 
 struct VetoHook {
@@ -186,9 +194,21 @@ impl HookDispatcher {
     /// pass tight budgets to exercise the budget-exhaustion path.
     pub fn new(budget: Duration) -> Self {
         Self {
-            inner: Arc::new(AsyncMutex::new(DispatcherInner { active: Vec::new() })),
+            inner: Arc::new(AsyncMutex::new(DispatcherInner {
+                active: Vec::new(),
+                expected: Vec::new(),
+            })),
             budget,
         }
+    }
+
+    /// Set the registered veto hook ids. Each must be connected for a
+    /// call to proceed.
+    pub async fn expect(&self, hook_ids: impl IntoIterator<Item = String>) {
+        let mut ids: Vec<String> = hook_ids.into_iter().collect();
+        ids.sort();
+        ids.dedup();
+        self.inner.lock().await.expected = ids;
     }
 
     /// Read `WIRKEN_VETO_BUDGET_MS` from the environment, or fall
@@ -246,18 +266,51 @@ impl VetoDispatcher for HookDispatcher {
         // Snapshot the active set so we don't hold the dispatcher's
         // async mutex across hook awaits (a slow hook would otherwise
         // block every other dispatcher and the accept loop).
-        let snapshot: Vec<(
-            String,
-            Arc<AsyncMutex<IpcFrameWriter>>,
-            Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<VetoResult>>>>,
-        )> = {
+        let (snapshot, missing): (
+            Vec<(
+                String,
+                Arc<AsyncMutex<IpcFrameWriter>>,
+                Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<VetoResult>>>>,
+            )>,
+            Vec<String>,
+        ) = {
             let inner = self.inner.lock().await;
-            inner
+            let missing = inner
+                .expected
+                .iter()
+                .filter(|id| !inner.active.iter().any(|h| &h.hook_id == *id))
+                .cloned()
+                .collect();
+            let snapshot = inner
                 .active
                 .iter()
                 .map(|h| (h.hook_id.clone(), h.writer.clone(), h.pending.clone()))
-                .collect()
+                .collect();
+            (snapshot, missing)
         };
+
+        // A registered hook that is not connected refuses the call
+        // without invoking the others.
+        if !missing.is_empty() {
+            let per_hook = missing
+                .into_iter()
+                .map(|hook_id| DispatchedVeto {
+                    hook_id,
+                    decision: InternalDecision::Unavailable,
+                })
+                .chain(snapshot.into_iter().map(|(hook_id, _, _)| DispatchedVeto {
+                    hook_id,
+                    decision: InternalDecision::Skipped,
+                }))
+                .collect();
+            return VetoOutcome {
+                per_hook,
+                all_allow: false,
+                first_deny_reason: None,
+                any_timeout: false,
+                any_unavailable: true,
+            };
+        }
 
         let start = Instant::now();
         let mut per_hook = Vec::with_capacity(snapshot.len());
@@ -340,6 +393,7 @@ impl VetoDispatcher for HookDispatcher {
             all_allow,
             first_deny_reason,
             any_timeout,
+            any_unavailable: false,
         }
     }
 }
@@ -549,6 +603,41 @@ mod tests {
                 .await;
         }
         d
+    }
+
+    #[tokio::test]
+    async fn a_registered_hook_that_disconnected_refuses_the_call() {
+        let (h1, s1) = TestHook::new().await;
+        let (h2, s2) = TestHook::new().await;
+        s1.send(TestResponse::allow()).await.unwrap();
+        s2.send(TestResponse::allow()).await.unwrap();
+        let d = dispatcher_with(1000, vec![("h1".into(), &h1), ("h2".into(), &h2)]).await;
+        d.expect(["h1".to_string(), "h2".to_string()]).await;
+
+        let outcome = d.dispatch("shell", "{}", "sess-1").await;
+        assert!(outcome.all_allow && !outcome.any_unavailable);
+
+        d.unregister("h1").await;
+        let outcome = d.dispatch("shell", "{}", "sess-1").await;
+        assert!(outcome.any_unavailable);
+        assert!(!outcome.all_allow);
+        assert_eq!(outcome.per_hook.len(), 2);
+        assert_eq!(outcome.per_hook[0].hook_id, "h1");
+        assert_eq!(outcome.per_hook[0].decision, InternalDecision::Unavailable);
+        assert_eq!(
+            outcome.per_hook[0].decision.for_audit(),
+            Some(HookDecision::Unavailable)
+        );
+        assert_eq!(outcome.per_hook[1].decision, InternalDecision::Skipped);
+    }
+
+    #[tokio::test]
+    async fn a_registered_hook_that_never_connected_refuses_the_call() {
+        let d = HookDispatcher::new(Duration::from_millis(1000));
+        d.expect(["guard".to_string()]).await;
+        let outcome = d.dispatch("shell", "{}", "sess-1").await;
+        assert!(outcome.any_unavailable);
+        assert_eq!(outcome.per_hook[0].decision, InternalDecision::Unavailable);
     }
 
     #[tokio::test]

@@ -9366,6 +9366,35 @@ mod phase_overlay {
     }
 
     #[tokio::test]
+    async fn a_registered_veto_hook_that_is_not_connected_refuses_with_a_row() {
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        let dispatcher = wirken_gateway::hook_dispatcher::HookDispatcher::new(
+            std::time::Duration::from_millis(1000),
+        );
+        dispatcher.expect(["guard".to_string()]).await;
+        agent.set_veto_dispatcher(Arc::new(dispatcher));
+
+        let result = agent
+            .execute_tool("read_file", r#"{"path":"/tmp/nope"}"#)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            result.output.contains("veto hook is not connected"),
+            "{}",
+            result.output
+        );
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        assert!(rows.iter().any(|r| matches!(
+            &r.event,
+            SessionEvent::HookDispatched { hook_id, decision: wirken_audit::HookDecision::Unavailable, .. }
+                if hook_id == "guard"
+        )));
+    }
+
+    #[tokio::test]
     async fn phase_denied_tool_call_emits_audit_with_typed_phase_reason() {
         // Path: enter phase that denies `read_file`, call
         // execute_tool, expect the SkillPermissionDenied audit row

@@ -72,6 +72,10 @@ Revisited when both move to p256/p384 0.14.
   only the variables it reads, by name.
 - `wirken update --check` refuses inside a Wirken `exec`, like an install and
   `--rollback`, and records an `update_refused` row.
+- A veto or egress hook registered when `wirken run` starts must be
+  connected: while one is not, tool calls are refused and outputs withheld,
+  with a hook row of decision `unavailable`. **For wirken-siem:** accept
+  `unavailable` in `hook_dispatched` and `egress_hook_dispatched`.
 
 ## [2.5.1] - 2026-10-23
 

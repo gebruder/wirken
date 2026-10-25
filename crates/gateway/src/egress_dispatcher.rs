@@ -70,6 +70,8 @@ pub enum InternalDecision {
         reason: String,
     },
     Timeout,
+    /// Registered but not connected.
+    Unavailable,
     Skipped,
 }
 
@@ -98,6 +100,8 @@ pub struct EgressOutcome {
     /// The runtime branches on `WIRKEN_ALLOW_UNREGISTERED_HOOKS` to
     /// decide fail-closed vs fail-open, same as veto.
     pub any_timeout: bool,
+    /// `true` if a registered hook was not connected. Always withheld.
+    pub any_unavailable: bool,
     /// `true` if the final bytes differ from the input bytes (any
     /// hook returned `Replace`). The runtime uses this to decide
     /// whether to emit a `ToolOutputRedacted` row.
@@ -135,6 +139,7 @@ impl EgressHookDispatcher for NoopEgressDispatcher {
             final_bytes: output_bytes.to_vec(),
             first_refuse_reason: None,
             any_timeout: false,
+            any_unavailable: false,
             replaced: false,
         }
     }
@@ -150,6 +155,9 @@ pub struct EgressDispatcher {
 
 struct DispatcherInner {
     active: Vec<EgressHook>,
+    /// Registered egress hook ids. One not in `active` withholds every
+    /// output.
+    expected: Vec<String>,
 }
 
 struct EgressHook {
@@ -176,9 +184,21 @@ impl Default for EgressDispatcher {
 impl EgressDispatcher {
     pub fn new(budget: Duration) -> Self {
         Self {
-            inner: Arc::new(AsyncMutex::new(DispatcherInner { active: Vec::new() })),
+            inner: Arc::new(AsyncMutex::new(DispatcherInner {
+                active: Vec::new(),
+                expected: Vec::new(),
+            })),
             budget,
         }
+    }
+
+    /// Set the registered egress hook ids. Each must be connected for
+    /// an output to pass.
+    pub async fn expect(&self, hook_ids: impl IntoIterator<Item = String>) {
+        let mut ids: Vec<String> = hook_ids.into_iter().collect();
+        ids.sort();
+        ids.dedup();
+        self.inner.lock().await.expected = ids;
     }
 
     fn resolve_budget() -> Duration {
@@ -226,18 +246,56 @@ impl EgressHookDispatcher for EgressDispatcher {
     ) -> EgressOutcome {
         // Snapshot the active set so we don't hold the dispatcher's
         // async mutex across hook awaits.
-        let snapshot: Vec<(
-            String,
-            Arc<AsyncMutex<IpcFrameWriter>>,
-            Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<EgressResult>>>>,
-        )> = {
+        let (snapshot, missing): (
+            Vec<(
+                String,
+                Arc<AsyncMutex<IpcFrameWriter>>,
+                Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<EgressResult>>>>,
+            )>,
+            Vec<String>,
+        ) = {
             let inner = self.inner.lock().await;
-            inner
+            let missing = inner
+                .expected
+                .iter()
+                .filter(|id| !inner.active.iter().any(|h| &h.hook_id == *id))
+                .cloned()
+                .collect();
+            let snapshot = inner
                 .active
                 .iter()
                 .map(|h| (h.hook_id.clone(), h.writer.clone(), h.pending.clone()))
-                .collect()
+                .collect();
+            (snapshot, missing)
         };
+
+        // A registered hook that is not connected withholds the output
+        // without invoking the others.
+        if !missing.is_empty() {
+            let per_hook = missing
+                .into_iter()
+                .map(|hook_id| DispatchedEgress {
+                    hook_id,
+                    decision: InternalDecision::Unavailable,
+                })
+                .chain(
+                    snapshot
+                        .into_iter()
+                        .map(|(hook_id, _, _)| DispatchedEgress {
+                            hook_id,
+                            decision: InternalDecision::Skipped,
+                        }),
+                )
+                .collect();
+            return EgressOutcome {
+                per_hook,
+                final_bytes: output_bytes.to_vec(),
+                first_refuse_reason: None,
+                any_timeout: false,
+                any_unavailable: true,
+                replaced: false,
+            };
+        }
 
         let start = Instant::now();
         let mut per_hook = Vec::with_capacity(snapshot.len());
@@ -320,6 +378,7 @@ impl EgressHookDispatcher for EgressDispatcher {
             final_bytes: working,
             first_refuse_reason,
             any_timeout,
+            any_unavailable: false,
             replaced,
         }
     }
@@ -368,5 +427,24 @@ async fn invoke_one(
             pending.lock().unwrap().remove(&request_id);
             Err(InvokeError::Timeout)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_registered_hook_that_is_not_connected_withholds_the_output() {
+        let d = EgressDispatcher::new(Duration::from_millis(1000));
+        let outcome = d.dispatch("read_file", b"secret", "sess-1").await;
+        assert!(!outcome.any_unavailable && outcome.per_hook.is_empty());
+
+        d.expect(["redactor".to_string()]).await;
+        let outcome = d.dispatch("read_file", b"secret", "sess-1").await;
+        assert!(outcome.any_unavailable);
+        assert_eq!(outcome.per_hook.len(), 1);
+        assert_eq!(outcome.per_hook[0].hook_id, "redactor");
+        assert_eq!(outcome.per_hook[0].decision, InternalDecision::Unavailable);
     }
 }

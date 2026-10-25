@@ -229,11 +229,12 @@ What the controls protect, in the order a loss matters:
 14. **Local sockets.** `gateway.sock`, `gateway-hooks.sock`,
     `gateway-permissions.sock`, `mcp-proxy.sock` and `orchestrator.sock` under
     `<data_dir>/sockets`, mode 0600, each taking a signed handshake. Veto and
-    egress hooks fail closed on timeout
-    (`crates/gateway/src/hook_dispatcher.rs`, `egress_dispatcher.rs`). In
-    scope: another OS user reaching a socket, a hook timeout passing a call
-    without `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1`, and a veto `Deny` that does
-    not stop dispatch.
+    egress hooks fail closed on timeout and while a registered hook is not
+    connected (`crates/gateway/src/hook_dispatcher.rs`,
+    `egress_dispatcher.rs`). In scope: another OS user reaching a socket, a
+    hook timeout passing a call without `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1`, a
+    call passing while a registered hook is not connected, and a veto `Deny`
+    that does not stop dispatch.
 
 ## Access controls
 

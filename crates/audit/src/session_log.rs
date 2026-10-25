@@ -2595,6 +2595,9 @@ pub enum HookDecision {
     /// the chain so a reviewer can distinguish a timeout from an
     /// explicit deny.
     Timeout,
+    /// The hook is registered but not connected. The tool call is
+    /// refused.
+    Unavailable,
 }
 
 /// The decision an egress hook returned for one invocation. `Replace`
@@ -2621,6 +2624,9 @@ pub enum EgressDecision {
     /// The hook did not respond within the configured timeout.
     /// Same fail-closed posture as veto.
     Timeout,
+    /// The hook is registered but not connected. The output is
+    /// withheld.
+    Unavailable,
 }
 
 /// A single tool call request from the assistant.

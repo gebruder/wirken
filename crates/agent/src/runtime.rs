@@ -4089,6 +4089,13 @@ impl Agent {
                 sandbox: None,
             });
         }
+        if veto_outcome.any_unavailable {
+            return Ok(crate::tool::ToolResult {
+                output: "a registered veto hook is not connected; the call is refused".to_string(),
+                success: false,
+                sandbox: None,
+            });
+        }
         if veto_outcome.any_timeout {
             let allow_unregistered =
                 wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNREGISTERED_HOOKS");
@@ -4326,6 +4333,9 @@ impl Agent {
                 wirken_gateway::egress_dispatcher::InternalDecision::Timeout => {
                     Some(wirken_audit::EgressDecision::Timeout)
                 }
+                wirken_gateway::egress_dispatcher::InternalDecision::Unavailable => {
+                    Some(wirken_audit::EgressDecision::Unavailable)
+                }
                 wirken_gateway::egress_dispatcher::InternalDecision::Skipped => None,
             };
             if let Some(decision) = audit_decision {
@@ -4355,6 +4365,12 @@ impl Agent {
                 placeholder.into_bytes(),
                 false,
                 Some(format!("refused: {refuse}")),
+            )
+        } else if outcome.any_unavailable {
+            (
+                b"(egress hook not connected; output withheld)".to_vec(),
+                false,
+                Some("egress hook unavailable".to_string()),
             )
         } else if outcome.any_timeout {
             let allow_unregistered =
@@ -4414,7 +4430,8 @@ impl Agent {
                 .find_map(|d| match d.decision {
                     wirken_gateway::egress_dispatcher::InternalDecision::Refuse { .. }
                     | wirken_gateway::egress_dispatcher::InternalDecision::Replace { .. }
-                    | wirken_gateway::egress_dispatcher::InternalDecision::Timeout => {
+                    | wirken_gateway::egress_dispatcher::InternalDecision::Timeout
+                    | wirken_gateway::egress_dispatcher::InternalDecision::Unavailable => {
                         Some(d.hook_id.clone())
                     }
                     _ => None,

@@ -1400,6 +1400,29 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let egress_dispatcher =
         Arc::new(wirken_gateway::egress_dispatcher::EgressDispatcher::default());
     factory.attach_egress_dispatcher(egress_dispatcher.clone());
+    {
+        let registered = hook_registry.lock().await.list();
+        let of = |ty: wirken_ipc::HookType| {
+            registered
+                .iter()
+                .filter(move |e| e.hook_type == ty)
+                .map(|e| e.hook_id.clone())
+                .collect::<Vec<_>>()
+        };
+        let (veto, egress) = (
+            of(wirken_ipc::HookType::Veto),
+            of(wirken_ipc::HookType::Egress),
+        );
+        if !veto.is_empty() || !egress.is_empty() {
+            tracing::info!(
+                veto = ?veto,
+                egress = ?egress,
+                "registered hooks: tool calls are refused while any of them is not connected"
+            );
+        }
+        hook_dispatcher.expect(veto).await;
+        egress_dispatcher.expect(egress).await;
+    }
 
     // --- cross-channel memory ---
     // Opening the store is what makes the memory tools available at

@@ -239,6 +239,13 @@ compare freshly-produced source bytes against operator-redacted ones.
 `tracing::warn!`; the audit row records the timeout regardless, so a reviewer
 can distinguish "hook timed out" from "hook ran clean".
 
+**Registered but not connected.** Every veto and egress hook registered in
+`hooks.db` when `wirken run` starts must be connected. While one is not, every
+tool call is refused, or its output withheld, without invoking the other
+hooks, and each absent hook gets a row with decision `unavailable`.
+`WIRKEN_ALLOW_UNREGISTERED_HOOKS` does not change this. `wirken hooks
+unregister` takes effect at the next start.
+
 ## Cross-channel memory
 
 `crates/gateway/src/memory.rs`, `crates/agent/src/memory_tool.rs`.
