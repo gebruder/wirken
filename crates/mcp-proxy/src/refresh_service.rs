@@ -969,6 +969,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn an_entry_removed_during_a_refresh_stays_removed() {
         let (_dir, store, audit, service) = interfered(Meanwhile::Remove);
@@ -981,6 +982,7 @@ mod tests {
         assert_eq!(discarded(&audit), ["removed"]);
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn an_entry_reauthorized_during_a_refresh_keeps_the_new_authorization() {
         let (_dir, store, audit, service) = interfered(Meanwhile::Reauthorize);
@@ -995,6 +997,7 @@ mod tests {
         assert_eq!(discarded(&audit), ["reauthorized"]);
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[tokio::test]
     async fn an_untouched_entry_takes_the_refresh_and_keeps_its_channel() {
         let (_dir, store, audit, service) = interfered(Meanwhile::Reauthorize);
