@@ -107,6 +107,12 @@ pub struct PendingRequest {
     /// `host`). `None` for other tools.
     pub exec_location: Option<String>,
     pub exec_runtime: Option<String>,
+    /// The conversation the approval prompt was posted in, for a gate
+    /// that posts it on a channel (the configured approval chat on
+    /// Telegram and Signal). A decision arriving through a channel
+    /// adapter must come from this conversation; `None` means the
+    /// prompt went to no channel, and no adapter's decision resolves it.
+    pub prompt_conversation: Option<String>,
 }
 
 /// Per-entry shape kept in the queue. The receiver half of the
@@ -147,6 +153,8 @@ pub struct PendingDetail {
     pub assistant_text: Option<String>,
     pub exec_location: Option<String>,
     pub exec_runtime: Option<String>,
+    /// Where the prompt was posted; see [`PendingRequest::prompt_conversation`].
+    pub prompt_conversation: Option<String>,
     pub requested_at: DateTime<Utc>,
     pub age_seconds: u64,
 }
@@ -305,6 +313,7 @@ impl PendingApprovalQueue {
             assistant_text: e.request.assistant_text.clone(),
             exec_location: e.request.exec_location.clone(),
             exec_runtime: e.request.exec_runtime.clone(),
+            prompt_conversation: e.request.prompt_conversation.clone(),
             requested_at: e.requested_at,
             age_seconds: now.saturating_duration_since(e.requested_instant).as_secs(),
         })
@@ -335,6 +344,7 @@ mod tests {
             exec_location: None,
             exec_runtime: None,
             session_id: String::new(),
+            prompt_conversation: None,
         }
     }
 

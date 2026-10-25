@@ -326,7 +326,7 @@ async fn full_message_flow_simulation() {
 #[test]
 fn approval_decision_allow_round_trips() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_approval_decision(&mut msg, "req-uuid", true, 12345, "davi");
+    convert::build_approval_decision(&mut msg, "req-uuid", true, 12345, "davi", "conv-1");
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
         frame::ApprovalDecision(d) => {
@@ -334,6 +334,7 @@ fn approval_decision_allow_round_trips() {
             assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
             assert_eq!(d.get_actor_user_id().unwrap().to_str().unwrap(), "12345");
             assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "davi");
+            assert_eq!(d.get_conversation_id().unwrap().to_str().unwrap(), "conv-1");
             match d.get_decision().unwrap().which().unwrap() {
                 wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
                 _ => panic!("expected Allow"),
@@ -346,7 +347,7 @@ fn approval_decision_allow_round_trips() {
 #[test]
 fn approval_decision_deny_round_trips() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_approval_decision(&mut msg, "r", false, 99, "");
+    convert::build_approval_decision(&mut msg, "r", false, 99, "", "conv-1");
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
         frame::ApprovalDecision(d) => {

@@ -6991,6 +6991,7 @@ mod tests {
             exec_location: None,
             exec_runtime: None,
             session_id: session_id.into(),
+            prompt_conversation: None,
         }
     }
 

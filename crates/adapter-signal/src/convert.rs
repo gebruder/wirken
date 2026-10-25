@@ -589,12 +589,14 @@ pub fn build_approval_decision(
     deny_reason: &str,
     actor_user_id: &str,
     actor_display: &str,
+    conversation_id: &str,
 ) {
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut decision = frame_builder.init_approval_decision();
     decision.set_request_id(request_id);
     decision.set_actor_user_id(actor_user_id);
     decision.set_actor_display(actor_display);
+    decision.set_conversation_id(conversation_id);
     let mut kind = decision.init_decision();
     if is_allow {
         kind.set_allow(());

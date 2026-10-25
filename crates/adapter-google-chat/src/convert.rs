@@ -271,6 +271,10 @@ pub struct ApprovalPress {
     /// `user_name` when the event omits a display name; keeps the
     /// audit row's display field populated.
     pub user_display: String,
+    /// The space the press came from (`"spaces/<id>"`), the
+    /// conversation the gateway checks the decision against. Empty
+    /// when the event names none.
+    pub space_name: String,
     /// Cross-adapter encoded approval payload from
     /// `event.common.parameters.wirken_approval`. Decoded at the
     /// consumer site via `wirken_adapter_core::approval::decode`.
@@ -333,9 +337,17 @@ pub fn extract_approval_press(json: &serde_json::Value) -> Option<ApprovalPress>
         .unwrap_or(user_name)
         .to_string();
 
+    let space_name = json
+        .get("space")
+        .and_then(|s| s.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+
     Some(ApprovalPress {
         user_name: user_name.to_string(),
         user_display,
+        space_name,
         encoded_payload: encoded.to_string(),
     })
 }
@@ -359,12 +371,14 @@ pub fn build_approval_decision(
     is_allow: bool,
     user_id: &str,
     user_display: &str,
+    conversation_id: &str,
 ) {
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut decision = frame_builder.init_approval_decision();
     decision.set_request_id(request_id);
     decision.set_actor_user_id(user_id);
     decision.set_actor_display(user_display);
+    decision.set_conversation_id(conversation_id);
     let mut kind = decision.init_decision();
     if is_allow {
         kind.set_allow(());

@@ -592,6 +592,7 @@ fn approval_decision_allow_round_trips() {
         true,
         "@alice:example.com",
         "@alice:example.com",
+        "conv-1",
     );
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
@@ -614,7 +615,7 @@ fn approval_decision_allow_round_trips() {
 #[test]
 fn approval_decision_deny_round_trips() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_approval_decision(&mut msg, "r", false, "@a:b", "");
+    convert::build_approval_decision(&mut msg, "r", false, "@a:b", "", "conv-1");
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
         frame::ApprovalDecision(d) => {

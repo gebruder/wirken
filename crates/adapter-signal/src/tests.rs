@@ -1643,6 +1643,7 @@ fn approval_decision_allow_round_trips_with_empty_deny_reason() {
         "",
         "00000000-0000-4000-8000-000000000001",
         "Alice",
+        "conv-1",
     );
     let reader = serialize_and_read(&msg);
     let fr = reader.get_root::<frame::Reader<'_>>().unwrap();
@@ -1655,6 +1656,7 @@ fn approval_decision_allow_round_trips_with_empty_deny_reason() {
                 "00000000-0000-4000-8000-000000000001"
             );
             assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "Alice");
+            assert_eq!(d.get_conversation_id().unwrap().to_str().unwrap(), "conv-1");
             match d.get_decision().unwrap().which().unwrap() {
                 wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
                 _ => panic!("expected Allow"),
@@ -1667,7 +1669,15 @@ fn approval_decision_allow_round_trips_with_empty_deny_reason() {
 #[test]
 fn approval_decision_deny_round_trips_with_reason_text() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_approval_decision(&mut msg, "r", false, "rm is too risky", "+15559876543", "");
+    convert::build_approval_decision(
+        &mut msg,
+        "r",
+        false,
+        "rm is too risky",
+        "+15559876543",
+        "",
+        "conv-1",
+    );
     let reader = serialize_and_read(&msg);
     let fr = reader.get_root::<frame::Reader<'_>>().unwrap();
     match fr.which().unwrap() {

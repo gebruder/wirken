@@ -261,6 +261,7 @@ async fn forward_approval_decision(
         is_allow,
         &reaction.reactor_mxid,
         &reaction.reactor_mxid,
+        &reaction.room_id,
     );
     let mut w = writer.lock().await;
     if let Err(e) = w.write_message(&capnp_msg).await {

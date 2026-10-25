@@ -4260,11 +4260,17 @@ fn parse_frame(
                         ApprovalDecisionKind::Deny { reason }
                     }
                 };
+                let conversation_id = d
+                    .get_conversation_id()?
+                    .to_str()
+                    .map_err(|e| anyhow::anyhow!("conversation_id not utf8: {e}"))?
+                    .to_string();
                 InboundAction::ApprovalDecision {
                     request_id,
                     decision,
                     user_id,
                     user_display,
+                    conversation_id,
                 }
             }
             frame::ApprovalRequestFailed(f) => {
@@ -4747,6 +4753,7 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
             decision,
             user_id,
             user_display,
+            conversation_id,
         } => {
             // A terminal is not on the approver list; it decides as the
             // operator key, on its own turn's requests only.
@@ -4782,6 +4789,37 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                     &request_id,
                     &user_id,
                     wirken_audit::ApprovalRefusalReason::UnauthorizedActor,
+                    Some(adapter_id),
+                );
+                return Ok(());
+            }
+            // An approver decides on the channel the request was raised
+            // on, in the conversation its prompt was posted in, and
+            // nowhere else, as webchat and the terminal already hold.
+            // An approver on one adapter who learned another channel's
+            // request id, or a press from a chat the prompt was never
+            // sent to, is refused with a row.
+            if terminal_actor.is_none()
+                && let Some(reason) = adapter_decision_misplaced(
+                    pending_approvals,
+                    &request_id,
+                    authenticated_channel.as_str(),
+                    &conversation_id,
+                )
+            {
+                tracing::warn!(
+                    adapter_id = adapter_id,
+                    user_id = %user_id,
+                    request_id = %request_id,
+                    reason = ?reason,
+                    "channel approval: decision is for another channel or conversation; dropping"
+                );
+                wirken_gateway::permissions::emit_approval_refused(
+                    factory.session_log().as_ref(),
+                    pending_approvals,
+                    &request_id,
+                    &user_id,
+                    reason,
                     Some(adapter_id),
                 );
                 return Ok(());
@@ -4973,6 +5011,27 @@ fn turn_event_frame(
 /// that turn spawned. Anything else is refused and counted, as a
 /// decision from the wrong conversation is on any channel. `None` means
 /// the decision is dropped.
+/// Why a channel adapter's decision does not belong to the request it
+/// names, or `None` when it does: the request was raised on
+/// `channel`, and its prompt was posted in `conversation`. A request
+/// the queue no longer holds is left to the resolve, which answers it
+/// as unknown.
+fn adapter_decision_misplaced(
+    queue: &wirken_gateway::pending_approvals::PendingApprovalQueue,
+    request_id: &str,
+    channel: &str,
+    conversation: &str,
+) -> Option<wirken_audit::ApprovalRefusalReason> {
+    let request = queue.show(request_id)?;
+    if request.session_id.split('/').nth(1) != Some(channel) {
+        return Some(wirken_audit::ApprovalRefusalReason::WrongChannel);
+    }
+    match request.prompt_conversation.as_deref() {
+        Some(posted) if !conversation.is_empty() && posted == conversation => None,
+        _ => Some(wirken_audit::ApprovalRefusalReason::WrongConversation),
+    }
+}
+
 fn terminal_decision_actor(
     conn: &Conn<'_>,
     peer: &TerminalPeer,
@@ -5063,6 +5122,9 @@ enum InboundAction {
         decision: ApprovalDecisionKind,
         user_id: String,
         user_display: String,
+        /// The conversation the decision arrived in, empty when the
+        /// adapter named none.
+        conversation_id: String,
     },
     /// Adapter could not deliver the outbound approval message.
     /// Gateway resolves the queue with `Timeout` and the audit row
@@ -7552,13 +7614,19 @@ mod same_connection_approval_tests {
         let adapter = async {
             loop {
                 let msg = reader.read_message().await.unwrap();
-                let request_id = match msg
+                let (request_id, posted_in) = match msg
                     .get_root::<frame::Reader<'_>>()
                     .unwrap()
                     .which()
                     .unwrap()
                 {
-                    frame::ApprovalRequest(r) => r.unwrap().get_request_id().unwrap().to_string(),
+                    frame::ApprovalRequest(r) => {
+                        let r = r.unwrap();
+                        (
+                            r.get_request_id().unwrap().to_string().unwrap(),
+                            r.get_target_conversation_id().unwrap().to_string().unwrap(),
+                        )
+                    }
                     frame::Outbound(o) => {
                         return o.unwrap().get_text().unwrap().to_string().unwrap();
                     }
@@ -7569,9 +7637,10 @@ mod same_connection_approval_tests {
                     let mut d = decision
                         .init_root::<frame::Builder<'_>>()
                         .init_approval_decision();
-                    d.set_request_id(request_id.unwrap());
+                    d.set_request_id(&request_id);
                     d.set_actor_user_id("U1");
                     d.set_actor_display("davi");
+                    d.set_conversation_id(&posted_in);
                     d.init_decision().set_allow(());
                 }
                 writer.write_message(&decision).await.unwrap();
@@ -7761,14 +7830,18 @@ mod approver_removed_mid_run_tests {
             tokio::time::timeout(TURN_DEADLINE, async {
                 loop {
                     let msg = reader.read_message().await.unwrap();
-                    let request_id = match msg
+                    let (request_id, posted_in) = match msg
                         .get_root::<frame::Reader<'_>>()
                         .unwrap()
                         .which()
                         .unwrap()
                     {
                         frame::ApprovalRequest(r) => {
-                            r.unwrap().get_request_id().unwrap().to_string()
+                            let r = r.unwrap();
+                            (
+                                r.get_request_id().unwrap().to_string().unwrap(),
+                                r.get_target_conversation_id().unwrap().to_string().unwrap(),
+                            )
                         }
                         frame::Outbound(o) => {
                             return o.unwrap().get_text().unwrap().to_string().unwrap();
@@ -7780,9 +7853,12 @@ mod approver_removed_mid_run_tests {
                         let mut d = decision
                             .init_root::<frame::Builder<'_>>()
                             .init_approval_decision();
-                        d.set_request_id(request_id.unwrap());
+                        d.set_request_id(&request_id);
                         d.set_actor_user_id(answer.user);
                         d.set_actor_display(answer.display);
+                        // From the chat the prompt was posted in, as a
+                        // press on it would be.
+                        d.set_conversation_id(&posted_in);
                         if answer.allow {
                             d.init_decision().set_allow(());
                         } else {
@@ -7910,6 +7986,126 @@ mod approver_removed_mid_run_tests {
                 s("Alice (security lead)")
             ]]
         );
+        h.finish().await;
+    }
+
+    /// A request raised on `session`, its prompt posted in `posted_in`.
+    fn pending(
+        session: &str,
+        posted_in: Option<&str>,
+    ) -> wirken_gateway::pending_approvals::PendingRequest {
+        wirken_gateway::pending_approvals::PendingRequest {
+            agent_id: "default".into(),
+            session_id: session.into(),
+            tool_name: "exec".into(),
+            action_key: "shell::pipeline:".into(),
+            requested_tier: "tier3".into(),
+            trigger_message: None,
+            arguments: None,
+            assistant_text: None,
+            exec_location: None,
+            exec_runtime: None,
+            prompt_conversation: posted_in.map(str::to_string),
+        }
+    }
+
+    impl Harness {
+        /// U1 allows `request_id` from `conversation` on this Signal
+        /// adapter.
+        async fn decide(&mut self, request_id: &str, conversation: &str) {
+            let mut decision = capnp::message::Builder::new_default();
+            {
+                let mut d = decision
+                    .init_root::<frame::Builder<'_>>()
+                    .init_approval_decision();
+                d.set_request_id(request_id);
+                d.set_actor_user_id("U1");
+                d.set_actor_display("davi");
+                d.set_conversation_id(conversation);
+                d.init_decision().set_allow(());
+            }
+            self.writer.write_message(&decision).await.unwrap();
+        }
+
+        /// Wait for the `n`th refusal row and return each refusal's
+        /// `(caller, reason)`.
+        async fn refusals(&self, n: usize) -> Vec<(Option<String>, Option<String>)> {
+            let deadline = tokio::time::Instant::now() + TURN_DEADLINE;
+            loop {
+                let rows: Vec<_> = self
+                    .rows(&["caller", "reason"])
+                    .into_iter()
+                    .filter(|r| r[0].as_deref() == Some("permission_approval_refused"))
+                    .map(|r| (r[1].clone(), r[2].clone()))
+                    .collect();
+                if rows.len() >= n || tokio::time::Instant::now() > deadline {
+                    return rows;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    /// An approver on the Signal adapter cannot decide a request raised
+    /// on Telegram, however it learned the id.
+    #[tokio::test]
+    async fn a_cross_channel_decision_is_refused() {
+        let mut h = Harness::start(Vec::new()).await;
+        let (id, mut rx) = h
+            .queue
+            .register(pending("default/telegram/-100", Some("-100")));
+        h.decide(&id, "-100").await;
+        assert_eq!(h.refusals(1).await, vec![(s("U1"), s("wrong_channel"))]);
+        assert!(h.queue.show(&id).is_some(), "the request is still pending");
+        assert!(rx.try_recv().is_err(), "and nothing resolved it");
+        h.finish().await;
+    }
+
+    /// On its own channel, a decision counts only from the chat the
+    /// prompt was posted in; one from another chat, or naming none, is
+    /// refused, and the right one then resolves the request.
+    #[tokio::test]
+    async fn a_decision_from_another_conversation_is_refused() {
+        let mut h = Harness::start(Vec::new()).await;
+        let (id, rx) = h
+            .queue
+            .register(pending("default/signal/dm-1", Some("group-1")));
+        h.decide(&id, "group-2").await;
+        h.decide(&id, "").await;
+        assert_eq!(
+            h.refusals(2).await,
+            vec![
+                (s("U1"), s("wrong_conversation")),
+                (s("U1"), s("wrong_conversation")),
+            ]
+        );
+        assert!(h.queue.show(&id).is_some());
+        h.decide(&id, "group-1").await;
+        let decision = tokio::time::timeout(TURN_DEADLINE, rx)
+            .await
+            .expect("the decision from the prompt's chat resolves it")
+            .unwrap();
+        match decision {
+            wirken_gateway::pending_approvals::PendingDecision::Allow { actor } => {
+                assert_eq!(actor.map(|a| a.id).as_deref(), Some("U1"))
+            }
+            other => panic!("{other:?}"),
+        }
+        h.finish().await;
+    }
+
+    /// A request whose prompt went to no channel is decided on no
+    /// channel adapter.
+    #[tokio::test]
+    async fn a_request_prompted_elsewhere_is_not_decided_by_an_adapter() {
+        let mut h = Harness::start(Vec::new()).await;
+        let (id, _rx) = h.queue.register(pending("default/signal/dm-1", None));
+        h.decide(&id, "dm-1").await;
+        assert_eq!(
+            h.refusals(1).await,
+            vec![(s("U1"), s("wrong_conversation"))]
+        );
+        assert!(h.queue.show(&id).is_some());
         h.finish().await;
     }
 

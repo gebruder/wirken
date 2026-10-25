@@ -696,6 +696,9 @@ impl SignalAdapter {
             &deny_reason_wire,
             &actor_user_id,
             &actor_display,
+            // The group, or for a direct message the sender, as on an
+            // inbound message.
+            inbound.group_id.as_deref().unwrap_or(&inbound.sender),
         );
         {
             let mut w = writer.lock().await;

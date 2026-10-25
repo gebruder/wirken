@@ -284,6 +284,11 @@ async fn forward_approval_decision(activity: &Activity, writer: Arc<Mutex<IpcFra
         is_allow,
         aad_object_id,
         &display,
+        activity
+            .conversation
+            .as_ref()
+            .and_then(|c| c.id.as_deref())
+            .unwrap_or(""),
     );
     let mut w = writer.lock().await;
     if let Err(e) = w.write_message(&capnp_msg).await {

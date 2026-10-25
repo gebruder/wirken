@@ -129,6 +129,7 @@ impl ApprovalGate for SseApprovalGate {
                 .exec_location
                 .as_ref()
                 .map(|l| crate::exec_location::runtime_name(l.mode).to_string()),
+            prompt_conversation: None,
         };
         let (request_id, rx) = self.queue.register(request);
 

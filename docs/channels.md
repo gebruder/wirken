@@ -341,7 +341,8 @@ wirken approvers add signal +15551234567 --display "Name"   # who may approve
 `set-chat` takes your E.164 number for a 1:1 DM, or a base64 group ID for a
 group. `approvers add` takes the E.164 number of each operator allowed to
 approve or deny. A reply from anyone else is logged as an unauthorized actor
-and dropped. The gateway reads both settings on every request and decision,
+and dropped, and so is a reply from an approver anywhere but the approval chat
+the prompt was posted in (`wrong_conversation`). The gateway reads both settings on every request and decision,
 so a change applies to the next one without a restart: an approver removed
 while `wirken run` is up cannot answer the next prompt.
 

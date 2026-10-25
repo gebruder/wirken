@@ -64,6 +64,17 @@ takes yet; it is revisited when both do.
 
 ### Security
 
+- A channel approver's decision is taken only for a request raised on that
+  adapter's channel, and only from the conversation the request's prompt was
+  posted in (`adapter_decision_misplaced`,
+  `crates/cli/src/commands/run.rs`). Otherwise a `permission_approval_refused`
+  row with `wrong_channel` or `wrong_conversation` is written and the request
+  stays open, as webchat and the terminal already held. `ApprovalDecision`
+  gains `conversationId`, which every adapter fills with the chat, channel,
+  room, space or DM the press or command came from, and each pending request
+  records where its prompt was posted. Before, an approver on one adapter who
+  learned another channel's request id could resolve it, and an approver
+  could answer a Telegram or Signal prompt from any chat.
 - The gateway writes a refreshed MCP OAuth credential only if the vault
   entry still holds the refresh token the refresh started from, checked and
   written under the vault's write lock (`RefreshService::refresh`,

@@ -136,6 +136,7 @@ impl ApprovalGate for SignalApprovalGate {
                 .exec_location
                 .as_ref()
                 .map(|l| runtime_name(l.mode).to_string()),
+            prompt_conversation: Some(target_conversation.clone()),
         };
         let (request_id, rx) = self.queue.register(request);
 

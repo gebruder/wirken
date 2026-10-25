@@ -264,6 +264,7 @@ async fn handle_approval_press(
         is_allow,
         &press.user_name,
         &press.user_display,
+        &press.space_name,
     );
     {
         let mut w = writer.lock().await;

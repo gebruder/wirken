@@ -435,6 +435,9 @@ async fn forward_approval_decision(press: &ApprovalPress, writer: &Arc<Mutex<Ipc
         is_allow,
         &press.from,
         &press.from_name,
+        // A WhatsApp chat is the sender's number, as on an inbound
+        // message.
+        &press.from,
     );
     let mut w = writer.lock().await;
     if let Err(e) = w.write_message(&capnp_msg).await {

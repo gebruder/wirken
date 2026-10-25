@@ -176,12 +176,14 @@ pub fn build_approval_decision(
     is_allow: bool,
     user_id: u64,
     user_display: &str,
+    conversation_id: &str,
 ) {
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut decision = frame_builder.init_approval_decision();
     decision.set_request_id(request_id);
     decision.set_actor_user_id(user_id.to_string());
     decision.set_actor_display(user_display);
+    decision.set_conversation_id(conversation_id);
     let mut kind = decision.init_decision();
     if is_allow {
         kind.set_allow(());

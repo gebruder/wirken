@@ -521,7 +521,15 @@ fn serialize_and_read(
 #[test]
 fn approval_decision_allow_round_trips() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_approval_decision(&mut msg, "req-uuid", true, "+15551234567", "Alice", None);
+    convert::build_approval_decision(
+        &mut msg,
+        "req-uuid",
+        true,
+        "+15551234567",
+        "Alice",
+        None,
+        "conv-1",
+    );
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
         frame::ApprovalDecision(d) => {
@@ -532,6 +540,7 @@ fn approval_decision_allow_round_trips() {
                 "+15551234567"
             );
             assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "Alice");
+            assert_eq!(d.get_conversation_id().unwrap().to_str().unwrap(), "conv-1");
             match d.get_decision().unwrap().which().unwrap() {
                 wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
                 _ => panic!("expected Allow"),
@@ -551,6 +560,7 @@ fn approval_decision_deny_with_reason_round_trips() {
         "+15551234567",
         "Alice",
         Some("looks risky"),
+        "conv-1",
     );
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
@@ -570,7 +580,15 @@ fn approval_decision_deny_with_reason_round_trips() {
 #[test]
 fn approval_decision_deny_without_reason_empty_string() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_approval_decision(&mut msg, "r", false, "+15551234567", "Alice", None);
+    convert::build_approval_decision(
+        &mut msg,
+        "r",
+        false,
+        "+15551234567",
+        "Alice",
+        None,
+        "conv-1",
+    );
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
         frame::ApprovalDecision(d) => {

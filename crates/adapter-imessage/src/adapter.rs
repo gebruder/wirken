@@ -382,6 +382,7 @@ async fn forward_approval_decision(
         &msg.sender_handle,
         &msg.sender_name,
         denial_reason.as_deref(),
+        &msg.chat_guid,
     );
     let mut w = writer.lock().await;
     if let Err(e) = w.write_message(&capnp_msg).await {

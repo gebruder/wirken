@@ -321,6 +321,7 @@ async fn forward_decision(
         is_allow,
         &user.id.0,
         &user_display,
+        channel.as_ref().map(|c| c.0.as_str()).unwrap_or(""),
     );
     {
         let mut w = writer.lock().await;

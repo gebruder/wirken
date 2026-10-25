@@ -126,6 +126,7 @@ impl ApprovalGate for TerminalApprovalGate {
                 .exec_location
                 .as_ref()
                 .map(|l| runtime_name(l.mode).to_string()),
+            prompt_conversation: None,
         };
         let (request_id, rx) = self.queue.register(request);
 

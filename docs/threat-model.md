@@ -85,7 +85,12 @@ What the controls protect, in the order a loss matters:
    the inbound row, the session and the route, and an `inbound_sender_refused`
    row is written, rate-limited per sender and per lane. Approval decisions arriving as frames are
    checked against the gateway-side approver allowlist keyed by
-   `(adapter_id, user_id)` (`crates/gateway/src/approver_registry.rs`). In
+   `(adapter_id, user_id)` (`crates/gateway/src/approver_registry.rs`), then
+   against the request: it must have been raised on the adapter's channel,
+   and the decision must come from the conversation its prompt was posted in
+   (`adapter_decision_misplaced`, `crates/cli/src/commands/run.rs`); otherwise
+   a `permission_approval_refused` row with `wrong_channel` or
+   `wrong_conversation` is written and the request stays open. In
    scope: platform-controlled bytes, forwarded by an adapter working as
    written, that make the gateway misroute a message, cross a channel, admit a
    sender the sender allowlist does not list, resolve an approval for someone

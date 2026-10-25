@@ -195,6 +195,7 @@ impl EventHandler for Handler {
             is_allow,
             user_id,
             &user_display,
+            &component.channel_id.get().to_string(),
         );
         {
             let mut w = self.writer.lock().await;
