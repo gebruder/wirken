@@ -44,6 +44,10 @@ Revisited when both move to p256/p384 0.14.
   is refused. **For wirken-siem:** new kinds `credential_destination_refused`,
   `credential_destination_granted`, `credential_destination_revoked`,
   `credential_handed_out`, `vault_migrated`.
+  An MCP OAuth refresh token is sent only to the provider's compiled-in
+  token endpoint, not checked against destinations. The MCP refresh socket
+  serves only credentials checked at the proxy's handoff; a revoke reaches
+  it at the next start.
 - A Zirkel source key is stored allowed to the hosts of the sources that use
   it; a run whose `sources.toml` sends it elsewhere is refused.
 - Skills load only under a registry root by default. The project root from
