@@ -1904,18 +1904,38 @@ pub enum SessionEvent {
         group: bool,
         removed_by: String,
     },
+    /// `wirken approvers add` let `user_id` answer approvals on
+    /// `adapter_id`. Written on the [`OPERATOR_APPROVERS_SESSION`] lane
+    /// and sealed by a chain head.
+    ApproverAdded {
+        adapter_id: String,
+        user_id: String,
+        display_name: String,
+        /// The local operator, as `wirken permissions` records it.
+        added_by: String,
+    },
+    /// `wirken approvers remove` took `user_id` off `adapter_id`. Same
+    /// lane and sealing as [`Self::ApproverAdded`].
+    ApproverRemoved {
+        adapter_id: String,
+        user_id: String,
+        removed_by: String,
+    },
     /// An allowlist command refused before it opened anything, because
     /// it ran inside a Wirken `exec` (the `WIRKEN_EXEC` marker was
     /// set). Written on that command's own lane,
-    /// [`OPERATOR_SENDERS_SESSION`] for `wirken senders`, and sealed by
+    /// [`OPERATOR_SENDERS_SESSION`] for `wirken senders` and
+    /// [`OPERATOR_APPROVERS_SESSION`] for `wirken approvers`, and sealed by
     /// a chain head, like [`Self::UpdateRefused`], so an operator can
     /// see that a model tried to change or read who may drive or
     /// approve for an agent through a command approved for something
     /// else. Forwarded to a SIEM by default.
     OperatorCommandRefused {
-        /// `senders`.
+        /// `senders` or `approvers`.
         command: String,
-        /// The subcommand asked for: `add`, `remove`, `list`, `refused`.
+        /// The subcommand asked for: `add`, `remove`, `list`, and
+        /// `refused` for senders or `set-chat` and `show-chat` for
+        /// approvers.
         invocation: String,
         /// Why it was refused: `inside_exec`.
         reason: String,
@@ -2426,6 +2446,11 @@ pub const INBOUND_SENDERS_SESSION: &str = "gateway-inbound";
 /// [`SessionEvent::InboundSenderRemoved`]. The gateway only reads the
 /// allowlist, so each lane keeps one writer.
 pub const OPERATOR_SENDERS_SESSION: &str = "gateway-senders";
+
+/// The session lane `wirken approvers` writes approver allowlist changes
+/// on: [`SessionEvent::ApproverAdded`] and
+/// [`SessionEvent::ApproverRemoved`].
+pub const OPERATOR_APPROVERS_SESSION: &str = "gateway-approvers";
 
 /// Why the gateway dropped an inbound message at the sender check.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

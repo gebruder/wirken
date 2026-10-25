@@ -3842,6 +3842,17 @@ fn every_session_event() -> Vec<SessionEvent> {
             group: false,
             removed_by: String::new(),
         },
+        SessionEvent::ApproverAdded {
+            adapter_id: String::new(),
+            user_id: String::new(),
+            display_name: String::new(),
+            added_by: String::new(),
+        },
+        SessionEvent::ApproverRemoved {
+            adapter_id: String::new(),
+            user_id: String::new(),
+            removed_by: String::new(),
+        },
         SessionEvent::OperatorCommandRefused {
             command: String::new(),
             invocation: String::new(),
@@ -3908,6 +3919,8 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::InboundSenderRefused { .. } => "InboundSenderRefused",
         SessionEvent::InboundSenderAdded { .. } => "InboundSenderAdded",
         SessionEvent::InboundSenderRemoved { .. } => "InboundSenderRemoved",
+        SessionEvent::ApproverAdded { .. } => "ApproverAdded",
+        SessionEvent::ApproverRemoved { .. } => "ApproverRemoved",
         SessionEvent::OperatorCommandRefused { .. } => "OperatorCommandRefused",
         SessionEvent::HookDispatched { .. } => "HookDispatched",
         SessionEvent::EgressHookDispatched { .. } => "EgressHookDispatched",
@@ -3935,7 +3948,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 74;
+const SESSION_EVENT_VARIANTS: usize = 76;
 
 /// The list covers the enum.
 #[test]

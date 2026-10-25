@@ -1595,8 +1595,8 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // plus the approval-chat configuration
     // (`adapter_approval_conversations` table). The CLI
     // subcommand `wirken approvers` writes both directly to
-    // SQLite; the registry's in-memory cache is loaded on next
-    // gateway start. The channel-adapter approval gates
+    // SQLite, and the registry reads them on every call, so a change
+    // applies to the next decision. The channel-adapter approval gates
     // (`TelegramApprovalGate`, `SignalApprovalGate`) are
     // constructed below where the `OutboundDispatcher` is
     // available; the registry is plumbed through.
@@ -7585,6 +7585,215 @@ mod same_connection_approval_tests {
                         channel: "signal".into()
                     }) && approved_by == "davi")),
             "{lane:?}"
+        );
+
+        drop((reader, writer));
+        tokio::time::timeout(Duration::from_secs(15), connection)
+            .await
+            .expect("the connection handler returns")
+            .unwrap()
+            .unwrap();
+        drop(audit);
+        audit_task.await.unwrap();
+    }
+}
+
+/// An approver removed while the gateway runs is refused on the next
+/// decision, with no restart: the registry is read on every decision.
+#[cfg(all(test, unix))]
+mod approver_removed_mid_run_tests {
+    use super::*;
+    use std::time::Duration;
+    use wirken_audit::SqliteSessionLog;
+    use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, test_pair};
+
+    /// Long enough for an answer that is read to land well inside it,
+    /// short enough that the refused request's wait ends the test.
+    const GATE_TIMEOUT: Duration = Duration::from_secs(3);
+    const TURN_DEADLINE: Duration = Duration::from_secs(20);
+
+    async fn send(writer: &mut IpcFrameWriter, id: &str) {
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut m = msg.init_root::<frame::Builder<'_>>().init_inbound();
+            m.set_id(id);
+            m.set_sender_id("U1");
+            m.set_sender_name("davi");
+            m.set_channel("signal");
+            m.set_conversation_id("dm-1");
+            m.set_text("list the files");
+            m.set_metadata("{}");
+        }
+        writer.write_message(&msg).await.unwrap();
+    }
+
+    /// Answer every approval request as U1 until the turn's reply, and
+    /// return it.
+    async fn answer_as_u1(reader: &mut IpcFrameReader, writer: &mut IpcFrameWriter) -> String {
+        loop {
+            let msg = reader.read_message().await.unwrap();
+            let request_id = match msg
+                .get_root::<frame::Reader<'_>>()
+                .unwrap()
+                .which()
+                .unwrap()
+            {
+                frame::ApprovalRequest(r) => r.unwrap().get_request_id().unwrap().to_string(),
+                frame::Outbound(o) => return o.unwrap().get_text().unwrap().to_string().unwrap(),
+                _ => continue,
+            };
+            let mut decision = capnp::message::Builder::new_default();
+            {
+                let mut d = decision
+                    .init_root::<frame::Builder<'_>>()
+                    .init_approval_decision();
+                d.set_request_id(request_id.unwrap());
+                d.set_actor_user_id("U1");
+                d.set_actor_display("davi");
+                d.init_decision().set_allow(());
+            }
+            writer.write_message(&decision).await.unwrap();
+        }
+    }
+
+    /// `(kind, caller, reason)` of every approval row in the log.
+    fn approval_rows(db: &std::path::Path) -> Vec<(String, Option<String>, Option<String>)> {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.prepare(
+            "SELECT json_extract(payload, '$.kind'), json_extract(payload, '$.caller'),
+                    json_extract(payload, '$.reason')
+               FROM session_events
+              WHERE json_extract(payload, '$.kind')
+                    IN ('permission_approved', 'permission_approval_refused')
+              ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn an_approver_removed_mid_run_is_refused_on_the_next_decision() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let model = super::scripted_model::serve(vec![
+            super::scripted_model::tool_call_completion("exec", r#"{"command":"ls"}"#),
+            super::scripted_model::text_completion("Done."),
+            super::scripted_model::tool_call_completion("exec", r#"{"command":"ls"}"#),
+            super::scripted_model::text_completion("Not run."),
+        ])
+        .await;
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let sessions_db = tmp.path().join("sessions.db");
+        let log = Arc::new(SqliteSessionLog::open(&sessions_db).unwrap());
+        let mut configs = super::scripted_model::default_agent(model, workspace);
+        if let Some(agent) = configs.get_mut("default") {
+            agent.sandbox.mode = wirken_agent::sandbox::SandboxMode::Off;
+        }
+        let factory = AgentFactory::new(
+            configs,
+            log.clone(),
+            Arc::new(std::sync::Mutex::new(
+                wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
+                    ":memory:",
+                ))
+                .unwrap(),
+            )),
+        );
+        let identity = AdapterIdentity::generate("signal");
+        let registry = AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap();
+        registry
+            .register("signal", &identity.public_key_bytes(), "signal")
+            .unwrap();
+        let approvers_db = tmp.path().join("approvers.db");
+        let approvers = Arc::new(
+            wirken_gateway::approver_registry::ApproverRegistry::open(&approvers_db).unwrap(),
+        );
+        approvers
+            .set_approval_conversation("signal", "group-1")
+            .unwrap();
+        approvers.register("signal", "U1", "davi").unwrap();
+        let queue = Arc::new(wirken_gateway::pending_approvals::PendingApprovalQueue::new());
+        let dispatcher = Arc::new(OutboundDispatcher::new());
+        factory.attach_signal_approval_gate(Arc::new(
+            wirken_agent::signal_approval_gate::SignalApprovalGate::with_timeout(
+                queue.clone(),
+                approvers.clone(),
+                dispatcher.clone(),
+                GATE_TIMEOUT,
+            ),
+        ));
+        let (audit, audit_task) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
+        let audit = Arc::new(audit);
+        let (gateway_end, adapter_end) = test_pair().unwrap();
+        let connection = tokio::spawn(handle_adapter_connection(
+            gateway_end,
+            Arc::new(Mutex::new(registry)),
+            factory,
+            audit.clone(),
+            Arc::new(Mutex::new(
+                SessionStore::open(&tmp.path().join("store.db"), 3600).unwrap(),
+            )),
+            Arc::new(Router::new()),
+            Arc::new(InjectionDetector::new()),
+            dispatcher,
+            queue.clone(),
+            approvers,
+            Arc::new(test_inbound_gate(tmp.path(), &[("signal", "U1")])),
+            Arc::new(HashMap::new()),
+            super::super::connection_tasks::AdapterIdSlot::default(),
+            log.clone(),
+            None,
+            TerminalSetup {
+                sessions: Arc::new(TerminalSessions::new()),
+                log: log.clone(),
+                data_dir: tmp.path().to_path_buf(),
+            },
+        ));
+        let (mut reader, mut writer) = split_stream(adapter_end);
+        perform_adapter_handshake(&mut reader, &mut writer, &identity)
+            .await
+            .unwrap();
+
+        // U1 approves the first request.
+        send(&mut writer, "m-1").await;
+        let reply = tokio::time::timeout(TURN_DEADLINE, answer_as_u1(&mut reader, &mut writer))
+            .await
+            .unwrap();
+        assert_eq!(reply, "Done.");
+
+        // `wirken approvers remove`, on its own connection, while the
+        // gateway runs.
+        assert!(
+            wirken_gateway::approver_registry::ApproverRegistry::open(&approvers_db)
+                .unwrap()
+                .unregister("signal", "U1")
+                .unwrap()
+        );
+
+        // U1 answers the next request the same way, and is refused: the
+        // gate waits out its timeout and the call does not run.
+        send(&mut writer, "m-2").await;
+        let reply = tokio::time::timeout(TURN_DEADLINE, answer_as_u1(&mut reader, &mut writer))
+            .await
+            .unwrap();
+        assert_eq!(reply, "Not run.");
+        assert!(queue.is_empty(), "the refused request timed out");
+
+        let rows = approval_rows(&sessions_db);
+        assert_eq!(
+            rows,
+            vec![
+                ("permission_approved".to_string(), None, None),
+                (
+                    "permission_approval_refused".to_string(),
+                    Some("U1".to_string()),
+                    Some("unauthorized_actor".to_string())
+                ),
+            ],
+            "one approval before the removal, one refusal after it"
         );
 
         drop((reader, writer));

@@ -545,6 +545,9 @@ impl OtelProjector {
             SessionEvent::InboundSenderRefused { .. } => Vec::new(),
             SessionEvent::InboundSenderAdded { .. } => Vec::new(),
             SessionEvent::InboundSenderRemoved { .. } => Vec::new(),
+            // Approver allowlist edits, outside any run.
+            SessionEvent::ApproverAdded { .. } => Vec::new(),
+            SessionEvent::ApproverRemoved { .. } => Vec::new(),
             // An operator's command, refused outside any run.
             SessionEvent::OperatorCommandRefused { .. } => Vec::new(),
             // The verdict lands on the tool result the tool span already

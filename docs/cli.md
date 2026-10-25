@@ -338,7 +338,15 @@ Channel-adapter approver allowlist and per-adapter approval chat.
 wirken approvers add <ADAPTER_ID> <USER_ID> [--display NAME]
 wirken approvers list [--adapter A]
 wirken approvers remove <ADAPTER_ID> <USER_ID>
+wirken approvers set-chat <ADAPTER_ID> <CONVERSATION_ID>
+wirken approvers show-chat <ADAPTER_ID>
 ```
+
+The gateway reads the allowlist and the approval chat on every decision, so a
+change applies without a restart. Each `add` and `remove` is an
+`approver_added` or `approver_removed` row on the signed `gateway-approvers`
+lane; an add whose row cannot be written is undone. Every subcommand refuses
+inside a Wirken `exec` and records the refusal on that lane.
 
 ## wirken senders
 

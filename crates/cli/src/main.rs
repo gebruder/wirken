@@ -112,8 +112,10 @@ enum Commands {
     /// Manage channel-adapter approver allowlist and per-adapter
     /// approval chat configuration. Operators allowed to approve
     /// tool-call requests on a given channel adapter live here;
-    /// `wirken run` loads the cache at startup and the gateway
-    /// validates every callback press against the allowlist.
+    /// the gateway validates every callback press against the
+    /// allowlist, reading it on every decision, so a change applies
+    /// without a restart. Each add and remove is a row on the signed
+    /// `gateway-approvers` lane. Refuses inside a Wirken `exec`.
     #[command(subcommand)]
     Approvers(ApproverCommands),
 
@@ -1154,6 +1156,7 @@ enum ApproverCommands {
     /// adapter does not supply one.
     Add {
         adapter_id: String,
+        #[arg(allow_hyphen_values = true)]
         user_id: String,
         #[arg(long)]
         display: Option<String>,
@@ -1164,7 +1167,11 @@ enum ApproverCommands {
         adapter: Option<String>,
     },
     /// Remove an approver.
-    Remove { adapter_id: String, user_id: String },
+    Remove {
+        adapter_id: String,
+        #[arg(allow_hyphen_values = true)]
+        user_id: String,
+    },
     /// Configure the conversation where approval messages render
     /// for the given channel adapter. Encoding is adapter-native:
     /// Telegram takes its `i64` chat id as a decimal string (often
@@ -1174,6 +1181,8 @@ enum ApproverCommands {
     /// sessions fail-closed at the gate's preflight.
     SetChat {
         adapter_id: String,
+        /// A Telegram group's id is negative and is taken as it is.
+        #[arg(allow_hyphen_values = true)]
         conversation_id: String,
     },
     /// Show the configured approval conversation for an adapter.

@@ -879,6 +879,11 @@ fn extract_identity_for_sentinel(
         // operator labels, off the sender column like `revoked_by`.
         SessionEvent::InboundSenderAdded { .. } => (None, None, None),
         SessionEvent::InboundSenderRemoved { .. } => (None, None, None),
+        // An operator's command outside any conversation. The approver
+        // is not a sender who acted, and `added_by` / `removed_by` are
+        // operator labels.
+        SessionEvent::ApproverAdded { .. } => (None, None, None),
+        SessionEvent::ApproverRemoved { .. } => (None, None, None),
         // An operator's command refused outside any conversation.
         SessionEvent::OperatorCommandRefused { .. } => (None, None, None),
         // A hook id and an error; none of the three.
@@ -1144,6 +1149,16 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::InboundSenderRemoved {
             channel, id, group, ..
         } => format!("inbound_sender_removed channel={channel} id={id} group={group}"),
+        SessionEvent::ApproverAdded {
+            adapter_id,
+            user_id,
+            ..
+        } => format!("approver_added adapter={adapter_id} user={user_id}"),
+        SessionEvent::ApproverRemoved {
+            adapter_id,
+            user_id,
+            ..
+        } => format!("approver_removed adapter={adapter_id} user={user_id}"),
         SessionEvent::OperatorCommandRefused {
             command,
             invocation,

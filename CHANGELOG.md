@@ -19,6 +19,9 @@ takes yet; it is revisited when both do.
 
 ### Fixed
 
+- `wirken approvers set-chat`, `add` and `remove` take an id with a leading
+  hyphen as it is, so a Telegram group's negative chat id is accepted; before,
+  it was read as an unknown flag.
 - A turn that reaches a ChatGPT plan's usage limit replies, in `wirken chat`
   and on every adapter channel, with "Usage limit reached. Review your plan
   or this app's limit in ChatGPT settings. Manage usage:
@@ -29,6 +32,18 @@ takes yet; it is revisited when both do.
 
 ### Security
 
+- The gateway reads the approver allowlist and each adapter's approval
+  conversation on every decision (`ApproverRegistry`,
+  `crates/gateway/src/approver_registry.rs`), so `wirken approvers` changes
+  apply to the next one without a restart, and an approver removed while
+  `wirken run` is up is refused on the next decision with a
+  `permission_approval_refused` row. Before, the gateway read both once at
+  startup, and a removed approver could go on approving until the next
+  restart. Each `wirken approvers add` and `remove` is an `approver_added` or
+  `approver_removed` row on the signed `gateway-approvers` lane, sealed by a
+  chain head and forwarded by default; an add whose row cannot be written is
+  undone. Every `wirken approvers` subcommand refuses inside a Wirken `exec`
+  and records an `operator_command_refused` row on that lane.
 - The gateway admits an inbound message from a channel adapter only when its
   sender, or the group it arrived in, is on the sender allowlist for that
   channel (`InboundGate::check`, `crates/gateway/src/sender_registry.rs`).

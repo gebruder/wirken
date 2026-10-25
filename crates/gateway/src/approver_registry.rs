@@ -11,8 +11,8 @@
 //! adapter. The adapter forwards every callback press to the
 //! gateway via the `ApprovalDecision` frame; the gateway calls
 //! `verify` against this registry before resolving the
-//! `PendingApprovalQueue`. The alternative — caching the allowlist
-//! at the adapter and validating before forwarding — would create
+//! `PendingApprovalQueue`. The alternative, caching the allowlist
+//! at the adapter and validating before forwarding, would create
 //! a synchronization problem (invalidation on `remove`, sync on
 //! reconnect, race between `remove` and a button press) for no
 //! operational benefit. Single source of truth.
@@ -23,14 +23,13 @@
 //! TEXT (Telegram serializes its `i64` chat_id; Signal carries
 //! the base64 group_id or E.164/UUID for DM channels; other
 //! adapters whatever their conversation primitive is). Same
-//! schema-file, same connection, same cache reload semantics as
-//! the `approvers` table; CLI writes go through the same module
-//! so the cache stays coherent.
+//! schema-file and connection as the `approvers` table, and read
+//! the same way: on every call, so a change from the CLI's process
+//! applies without a restart.
 
-use rusqlite::{Connection, params};
-use std::collections::HashMap;
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Mutex;
 
 use crate::error::GatewayError;
 
@@ -49,28 +48,34 @@ pub struct ApproverEntry {
     pub display_name: String,
 }
 
-/// SQLite-backed approver allowlist with an in-memory cache.
-/// CLI writes go through `register` / `unregister` / `set_approval_conversation`;
-/// the gateway reads via `verify` and `approval_chat` on every
-/// decision.
+/// SQLite-backed approver allowlist, read on every call.
+///
+/// There is no cache: `verify`, `display_name` and
+/// `approval_conversation` query the database each time, so a change
+/// `wirken approvers` makes from its own process applies to the next
+/// decision without a restart, and a removed approver cannot answer the
+/// next request. A read that fails admits nobody: `verify` answers
+/// false and `approval_conversation` none, which the channel gates
+/// already treat as fail-closed.
+///
 /// `Connection` is `!Sync` because rusqlite holds a `RefCell` for
 /// statement caching. Wrapping it in a `Mutex` inside the struct
 /// makes `Arc<ApproverRegistry>` shareable across tokio tasks
-/// without forcing callers to wrap externally. Cache reads
-/// (`verify`, `approval_chat`) bypass the mutex entirely; only
-/// SQLite writes take it.
+/// without forcing callers to wrap externally.
 pub struct ApproverRegistry {
     conn: Mutex<Connection>,
-    approvers: Arc<RwLock<HashMap<(String, String), ApproverEntry>>>,
-    conversations: Arc<RwLock<HashMap<String, String>>>,
 }
 
+/// How long SQLite waits on a lock before an operation fails. The CLI
+/// writes while the gateway reads; WAL lets those run together, and
+/// this covers the brief write lock a checkpoint takes.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl ApproverRegistry {
-    /// Open or create the approver registry at `db_path`. Loads the
-    /// existing allowlist and approval-chat configuration into the
-    /// in-memory cache.
+    /// Open or create the approver registry at `db_path`.
     pub fn open(db_path: &Path) -> Result<Self, GatewayError> {
         let conn = Connection::open(db_path)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS approvers (
@@ -85,78 +90,41 @@ impl ApproverRegistry {
                  conversation_id TEXT NOT NULL
              );",
         )?;
-
-        let mut approvers = HashMap::new();
-        {
-            let mut stmt =
-                conn.prepare("SELECT adapter_id, user_id, display_name FROM approvers")?;
-            let rows = stmt.query_map([], |row| {
-                let adapter_id: String = row.get(0)?;
-                let user_id: String = row.get(1)?;
-                let display_name: String = row.get(2)?;
-                Ok((adapter_id, user_id, display_name))
-            })?;
-            for row in rows {
-                let (adapter_id, user_id, display_name) = row?;
-                approvers.insert(
-                    (adapter_id.clone(), user_id.clone()),
-                    ApproverEntry {
-                        adapter_id,
-                        user_id,
-                        display_name,
-                    },
-                );
-            }
-        }
-
-        let mut conversations = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT adapter_id, conversation_id FROM adapter_approval_conversations",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                let adapter_id: String = row.get(0)?;
-                let conversation_id: String = row.get(1)?;
-                Ok((adapter_id, conversation_id))
-            })?;
-            for row in rows {
-                let (adapter_id, conversation_id) = row?;
-                conversations.insert(adapter_id, conversation_id);
-            }
-        }
-
         Ok(Self {
             conn: Mutex::new(conn),
-            approvers: Arc::new(RwLock::new(approvers)),
-            conversations: Arc::new(RwLock::new(conversations)),
         })
+    }
+
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Add `(adapter_id, user_id)` to the allowlist. Idempotent:
     /// repeated calls with the same key update the display name.
+    /// Returns whether the entry is new.
     /// CLI surface: `wirken approvers add <adapter_id> <user_id>`.
     pub fn register(
         &self,
         adapter_id: &str,
         user_id: &str,
         display_name: &str,
-    ) -> Result<(), GatewayError> {
-        self.conn.lock().unwrap().execute(
+    ) -> Result<bool, GatewayError> {
+        let conn = self.conn();
+        let existed = conn
+            .query_row(
+                "SELECT 1 FROM approvers WHERE adapter_id = ?1 AND user_id = ?2",
+                params![adapter_id, user_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        conn.execute(
             "INSERT INTO approvers (adapter_id, user_id, display_name) \
              VALUES (?1, ?2, ?3) \
              ON CONFLICT(adapter_id, user_id) DO UPDATE SET display_name = excluded.display_name",
             params![adapter_id, user_id, display_name],
         )?;
-        let entry = ApproverEntry {
-            adapter_id: adapter_id.to_string(),
-            user_id: user_id.to_string(),
-            display_name: display_name.to_string(),
-        };
-        self.approvers
-            .write()
-            .unwrap()
-            .insert((adapter_id.to_string(), user_id.to_string()), entry);
-        Ok(())
+        Ok(!existed)
     }
 
     /// Remove `(adapter_id, user_id)` from the allowlist. Returns
@@ -164,41 +132,53 @@ impl ApproverRegistry {
     /// the operator's perspective; the CLI prints "no such
     /// approver" but doesn't fail).
     pub fn unregister(&self, adapter_id: &str, user_id: &str) -> Result<bool, GatewayError> {
-        let changes = self.conn.lock().unwrap().execute(
+        let changes = self.conn().execute(
             "DELETE FROM approvers WHERE adapter_id = ?1 AND user_id = ?2",
             params![adapter_id, user_id],
         )?;
-        if changes > 0 {
-            self.approvers
-                .write()
-                .unwrap()
-                .remove(&(adapter_id.to_string(), user_id.to_string()));
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(changes > 0)
     }
 
-    /// True iff `(adapter_id, user_id)` is in the allowlist.
+    /// True iff `(adapter_id, user_id)` is in the allowlist now.
     /// Called by the gateway's `ApprovalDecision` handler before
     /// resolving the queue entry. Unauthorized presses are silently
-    /// dropped at the call site; this method just answers yes/no.
+    /// dropped at the call site; this method just answers yes/no. A
+    /// read that fails answers no.
     pub fn verify(&self, adapter_id: &str, user_id: &str) -> bool {
-        self.approvers
-            .read()
-            .unwrap()
-            .contains_key(&(adapter_id.to_string(), user_id.to_string()))
+        match self
+            .conn()
+            .query_row(
+                "SELECT 1 FROM approvers WHERE adapter_id = ?1 AND user_id = ?2",
+                params![adapter_id, user_id],
+                |_| Ok(()),
+            )
+            .optional()
+        {
+            Ok(found) => found.is_some(),
+            Err(e) => {
+                tracing::error!(
+                    adapter_id,
+                    error = %e,
+                    "approver allowlist could not be read; refusing the decision"
+                );
+                false
+            }
+        }
     }
 
     /// Display name for `(adapter_id, user_id)` if registered.
     /// Used as the audit row's actor label fallback when the
     /// adapter's `ApprovalDecision` frame did not carry a display.
     pub fn display_name(&self, adapter_id: &str, user_id: &str) -> Option<String> {
-        self.approvers
-            .read()
-            .unwrap()
-            .get(&(adapter_id.to_string(), user_id.to_string()))
-            .map(|e| e.display_name.clone())
+        self.conn()
+            .query_row(
+                "SELECT display_name FROM approvers WHERE adapter_id = ?1 AND user_id = ?2",
+                params![adapter_id, user_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
     }
 
     /// Set the approval conversation for `adapter_id`. Channel
@@ -213,36 +193,57 @@ impl ApproverRegistry {
         adapter_id: &str,
         conversation_id: &str,
     ) -> Result<(), GatewayError> {
-        self.conn.lock().unwrap().execute(
+        self.conn().execute(
             "INSERT INTO adapter_approval_conversations (adapter_id, conversation_id) \
              VALUES (?1, ?2) \
              ON CONFLICT(adapter_id) DO UPDATE SET conversation_id = excluded.conversation_id",
             params![adapter_id, conversation_id],
         )?;
-        self.conversations
-            .write()
-            .unwrap()
-            .insert(adapter_id.to_string(), conversation_id.to_string());
         Ok(())
     }
 
     /// Approval conversation id for `adapter_id`, or `None` when
-    /// none is configured. `None` triggers a startup
-    /// `tracing::warn` at `wirken run` and a fail-closed preflight
-    /// in the gate.
+    /// none is configured or it could not be read. `None` triggers a
+    /// startup `tracing::warn` at `wirken run` and a fail-closed
+    /// preflight in the gate.
     pub fn approval_conversation(&self, adapter_id: &str) -> Option<String> {
-        self.conversations.read().unwrap().get(adapter_id).cloned()
+        match self
+            .conn()
+            .query_row(
+                "SELECT conversation_id FROM adapter_approval_conversations WHERE adapter_id = ?1",
+                params![adapter_id],
+                |row| row.get(0),
+            )
+            .optional()
+        {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::error!(
+                    adapter_id,
+                    error = %e,
+                    "approval conversation could not be read; no approval chat"
+                );
+                None
+            }
+        }
     }
 
     /// List approvers, optionally filtered by adapter. CLI
     /// surface: `wirken approvers list [--adapter <id>]`.
-    pub fn list(&self, adapter_id: Option<&str>) -> Vec<ApproverEntry> {
-        let cache = self.approvers.read().unwrap();
-        cache
-            .values()
-            .filter(|e| adapter_id.is_none_or(|a| e.adapter_id == a))
-            .cloned()
-            .collect()
+    pub fn list(&self, adapter_id: Option<&str>) -> Result<Vec<ApproverEntry>, GatewayError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT adapter_id, user_id, display_name FROM approvers \
+             WHERE ?1 IS NULL OR adapter_id = ?1 ORDER BY adapter_id, user_id",
+        )?;
+        let rows = stmt.query_map(params![adapter_id], |row| {
+            Ok(ApproverEntry {
+                adapter_id: row.get(0)?,
+                user_id: row.get(1)?,
+                display_name: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
@@ -360,17 +361,46 @@ mod tests {
         reg.register("telegram", "1", "alice").unwrap();
         reg.register("telegram", "2", "bob").unwrap();
         reg.register("discord", "3", "carol").unwrap();
-        let mut tg = reg.list(Some("telegram"));
+        let mut tg = reg.list(Some("telegram")).unwrap();
         tg.sort_by(|a, b| a.user_id.cmp(&b.user_id));
         assert_eq!(tg.len(), 2);
         assert_eq!(tg[0].user_id, "1");
         assert_eq!(tg[1].user_id, "2");
-        let all = reg.list(None);
+        let all = reg.list(None).unwrap();
         assert_eq!(all.len(), 3);
     }
 
+    /// The gateway and `wirken approvers` hold separate connections. A
+    /// change from the CLI's is seen on the gateway's next read, with no
+    /// reopen.
     #[test]
-    fn cache_persists_across_reopen() {
+    fn a_change_from_another_connection_is_seen_on_the_next_read() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("approvers.db");
+        let gateway = ApproverRegistry::open(&path).unwrap();
+        let cli = ApproverRegistry::open(&path).unwrap();
+        assert!(cli.register("signal", "U1", "davi").unwrap());
+        assert!(gateway.verify("signal", "U1"));
+        assert_eq!(
+            gateway.display_name("signal", "U1").as_deref(),
+            Some("davi")
+        );
+        cli.set_approval_conversation("signal", "group-1").unwrap();
+        assert_eq!(
+            gateway.approval_conversation("signal").as_deref(),
+            Some("group-1")
+        );
+        assert!(cli.unregister("signal", "U1").unwrap());
+        assert!(!gateway.verify("signal", "U1"));
+        assert!(cli.register("signal", "U2", "").unwrap(), "a new entry");
+        assert!(
+            !cli.register("signal", "U2", "x").unwrap(),
+            "an existing entry"
+        );
+    }
+
+    #[test]
+    fn entries_persist_across_reopen() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("approvers.db");
         {
