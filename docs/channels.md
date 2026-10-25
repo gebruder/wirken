@@ -349,9 +349,14 @@ while `wirken run` is up cannot answer the next prompt.
 The prompt shows a prefix. Reply in the approval chat with `!approve <prefix>`
 or `!deny <prefix> [reason]`.
 
-To send from your own number (Note to Self), signal-cli delivers those messages
-as sync messages from your other device, and wirken drops them unless
-`WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1` is set on `wirken run`.
+To talk to the agent from your own number, message yourself (Note to Self).
+signal-cli, linked to your number, sees those as sync messages from your phone
+addressed to your own number, and forwards them as messages from that number,
+which then has to be on both allowlists like any sender. A message you send
+from your phone to anyone else also reaches signal-cli as a sync message; it is
+dropped unless `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1` is set on
+`wirken run`, and the first one dropped in a run is logged at `warn` naming
+that variable.
 
 ### The allowlist is the perimeter
 
@@ -421,9 +426,9 @@ echo "+15551234567,+15559876543,group-abc-xyz=" \
 
 Non-text messages (typing indicators, reactions, stickers) are dropped. Own
 sends are filtered by timestamp so the agent does not re-process its own
-replies; sends from your other linked devices are dropped unless
-`WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS` is set, which is a test-to-self
-affordance.
+replies. Sends from your other linked devices are forwarded when they are
+Note to Self, and otherwise dropped unless
+`WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS` is set.
 
 ## Google Chat
 

@@ -42,6 +42,9 @@ takes yet; it is revisited when both do.
 
 ### Fixed
 
+- A Signal Note to Self is forwarded without
+  `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS`. Other linked-device sends still
+  need it; the first one dropped in a run is logged at `warn`.
 - The iMessage adapter registers its webhook at `/api/v1/webhook` and sends the
   BlueBubbles password as the `password` query parameter on every API call.
   Before, it registered at `/api/v1/server/webhooks`, a route BlueBubbles

@@ -98,10 +98,15 @@ pub struct SignalAdapter {
     phone_number: String,
     allowlist: SignalAllowlist,
     /// When false (default), `syncMessage.sentMessage` notifications are
-    /// dropped entirely. When true, they are still filtered by the
-    /// self-echo cache but otherwise forwarded so tests-to-self work.
-    /// Controlled by `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1`.
+    /// dropped, except Note to Self: one whose destination is this
+    /// account's own number is the operator writing in their own chat
+    /// and is forwarded. When true, every one is forwarded, still
+    /// filtered by the self-echo cache. Controlled by
+    /// `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1`.
     forward_linked_device_sends: bool,
+    /// Set once the first linked-device send is dropped and logged at
+    /// warn; later drops log at debug.
+    warned_linked_device_drop: std::sync::atomic::AtomicBool,
     /// Cap on how long `send_message` waits for reconnect. Read once
     /// here rather than on every send, for the same reason
     /// `forward_linked_device_sends` is: the value cannot change
@@ -213,6 +218,7 @@ impl SignalAdapter {
             phone_number,
             allowlist,
             forward_linked_device_sends,
+            warned_linked_device_drop: std::sync::atomic::AtomicBool::new(false),
             reconnect_wait: resolve_reconnect_wait(),
             echoed_timestamps: Mutex::new(LruCache::new(echo_cap)),
             next_req_id: AtomicU64::new(1),
@@ -556,15 +562,32 @@ impl SignalAdapter {
             return;
         }
 
-        // Filter 3: linked-device-send gate. Operator sending from their
-        // phone to a contact is visible here as a SyncSent envelope. The
-        // default is to drop those (agent only processes inbound from
-        // other people); operators opt-in for test-to-self via env var.
-        if is_sync_sent && !self.forward_linked_device_sends {
-            tracing::debug!(
-                ts = envelope_ts,
-                "dropping linked-device send (WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS not set)"
-            );
+        // Filter 3: linked-device-send gate. The operator sending from
+        // their phone is visible here as a SyncSent envelope. Sent to
+        // their own number (Note to Self), it is the operator writing to
+        // the agent in their own chat, and goes on to the allowlist like
+        // any message. Sent to anyone else, it is the operator talking
+        // to someone else, and is dropped unless the operator opted in.
+        if is_sync_sent
+            && !self.forward_linked_device_sends
+            && !is_note_to_self(envelope, &self.phone_number)
+        {
+            if !self
+                .warned_linked_device_drop
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    ts = envelope_ts,
+                    "dropping a message this account sent to someone else from a linked \
+                     device; set WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1 on `wirken run` to \
+                     forward them. Messages to this account's own number are forwarded."
+                );
+            } else {
+                tracing::debug!(
+                    ts = envelope_ts,
+                    "dropping linked-device send (WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS not set)"
+                );
+            }
             return;
         }
 
@@ -1097,4 +1120,18 @@ impl SignalAdapter {
     ) {
         self.route_approval_command(inbound, cmd).await;
     }
+}
+
+/// Whether a `syncMessage.sentMessage` envelope is Note to Self: sent by
+/// this account to its own number. Compared exactly with the number the
+/// adapter was configured with, as signal-cli writes both in E.164.
+pub(crate) fn is_note_to_self(envelope: &Value, own_number: &str) -> bool {
+    let Some(sent) = envelope.pointer("/syncMessage/sentMessage") else {
+        return false;
+    };
+    !own_number.is_empty()
+        && ["destination", "destinationNumber"]
+            .iter()
+            .filter_map(|k| sent.get(*k).and_then(|d| d.as_str()))
+            .any(|d| d == own_number)
 }

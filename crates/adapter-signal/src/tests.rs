@@ -1345,6 +1345,156 @@ async fn adapter_drops_messages_from_unknown_senders() {
     fake_signal.abort();
 }
 
+/// Note to Self is a sync-sent envelope whose destination is the
+/// account's own number; a sync send to anyone else is not.
+#[test]
+fn note_to_self_is_a_sync_send_to_the_own_number() {
+    use crate::adapter::is_note_to_self;
+    let envelope = |line: String| -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        v.pointer("/params/result/envelope").unwrap().clone()
+    };
+    let own = fixtures::FIXTURE_ACCOUNT;
+    assert!(is_note_to_self(
+        &envelope(fixtures::sync_sent_subscribed(1, 1, own, "hi")),
+        own
+    ));
+    assert!(!is_note_to_self(
+        &envelope(fixtures::sync_sent_subscribed(
+            1,
+            1,
+            fixtures::FIXTURE_SOURCE,
+            "hi"
+        )),
+        own
+    ));
+    assert!(!is_note_to_self(
+        &envelope(fixtures::sync_sent_subscribed(1, 1, own, "hi")),
+        ""
+    ));
+    // A data message from the own number is not a sync send at all.
+    assert!(!is_note_to_self(
+        &envelope(fixtures::data_message_from(1, 1, "hi", own)),
+        own
+    ));
+}
+
+/// The operator messaging their own number from their phone, with
+/// signal-cli linked to that number and the number on the allowlist,
+/// reaches the gateway by default, attributed to the own number. A
+/// message the operator sends from the phone to someone else does not,
+/// without `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS`.
+#[tokio::test]
+async fn a_note_to_self_from_an_allowlisted_own_number_reaches_the_gateway() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    use crate::SignalAdapter;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let signal_socket = tmp.path().join("signal-cli.sock");
+    let gw_socket = tmp.path().join("gw.sock");
+    let signal_listener = UnixListener::bind(&signal_socket).unwrap();
+    let gw_listener = UnixListener::bind(&gw_socket).unwrap();
+
+    let fake_signal = tokio::spawn(async move {
+        let (stream, _) = signal_listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().expect("subscribe");
+        let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let req_id = req["id"].as_u64().unwrap();
+        let sub_id: u64 = 556;
+        write
+            .write_all(fixtures::subscribe_response(req_id, sub_id).as_bytes())
+            .await
+            .unwrap();
+        // First the operator writing to a contact, which must stay with
+        // the phone; then Note to Self, which must reach the agent.
+        for (ts, destination, text) in [
+            (1711900000001, fixtures::FIXTURE_SOURCE, "to a contact"),
+            (1711900000002, fixtures::FIXTURE_ACCOUNT, "note to self"),
+        ] {
+            write
+                .write_all(fixtures::sync_sent_subscribed(sub_id, ts, destination, text).as_bytes())
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    });
+
+    let gateway_task = tokio::spawn(async move {
+        let (stream, _) = gw_listener.accept().await.unwrap();
+        let (mut gr, mut gw) = split_stream(stream);
+        perform_gateway_handshake(&mut gr, &mut gw, |id, _pk| {
+            assert_eq!(id, "signal");
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut seen = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, gr.read_message()).await {
+                Ok(Ok(msg)) => {
+                    let fr = msg.get_root::<frame::Reader<'_>>().unwrap();
+                    if let frame::Inbound(ib) = fr.which().unwrap() {
+                        let m = ib.unwrap();
+                        seen.push((
+                            m.get_text().unwrap().to_str().unwrap().to_string(),
+                            m.get_sender_id().unwrap().to_str().unwrap().to_string(),
+                            m.get_conversation_id()
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .to_string(),
+                        ));
+                    }
+                }
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        seen
+    });
+
+    let allowlist = SignalAllowlist::from_csv(&format!(
+        "{},{}",
+        fixtures::FIXTURE_ACCOUNT,
+        fixtures::FIXTURE_SOURCE
+    ))
+    .unwrap();
+    let adapter = SignalAdapter::new(
+        AdapterIdentity::generate("signal"),
+        signal_socket.to_string_lossy().into_owned(),
+        fixtures::FIXTURE_ACCOUNT.into(),
+        allowlist,
+    )
+    .expect("adapter construction");
+    let gw_socket_for_adapter = gw_socket.clone();
+    let adapter_task = tokio::spawn(async move {
+        std::sync::Arc::new(adapter)
+            .run(&gw_socket_for_adapter)
+            .await
+    });
+
+    let seen = gateway_task.await.expect("gateway task panicked");
+    adapter_task.abort();
+    fake_signal.abort();
+    assert_eq!(
+        seen,
+        vec![(
+            "note to self".to_string(),
+            fixtures::FIXTURE_ACCOUNT.to_string(),
+            fixtures::FIXTURE_ACCOUNT.to_string()
+        )],
+        "only the Note to Self reached the gateway, from the own number"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Feature-gated integration test against a real signal-cli daemon.
 // Set WIRKEN_SIGNAL_E2E=1 to enable. Requires `signal-cli` on PATH and a
