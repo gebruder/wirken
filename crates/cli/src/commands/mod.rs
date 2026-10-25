@@ -47,6 +47,7 @@ pub mod ui;
 pub mod update;
 pub mod vault;
 pub mod webchat;
+pub mod webchat_auth;
 pub mod zirkel;
 pub mod zirkel_calibrate;
 

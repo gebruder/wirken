@@ -1669,9 +1669,9 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // --- Webchat ---
     if wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN") {
         tracing::warn!(
-            "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN: webchat /api/chat accepts requests \
-             without an Origin header. Same-host non-browser callers (curl, scripts) \
-             can drive the agent. Same UID is the only trust boundary."
+            "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN: webchat accepts state-changing requests \
+             without an Origin header. It relaxes the Origin check only: every /api \
+             call still needs a login cookie or the session token as a bearer."
         );
     }
     let webchat_port = port.unwrap_or(18790);
@@ -1787,7 +1787,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         }
     });
 
-    println!("  WebChat: http://localhost:{webchat_port}");
+    println!("  WebChat: http://127.0.0.1:{webchat_port} (log in with `wirken webchat open`)");
     println!();
     // Taken before the line below says the gateway is up, so a signal
     // sent on seeing it is never handled by the default action instead.

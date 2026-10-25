@@ -479,6 +479,10 @@ const HTML: &str = r#"<!DOCTYPE html>
   <span class="chip chip-danger">Audit writer halted</span>
   <span>The audit record stopped accepting rows. New turns are refused until the gateway is restarted and the record verified.</span>
 </div>
+<div id="login-banner" class="banner banner-danger" role="alert" hidden>
+  <span class="chip chip-danger">Not logged in</span>
+  <span>On the gateway host, run <code>wirken webchat open</code> and open the link it prints.</span>
+</div>
 <div id="banners"></div>
 <header id="status">
   <button id="wordmark" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="about">wirken</button>
@@ -510,6 +514,15 @@ const HTML: &str = r#"<!DOCTYPE html>
 </div>
 <script>
 'use strict';
+// Every API call takes the login cookie. A 401 means this browser has
+// none, or one from an earlier gateway start: say how to log in.
+const loginBanner = document.getElementById('login-banner');
+const apiFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const res = await apiFetch(...args);
+  if (res.status === 401) loginBanner.hidden = false;
+  return res;
+};
 const conversation = document.getElementById('conversation');
 const thread = document.getElementById('thread');
 const turnline = document.getElementById('turnline');
@@ -2626,11 +2639,21 @@ pub async fn serve(
     connection_tasks: super::connection_tasks::ConnectionTasks,
 ) -> Result<()> {
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
-    tracing::info!("WebChat listening on http://127.0.0.1:{port}");
-
     let cfg = super::config();
+    // A fresh session token every start, written 0600 for `wirken
+    // webchat open` and never logged. Without the file nobody can log
+    // in, so a failure to write it stops webchat rather than serving a
+    // page every API call would refuse.
+    let auth = Arc::new(super::webchat_auth::WebchatAuth::generate());
+    auth.write_file(&cfg.data_dir, port)
+        .map_err(|e| anyhow::anyhow!("write the webchat credential: {e}"))?;
+    tracing::info!(
+        "WebChat listening on http://127.0.0.1:{port}; run `wirken webchat open` to log in"
+    );
+
     let shared = Shared {
         port,
+        auth,
         cfg: cfg.clone(),
         factory,
         audit,
@@ -2723,6 +2746,9 @@ struct Shared {
     /// The bound port, which the preflight checks `Origin` and `Host`
     /// against.
     port: u16,
+    /// The credential every `/api` route takes: a login's cookie, or
+    /// the session token as a bearer. See [`super::webchat_auth`].
+    auth: Arc<super::webchat_auth::WebchatAuth>,
     /// The gateway's config, read once at startup. Every route that
     /// reaches a database reaches it through this, so a test can
     /// point the routes at a directory of its own without writing the
@@ -2781,8 +2807,21 @@ struct AcceptedTurn {
 /// from a target that named them.
 async fn route(req: &Request<'_>, shared: &Shared) -> Response {
     match (req.method, req.path) {
-        ("GET", "/") => route_page(),
-        ("GET", path) if path.starts_with("/index.html") => route_page(),
+        ("GET", "/") => return route_page(),
+        ("GET", path) if path.starts_with("/index.html") => return route_page(),
+        ("GET", "/login") => return route_login(req, shared),
+        ("POST", "/api/login-tokens") => return route_login_token(req, shared),
+        _ => {}
+    }
+    // Every other route is under `/api` and takes a credential, checked
+    // before the route does anything. A path that is not is no route.
+    if !req.path.starts_with("/api/") {
+        return not_found();
+    }
+    let Some(caller) = shared.auth.authenticate(req.raw) else {
+        return Response::Complete(unauthorized());
+    };
+    match (req.method, req.path) {
         ("GET", path) if path.starts_with("/api/sessions/") => route_session(req, shared),
         ("GET", path) if path.starts_with("/api/imported/") => route_imported(req, shared),
         ("GET", "/api/approvals") => route_approvals(req, shared),
@@ -2794,12 +2833,73 @@ async fn route(req: &Request<'_>, shared: &Shared) -> Response {
         ("POST", path) if path.starts_with("/api/verify") => route_verify(req, shared).await,
         ("POST", path) if path.starts_with("/api/approvals/") => {
             match parse_approval_path(req.first_line) {
-                Some(request_id) => route_decision(req, shared, request_id).await,
+                Some(request_id) => route_decision(req, shared, request_id, &caller).await,
                 None => not_found(),
             }
         }
         _ => not_found(),
     }
+}
+
+/// The answer to an `/api` request with no valid credential.
+fn unauthorized() -> String {
+    let body = r#"{"error":"not logged in: run `wirken webchat open` on the gateway host"}"#;
+    format!(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\
+         WWW-Authenticate: Bearer\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// `GET /login?token=<login token>` exchanges a one-time login token
+/// for a session cookie and redirects to the page, so the token leaves
+/// the address bar. A token that is unknown, used or expired gets a
+/// 403. The `Host` check applies, and `Origin` when the browser sends
+/// one; nothing about this answer is cached or sent on as a referrer.
+fn route_login(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    let redeemed = query_param(req.first_line, "token")
+        .and_then(|token| shared.auth.redeem_login(token, std::time::Instant::now()));
+    match redeemed {
+        Some((cookie, label)) => {
+            tracing::info!(session = %label, "webchat login");
+            Response::Complete(format!(
+                "HTTP/1.1 303 See Other\r\nLocation: /\r\n\
+                 Set-Cookie: {}={cookie}; Path=/; HttpOnly; SameSite=Strict\r\n\
+                 Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n",
+                super::webchat_auth::COOKIE
+            ))
+        }
+        None => {
+            let body = "This login link is used, expired, or not one. Run `wirken webchat open` \
+                        on the gateway host for a new one.\n";
+            Response::Complete(format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                 Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ))
+        }
+    }
+}
+
+/// `POST /api/login-tokens` mints a one-time login token for `wirken
+/// webchat open`. It takes the session token as a bearer and nothing
+/// else: a logged-in browser cannot mint logins.
+fn route_login_token(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    if !shared.auth.is_bearer(req.raw) {
+        return Response::Complete(unauthorized());
+    }
+    let login = shared.auth.mint_login(std::time::Instant::now());
+    Response::Complete(json_ok(
+        &serde_json::json!({ "login_token": login }).to_string(),
+    ))
 }
 
 /// The response for a target no route names.
@@ -3343,7 +3443,12 @@ async fn verify_chain_off_runtime(
 /// per-user allowlist in webchat today, the loopback bind + Origin
 /// check are the trust boundary) and pushes an ApprovalDecisionAck
 /// event onto the SSE stream so the browser closes the approval UI.
-async fn route_decision(req: &Request<'_>, shared: &Shared, request_id: String) -> Response {
+async fn route_decision(
+    req: &Request<'_>,
+    shared: &Shared,
+    request_id: String,
+    caller: &super::webchat_auth::Caller,
+) -> Response {
     // Same CSRF + DNS-rebinding preflight as /api/chat.
     if let Some(resp) = api_preflight(req.raw, shared.port, true) {
         return Response::Complete(resp);
@@ -3356,13 +3461,16 @@ async fn route_decision(req: &Request<'_>, shared: &Shared, request_id: String) 
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
+    // The actor names the login that decided, `webchat:<label>`, or
+    // `webchat:bearer` for a caller holding the session token.
+    let actor = caller.actor();
     let decision = match decision_str {
         "allow" => PendingDecision::Allow {
-            actor: Some("webchat".to_string()),
+            actor: Some(actor.clone()),
         },
         "deny" => PendingDecision::Deny {
             reason,
-            actor: Some("webchat".to_string()),
+            actor: Some(actor.clone()),
         },
         _ => {
             return Response::Complete(json_bad_request(
@@ -3371,8 +3479,8 @@ async fn route_decision(req: &Request<'_>, shared: &Shared, request_id: String) 
         }
     };
 
-    // A decision made here is made as actor "webchat" with no
-    // per-operator identity. That is acceptable for this browser's own
+    // A decision made here is made as a webchat login, not as an
+    // operator on an approver list. That is acceptable for this browser's own
     // conversation and for nothing else: a request that belongs to
     // another channel's session is refused, whatever its id, so
     // enumerating ids can never become a way around that channel's
@@ -3382,7 +3490,7 @@ async fn route_decision(req: &Request<'_>, shared: &Shared, request_id: String) 
             shared.factory.session_log().as_ref(),
             &shared.pending_approvals,
             &request_id,
-            "webchat",
+            &actor,
             wirken_audit::ApprovalRefusalReason::WrongChannel,
             Some("webchat"),
         );
@@ -8601,6 +8709,8 @@ mod tests {
     /// The port the harness binds nothing to. Only the preflight
     /// reads it, and it compares strings.
     const TEST_PORT: u16 = 18790;
+    /// The session token the test routes are given.
+    const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// A gateway whose routes can be called: an audit writer over a
     /// temp directory, the approval queue and SSE registry a decision
@@ -8657,6 +8767,9 @@ mod tests {
                 .expect("the session log opens");
             let shared = Shared {
                 port: TEST_PORT,
+                auth: Arc::new(super::super::webchat_auth::WebchatAuth::with_token(
+                    TEST_TOKEN.to_string(),
+                )),
                 cfg: cfg.clone(),
                 factory: wirken_agent::AgentFactory::new(
                     configs,
@@ -8743,7 +8856,19 @@ mod tests {
         )
     }
 
+    /// The same, carrying the session token as a bearer, which every
+    /// `/api` route takes.
     fn request_with_headers(line: &str, headers: &str, body: &str) -> String {
+        request_with_credential(
+            line,
+            &format!("{headers}\r\nAuthorization: Bearer {TEST_TOKEN}"),
+            body,
+        )
+    }
+
+    /// A request with exactly `headers`: no credential unless they
+    /// carry one.
+    fn request_with_credential(line: &str, headers: &str, body: &str) -> String {
         format!(
             "{line} HTTP/1.1\r\n{headers}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -9662,6 +9787,283 @@ mod tests {
                 head.starts_with("HTTP/1.1 404 Not Found"),
                 "{line} must reach no route: {head}"
             );
+        }
+    }
+
+    /// The full response text, for a route that answers in one piece.
+    fn complete(resp: &Response) -> &str {
+        match resp {
+            Response::Complete(text) => text,
+            Response::Turn(_) => panic!("expected a complete response, got a turn"),
+        }
+    }
+
+    fn header_of<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+        response
+            .split("\r\n\r\n")
+            .next()
+            .unwrap_or("")
+            .lines()
+            .find_map(|l| {
+                let (n, v) = l.split_once(':')?;
+                n.eq_ignore_ascii_case(name).then(|| v.trim())
+            })
+    }
+
+    /// Loopback `Host` and a matching `Origin`, as the page sends them,
+    /// with no credential.
+    fn page_headers() -> String {
+        format!("Host: 127.0.0.1:{TEST_PORT}\r\nOrigin: http://127.0.0.1:{TEST_PORT}")
+    }
+
+    /// Every `/api` route the router names, with a body each would
+    /// accept, so a refusal can only come from the missing credential.
+    fn every_api_route() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            (
+                "GET",
+                "/api/sessions/default%2Fwebchat%2Fc-0123456789ab",
+                "",
+            ),
+            (
+                "GET",
+                "/api/sessions/default%2Fwebchat%2Fc-0123456789ab/events",
+                "",
+            ),
+            ("GET", "/api/imported/sources", ""),
+            ("GET", "/api/approvals?c=c-0123456789ab", ""),
+            ("GET", "/api/capabilities", ""),
+            ("GET", "/api/credentials", ""),
+            ("GET", "/api/status", ""),
+            ("GET", "/api/sessions", ""),
+            (
+                "POST",
+                "/api/chat",
+                r#"{"message":"hi","conversation":"c-0123456789ab"}"#,
+            ),
+            ("POST", "/api/verify", "{}"),
+            (
+                "POST",
+                "/api/approvals/0000",
+                r#"{"decision":"allow","conversation":"c-0123456789ab"}"#,
+            ),
+            ("POST", "/api/login-tokens", ""),
+        ]
+    }
+
+    /// Log in through the routes: mint with the bearer, redeem at
+    /// `/login`. Returns the cookie value and the redirect response.
+    async fn log_in(routes: &Routes) -> (String, String) {
+        let minted = routes.call(&request("POST /api/login-tokens", "")).await;
+        let (head, body) = answered(&minted);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        let login = body["login_token"].as_str().unwrap().to_string();
+        let resp = routes
+            .call(&request_with_credential(
+                &format!("GET /login?token={login}"),
+                &format!("Host: 127.0.0.1:{TEST_PORT}"),
+                "",
+            ))
+            .await;
+        let text = complete(&resp).to_string();
+        let cookie = header_of(&text, "set-cookie")
+            .and_then(|c| c.split(';').next())
+            .and_then(|kv| kv.strip_prefix("wirken_webchat="))
+            .expect("a session cookie")
+            .to_string();
+        (cookie, text)
+    }
+
+    /// No `/api` route answers without a credential, or with a wrong
+    /// one. Forcing the check open fails this test.
+    #[tokio::test]
+    async fn every_api_route_refuses_without_a_credential() {
+        let routes = Routes::open();
+        for (method, path, body) in every_api_route() {
+            for extra in [
+                String::new(),
+                "\r\nAuthorization: Bearer 00".to_string(),
+                format!("\r\nAuthorization: Bearer {}", TEST_TOKEN.replace('0', "1")),
+                "\r\nCookie: wirken_webchat=deadbeef".to_string(),
+                format!("\r\nCookie: wirken_webchat={TEST_TOKEN}"),
+            ] {
+                let resp = routes
+                    .call(&request_with_credential(
+                        &format!("{method} {path}"),
+                        &format!("{}{extra}", page_headers()),
+                        body,
+                    ))
+                    .await;
+                let text = complete(&resp);
+                assert!(
+                    text.starts_with("HTTP/1.1 401 Unauthorized"),
+                    "{method} {path} with '{extra}': {text}"
+                );
+            }
+        }
+    }
+
+    /// The session token in a query string is no credential, on an
+    /// `/api` route or at `/login`.
+    #[tokio::test]
+    async fn the_session_token_in_a_query_string_is_refused() {
+        let routes = Routes::open();
+        let resp = routes
+            .call(&request_with_credential(
+                &format!("GET /api/status?token={TEST_TOKEN}"),
+                &page_headers(),
+                "",
+            ))
+            .await;
+        assert!(
+            complete(&resp).starts_with("HTTP/1.1 401"),
+            "{}",
+            complete(&resp)
+        );
+        let resp = routes
+            .call(&request_with_credential(
+                &format!("GET /login?token={TEST_TOKEN}"),
+                &format!("Host: 127.0.0.1:{TEST_PORT}"),
+                "",
+            ))
+            .await;
+        let text = complete(&resp);
+        assert!(text.starts_with("HTTP/1.1 403"), "{text}");
+        assert!(header_of(text, "set-cookie").is_none());
+    }
+
+    /// The bearer and a login's cookie each pass. The login redirects
+    /// to the page with nothing of the token left in the address, and
+    /// its answer is neither cached nor sent on as a referrer.
+    #[tokio::test]
+    async fn a_correct_cookie_and_a_correct_bearer_each_pass() {
+        let routes = Routes::open();
+        let resp = routes.call(&request("GET /api/status", "")).await;
+        assert!(complete(&resp).starts_with("HTTP/1.1 200 OK"));
+
+        let (cookie, redirect) = log_in(&routes).await;
+        assert!(redirect.starts_with("HTTP/1.1 303 See Other"), "{redirect}");
+        assert_eq!(header_of(&redirect, "location"), Some("/"));
+        assert_eq!(header_of(&redirect, "cache-control"), Some("no-store"));
+        assert_eq!(header_of(&redirect, "referrer-policy"), Some("no-referrer"));
+        let set = header_of(&redirect, "set-cookie").unwrap();
+        assert!(
+            set.contains("HttpOnly") && set.contains("SameSite=Strict"),
+            "{set}"
+        );
+        assert_ne!(cookie, TEST_TOKEN, "the cookie is not the session token");
+
+        let resp = routes
+            .call(&request_with_credential(
+                "GET /api/status",
+                &format!("{}\r\nCookie: wirken_webchat={cookie}", page_headers()),
+                "",
+            ))
+            .await;
+        assert!(complete(&resp).starts_with("HTTP/1.1 200 OK"));
+    }
+
+    /// A login token works once.
+    #[tokio::test]
+    async fn a_second_use_of_a_login_token_is_refused() {
+        let routes = Routes::open();
+        let login = routes.shared.auth.mint_login(std::time::Instant::now());
+        let line = format!("GET /login?token={login}");
+        let host = format!("Host: 127.0.0.1:{TEST_PORT}");
+        let first = routes
+            .call(&request_with_credential(&line, &host, ""))
+            .await;
+        assert!(complete(&first).starts_with("HTTP/1.1 303"));
+        let second = routes
+            .call(&request_with_credential(&line, &host, ""))
+            .await;
+        let text = complete(&second);
+        assert!(text.starts_with("HTTP/1.1 403"), "{text}");
+        assert!(header_of(text, "set-cookie").is_none());
+    }
+
+    /// A login token left unused past its lifetime is refused.
+    #[tokio::test]
+    async fn an_expired_login_token_is_refused() {
+        let routes = Routes::open();
+        let minted = std::time::Instant::now()
+            .checked_sub(
+                super::super::webchat_auth::LOGIN_TOKEN_TTL + std::time::Duration::from_secs(1),
+            )
+            .expect("the clock has run longer than a minute");
+        let login = routes.shared.auth.mint_login(minted);
+        let resp = routes
+            .call(&request_with_credential(
+                &format!("GET /login?token={login}"),
+                &format!("Host: 127.0.0.1:{TEST_PORT}"),
+                "",
+            ))
+            .await;
+        assert!(complete(&resp).starts_with("HTTP/1.1 403"));
+    }
+
+    /// `/login` takes the `Host` check: a rebinding page cannot log in.
+    #[tokio::test]
+    async fn a_login_from_another_host_is_refused() {
+        let routes = Routes::open();
+        let login = routes.shared.auth.mint_login(std::time::Instant::now());
+        let resp = routes
+            .call(&request_with_credential(
+                &format!("GET /login?token={login}"),
+                "Host: evil.example:18790",
+                "",
+            ))
+            .await;
+        assert!(complete(&resp).starts_with("HTTP/1.1 403"));
+    }
+
+    /// A decision is recorded against the login that made it, and a
+    /// bearer's against `webchat:bearer`.
+    #[tokio::test]
+    async fn a_decision_names_the_login_that_made_it() {
+        let routes = Routes::open();
+        let (cookie, _) = log_in(&routes).await;
+        let label = match routes.shared.auth.authenticate(&format!(
+            "GET / HTTP/1.1\r\nCookie: wirken_webchat={cookie}\r\n\r\n"
+        )) {
+            Some(super::super::webchat_auth::Caller::Session { label }) => label,
+            other => panic!("{other:?}"),
+        };
+        let (id, rx) = routes.shared.pending_approvals.register(pending(
+            &webchat_session_id("c-0123456789ab"),
+            "roll staging back",
+        ));
+        let resp = routes
+            .call(&request_with_credential(
+                &format!("POST /api/approvals/{id}"),
+                &format!("{}\r\nCookie: wirken_webchat={cookie}", page_headers()),
+                r#"{"decision":"allow","conversation":"c-0123456789ab"}"#,
+            ))
+            .await;
+        assert!(complete(&resp).starts_with("HTTP/1.1 200 OK"));
+        match rx.await.unwrap() {
+            wirken_gateway::pending_approvals::PendingDecision::Allow { actor } => {
+                assert_eq!(actor.as_deref(), Some(format!("webchat:{label}").as_str()))
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let (id, rx) = routes.shared.pending_approvals.register(pending(
+            &webchat_session_id("c-0123456789ab"),
+            "roll staging back",
+        ));
+        let resp = routes
+            .call(&request(
+                &format!("POST /api/approvals/{id}"),
+                r#"{"decision":"deny","conversation":"c-0123456789ab"}"#,
+            ))
+            .await;
+        assert!(complete(&resp).starts_with("HTTP/1.1 200 OK"));
+        match rx.await.unwrap() {
+            wirken_gateway::pending_approvals::PendingDecision::Deny { actor, .. } => {
+                assert_eq!(actor.as_deref(), Some("webchat:bearer"))
+            }
+            other => panic!("{other:?}"),
         }
     }
 }

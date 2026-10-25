@@ -127,6 +127,11 @@ enum Commands {
     #[command(subcommand)]
     Senders(SenderCommands),
 
+    /// Log in to the webchat page. Every webchat API call takes a
+    /// login; `wirken run` must be running.
+    #[command(subcommand)]
+    Webchat(WebchatCommands),
+
     /// Manage agents
     #[command(subcommand)]
     Agents(AgentCommands),
@@ -1190,6 +1195,18 @@ enum ApproverCommands {
 }
 
 #[derive(Subcommand)]
+enum WebchatCommands {
+    /// Print a login URL for the running gateway's webchat. It carries
+    /// a one-time token that works once, within 60 seconds, and is
+    /// exchanged for a cookie; run this again for another login.
+    Open {
+        /// Open the URL in the default browser as well.
+        #[arg(long)]
+        browser: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum SenderCommands {
     /// Admit a sender on a channel. `sender_id` is the platform id
     /// the adapter reports, exactly: a Telegram numeric user id, a
@@ -1616,6 +1633,9 @@ async fn main() -> Result<()> {
             ApproverCommands::ShowChat { adapter_id } => {
                 commands::approvers::show_chat(&adapter_id)
             }
+        },
+        Commands::Webchat(cmd) => match cmd {
+            WebchatCommands::Open { browser } => commands::webchat_auth::open(browser).await,
         },
         Commands::Senders(cmd) => match cmd {
             SenderCommands::Add {
