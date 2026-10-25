@@ -1921,6 +1921,16 @@ pub enum SessionEvent {
         user_id: String,
         removed_by: String,
     },
+    /// `wirken approvers set-chat` changed where `adapter_id`'s approval
+    /// prompts are sent. `previous_conversation_id` is absent when none
+    /// was set. Same lane and sealing as [`Self::ApproverAdded`].
+    ApprovalChatSet {
+        adapter_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_conversation_id: Option<String>,
+        conversation_id: String,
+        set_by: String,
+    },
     /// An allowlist command refused before it opened anything, because
     /// it ran inside a Wirken `exec` (the `WIRKEN_EXEC` marker was
     /// set). Written on that command's own lane,

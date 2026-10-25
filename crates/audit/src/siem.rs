@@ -884,6 +884,7 @@ fn extract_identity_for_sentinel(
         // operator labels.
         SessionEvent::ApproverAdded { .. } => (None, None, None),
         SessionEvent::ApproverRemoved { .. } => (None, None, None),
+        SessionEvent::ApprovalChatSet { .. } => (None, None, None),
         // An operator's command refused outside any conversation.
         SessionEvent::OperatorCommandRefused { .. } => (None, None, None),
         // A hook id and an error; none of the three.
@@ -1159,6 +1160,15 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             user_id,
             ..
         } => format!("approver_removed adapter={adapter_id} user={user_id}"),
+        SessionEvent::ApprovalChatSet {
+            adapter_id,
+            previous_conversation_id,
+            conversation_id,
+            ..
+        } => format!(
+            "approval_chat_set adapter={adapter_id} from={} to={conversation_id}",
+            previous_conversation_id.as_deref().unwrap_or("none")
+        ),
         SessionEvent::OperatorCommandRefused {
             command,
             invocation,

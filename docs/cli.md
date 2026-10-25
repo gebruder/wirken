@@ -343,9 +343,10 @@ wirken approvers show-chat <ADAPTER_ID>
 ```
 
 The gateway reads the allowlist and the approval chat on every decision, so a
-change applies without a restart. Each `add` and `remove` is an
-`approver_added` or `approver_removed` row on the signed `gateway-approvers`
-lane; an add whose row cannot be written is undone. Every subcommand refuses
+change applies without a restart. Each `add`, `remove` and `set-chat` is an
+`approver_added`, `approver_removed` or `approval_chat_set` row on the signed
+`gateway-approvers` lane; `set-chat`'s row names the chat it replaced. An add
+or a set-chat whose row cannot be written is undone. Every subcommand refuses
 inside a Wirken `exec` and records the refusal on that lane.
 
 ## wirken senders

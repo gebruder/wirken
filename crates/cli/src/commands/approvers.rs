@@ -3,8 +3,8 @@
 //! configuration. Direct SQLite writes against
 //! `<data_dir>/approvers.db`, which the gateway reads on every
 //! decision, so a change applies to the next one without a restart.
-//! Each add and remove is a row on the signed `gateway-approvers`
-//! lane, sealed by a chain head.
+//! Each add, remove and set-chat is a row on the signed
+//! `gateway-approvers` lane, sealed by a chain head.
 //!
 //! Every subcommand refuses under the `exec` marker: the allowlist
 //! decides who can approve an agent's actions, so an agent's own
@@ -164,12 +164,38 @@ pub fn remove(adapter_id: &str, user_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Send `adapter_id`'s approval prompts to `conversation_id`. The new
+/// value is written first and the row after it, naming the old and new
+/// ids; a change whose row cannot be written is put back.
 pub fn set_chat(adapter_id: &str, conversation_id: &str) -> Result<()> {
     refuse_inside_exec("set-chat")?;
+    let log = open_signed_session_log(&config())?;
     let registry = open_registry()?;
-    registry
+    let previous = registry
         .set_approval_conversation(adapter_id, conversation_id)
         .context("set approval conversation")?;
+    let recorded = record(
+        &log,
+        SessionEvent::ApprovalChatSet {
+            adapter_id: adapter_id.to_string(),
+            previous_conversation_id: previous.clone(),
+            conversation_id: conversation_id.to_string(),
+            set_by: local_operator(),
+        },
+    );
+    if let Err(e) = recorded {
+        match &previous {
+            Some(old) => registry
+                .set_approval_conversation(adapter_id, old)
+                .map(|_| ()),
+            None => registry.clear_approval_conversation(adapter_id).map(|_| ()),
+        }
+        .map_err(|e| anyhow::anyhow!("put the unrecorded approval conversation back: {e}"))?;
+        return Err(e.context(format!(
+            "the approval conversation for {adapter_id} was not changed: its \
+             {OPERATOR_APPROVERS_SESSION} audit row could not be written"
+        )));
+    }
     println!(
         "Approval conversation set: adapter='{adapter_id}', \
          conversation_id='{conversation_id}'.\n\

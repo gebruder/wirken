@@ -4447,6 +4447,7 @@ pub fn session_events(
             // Written on the approvers lane, never in a conversation.
             SessionEvent::ApproverAdded { .. } => None,
             SessionEvent::ApproverRemoved { .. } => None,
+            SessionEvent::ApprovalChatSet { .. } => None,
             SessionEvent::OperatorCommandRefused { .. } => None,
             // The hook's verdict is already the outcome on the tool row it
             // gated.

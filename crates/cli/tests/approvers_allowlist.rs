@@ -47,6 +47,28 @@ fn rows(data: &std::path::Path) -> Vec<Row> {
     .collect()
 }
 
+/// `(adapter_id, previous_conversation_id, conversation_id)` of every
+/// `approval_chat_set` row, in order.
+type ChatRow = (Option<String>, Option<String>, Option<String>);
+
+fn chat_rows(data: &std::path::Path) -> Vec<ChatRow> {
+    let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
+    db.prepare(
+        "SELECT json_extract(payload, '$.adapter_id'),
+                json_extract(payload, '$.previous_conversation_id'),
+                json_extract(payload, '$.conversation_id')
+           FROM session_events
+          WHERE session_id = 'gateway-approvers'
+            AND json_extract(payload, '$.kind') = 'approval_chat_set'
+          ORDER BY seq",
+    )
+    .unwrap()
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
 fn sealed(data: &std::path::Path) -> bool {
     let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
     let last: String = db
@@ -88,11 +110,22 @@ fn add_and_remove_leave_sealed_rows_and_need_no_restart() {
     );
 
     // A Telegram group's chat id is negative, and is taken as it is.
+    // Each change is a row naming the chat it replaced.
     let (ok, _, err) = run(data, &["set-chat", "telegram", "-100123456789"], false);
+    assert!(ok, "{err}");
+    let (ok, _, err) = run(data, &["set-chat", "telegram", "-100999"], false);
     assert!(ok, "{err}");
     let (ok, out, _) = run(data, &["show-chat", "telegram"], false);
     assert!(ok);
-    assert!(out.contains("'-100123456789'"), "{out}");
+    assert!(out.contains("'-100999'"), "{out}");
+    assert!(sealed(data));
+    assert_eq!(
+        chat_rows(data),
+        vec![
+            (s("telegram"), None, s("-100123456789")),
+            (s("telegram"), s("-100123456789"), s("-100999")),
+        ]
+    );
 
     let (ok, out, err) = run(data, &["remove", "telegram", "12345"], false);
     assert!(ok, "{err}");
@@ -106,6 +139,8 @@ fn add_and_remove_leave_sealed_rows_and_need_no_restart() {
         rows(data),
         vec![
             ("approver_added".into(), s("telegram"), s("12345"), None),
+            ("approval_chat_set".into(), s("telegram"), None, None),
+            ("approval_chat_set".into(), s("telegram"), None, None),
             ("approver_removed".into(), s("telegram"), s("12345"), None),
         ]
     );

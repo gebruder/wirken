@@ -187,19 +187,38 @@ impl ApproverRegistry {
     /// encoding (Telegram: stringified `i64`; Signal: base64
     /// group_id or E.164/UUID); the registry stores the value
     /// verbatim and the adapter parses on receipt. Overwrites any
-    /// prior value.
+    /// prior value, and returns it.
     pub fn set_approval_conversation(
         &self,
         adapter_id: &str,
         conversation_id: &str,
-    ) -> Result<(), GatewayError> {
-        self.conn().execute(
+    ) -> Result<Option<String>, GatewayError> {
+        let conn = self.conn();
+        let previous: Option<String> = conn
+            .query_row(
+                "SELECT conversation_id FROM adapter_approval_conversations WHERE adapter_id = ?1",
+                params![adapter_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        conn.execute(
             "INSERT INTO adapter_approval_conversations (adapter_id, conversation_id) \
              VALUES (?1, ?2) \
              ON CONFLICT(adapter_id) DO UPDATE SET conversation_id = excluded.conversation_id",
             params![adapter_id, conversation_id],
         )?;
-        Ok(())
+        Ok(previous)
+    }
+
+    /// Remove `adapter_id`'s approval conversation, so its gate fails
+    /// closed. Used to undo a `set-chat` whose audit row could not be
+    /// written when none was set before it.
+    pub fn clear_approval_conversation(&self, adapter_id: &str) -> Result<bool, GatewayError> {
+        let changes = self.conn().execute(
+            "DELETE FROM adapter_approval_conversations WHERE adapter_id = ?1",
+            params![adapter_id],
+        )?;
+        Ok(changes > 0)
     }
 
     /// Approval conversation id for `adapter_id`, or `None` when
