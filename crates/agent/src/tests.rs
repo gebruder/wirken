@@ -14058,6 +14058,193 @@ mod webchat_approval_reaches_the_page {
     }
 }
 
+// ---------------------------------------------------------------------------
+// A Discord approval reaches the channel. The context is built by the
+// runtime rather than by hand, for the same reason the webchat module
+// above gives: the gate's own tests construct a
+// `PermissionDenialContext` themselves, so they agree with whatever
+// shape they were written against and stop tracking the one the
+// runtime produces. This drives a real turn to the gate and asserts
+// the queue entry carries the session id and the logical agent id the
+// runtime set, plus that the request_id it minted still fits the
+// `custom_id` the adapter has to put on the button.
+// ---------------------------------------------------------------------------
+mod discord_approval_reaches_the_channel {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+    use tokio::sync::Mutex as AsyncMutex;
+    use wirken_adapter_core::approval::{self, ApprovalPayload, DISCORD_CUSTOM_ID_MAX, Decision};
+    use wirken_audit::{SessionLog, SqliteSessionLog};
+    use wirken_gateway::approver_registry::ApproverRegistry;
+    use wirken_gateway::outbound_dispatcher::OutboundDispatcher;
+    use wirken_gateway::pending_approvals::{DecisionActor, PendingApprovalQueue, PendingDecision};
+    use wirken_ipc::wirken_capnp::frame;
+    use wirken_ipc::{IpcFrameWriter, split_stream, test_pair};
+
+    use crate::discord_approval_gate::DiscordApprovalGate;
+    use crate::llm::LlmConfig;
+
+    /// `{agent}/{channel}/{conversation}`, the shape the factory wakes
+    /// a Discord session under.
+    const SESSION: &str = "discordbot/discord/1558988519324524584";
+    /// The channel the card renders in, as `wirken approvers set-chat`
+    /// stores it: a Discord snowflake in decimal.
+    const APPROVAL_CHANNEL: &str = "1234567890123456789";
+
+    #[tokio::test]
+    async fn an_exec_from_discord_reaches_the_adapter_and_the_queue() {
+        let (base_url, server) = super::approved_unknown_tool::stub(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Listing it.",
+                "tool_calls": [{
+                    "id": "call_ls",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{\"command\": \"ls ~\"}"},
+                }],
+            }),
+            serde_json::json!({"role": "assistant", "content": "Not allowed."}),
+        ])
+        .await;
+
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let mut agent = crate::runtime::Agent::new(
+            SESSION.to_string(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        // What `AgentFactory::wake` does: the config key the agent was
+        // looked up under, which is what every audit row carries and
+        // what the queue entry has to show the operator.
+        agent.set_agent_id("discordbot");
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+
+        // What `wirken run` does on startup: an approval channel for
+        // the adapter, and the adapter's live writer in the dispatcher.
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let approvers = ApproverRegistry::open(&tmp.path().join("approvers.db")).unwrap();
+        approvers
+            .set_approval_conversation("discord", APPROVAL_CHANNEL)
+            .unwrap();
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let (a, b) = test_pair().unwrap();
+        let (_unused_a_reader, a_writer) = split_stream(a);
+        let (mut adapter_reader, _unused_b_writer) = split_stream(b);
+        outbound.register(
+            "discord",
+            Arc::new(AsyncMutex::new(a_writer)) as Arc<AsyncMutex<IpcFrameWriter>>,
+        );
+        agent.set_approval_gate(Arc::new(DiscordApprovalGate::with_timeout(
+            queue.clone(),
+            Arc::new(approvers),
+            outbound,
+            Duration::from_secs(30),
+        )));
+
+        let turn = tokio::spawn(async move {
+            agent
+                .process_message("what is in my home directory?", "msg-1".into())
+                .await
+        });
+
+        // The adapter side of the socket: the frame it would render as
+        // a card with the two buttons under it.
+        let msg = tokio::time::timeout(Duration::from_secs(10), adapter_reader.read_message())
+            .await
+            .expect("the card reaches the adapter instead of the gate failing closed")
+            .expect("a frame");
+        let request_id = {
+            let frame::ApprovalRequest(req) = msg
+                .get_root::<frame::Reader<'_>>()
+                .unwrap()
+                .which()
+                .unwrap()
+            else {
+                panic!("expected ApprovalRequest");
+            };
+            let req = req.unwrap();
+            assert_eq!(req.get_tool_name().unwrap().to_str().unwrap(), "exec");
+            assert_eq!(
+                req.get_target_conversation_id().unwrap().to_str().unwrap(),
+                APPROVAL_CHANNEL,
+                "the card goes to the configured approval channel"
+            );
+            assert_eq!(
+                req.get_triggering_agent().unwrap().to_str().unwrap(),
+                "discordbot",
+            );
+            assert_eq!(
+                req.get_exec_location().unwrap().to_str().unwrap(),
+                "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)"
+            );
+            req.get_request_id().unwrap().to_string().unwrap()
+        };
+
+        // The fields the gate's own tests supply by hand, taken here
+        // from the value the runtime computed.
+        let entry = queue
+            .show(&request_id)
+            .expect("the request is in the queue");
+        assert_eq!(
+            entry.session_id, SESSION,
+            "the queue entry carries the runtime's session id"
+        );
+        assert_eq!(
+            entry.agent_id, "discordbot",
+            "and the logical agent id, not the session id"
+        );
+
+        // The id the runtime minted has to survive the encoding the
+        // adapter puts on each button, under Discord's cap.
+        for decision in [Decision::Allow, Decision::Deny] {
+            let encoded = approval::encode(&ApprovalPayload {
+                request_id: request_id.clone(),
+                decision,
+            })
+            .expect("a runtime-minted request_id encodes");
+            assert!(
+                encoded.len() <= DISCORD_CUSTOM_ID_MAX,
+                "custom_id {} bytes over the {DISCORD_CUSTOM_ID_MAX}-byte cap",
+                encoded.len()
+            );
+            assert_eq!(approval::decode(&encoded).unwrap().request_id, request_id);
+        }
+
+        // Deny rather than allow: the turn ends without reaching a
+        // sandbox this test has no business provisioning.
+        queue.resolve(
+            &request_id,
+            PendingDecision::Deny {
+                reason: None,
+                actor: Some(DecisionActor::new("1553845421904760892")),
+            },
+        );
+        turn.await.unwrap().expect("the turn ends with a reply");
+        server.await.unwrap();
+    }
+}
+
 /// Exact-match leak detection: content carrying a stored secret is
 /// refused before it goes further, and the refusal is recorded.
 mod leak_detection {

@@ -210,11 +210,12 @@ The surfaces, and what each adds after the card:
   browser reload shows what the live one showed.
 - `wirken permissions pending show` prints the request id, when it was
   made and its age, then the card.
-- Telegram and Signal receive the card in the channel's own text dialect
-  (HTML on Telegram, every value escaped; plain text on Signal), then the
-  channel's way of deciding: buttons on Telegram, `!approve <prefix>` /
-  `!deny <prefix> [reason]` on Signal. These are the two channels `wirken
-  run` attaches a channel approval gate to.
+- Telegram, Signal and Discord receive the card in the channel's own text
+  dialect (HTML on Telegram, every value escaped; plain text on Signal;
+  Markdown on Discord), then the channel's way of deciding: buttons on
+  Telegram and Discord, `!approve <prefix>` / `!deny <prefix> [reason]` on
+  Signal. These are the three channels `wirken run` attaches a channel
+  approval gate to.
 - A session on any other channel, Slack included, prompts on the CLI
   surface: the request appears in `wirken permissions pending list` and is
   decided with `wirken permissions approve` or `deny`. Nothing is posted in

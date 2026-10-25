@@ -1822,6 +1822,18 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         ),
     ));
 
+    // Discord sessions route through `DiscordApprovalGate`. Like
+    // Telegram it decides with buttons; the adapter renders them as
+    // a Components-v2 row whose `custom_id` carries the shared
+    // `wirken_adapter_core::approval` encoding.
+    factory.attach_discord_approval_gate(Arc::new(
+        wirken_agent::discord_approval_gate::DiscordApprovalGate::new(
+            pending_approval_queue.clone(),
+            approver_registry.clone(),
+            dispatcher.clone(),
+        ),
+    ));
+
     // Terminal sessions (`wirken chat`) route through
     // `TerminalApprovalGate`, which asks on the connection whose
     // message started the turn.

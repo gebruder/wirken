@@ -345,6 +345,12 @@ pub struct AgentFactory {
     /// for the Signal adapter. `None` when Signal is not
     /// configured; the factory falls back to `approval_gate`.
     signal_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
+    /// Channel-specific approval gate for Discord sessions
+    /// (`{agent}/discord/{conv}`). Set when the gateway has an
+    /// `approver_chat` (channel id) configured for the Discord
+    /// adapter. `None` when Discord is not configured; the factory
+    /// falls back to `approval_gate`.
+    discord_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
     /// Channel-specific approval gate for webchat sessions
     /// (`{agent}/webchat/{conv}` session-id format). Installed by
     /// the `wirken webchat` command when serving locally; webchat
@@ -486,6 +492,7 @@ impl AgentFactory {
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
             signal_approval_gate: std::sync::RwLock::new(None),
+            discord_approval_gate: std::sync::RwLock::new(None),
             sse_approval_gate: std::sync::RwLock::new(None),
             terminal_approval_gate: std::sync::RwLock::new(None),
             budget_wiring: std::sync::RwLock::new(None),
@@ -523,6 +530,13 @@ impl AgentFactory {
         *self.signal_approval_gate.write().unwrap() = Some(gate);
     }
 
+    /// Install the Discord-specific approval gate. Sessions whose
+    /// id parses with channel `"discord"` will route through this
+    /// gate; everything else falls back to the default.
+    pub fn attach_discord_approval_gate(&self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
+        *self.discord_approval_gate.write().unwrap() = Some(gate);
+    }
+
     /// Install the SSE webchat approval gate. Sessions whose id
     /// parses with channel `"webchat"` route through this gate.
     /// Installed by the `wirken webchat` command when constructing
@@ -557,6 +571,11 @@ impl AgentFactory {
             }
             Some("signal") => {
                 if let Some(g) = self.signal_approval_gate.read().unwrap().clone() {
+                    return Some(g);
+                }
+            }
+            Some("discord") => {
+                if let Some(g) = self.discord_approval_gate.read().unwrap().clone() {
                     return Some(g);
                 }
             }

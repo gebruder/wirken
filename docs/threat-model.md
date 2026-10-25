@@ -241,10 +241,10 @@ Who holds what, so a precondition can be compared with an impact:
 
 - **The operator** is the OS user. They hold the vault passphrase, write the
   configuration files in the data dir, answer approval prompts on the CLI, and
-  may name approvers for Telegram and Signal, keyed by `(adapter_id, user_id)`
-  in the approver registry. A decision from anyone not on that allowlist is
-  dropped. The operator is the approver: an operator approving a prompt that
-  described the call accurately is not a finding.
+  may name approvers for Telegram, Signal and Discord, keyed by
+  `(adapter_id, user_id)` in the approver registry. A decision from anyone not
+  on that allowlist is dropped. The operator is the approver: an operator
+  approving a prompt that described the call accurately is not a finding.
 - **Another OS user** holds nothing. The sockets are mode 0600 and every
   connection takes a signed handshake.
 - **A chat user** reaches the agent only when the sender allowlist admits

@@ -151,6 +151,33 @@ adapter checks `msg.author.id == bot_id` before forwarding, so it does not
 echo-loop on its own DMs. CommonMark passes through unchanged; horizontal
 rules collapse to a blank line.
 
+### Approvals
+
+Tool calls that need approval are answered in Discord, with buttons. Two
+settings control where and by whom:
+
+```bash
+wirken approvers set-chat discord CHANNEL_ID    # where prompts render
+wirken approvers add discord USER_ID --display "Name"    # who may approve
+```
+
+`set-chat` takes the channel id the approval card is posted in; `approvers
+add` takes the user id of each operator allowed to approve or deny. Both are
+Discord snowflakes — enable Developer Mode in Discord's settings, then
+right-click a channel or user and **Copy ID**. The bot needs `Send Messages`
+in the approval channel.
+
+The card renders with **Approve** and **Deny** buttons under it. A press from
+anyone else is logged as an unauthorized actor and dropped; the presser sees
+the same acknowledgement either way, so the allowlist is not disclosed through
+the UI. The gateway reads both settings on every request and decision, so a
+change applies to the next one without a restart.
+
+A request nobody decides within the gate's timeout
+(`WIRKEN_DISCORD_APPROVAL_TIMEOUT_S`, 300 seconds by default) resolves to
+deny, as does a request made while no approval channel is configured or while
+the adapter is disconnected.
+
 ## Slack
 
 Socket Mode. No public URL, no webhook.
@@ -161,10 +188,10 @@ wirken channel add slack
 
 Two tokens, both from [api.slack.com/apps](https://api.slack.com/apps):
 
-| Prompt | Where |
-|--------|-------|
+| Prompt                       | Where                                          |
+| ---------------------------- | ---------------------------------------------- |
 | `Slack bot token (xoxb-...)` | **OAuth & Permissions** → Bot User OAuth Token |
-| `Slack app token (xapp-...)` | **Basic Information** → App-Level Tokens |
+| `Slack app token (xapp-...)` | **Basic Information** → App-Level Tokens       |
 
 Nothing under **App Credentials** (Client ID, Client Secret, Signing Secret,
 Verification Token) is used. To skip the prompts, pass the bot token with
@@ -439,7 +466,7 @@ echo "+15551234567,+15559876543,group-abc-xyz=" \
 - **Approvals pending at a restart are lost.** The prefix map behind
   `!approve <prefix>` is held in memory. After the adapter restarts, a prefix
   from an earlier prompt is answered with `no pending request matching
-  prefix` and the request waits out its timeout.
+prefix` and the request waits out its timeout.
 - **No rate limiting on the adapter.** An allowlisted sender spamming messages
   spams the LLM and the API bill. Add external rate limiting if more than a
   handful of people can reach it.

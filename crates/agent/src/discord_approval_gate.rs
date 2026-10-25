@@ -1,0 +1,575 @@
+//! Discord approval gate: bridges the agent's `ApprovalGate` trait
+//! to the Discord channel adapter. Mirrors `TelegramApprovalGate`
+//! structurally; both channels decide with buttons, so the
+//! differences live entirely in the wire-side encoding (Discord
+//! component `custom_id` rather than Telegram `callback_data`),
+//! which is the adapter's concern, not the gate's.
+//!
+//! `request_approval` preflights `approver_registry::approval_conversation`
+//! and fails-closed at request time when no approval channel is
+//! configured. The same fail-closed reasoning as Telegram applies:
+//! the alternative is to ship the frame, have the adapter bounce
+//! back as `ApprovalRequestFailed`, and burn the queue entry for
+//! the round-trip. Preflight is cheaper and the warn-level log
+//! gives operators a clear signal that the adapter is
+//! misconfigured.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+
+use wirken_audit::ApprovalSource;
+use wirken_gateway::approver_registry::ApproverRegistry;
+use wirken_gateway::outbound_dispatcher::OutboundDispatcher;
+use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingDecision, PendingRequest};
+use wirken_ipc::wirken_capnp::frame;
+
+use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
+use crate::error::PermissionDenialContext;
+use crate::exec_location::runtime_name;
+
+/// Default wall-clock cap on a Discord approval await. 300s
+/// default matches Telegram, Signal, CLI, and SSE; the operational
+/// shape (an operator finding the approval message in chat) is the
+/// same across out-of-band surfaces.
+pub const DEFAULT_DISCORD_TIMEOUT_SECS: u64 = 300;
+
+pub fn resolve_discord_timeout() -> Duration {
+    discord_timeout_from(
+        std::env::var("WIRKEN_DISCORD_APPROVAL_TIMEOUT_S")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The rule on its own, with the environment read lifted out.
+///
+/// Split out so the tests cover the value without writing a
+/// process-global variable. `std::env::set_var` is `unsafe` in the
+/// 2024 edition because it is undefined behaviour while another
+/// thread reads or writes the environment, and cargo runs a crate's
+/// tests on parallel threads that do exactly that. A serializing
+/// mutex orders the writers and leaves every reader alone.
+fn discord_timeout_from(raw: Option<&str>) -> Duration {
+    match raw.map(|s| s.trim().parse::<u64>()) {
+        Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs),
+        _ => Duration::from_secs(DEFAULT_DISCORD_TIMEOUT_SECS),
+    }
+}
+
+/// Channel constant for the Discord surface. Used to resolve the
+/// live writer in `OutboundDispatcher` and as the adapter_id when
+/// looking up the approval channel. The single-bot model maps
+/// `channel == adapter_id == "discord"`.
+const DISCORD_CHANNEL: &str = "discord";
+
+pub struct DiscordApprovalGate {
+    queue: Arc<PendingApprovalQueue>,
+    approvers: Arc<ApproverRegistry>,
+    outbound: Arc<OutboundDispatcher>,
+    /// Captured once at construction. The gate is built at
+    /// startup and lives for the process, so reading the override
+    /// here rather than on every request is the same value and one
+    /// fewer environment read on the approval path.
+    timeout: Duration,
+}
+
+impl DiscordApprovalGate {
+    pub fn new(
+        queue: Arc<PendingApprovalQueue>,
+        approvers: Arc<ApproverRegistry>,
+        outbound: Arc<OutboundDispatcher>,
+    ) -> Self {
+        Self::with_timeout(queue, approvers, outbound, resolve_discord_timeout())
+    }
+
+    /// Construct with an explicit timeout instead of the value
+    /// [`resolve_discord_timeout`] reads from the environment. Lets a test drive
+    /// the deadline directly rather than writing a process-global
+    /// variable other threads are reading.
+    pub fn with_timeout(
+        queue: Arc<PendingApprovalQueue>,
+        approvers: Arc<ApproverRegistry>,
+        outbound: Arc<OutboundDispatcher>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            queue,
+            approvers,
+            outbound,
+            timeout,
+        }
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for DiscordApprovalGate {
+    async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+        let Some(target_conversation) = self.approvers.approval_conversation(DISCORD_CHANNEL)
+        else {
+            tracing::warn!(
+                agent = %ctx.agent_id,
+                tool = %ctx.tool_name,
+                "discord approval gate: no approval conversation configured for adapter \
+                 '{DISCORD_CHANNEL}'; failing closed. Run \
+                 `wirken approvers set-chat {DISCORD_CHANNEL} <channel_id>` to enable."
+            );
+            return ApprovalOutcome::Timeout;
+        };
+
+        let Some(writer) = self.outbound.writer_for(DISCORD_CHANNEL) else {
+            tracing::warn!(
+                agent = %ctx.agent_id,
+                tool = %ctx.tool_name,
+                "discord approval gate: adapter '{DISCORD_CHANNEL}' not currently \
+                 connected; failing closed"
+            );
+            return ApprovalOutcome::Timeout;
+        };
+
+        let request = PendingRequest {
+            agent_id: ctx.agent_id.clone(),
+            session_id: ctx.session_id.clone(),
+            tool_name: ctx.tool_name.clone(),
+            action_key: ctx.action.approval_key(),
+            requested_tier: ctx.requested_tier.label().to_string(),
+            trigger_message: ctx.trigger_message.clone(),
+            arguments: ctx.arguments.clone(),
+            assistant_text: ctx.assistant_text.clone(),
+            exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
+            exec_runtime: ctx
+                .exec_location
+                .as_ref()
+                .map(|l| runtime_name(l.mode).to_string()),
+            prompt_conversation: Some(target_conversation.clone()),
+        };
+        let (request_id, rx) = self.queue.register(request);
+
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let frame_builder = message.init_root::<frame::Builder<'_>>();
+            let mut req = frame_builder.init_approval_request();
+            req.set_request_id(&request_id);
+            req.set_tool_name(&ctx.tool_name);
+            req.set_action_key(ctx.action.approval_key());
+            req.set_requested_tier(ctx.requested_tier.label());
+            req.set_triggering_agent(&ctx.agent_id);
+            req.set_trigger_message(ctx.trigger_message.as_deref().unwrap_or(""));
+            req.set_target_conversation_id(&target_conversation);
+            req.set_exec_location(
+                ctx.exec_location
+                    .as_ref()
+                    .map(|l| l.text.as_str())
+                    .unwrap_or(""),
+            );
+            req.set_arguments(ctx.arguments.as_deref().unwrap_or(""));
+            req.set_assistant_text(ctx.assistant_text.as_deref().unwrap_or(""));
+            req.set_timeout_secs(u32::try_from(self.timeout.as_secs()).unwrap_or(u32::MAX));
+            req.set_exec_runtime(
+                ctx.exec_location
+                    .as_ref()
+                    .map(|l| runtime_name(l.mode))
+                    .unwrap_or(""),
+            );
+        }
+
+        {
+            let mut w = writer.lock().await;
+            if let Err(e) = w.write_message(&message).await {
+                tracing::warn!(
+                    request_id = %request_id,
+                    error = %e,
+                    "discord approval gate: failed to send ApprovalRequest frame; \
+                     forgetting queue entry and returning Timeout"
+                );
+                self.queue.forget(&request_id);
+                return ApprovalOutcome::Timeout;
+            }
+        }
+
+        tracing::info!(
+            request_id = %request_id,
+            tool = %ctx.tool_name,
+            agent = %ctx.agent_id,
+            "discord approval pending; awaiting operator decision via component buttons"
+        );
+
+        let timeout = self.timeout;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(decision)) => match decision {
+                PendingDecision::Allow { actor } => ApprovalOutcome::Approved { actor },
+                PendingDecision::Deny { reason, actor } => {
+                    ApprovalOutcome::Denied { reason, actor }
+                }
+                PendingDecision::Timeout => ApprovalOutcome::Timeout,
+            },
+            Ok(Err(_)) => ApprovalOutcome::Timeout,
+            Err(_) => {
+                self.queue.forget(&request_id);
+                ApprovalOutcome::Timeout
+            }
+        }
+    }
+
+    fn source(&self) -> ApprovalSource {
+        ApprovalSource::ChannelAdapter {
+            channel: DISCORD_CHANNEL.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokio::sync::Mutex as AsyncMutex;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+    use wirken_ipc::{IpcFrameWriter, split_stream, test_pair};
+
+    /// A Discord channel id is a numeric snowflake, rendered as a
+    /// decimal string on the wire. The gate passes it through
+    /// verbatim; the adapter parses it back to `ChannelId`.
+    const CHANNEL_SNOWFLAKE: &str = "1234567890123456789";
+
+    fn ctx(name: &str) -> PermissionDenialContext {
+        PermissionDenialContext {
+            tool_name: name.into(),
+            action: Action::ShellExec {
+                pattern: name.into(),
+            },
+            requested_tier: PermissionTier::Tier2,
+            agent_id: "default".into(),
+            trigger_message: Some("clean old logs".into()),
+            arguments: Some(r#"{"command":"find /var/log -mtime +30 -delete"}"#.into()),
+            assistant_text: Some("Clearing the old logs.".into()),
+            exec_location: None,
+            session_id: String::new(),
+        }
+    }
+
+    async fn writer_pair() -> (Arc<AsyncMutex<IpcFrameWriter>>, wirken_ipc::IpcFrameReader) {
+        let (a, b) = test_pair().unwrap();
+        let (_unused_a_reader, a_writer) = split_stream(a);
+        let (b_reader, _unused_b_writer) = split_stream(b);
+        (Arc::new(AsyncMutex::new(a_writer)), b_reader)
+    }
+
+    fn setup_approvers(
+        adapter: &str,
+        conversation: Option<&str>,
+    ) -> (TempDir, Arc<ApproverRegistry>) {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("approvers.db");
+        let reg = ApproverRegistry::open(&path).unwrap();
+        if let Some(c) = conversation {
+            reg.set_approval_conversation(adapter, c).unwrap();
+        }
+        (tmp, Arc::new(reg))
+    }
+
+    #[tokio::test]
+    async fn missing_approval_conversation_fails_closed_without_writing_frame() {
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let (_tmp, approvers) = setup_approvers("discord", None);
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let gate = DiscordApprovalGate::new(queue.clone(), approvers, outbound);
+
+        let outcome = gate.request_approval(&ctx("exec")).await;
+        assert_eq!(outcome, ApprovalOutcome::Timeout);
+        assert!(queue.is_empty(), "no queue entry on preflight failure");
+    }
+
+    #[tokio::test]
+    async fn adapter_not_connected_fails_closed_with_no_queue_entry() {
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let (_tmp, approvers) = setup_approvers("discord", Some(CHANNEL_SNOWFLAKE));
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let gate = DiscordApprovalGate::new(queue.clone(), approvers, outbound);
+
+        let outcome = gate.request_approval(&ctx("exec")).await;
+        assert_eq!(outcome, ApprovalOutcome::Timeout);
+        assert!(queue.is_empty());
+    }
+
+    /// A Signal approval conversation must not satisfy a Discord
+    /// request. The registry is keyed per adapter; this pins that
+    /// the gate reads its own channel's row and no other.
+    #[tokio::test]
+    async fn another_channels_approval_conversation_does_not_satisfy_discord() {
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let (_tmp, approvers) = setup_approvers("signal", Some("9LJqVbY9wKD2c3vH/abc=="));
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let (writer, _reader) = writer_pair().await;
+        outbound.register("discord", writer);
+        let gate = DiscordApprovalGate::new(queue.clone(), approvers, outbound);
+
+        let outcome = gate.request_approval(&ctx("exec")).await;
+        assert_eq!(outcome, ApprovalOutcome::Timeout);
+        assert!(queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn happy_path_writes_approval_request_with_discord_channel_id() {
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let (_tmp, approvers) = setup_approvers("discord", Some(CHANNEL_SNOWFLAKE));
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let (writer, mut reader) = writer_pair().await;
+        outbound.register("discord", writer);
+        let gate = DiscordApprovalGate::new(queue.clone(), approvers.clone(), outbound.clone());
+
+        let queue_for_resolver = queue.clone();
+        let gate_task = tokio::spawn(async move { gate.request_approval(&ctx("exec")).await });
+
+        let msg = reader.read_message().await.unwrap();
+        let request_id = {
+            let f = msg.get_root::<frame::Reader<'_>>().unwrap();
+            match f.which().unwrap() {
+                frame::ApprovalRequest(req) => {
+                    let req = req.unwrap();
+                    assert_eq!(req.get_tool_name().unwrap().to_string().unwrap(), "exec");
+                    assert_eq!(
+                        req.get_target_conversation_id()
+                            .unwrap()
+                            .to_string()
+                            .unwrap(),
+                        CHANNEL_SNOWFLAKE
+                    );
+                    assert_eq!(
+                        req.get_triggering_agent().unwrap().to_string().unwrap(),
+                        "default"
+                    );
+                    req.get_request_id().unwrap().to_string().unwrap()
+                }
+                _ => panic!("expected ApprovalRequest"),
+            }
+        };
+
+        queue_for_resolver.resolve(
+            &request_id,
+            PendingDecision::Allow {
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi",
+                )),
+            },
+        );
+        let outcome = gate_task.await.unwrap();
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Approved {
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi"
+                ))
+            }
+        );
+    }
+
+    /// The `request_id` the gate mints has to survive the adapter's
+    /// `custom_id` encoding, which is capped at
+    /// `DISCORD_CUSTOM_ID_MAX`. Encoding the id the queue actually
+    /// produced pins the two ends together: a future queue change
+    /// that lengthened the id would fail here rather than at the
+    /// Discord API.
+    #[tokio::test]
+    async fn the_minted_request_id_encodes_within_the_discord_custom_id_budget() {
+        use wirken_adapter_core::approval::{
+            self, ApprovalPayload, DISCORD_CUSTOM_ID_MAX, Decision,
+        };
+
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let (_tmp, approvers) = setup_approvers("discord", Some(CHANNEL_SNOWFLAKE));
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let (writer, mut reader) = writer_pair().await;
+        outbound.register("discord", writer);
+        let gate = DiscordApprovalGate::new(queue.clone(), approvers, outbound);
+        let task = tokio::spawn(async move { gate.request_approval(&ctx("exec")).await });
+
+        let msg = reader.read_message().await.unwrap();
+        let frame::ApprovalRequest(req) = msg
+            .get_root::<frame::Reader<'_>>()
+            .unwrap()
+            .which()
+            .unwrap()
+        else {
+            panic!("expected ApprovalRequest");
+        };
+        let request_id = req.unwrap().get_request_id().unwrap().to_string().unwrap();
+
+        for decision in [Decision::Allow, Decision::Deny] {
+            let encoded = approval::encode(&ApprovalPayload {
+                request_id: request_id.clone(),
+                decision,
+            })
+            .expect("minted request_id must encode");
+            assert!(
+                encoded.len() <= DISCORD_CUSTOM_ID_MAX,
+                "custom_id {} bytes exceeds the {DISCORD_CUSTOM_ID_MAX}-byte cap",
+                encoded.len()
+            );
+            // Round-trips to the same id the adapter will forward.
+            assert_eq!(approval::decode(&encoded).unwrap().request_id, request_id);
+        }
+
+        queue.resolve(
+            &request_id,
+            PendingDecision::Deny {
+                reason: None,
+                actor: None,
+            },
+        );
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deny_with_reason_propagates_through_outcome() {
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let (_tmp, approvers) = setup_approvers("discord", Some(CHANNEL_SNOWFLAKE));
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let (writer, mut reader) = writer_pair().await;
+        outbound.register("discord", writer);
+        let gate = DiscordApprovalGate::new(queue.clone(), approvers, outbound);
+
+        let queue_for_resolver = queue.clone();
+        let gate_task = tokio::spawn(async move { gate.request_approval(&ctx("rm")).await });
+
+        let msg = reader.read_message().await.unwrap();
+        let request_id = {
+            let f = msg.get_root::<frame::Reader<'_>>().unwrap();
+            match f.which().unwrap() {
+                frame::ApprovalRequest(req) => {
+                    req.unwrap().get_request_id().unwrap().to_string().unwrap()
+                }
+                _ => panic!("expected ApprovalRequest"),
+            }
+        };
+
+        queue_for_resolver.resolve(
+            &request_id,
+            PendingDecision::Deny {
+                reason: Some("rm is too dangerous".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi",
+                )),
+            },
+        );
+        let outcome = gate_task.await.unwrap();
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Denied {
+                reason: Some("rm is too dangerous".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi"
+                )),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_path_forgets_queue_entry() {
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let (_tmp, approvers) = setup_approvers("discord", Some(CHANNEL_SNOWFLAKE));
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let (writer, _reader) = writer_pair().await;
+        outbound.register("discord", writer);
+        let gate = DiscordApprovalGate::with_timeout(
+            queue.clone(),
+            approvers,
+            outbound,
+            Duration::from_millis(50),
+        );
+
+        let outcome = gate.request_approval(&ctx("exec")).await;
+        assert_eq!(outcome, ApprovalOutcome::Timeout);
+        assert!(queue.is_empty(), "timed-out entry must be forgotten");
+    }
+
+    /// The frame carries what the card shows: the arguments, what the
+    /// model said, where an `exec` runs and under which runtime, from
+    /// the exec location the runtime computed from the agent's sandbox
+    /// settings.
+    #[tokio::test]
+    async fn the_frame_carries_the_arguments_and_the_runtime() {
+        for (mode, expected) in [
+            (wirken_audit::SandboxModeLabel::Gvisor, "gvisor"),
+            (wirken_audit::SandboxModeLabel::ExecOnly, "docker"),
+            (wirken_audit::SandboxModeLabel::Off, "host"),
+        ] {
+            let queue = Arc::new(PendingApprovalQueue::new());
+            let (_tmp, approvers) = setup_approvers("discord", Some(CHANNEL_SNOWFLAKE));
+            let outbound = Arc::new(OutboundDispatcher::new());
+            let (writer, mut reader) = writer_pair().await;
+            outbound.register("discord", writer);
+            let gate = DiscordApprovalGate::new(queue.clone(), approvers, outbound);
+            let mut asked = ctx("exec");
+            asked.exec_location = Some(wirken_audit::ExecLocation {
+                mode,
+                text: "runs somewhere".into(),
+            });
+            let task = tokio::spawn(async move { gate.request_approval(&asked).await });
+
+            let msg = reader.read_message().await.unwrap();
+            let frame::ApprovalRequest(req) = msg
+                .get_root::<frame::Reader<'_>>()
+                .unwrap()
+                .which()
+                .unwrap()
+            else {
+                panic!("expected ApprovalRequest");
+            };
+            let req = req.unwrap();
+            assert_eq!(
+                req.get_arguments().unwrap().to_str().unwrap(),
+                r#"{"command":"find /var/log -mtime +30 -delete"}"#
+            );
+            assert_eq!(
+                req.get_assistant_text().unwrap().to_str().unwrap(),
+                "Clearing the old logs."
+            );
+            assert_eq!(
+                req.get_exec_location().unwrap().to_str().unwrap(),
+                "runs somewhere"
+            );
+            assert_eq!(req.get_exec_runtime().unwrap().to_str().unwrap(), expected);
+            assert!(req.get_timeout_secs() > 0);
+            let id = req.get_request_id().unwrap().to_string().unwrap();
+            let shown = queue.show(&id).unwrap();
+            assert_eq!(shown.exec_runtime.as_deref(), Some(expected));
+            assert_eq!(
+                shown.arguments.as_deref(),
+                Some(r#"{"command":"find /var/log -mtime +30 -delete"}"#)
+            );
+            queue.resolve(
+                &id,
+                PendingDecision::Deny {
+                    reason: None,
+                    actor: None,
+                },
+            );
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn source_reports_channel_adapter_discord() {
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let (_tmp, approvers) = setup_approvers("discord", None);
+        let outbound = Arc::new(OutboundDispatcher::new());
+        let gate = DiscordApprovalGate::new(queue, approvers, outbound);
+        match gate.source() {
+            ApprovalSource::ChannelAdapter { channel } => assert_eq!(channel, "discord"),
+            other => panic!("expected ChannelAdapter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timeout_override_parses_and_falls_back() {
+        assert_eq!(discord_timeout_from(Some("45")), Duration::from_secs(45));
+        assert_eq!(discord_timeout_from(Some(" 45 ")), Duration::from_secs(45));
+        for bad in [Some("0"), Some("-1"), Some("abc"), Some(""), None] {
+            assert_eq!(
+                discord_timeout_from(bad),
+                Duration::from_secs(DEFAULT_DISCORD_TIMEOUT_SECS)
+            );
+        }
+    }
+}

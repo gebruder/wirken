@@ -24,6 +24,18 @@ Revisited when both move to p256/p384 0.14.
   name, and add a `DecidedBy` string column to the `Custom-WirkenSession_CL`
   DCR stream and table.
 
+### Added
+
+- A tool call that needs approval on a Discord session is decided in Discord,
+  on the card's Approve and Deny buttons, where before it prompted on the CLI
+  surface and nothing was posted in the channel. `wirken approvers set-chat
+  discord <channel_id>` is where the card renders and `wirken approvers add
+  discord <user_id>` is who may decide; a press from anyone else is dropped
+  and recorded as an unauthorized actor. The gate resolves to deny when no
+  approval channel is configured, when the adapter is not connected, and when
+  nobody decides within `WIRKEN_DISCORD_APPROVAL_TIMEOUT_S` (300 seconds by
+  default).
+
 ### Fixed
 
 - A Signal Note to Self is forwarded without
