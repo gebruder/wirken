@@ -19,6 +19,14 @@ takes yet; it is revisited when both do.
 
 ### Fixed
 
+- The iMessage adapter registers its webhook at `/api/v1/webhook` and sends the
+  BlueBubbles password as the `password` query parameter on every API call.
+  Before, it registered at `/api/v1/server/webhooks`, a route BlueBubbles
+  Server does not serve, and sent the password in the JSON body, where its
+  authentication does not read it, so by BlueBubbles' source the
+  registration, and with it the adapter's start, and every send would be
+  refused. This is read from BlueBubbles Server's source and has not been
+  run against a BlueBubbles server.
 - `wirken approvers set-chat`, `add` and `remove`, and `wirken senders add`
   and `remove`, take an id with a leading hyphen as it is, so a Telegram
   group's negative chat id is accepted; before, it was read as an unknown
@@ -33,6 +41,37 @@ takes yet; it is revisited when both do.
 
 ### Security
 
+- Every webchat `/api` route takes a credential before it does anything:
+  the cookie a login sets, or the gateway's session token as
+  `Authorization: Bearer <token>` for a non-browser caller
+  (`crates/cli/src/commands/webchat_auth.rs`). The session token, 256 bits,
+  is made at every start and written with the port to `webchat.json` at mode
+  0600; it is never logged and never put in a URL. `wirken webchat open
+  [--browser]` asks the gateway, with that token, for a one-time login token
+  and prints a login URL carrying only it; `GET /login` exchanges it once, within
+  60 seconds, for an `HttpOnly; SameSite=Strict` cookie and redirects to the
+  page. The `Host` and `Origin` checks stay, and
+  `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN` relaxes `Origin` only. A webchat decision
+  is recorded with the actor `webchat:<label>`, the login's public label, or
+  `webchat:bearer`. Before, the routes checked `Origin` and `Host` only, which
+  a non-browser client sets itself, so any local process of any user could
+  drive the default agent, approve its own tool calls, and read every
+  channel's transcripts and the imported archives.
+  **Operator action, for webchat users:** the page asks you to log in; run
+  `wirken webchat open --browser` on the gateway host, again after each
+  restart of `wirken run`. A script calling the API sends the token from
+  `webchat.json` as a bearer.
+- Every iMessage webhook must present a per-install secret
+  (`webhook_access`, `crates/adapter-imessage/src/adapter.rs`). BlueBubbles
+  posts webhooks with no authentication of its own, so the adapter registers
+  its webhook URL with a `secret` query parameter, an HMAC-SHA256 keyed by the
+  BlueBubbles server password and the same on every start, and answers 403,
+  without reading the body, to a POST without it. Before, any local process
+  could post a message as any sender into any chat.
+  **Operator action, for iMessage users:** delete the webhook an earlier
+  version registered, `http://localhost:3981/webhook` with no secret, in the
+  BlueBubbles server's webhook settings, if it is there; it is refused on
+  every message until then.
 - The gateway reads the approver allowlist and each adapter's approval
   conversation on every decision (`ApproverRegistry`,
   `crates/gateway/src/approver_registry.rs`), so `wirken approvers` changes

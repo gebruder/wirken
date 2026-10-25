@@ -81,7 +81,7 @@ feature-set differences.
 
 `wirken run` spawns adapter processes, accepts authenticated connections,
 routes messages to the agent, and serves a WebChat UI at
-`http://localhost:18790`:
+`http://127.0.0.1:18790`; log in with `wirken webchat open --browser`:
 
 ```
   wirken v2.5.1
@@ -90,7 +90,7 @@ routes messages to the agent, and serves a WebChat UI at
   Provider: ollama/llama3.2
   Ollama version: 0.19.0
   Route: Telegram -> agent:default
-  WebChat: http://localhost:18790
+  WebChat: http://127.0.0.1:18790 (log in with `wirken webchat open`)
 
   Wirken running. Press Ctrl+C to stop.
 ```

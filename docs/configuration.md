@@ -19,6 +19,7 @@ moves every process at once.
 | `permissions.db` | Tool approval records | `wirken run` |
 | `permissions.json` | Default grant window (`default_expiry_days`, 30 when absent) | Manual |
 | `adapters.db` | Registered channel adapters and Ed25519 keys | `wirken channel add` |
+| `webchat.json` | WebChat's port and session token, 0600, rewritten at every start; read by `wirken webchat open` | `wirken run` |
 | `senders.db` | Inbound sender allowlist, read on every message | `wirken senders add` or `wirken run` |
 | `hooks.db` | Registered observe, veto and egress hooks | `wirken hooks register` |
 | `cron.db` | Scheduled cron jobs | `wirken cron create` |

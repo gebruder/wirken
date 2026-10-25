@@ -24,6 +24,16 @@ connections.
 
 ### What WebChat serves
 
+Every `/api` route takes a credential before it does anything: the cookie a
+login sets, or the gateway's session token as `Authorization: Bearer <token>`
+for a non-browser caller. A request with neither, or with a wrong one, is
+answered 401; a token in a query string is not a credential. The session
+token is made fresh at every start and written, with the port, to
+`<data_dir>/webchat.json` at mode 0600; it is never logged and never put in a
+URL. Log in with `wirken webchat open` (below). The page itself, `GET /`, holds
+no data and is served to anyone; it shows how to log in when the API answers
+401.
+
 Every route is bound to loopback and checks the `Host` header against the
 loopback names for the bound port, which is what closes DNS rebinding. The
 state-changing routes (`POST /api/chat`, `POST /api/approvals/{id}`,
@@ -52,6 +62,22 @@ It asked `/api/capabilities` with no conversation key, so it always
 showed the legacy conversation: a turn running in the conversation
 being viewed read as idle, and a turn in the legacy one read as busy. It
 sends the key now and reloads when a switch happens while it is open.
+
+## wirken webchat
+
+```bash
+wirken webchat open [--browser]
+```
+
+Asks the running gateway for a one-time login token, using the session token
+in `webchat.json`, and prints the login URL; `--browser` opens it too. The URL
+carries only the login token. `GET /login` exchanges it, once, for an
+`HttpOnly; SameSite=Strict` cookie and redirects to the page, so the token
+leaves the address bar; a second use, or a use more than 60 seconds after it
+was minted, is refused. Run the command again for another login. Each login
+has a short public label, and a decision made in that browser is recorded with
+the actor `webchat:<label>`; a bearer caller's is `webchat:bearer`. Cookies
+last until the gateway restarts.
 
 ## wirken ask
 

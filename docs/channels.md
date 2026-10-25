@@ -470,28 +470,42 @@ default is stored. The adapter registers a webhook with BlueBubbles,
 sends replies through its REST API, and filters out messages from yourself
 (`isFromMe`). It listens on `127.0.0.1:3981`.
 
-**BlueBubbles posts webhook events with no authentication of any kind.** Its
-`axios.post` sets only `Content-Type: application/json`: no HMAC, no bearer,
-no shared secret, no signed timestamp. The receiving side cannot tell a
-BlueBubbles webhook from any process that can reach the adapter port.
+**BlueBubbles posts webhook events with no authentication of its own.** Its
+webhook service sends a plain `axios.post` with only `Content-Type:
+application/json`: no HMAC, no bearer, no signature
+([`webhookService/index.ts`](https://github.com/BlueBubblesApp/bluebubbles-server/blob/f2e2286241a7c3b6617a82b37d4afaab4df3a6b9/packages/server/src/server/services/webhookService/index.ts)). What
+it does keep is the URL it was given, and it posts to that URL as given. The
+adapter therefore registers `http://localhost:3981/webhook?secret=<secret>`,
+where the secret is an HMAC-SHA256 keyed by the BlueBubbles server password,
+the same on every start, and answers 403 to any POST whose `secret` does not
+match, compared in constant time, without reading its body. Rotating the
+BlueBubbles password changes the secret. BlueBubbles writes webhook URLs to
+its debug log, so the secret is there too; it does not give the password away.
 
-The adapter therefore draws its boundary at the socket: the listener binds to
-`127.0.0.1` only, and `wirken run` refuses to start the adapter if the bound
-address is not loopback. The realistic deployment is single-user,
-single-machine, with BlueBubbles and wirken on the same Mac. To receive
-webhooks from another machine, terminate a reverse proxy that adds its own
-authentication (mTLS, HMAC at the proxy, a bearer header) before the request
-reaches the loopback listener. Do not expose the port directly.
+The listener also binds to `127.0.0.1` only, and `wirken run` refuses to start
+the adapter if the bound address is not loopback. The realistic deployment is
+single-user, single-machine, with BlueBubbles and wirken on the same Mac. To
+receive webhooks from another machine, terminate a reverse proxy that adds its
+own authentication before the request reaches the loopback listener. Do not
+expose the port directly.
 
-Uninstalling wirken does not remove the webhook registration; delete it in the
-BlueBubbles server's webhook settings.
+The adapter calls BlueBubbles' REST API with the server password as the
+`password` query parameter, which is where its authentication reads it
+([`authMiddleware.ts`](https://github.com/BlueBubblesApp/bluebubbles-server/blob/f2e2286241a7c3b6617a82b37d4afaab4df3a6b9/packages/server/src/server/api/http/api/v1/middleware/authMiddleware.ts)),
+and registers the webhook at `/api/v1/webhook`.
+
+**Upgrading from an earlier version:** that version's webhook registration,
+`http://localhost:3981/webhook` with no secret, if BlueBubbles holds one, stays
+there and is refused on every message, with a warning in the adapter log.
+Delete it in the BlueBubbles server's webhook settings. Uninstalling wirken
+does not remove the webhook registration either; delete it there too.
 
 **After a restart.** The adapter registers its webhook on every start, a
-restart included. If BlueBubbles keeps a registration per call for the same
-URL (BlueBubbles' behaviour, not checked in the adapter), each message is then
-posted, and forwarded, once per registration; check the server's webhook
-settings after a restart. Each POST is answered with 200 only after the
-message is written to the gateway, so a POST cut off by a kill may be
+restart included. BlueBubbles keeps one registration per URL and returns the
+existing one for a URL it already has
+([`addWebhook`](https://github.com/BlueBubblesApp/bluebubbles-server/blob/f2e2286241a7c3b6617a82b37d4afaab4df3a6b9/packages/server/src/server/databases/server/index.ts)), and the URL is the same on
+every start, so a restart adds none. Each POST is answered with 200 only after
+the message is written to the gateway, so a POST cut off by a kill may be
 retried and forwarded again.
 
 **Approvals.** Tool calls that need approval on an iMessage session prompt on

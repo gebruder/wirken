@@ -62,7 +62,8 @@ Spawns an adapter process per channel, serves the WebChat UI at
 `http://localhost:18790`, and waits for messages. All local services bind to
 127.0.0.1.
 
-Open WebChat in a browser, or use a configured channel. A channel admits only
+Log in to WebChat with `wirken webchat open --browser`, which opens a one-time
+login link, or use a configured channel. A channel admits only
 the senders on its allowlist, and starts with none, so the first message you
 send is dropped. Admit yourself with the sender id it recorded:
 

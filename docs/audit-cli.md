@@ -120,7 +120,7 @@ from that caller, so an attempt to decide another channel's request leaves
 a row whether or not it succeeded:
 
 ```json
-{"kind":"permission_approval_refused","request_id":"9b8f1c0a-1234-4abc-9def-0123456789ab","action_key":"shell:rm","caller":"webchat","reason":"wrong_channel","adapter_id":"webchat"}
+{"kind":"permission_approval_refused","request_id":"9b8f1c0a-1234-4abc-9def-0123456789ab","action_key":"shell:rm","caller":"webchat:3f2a9c1d","reason":"wrong_channel","adapter_id":"webchat"}
 ```
 
 Source: `crates/audit/src/session_log.rs:480-1701` (`SessionEvent`).

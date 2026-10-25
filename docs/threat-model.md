@@ -64,9 +64,11 @@ What the controls protect, in the order a loss matters:
    (`crates/adapter-teams/src/auth.rs`, `crates/adapter-google-chat/src/auth.rs`),
    WhatsApp by an HMAC-SHA256 signature (`verify_signature`,
    `crates/adapter-whatsapp/src/adapter.rs`). iMessage (BlueBubbles) webhooks
-   carry no authentication, so that boundary is the loopback bind, and
-   `wirken run` refuses to start the adapter on any other address
-   ([channels.md](channels.md)). Parsing before authentication, verification bypass,
+   carry no authentication of their own, so the adapter registers its webhook
+   URL with a per-install secret, derived from the BlueBubbles password, and
+   refuses a POST without it (`webhook_access`,
+   `crates/adapter-imessage/src/adapter.rs`); the listener also binds to
+   loopback only ([channels.md](channels.md)). Parsing before authentication, verification bypass,
    and one sender acting as another are in scope.
 
 2. **Adapter to gateway.** A Unix socket carrying Cap'n Proto frames after a
@@ -174,9 +176,15 @@ What the controls protect, in the order a loss matters:
    scope: a model setting its own provenance, a partial label set written, and
    a cross-channel read without the Tier 3 prompt or its audit row.
 
-10. **Webchat.** Served on 127.0.0.1 with an `Origin` check on `/api/chat`
-    (`crates/cli/src/commands/webchat.rs`). In scope: a page in the operator's
-    browser driving the agent cross-origin.
+10. **Webchat.** Served on 127.0.0.1. Every `/api` route takes a login cookie
+    or the per-start session token as a bearer, compared in constant time
+    (`crates/cli/src/commands/webchat_auth.rs`), on top of the `Host` check and
+    an `Origin` check on state-changing routes
+    (`crates/cli/src/commands/webchat.rs`). The session token is in
+    `webchat.json` at mode 0600; a login token is single-use and expires
+    after 60 seconds. In scope: a page in the operator's browser driving the
+    agent cross-origin, and a local process of another user reaching any
+    `/api` route without the cookie or token.
 
 11. **Vault.** XChaCha20-Poly1305 with an Argon2id-derived or keychain device
     key (`crates/vault`). No process the gateway starts opens it or holds
