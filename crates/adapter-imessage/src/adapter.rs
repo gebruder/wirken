@@ -158,19 +158,22 @@ impl IMessageAdapter {
 
     /// Register a webhook URL with BlueBubbles Server.
     async fn register_webhook(&self, webhook_url: &str) -> Result<(), IMessageError> {
-        let url = format!("{}/api/v1/server/webhooks", self.bluebubbles_url);
-
         let body = serde_json::json!({
             "url": webhook_url,
             "events": ["new-message"],
-            "password": self.server_password
         });
 
         let http = reqwest::Client::new();
-        let resp =
-            http.post(&url).json(&body).send().await.map_err(|e| {
-                IMessageError::BlueBubbles(format!("Failed to register webhook: {e}"))
-            })?;
+        let resp = bluebubbles_post(
+            &http,
+            &self.bluebubbles_url,
+            WEBHOOK_PATH,
+            &self.server_password,
+            &body,
+        )
+        .send()
+        .await
+        .map_err(|e| IMessageError::BlueBubbles(format!("Failed to register webhook: {e}")))?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -376,15 +379,15 @@ async fn handle_outbound(
 
         match action {
             FrameAction::SendMessage(fields) => {
-                let url = format!("{}/api/v1/message/text", bluebubbles_url);
-
                 let body = serde_json::json!({
                     "chatGuid": fields.conversation_id,
                     "message": fields.text,
-                    "password": server_password,
                 });
 
-                let resp = http.post(&url).json(&body).send().await;
+                let resp =
+                    bluebubbles_post(&http, &bluebubbles_url, TEXT_PATH, &server_password, &body)
+                        .send()
+                        .await;
 
                 let (success, msg_id, error) = match resp {
                     Ok(r) if r.status().is_success() => {
@@ -463,6 +466,37 @@ pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields, prefix: &st
     )
 }
 
+/// BlueBubbles' route for registering a webhook (`prefix: "webhook"` in
+/// its `httpRoutes.ts`).
+pub(crate) const WEBHOOK_PATH: &str = "/api/v1/webhook";
+
+/// BlueBubbles' route for sending a text message.
+pub(crate) const TEXT_PATH: &str = "/api/v1/message/text";
+
+/// A POST to the BlueBubbles API at `path` with a JSON `body`. Its
+/// authentication middleware reads the server password from the query
+/// string only (`guid`, `password` or `token`, in
+/// `packages/server/src/server/api/http/api/v1/middleware/authMiddleware.ts`),
+/// so the password goes there and not in the body.
+pub(crate) fn bluebubbles_post(
+    http: &reqwest::Client,
+    bluebubbles_url: &str,
+    path: &str,
+    server_password: &str,
+    body: &serde_json::Value,
+) -> reqwest::RequestBuilder {
+    let raw = format!("{}{path}", bluebubbles_url.trim_end_matches('/'));
+    match reqwest::Url::parse(&raw) {
+        Ok(mut url) => {
+            url.query_pairs_mut()
+                .append_pair("password", server_password);
+            http.post(url).json(body)
+        }
+        // Not a URL: the request fails when sent, naming why.
+        Err(_) => http.post(raw).json(body),
+    }
+}
+
 async fn send_approval_request(
     http: &reqwest::Client,
     bluebubbles_url: &str,
@@ -475,13 +509,13 @@ async fn send_approval_request(
 
     let prompt = approval_text(&fields, &prefix);
 
-    let url = format!("{bluebubbles_url}/api/v1/message/text");
     let body = serde_json::json!({
         "chatGuid": fields.target_chat_guid,
         "message": prompt,
-        "password": server_password,
     });
-    let resp = http.post(&url).json(&body).send().await;
+    let resp = bluebubbles_post(http, bluebubbles_url, TEXT_PATH, server_password, &body)
+        .send()
+        .await;
 
     match resp {
         Ok(r) if r.status().is_success() => {

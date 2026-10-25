@@ -658,3 +658,34 @@ fn the_approval_message_is_the_shared_card() {
     assert!(!text.contains("runs:"), "{text}");
     assert!(!text.contains("runtime:"), "{text}");
 }
+
+/// Every BlueBubbles API call carries the password in the query string,
+/// where its authentication middleware reads it, and not in the body.
+#[test]
+fn bluebubbles_requests_carry_the_password_in_the_query() {
+    use crate::adapter::{TEXT_PATH, WEBHOOK_PATH, bluebubbles_post};
+    let http = reqwest::Client::new();
+    for path in [WEBHOOK_PATH, TEXT_PATH] {
+        let request = bluebubbles_post(
+            &http,
+            "http://127.0.0.1:1234/",
+            path,
+            "s3cr&t pw",
+            &serde_json::json!({ "chatGuid": "iMessage;-;+15550001111" }),
+        )
+        .build()
+        .unwrap();
+        let url = request.url();
+        assert_eq!(url.path(), path);
+        assert_eq!(
+            url.query_pairs()
+                .find(|(k, _)| k == "password")
+                .map(|(_, v)| v.into_owned()),
+            Some("s3cr&t pw".to_string())
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert!(body.get("password").is_none(), "{body}");
+    }
+    assert_eq!(WEBHOOK_PATH, "/api/v1/webhook");
+}
