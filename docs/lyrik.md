@@ -109,8 +109,8 @@ scorers into a consensus, and does not send findings to any delivery channel.
   model call.
 - **Operator sign-off.** Outside `bench_mode` a run starts only on a yes at
   the terminal, recorded on the signed chain. See [Setup](#setup).
-- **Bundled skill staged per run**, self-signed with a one-shot keypair so the
-  loader's signature gate accepts it, which is why `/lyrik` resolves to the
+- **Bundled skill staged per run**, signed under a root the run's process
+  holds in memory, so the loader accepts it in that process only, which is why `/lyrik` resolves to the
   staged copy regardless of operator state under `<data_dir>/skills/`.
 - **Citation-resolution gate.** For every emitted finding the runner confirms
   the cited file exists and the cited line resolves, then runs class-specific

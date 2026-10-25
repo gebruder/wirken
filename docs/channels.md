@@ -35,9 +35,9 @@ homeserver per adapter process; a second needs a second registered channel
 with a distinct name. Tokens are loaded once when the adapter process starts,
 so a rotated one takes effect at the next start: a restart of `wirken run`, or
 an automatic restart after the adapter's gateway connection ends. No command
-restarts one adapter on demand. Permissions are scoped per agent, not per
-platform user: every admitted sender inherits every Tier 2 approval that agent
-already holds. See
+restarts one adapter on demand. Permissions are scoped per agent and channel,
+not per platform user: every admitted sender on a channel inherits every Tier 2
+approval that agent holds on that channel. See
 [permissions-and-identity.md](permissions-and-identity.md).
 
 **Restarts.** `wirken run` restarts an adapter process when it exits or its
@@ -152,6 +152,9 @@ echo-loop on its own DMs. CommonMark passes through unchanged; horizontal
 rules collapse to a blank line.
 
 ### Approvals
+
+**Unit-tested only.** No run against a live Discord bot has posted the card or
+taken a press.
 
 Tool calls that need approval on a Discord session post a card with Approve
 and Deny buttons in the approval channel:
@@ -322,52 +325,90 @@ here.
 
 ### Setup
 
-Install [signal-cli](https://github.com/AsamK/signal-cli) from its release
-page, using the `Linux-native` tarball. That build is GraalVM-compiled and has
-no JRE dependency. Check the `.asc` signature against the maintainer's key
-before you unpack it. Put the binary on your `PATH`, for example in
-`~/.local/bin`. The native build reads the working directory at startup, so
-run it from a directory that exists; otherwise it fails with `Could not
-determine current working directory`.
+The common case: the agent answers you on your own number, and you write to
+it in Note to Self. Replace `+15551234567` with your number throughout.
 
-Then link it as a secondary device, which keeps your phone primary and needs
-no new number:
+1. **Install signal-cli** from its [release page](https://github.com/AsamK/signal-cli),
+   the `Linux-native` tarball (no JRE needed). Check the `.asc` signature
+   before unpacking, and put the binary on your `PATH`, for example in
+   `~/.local/bin`.
+2. **Link it to your phone** as a secondary device:
+
+   ```bash
+   signal-cli link -n "wirken"
+   ```
+
+   Open the printed `tsdevice://` link in Signal on your phone under Settings,
+   Linked devices. It sees only messages that arrive after the link.
+   (Registering a number instead makes signal-cli its primary device and
+   signs out any other install on that number.)
+3. **Run the daemon** on its default socket,
+   `$XDG_RUNTIME_DIR/signal-cli/socket`, from a directory that exists:
+
+   ```bash
+   signal-cli -a +15551234567 daemon --socket
+   ```
+
+   To keep it running, use a systemd user unit
+   (`~/.config/systemd/user/signal-cli.service`, then `systemctl --user
+   enable --now signal-cli`):
+
+   ```ini
+   [Service]
+   ExecStart=%h/.local/bin/signal-cli -a +15551234567 daemon --socket
+   WorkingDirectory=%h
+   Restart=on-failure
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+4. **Add the channel**, with your number on the adapter's allowlist:
+
+   ```bash
+   wirken channel add signal --phone-number +15551234567 --allowed-senders +15551234567
+   ```
+
+   The socket path defaults to the one above (`--endpoint` to change it).
+5. **Admit your number at the gateway** too; Signal has two allowlists
+   ([below](#the-allowlist-is-the-perimeter)):
+
+   ```bash
+   wirken senders add signal +15551234567
+   ```
+
+6. **Answer approvals in Signal** (optional):
+
+   ```bash
+   wirken approvers set-chat signal +15551234567
+   wirken approvers add signal +15551234567 --display "Me"
+   ```
+
+7. **Start `wirken run`** and write to yourself in Note to Self.
+
+If nothing arrives:
+
+- `wirken senders refused signal` lists messages the gateway dropped, with the
+  number to admit.
+- The adapter logs `not in allowlist` for a number missing from
+  `signal-allowed-senders`.
+- The daemon's own output shows `Envelope from:` for every message it
+  received, which tells "signal-cli never got it" from "wirken dropped it".
+- A message you send from your phone to someone else is dropped by design
+  ([Approvals](#approvals-2) explains the variable that forwards them).
+
+To move the daemon to another socket path later, update the two entries that
+hold it; each keeps its binding to the adapter:
 
 ```bash
-signal-cli link -n "wirken"
+printf %s "$XDG_RUNTIME_DIR/signal-cli/socket" | wirken credentials rotate signal-endpoint --stdin
+printf %s "$XDG_RUNTIME_DIR/signal-cli/socket" | wirken credentials rotate signal-token --stdin
 ```
 
-Scan or paste the printed `tsdevice://` URL from Signal on your phone under
-Settings → Linked devices. A linked device sees only messages that arrive
-after the link; prior history stays on the phone, and group metadata syncs in
-the background over a few minutes. Registering a new number instead makes
-signal-cli the primary device for it, which kicks any existing install on that
-number offline.
-
-Run the daemon on its default socket, `$XDG_RUNTIME_DIR/signal-cli/socket`:
-
-```bash
-signal-cli -a +15551234567 daemon --socket
-ls -l "$XDG_RUNTIME_DIR/signal-cli/socket"   # srw------- , owned by you
-echo '{"jsonrpc":"2.0","method":"version","id":1}' \
-  | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/signal-cli/socket"
-```
-
-Keep it under a supervisor such as systemd or launchd: `wirken run` restarts
-its own adapter processes, not signal-cli. Then:
-
-```bash
-wirken channel add signal
-```
-
-You are prompted for the registered E.164 number, the socket path (bare path
-or `unix:///absolute/path`; HTTP URLs are rejected), and the sender allowlist.
-To skip the prompts, pass `--phone-number`, `--endpoint` and
-`--allowed-senders`, or set `WIRKEN_SIGNAL_PHONE_NUMBER`,
-`WIRKEN_SIGNAL_ENDPOINT` and `WIRKEN_SIGNAL_ALLOWED_SENDERS`. The default
-socket path is `$XDG_RUNTIME_DIR/signal-cli/socket`, or
-`<data_dir>/signal-cli.sock` when `XDG_RUNTIME_DIR` is unset. With no
-terminal, an allowlist not given is empty, which drops every inbound message.
+`channel add` also reads `WIRKEN_SIGNAL_PHONE_NUMBER`, `WIRKEN_SIGNAL_ENDPOINT`
+and `WIRKEN_SIGNAL_ALLOWED_SENDERS`. With no terminal and no allowlist given,
+the allowlist is empty and every inbound message is dropped. The socket path
+falls back to `<data_dir>/signal-cli.sock` when `XDG_RUNTIME_DIR` is unset.
 
 ### Approvals
 

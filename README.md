@@ -241,10 +241,13 @@ compromise impossible. The honest edges:
   is enforced at the process level; the compile-time `SessionHandle<Channel>`
   API exists and is tested but is not threaded through the production message
   path.
-- **The iMessage adapter has not been verified against a live BlueBubbles
-  server.** Its API calls and webhook check follow BlueBubbles Server's source;
-  no run against a running server has confirmed them. See
-  [docs/channels.md](docs/channels.md#imessage-bluebubbles).
+- **Not verified against the live service:**
+  - **iMessage.** The API calls and webhook check follow BlueBubbles Server's
+    source; no run against a running server has confirmed them. See
+    [docs/channels.md](docs/channels.md#imessage-bluebubbles).
+  - **Discord approvals.** Unit-tested only; no run against a live Discord bot
+    has posted the card or taken a press. See
+    [docs/channels.md](docs/channels.md#discord).
 - **Agents share the gateway's address space.** Channel adapters are separate
   processes; agents are not.
 - **Permissions are per agent and channel, not per user.** A Tier 2 approval

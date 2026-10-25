@@ -20,8 +20,9 @@ Revisited when both move to p256/p384 0.14.
   buttons in the channel set with `wirken approvers set-chat discord`, decided
   by the users added with `wirken approvers add discord`. Refused when no
   channel is set or the adapter is down, and after
-  `WIRKEN_DISCORD_APPROVAL_TIMEOUT_S` (300 seconds). Reported, with a first
-  implementation, by @olive-mm (#305).
+  `WIRKEN_DISCORD_APPROVAL_TIMEOUT_S` (300 seconds). Not yet run against a
+  live Discord bot. Reported, with a first implementation, by @olive-mm
+  (#305).
 
 ### Changed
 
@@ -112,8 +113,9 @@ Revisited when both move to p256/p384 0.14.
   default socket path is `$XDG_RUNTIME_DIR/signal-cli/socket`, signal-cli's own
   `daemon --socket` default, instead of `/tmp/signal-cli.sock`. **Operator
   action:** an install set up with the old default keeps `/tmp/signal-cli.sock`
-  and is warned at start; move signal-cli to `daemon --socket` and run
-  `wirken channel add signal` again.
+  and is warned at start; run signal-cli with `daemon --socket` and point
+  `signal-endpoint` and `signal-token` at the new path with `wirken credentials
+  rotate` ([channels.md](docs/channels.md#setup)).
 - A veto or egress hook registered when `wirken run` starts must be
   connected: while one is not, tool calls are refused and outputs withheld,
   with a hook row of decision `unavailable`. **For wirken-siem:** accept

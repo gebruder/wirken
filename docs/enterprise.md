@@ -142,9 +142,9 @@ build on top.
   user accounts, no login flow, no SAML, no OIDC, no SCIM. Platform sender
   identity is checked against the inbound sender allowlist and recorded on
   every inbound audit event; it is not an identity Wirken authenticates.
-- **Permissions are scoped per agent, not per user.** A Tier 2 approval
-  granted when any user first triggers an action applies to every user on that
-  channel for the approval window. Running one agent per user is not the
+- **Permissions are scoped per agent and channel, not per user.** A Tier 2
+  approval granted when any user first triggers an action applies to every
+  user on that channel for the approval window. Running one agent per user is not the
   intended model.
 - **Permissions are not scoped per channel within an agent.** The key is
   `(action_key, agent_id)`. One agent bound to both `slack` and `matrix`
