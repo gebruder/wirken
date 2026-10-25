@@ -41,6 +41,11 @@ takes yet; it is revisited when both do.
 
 ### Security
 
+- Every webchat response carries `Content-Security-Policy: frame-ancestors
+  'none'` and `X-Frame-Options: DENY`: the page, every `/api` answer, the
+  login, a miss, and the head of a turn's event stream. Before, nothing
+  stopped another page from framing webchat and overlaying it to steer a
+  click onto an approval.
 - Every webchat `/api` route takes a credential before it does anything:
   the cookie a login sets, or the gateway's session token as
   `Authorization: Bearer <token>` for a non-browser caller

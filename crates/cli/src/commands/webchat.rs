@@ -2685,7 +2685,10 @@ pub async fn serve(
             let raw = String::from_utf8_lossy(&buf[..n]);
             let response = match Request::parse(&raw) {
                 Some(request) => route(&request, &shared).await,
-                None => not_found(),
+                None => match not_found() {
+                    Response::Complete(text) => Response::Complete(with_frame_protection(text)),
+                    turn => turn,
+                },
             };
 
             match response {
@@ -2806,6 +2809,39 @@ struct AcceptedTurn {
 /// query string taken off. The two routes that read a query read it
 /// from a target that named them.
 async fn route(req: &Request<'_>, shared: &Shared) -> Response {
+    match dispatch(req, shared).await {
+        Response::Complete(text) => Response::Complete(with_frame_protection(text)),
+        turn @ Response::Turn(_) => turn,
+    }
+}
+
+/// Headers every webchat response carries, so no other page can frame
+/// it: `frame-ancestors 'none'` for browsers that read CSP, and
+/// `X-Frame-Options: DENY` for those that do not. A page that could
+/// frame this one could overlay it and trick a click on an approval.
+const FRAME_PROTECTION: &str =
+    "Content-Security-Policy: frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\n";
+
+/// `response` with [`FRAME_PROTECTION`] after its status line.
+fn with_frame_protection(response: String) -> String {
+    match response.split_once("\r\n") {
+        Some((status, rest)) => format!("{status}\r\n{FRAME_PROTECTION}{rest}"),
+        None => response,
+    }
+}
+
+/// The head of a chat turn's event stream, which [`run_turn`] writes
+/// itself.
+fn turn_stream_head() -> String {
+    with_frame_protection(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
+         Connection: keep-alive\r\n\r\n"
+            .to_string(),
+    )
+}
+
+/// Route one request; [`route`] adds the frame headers to the answer.
+async fn dispatch(req: &Request<'_>, shared: &Shared) -> Response {
     match (req.method, req.path) {
         ("GET", "/") => return route_page(),
         ("GET", path) if path.starts_with("/index.html") => return route_page(),
@@ -3237,7 +3273,7 @@ async fn route_chat(req: &Request<'_>, shared: &Shared) -> Response {
 /// the end of this function, whichever way the stream ended.
 async fn run_turn(turn: AcceptedTurn, stream: &mut tokio::net::TcpStream, shared: &Shared) {
     // SSE headers — stream tokens as they arrive
-    let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+    let header = turn_stream_head();
     if stream.write_all(header.as_bytes()).await.is_err() || stream.flush().await.is_err() {
         return;
     }
@@ -9768,7 +9804,11 @@ mod tests {
         let Response::Complete(text) = &page else {
             panic!("the page route completes");
         };
-        assert!(text.starts_with("HTTP/1.1 200 OK\r\nContent-Type: text/html"));
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(
+            header_of(text, "content-type").is_some_and(|t| t.starts_with("text/html")),
+            "{text}"
+        );
         assert!(text.ends_with(HTML));
 
         for line in [
@@ -10065,5 +10105,49 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Every answer, the page, the API in each of its outcomes, the
+    /// login and a miss, and the head of a turn's event stream, forbids
+    /// framing.
+    #[tokio::test]
+    async fn every_response_forbids_framing() {
+        let routes = Routes::open();
+        let host = format!("Host: 127.0.0.1:{TEST_PORT}");
+        let login = routes.shared.auth.mint_login(std::time::Instant::now());
+        let requests = [
+            request_with_credential("GET /", &host, ""),
+            request("GET /api/status", ""),
+            request("GET /api/sessions", ""),
+            request_with_credential("GET /api/status", &page_headers(), ""),
+            request("POST /api/approvals/0000", r#"{"decision":"maybe"}"#),
+            request_with_credential(&format!("GET /login?token={login}"), &host, ""),
+            request_with_credential("GET /login?token=used", &host, ""),
+            request_with_credential("GET /nowhere", &host, ""),
+        ];
+        for raw in &requests {
+            let resp = routes.call(raw).await;
+            let text = complete(&resp);
+            let line = raw.lines().next().unwrap();
+            assert_eq!(
+                header_of(text, "content-security-policy"),
+                Some("frame-ancestors 'none'"),
+                "{line}: {text}"
+            );
+            assert_eq!(header_of(text, "x-frame-options"), Some("DENY"), "{line}");
+            assert_eq!(
+                text.matches("X-Frame-Options").count(),
+                1,
+                "{line}: added once"
+            );
+        }
+        let head = super::turn_stream_head();
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(
+            header_of(&head, "content-security-policy"),
+            Some("frame-ancestors 'none'")
+        );
+        assert_eq!(header_of(&head, "x-frame-options"), Some("DENY"));
+        assert_eq!(header_of(&head, "content-type"), Some("text/event-stream"));
     }
 }
