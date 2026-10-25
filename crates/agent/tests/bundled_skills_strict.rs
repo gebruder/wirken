@@ -100,7 +100,11 @@ fn bundled_skills_load_under_the_project_root_and_refuse_when_edited() {
     for f in ["SKILL.sig", "SKILL.pub", "SKILL.deleg"] {
         std::fs::remove_file(git.join(f)).unwrap();
     }
-    wirken_agent::bundled_skills::self_sign_skill_dir(&git).unwrap();
+    wirken_gateway::skill_registry::sign_skill(
+        &git,
+        &ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]),
+    )
+    .unwrap();
 
     let found = SkillLoader::load_dir(&skills_dir).unwrap();
     assert_eq!(found.loaded.len(), 14);

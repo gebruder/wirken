@@ -1170,17 +1170,15 @@ async fn dispatch_via_agent_runtime(
         )));
     }
 
-    // Stage and self-sign the bundled Lyrik skill into the run dir,
+    // Stage and sign the bundled Lyrik skill into the run dir,
     // then merge it into the agent's loaded set. The `/lyrik` slash
     // invocation in the dispatch prompt resolves to this staged copy
     // regardless of operator state under `<data_dir>/skills/`: if the
     // installed copy is unsigned (pre-signature-gate setup) or absent,
     // the run still has a known-good Lyrik skill loaded.
     //
-    // Self-sign with a one-shot keypair through
-    // [`wirken_agent::bundled_skills::self_sign_skill_dir`]: the pair
-    // gives tamper detection across the run and discards the key after
-    // sign.
+    // Signed under this process's staging root
+    // ([`wirken_agent::bundled_skills::stage_sign_skill_dir`]).
     // `exec` only in the sandbox. With it off, an approved command
     // would run on the host with the host's network, so the run's
     // skills do not grant it and a call to it is refused.
@@ -1655,16 +1653,16 @@ async fn dispatch_via_agent_runtime(
     Ok(Some(funnel))
 }
 
-/// Stage the bundled Lyrik SKILL.md into a per-run dir and self-sign
+/// Stage the bundled Lyrik SKILL.md into a per-run dir and sign
 /// it so `agent.extend_skills` accepts it under the signature gate.
 /// The staged dir layout is `<run_dir>/lyrik-skill/lyrik/SKILL.md`
-/// plus `SKILL.sig` and `SKILL.pub`. The returned path is the
+/// plus `SKILL.sig`, `SKILL.pub` and `SKILL.deleg`. The returned path is the
 /// containing directory (`<run_dir>/lyrik-skill`) so it can be
 /// passed to [`wirken_agent::Agent::extend_skills`] which expects a
 /// directory of skill subdirectories.
 ///
-/// One-shot keypair, discarded after the signature is written, through
-/// [`wirken_agent::bundled_skills::self_sign_skill_dir`].
+/// Signed under this process's staging root through
+/// [`wirken_agent::bundled_skills::stage_sign_skill_dir`].
 fn stage_lyrik_skill(
     run_dir: &Path,
     run_id: &str,
@@ -1685,7 +1683,7 @@ fn stage_lyrik_skill(
     let skill_md = lyrik_dir.join("SKILL.md");
     std::fs::write(&skill_md, body).with_context(|| format!("write {}", skill_md.display()))?;
 
-    wirken_agent::bundled_skills::self_sign_skill_dir(&lyrik_dir)
+    wirken_agent::bundled_skills::stage_sign_skill_dir(&lyrik_dir)
         .with_context(|| format!("sign staged Lyrik skill at {}", lyrik_dir.display()))?;
 
     Ok(staged_root)
@@ -2220,7 +2218,7 @@ async fn dispatch_fixes(
         lyrik_fix::fix_skill_text(&run_id, super::lyrik_walks::run_tools(true)),
     )
     .with_context(|| format!("write {}", fix_skill_dir.join("SKILL.md").display()))?;
-    wirken_agent::bundled_skills::self_sign_skill_dir(&fix_skill_dir)
+    wirken_agent::bundled_skills::stage_sign_skill_dir(&fix_skill_dir)
         .with_context(|| format!("sign staged fix skill at {}", fix_skill_dir.display()))?;
     eprintln!(
         "  defender fix step: {} confirmed finding(s). This step asks before each of these          commands runs: {}, and each finding's reproduction command.",
@@ -2360,7 +2358,7 @@ async fn dispatch_fixes(
 }
 
 /// Run a fresh-context replay for each reproduction record the walks
-/// wrote. The replay skill is staged beside the walks and self-signed;
+/// wrote. The replay skill is staged beside the walks and signed;
 /// each record gets its own Agent, built like a walk's, whose prompt is
 /// the record and the path of the replay to write. With `exec`
 /// unavailable no replay runs: each record is recorded as skipped and
@@ -2424,7 +2422,7 @@ async fn dispatch_replays(
         lyrik_replay::replay_skill_text(&run_id, super::lyrik_walks::run_tools(true)),
     )
     .with_context(|| format!("write {}", replay_dir.join("SKILL.md").display()))?;
-    wirken_agent::bundled_skills::self_sign_skill_dir(&replay_dir)
+    wirken_agent::bundled_skills::stage_sign_skill_dir(&replay_dir)
         .with_context(|| format!("sign staged replay skill at {}", replay_dir.display()))?;
     use tokio::sync::Semaphore;
     let permits = std::cmp::max(1, std::cmp::min(max_concurrent, jobs.len() as u32));
@@ -5022,7 +5020,7 @@ mod tests {
                     .replace("DOMAINS", domains),
             )
             .unwrap();
-            wirken_agent::bundled_skills::self_sign_skill_dir(&dir.path().join("wide")).unwrap();
+            wirken_agent::bundled_skills::stage_sign_skill_dir(&dir.path().join("wide")).unwrap();
             let err = super::lyrik_run_skills(dir.path(), None).unwrap_err();
             assert!(
                 err.to_string().contains("grants more than a run may hold"),

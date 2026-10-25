@@ -619,13 +619,7 @@ mod tests {
     /// it. Mirrors the `sign_for_test` pattern used in
     /// `crates/agent/src/preset.rs` and slice-1's persona tests.
     fn sign_skill_for_test(skill_dir: &std::path::Path) {
-        let (secret_hex, _) = wirken_gateway::skill_registry::generate_signing_keypair();
-        let bytes =
-            wirken_gateway::skill_registry::hex_decode_public(&secret_hex).expect("hex decode");
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        let key = ed25519_dalek::SigningKey::from_bytes(&arr);
-        wirken_gateway::skill_registry::sign_skill(skill_dir, &key).expect("sign test skill");
+        wirken_gateway::skill_registry::stage_sign_skill(skill_dir).expect("sign test skill");
     }
 
     fn write_minimal_preset(

@@ -136,22 +136,11 @@ const SKILLS: &[BundledSkill] = &[
     },
 ];
 
-/// Self-sign a skill directory (containing `SKILL.md`) with a freshly
-/// generated one-shot ed25519 keypair, writing `SKILL.sig` and
-/// `SKILL.pub` alongside. Used at install or staging time so the
-/// loader's signature gate (`wirken_agent::skill::verify_skill_signature`)
-/// accepts the bundle without operator action. The signing key is
-/// discarded after use; the pair only proves the bundle is internally
-/// consistent (catches post-install tampering, not provenance).
-pub fn self_sign_skill_dir(dir: &Path) -> std::io::Result<()> {
-    let (secret_hex, _public_hex) = wirken_gateway::skill_registry::generate_signing_keypair();
-    let secret_bytes = wirken_gateway::skill_registry::hex_decode_public(&secret_hex)
-        .map_err(std::io::Error::other)?;
-    let mut secret_arr = [0u8; 32];
-    secret_arr.copy_from_slice(&secret_bytes);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
-    wirken_gateway::skill_registry::sign_skill(dir, &signing_key).map_err(std::io::Error::other)?;
-    Ok(())
+/// Sign a skill directory this process staged, under its in-memory
+/// staging root. It loads in this process only; see
+/// [`wirken_gateway::skill_registry::stage_sign_skill`].
+pub fn stage_sign_skill_dir(dir: &Path) -> std::io::Result<()> {
+    wirken_gateway::skill_registry::stage_sign_skill(dir).map_err(std::io::Error::other)
 }
 
 /// What [`install_bundled_skills`] changed.
@@ -350,8 +339,8 @@ pub fn bundled_skill_content(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SKILLS, install_bundled_skills, restore_bundled_signatures, self_sign_skill_dir,
-        shipped_signature_verifies,
+        SKILLS, install_bundled_skills, restore_bundled_signatures, shipped_signature_verifies,
+        stage_sign_skill_dir,
     };
     use std::path::Path;
 
@@ -379,7 +368,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let content = SKILLS.iter().find(|s| s.name == name).unwrap().content;
         std::fs::write(dir.join("SKILL.md"), content).unwrap();
-        self_sign_skill_dir(&dir).unwrap();
+        stage_sign_skill_dir(&dir).unwrap();
         dir
     }
 
@@ -448,7 +437,7 @@ mod tests {
         let mut md = std::fs::read(dir.join("SKILL.md")).unwrap();
         md.extend_from_slice(b"\nlocal note\n");
         std::fs::write(dir.join("SKILL.md"), &md).unwrap();
-        self_sign_skill_dir(&dir).unwrap();
+        stage_sign_skill_dir(&dir).unwrap();
         let before = files(&dir);
 
         let done = install_bundled_skills(tmp.path()).unwrap();
@@ -468,7 +457,7 @@ mod tests {
         let content = SKILLS.iter().find(|s| s.name == "weather").unwrap().content;
         std::fs::write(dir.join("SKILL.md"), content).unwrap();
         std::fs::write(dir.join("skill.wasm"), b"\0asm").unwrap();
-        self_sign_skill_dir(&dir).unwrap();
+        stage_sign_skill_dir(&dir).unwrap();
         let before = files(&dir);
 
         let done = install_bundled_skills(tmp.path()).unwrap();

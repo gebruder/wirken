@@ -9,7 +9,7 @@ my-skill/
 ├── SKILL.md     (required)
 ├── SKILL.sig    (required unless the unsigned bypass is set)
 ├── SKILL.pub    (pairs with SKILL.sig)
-└── SKILL.deleg  (required once an operator registry root is configured)
+└── SKILL.deleg  (required: the registry root's delegation of SKILL.pub)
 ```
 
 `SKILL.md` is YAML frontmatter followed by a markdown body. The body is what
@@ -68,18 +68,18 @@ only when the shipped signature verifies for that directory. An edited
 `SKILL.md` is left alone for you to re-sign, since writing a fresh signature
 over it would make an edited bundle look authentic.
 
-**To run the bundled set in strict mode**, install the project root:
+**Every skill loads under a registry root.** The project root in
+[`skills/REGISTRY-ROOT.pub`](../skills/REGISTRY-ROOT.pub) is compiled in, so the
+bundled set loads with no setup. A skill of your own needs a root of your own:
 
 ```bash
-wirken skills trust-root 81afdc96e2fde6a371fd114bc6486c7f26a9af4737862de63af97205b02f8f30
+wirken skills trust-root <your-root-public-key>
+wirken skills sign --root-key <your-root-seed> <dir>
 ```
 
-The same value is in [`skills/REGISTRY-ROOT.pub`](../skills/REGISTRY-ROOT.pub).
-Installing it means trusting the project's offline root as the identity anchor
-for every skill you load, bundled or not: a root is singular, so this is not a
-way to add the project alongside a root of your own. Operators who run their
-own root re-sign the bundled set as delegates of it, which is what the
-`trust-root` output tells you to do.
+The root is singular: yours replaces the project root, so re-sign the bundled
+set as delegates of it too. The bundled preset skills load by content under
+any root.
 
 Before it installs a root, `trust-root` lists every installed skill that loads
 now and would not load under that root, and marks the unmodified bundled
@@ -238,7 +238,8 @@ wirken skills verify ./my-skill/
 index at `https://raw.githubusercontent.com/gebruder/wirken-skills/main/index.json`,
 or the URL in `WIRKEN_SKILLS_INDEX`. That URL returns 404 today, so both stop
 with an error naming it. The bundled skills come from `wirken setup`; your own
-go in `<data_dir>/skills/` and are signed with `wirken skills sign`.
+go in `<data_dir>/skills/` and are signed with `wirken skills sign --root-key`
+under your root.
 
 Skills installed from an index are verified against the Ed25519 key the index
 gives for them before installation, and again at every load. What the
@@ -254,9 +255,8 @@ directly:
 cp -r ~/.openclaw/skills/* ~/.wirken/skills/
 ```
 
-Two steps follow the copy. **Sign each one**, or set
-`WIRKEN_ALLOW_UNSIGNED_SKILLS=1`, because the load-time gate refuses unsigned
-bundles by default. **Run `wirken skills migrate`** to rewrite
+Two steps follow the copy. **Sign each one** under your registry root, because
+the load-time gate refuses a skill without a delegation. **Run `wirken skills migrate`** to rewrite
 `metadata.openclaw.*` and add a deny-all `permissions` block; without a wirken
 block a skill loads but has no capability.
 

@@ -1292,18 +1292,9 @@ skills = ["aggregator"]
         std::fs::write(dest.join("sources.toml"), sources_toml).unwrap();
     }
 
-    /// Self-sign a test skill directory with a fresh one-shot
-    /// keypair. Mirrors what bundled-skill / bundled-preset install
-    /// does on the production paths so the loader's signature gate
-    /// accepts the fixture without test-only env-var games.
+    /// Sign a test skill under this process's staging root.
     fn sign_test_skill(skill_dir: &Path) {
-        let (secret_hex, _) = wirken_gateway::skill_registry::generate_signing_keypair();
-        let bytes =
-            wirken_gateway::skill_registry::hex_decode_public(&secret_hex).expect("hex decode");
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        let key = ed25519_dalek::SigningKey::from_bytes(&arr);
-        wirken_gateway::skill_registry::sign_skill(skill_dir, &key).expect("sign test skill");
+        wirken_gateway::skill_registry::stage_sign_skill(skill_dir).expect("sign test skill");
     }
 
     fn write_interests(path: &Path, raw: &str) {

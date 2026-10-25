@@ -44,13 +44,10 @@ const PRESETS: &[BundledPreset] = &[BundledPreset {
 /// the wirken binary refreshes the on-disk preset on next install.
 /// Returns the count of files written.
 ///
-/// Each skill directory the preset ships (any `SKILL.md` path under
-/// `skills/<name>/`) is self-signed with a one-shot keypair after
-/// the SKILL.md is written. The signing key is discarded after the
-/// signature file is on disk. Matches the bundled-skill install
-/// behaviour: the loader's signature gate accepts the bundle on
-/// first load without operator setup, and any post-install edit to
-/// a SKILL.md without re-signing is rejected.
+/// Each skill directory the preset ships is self-signed with a one-shot
+/// keypair, for a build without a registry root. Under a root, the
+/// loader accepts the preset's skills by content
+/// ([`is_shipped_preset_skill`]), so an edited `SKILL.md` is refused.
 pub fn install_bundled_preset(name: &str, dest_dir: &Path) -> io::Result<usize> {
     let preset = PRESETS.iter().find(|p| p.name == name).ok_or_else(|| {
         io::Error::new(
@@ -83,6 +80,15 @@ pub fn install_bundled_preset(name: &str, dest_dir: &Path) -> io::Result<usize> 
         wirken_gateway::skill_registry::sign_skill(&dir, &key).map_err(io::Error::other)?;
     }
     Ok(count)
+}
+
+/// Whether `skill_md` is a bundled preset's `SKILL.md`, byte for byte.
+pub fn is_shipped_preset_skill(skill_md: &[u8]) -> bool {
+    PRESETS.iter().any(|p| {
+        p.files
+            .iter()
+            .any(|(path, content)| path.ends_with("/SKILL.md") && content.as_bytes() == skill_md)
+    })
 }
 
 /// Names of every bundled preset.

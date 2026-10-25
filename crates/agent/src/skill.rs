@@ -58,6 +58,10 @@ pub enum LoadedSignature {
     SelfSigned { signer: String },
     /// Verified under a signer the configured registry root delegated.
     Delegated { signer: String },
+    /// Staged by this process and delegated under its staging root.
+    Staged { signer: String },
+    /// A bundled preset skill, byte for byte the copy in this binary.
+    Shipped,
     /// No signature; loaded because `WIRKEN_ALLOW_UNSIGNED_SKILLS=1`.
     Unsigned,
 }
@@ -738,8 +742,22 @@ fn verify_skill_signature_with_root(
                     )),
                 )
             })?;
+            if let VerifyResult::Valid { signer } = result {
+                return Ok(LoadedSignature::Delegated { signer });
+            }
+            let staging = wirken_gateway::skill_registry::staging_root_public();
+            if let Ok(VerifyResult::Valid { signer }) =
+                verify_skill_delegated(skill_dir, skill_md, &staging)
+            {
+                return Ok(LoadedSignature::Staged { signer });
+            }
+            if crate::bundled_presets::is_shipped_preset_skill(skill_md)
+                && !skill_dir.join("skill.wasm").exists()
+            {
+                return Ok(LoadedSignature::Shipped);
+            }
             match result {
-                VerifyResult::Valid { signer } => Ok(LoadedSignature::Delegated { signer }),
+                VerifyResult::Valid { .. } => unreachable!("returned above"),
                 VerifyResult::Invalid => Err((
                     Refusal::NotDelegated,
                     AgentError::SkillLoad(format!(
@@ -933,25 +951,55 @@ mod root_branch_tests {
 mod load_dir_tests {
     use super::{Refusal, SkillLoader};
     use std::path::Path;
-    use wirken_gateway::skill_registry::{MAX_SKILL_MD_BYTES, sign_skill};
-
-    fn key() -> ed25519_dalek::SigningKey {
-        ed25519_dalek::SigningKey::from_bytes(&[3u8; 32])
-    }
+    use wirken_gateway::skill_registry::MAX_SKILL_MD_BYTES;
 
     fn skill(root: &Path, name: &str, md: &[u8], signed: bool) -> std::path::PathBuf {
         let dir = root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), md).unwrap();
         if signed {
-            sign_skill(&dir, &key()).unwrap();
+            wirken_gateway::skill_registry::stage_sign_skill(&dir).unwrap();
         }
         dir
     }
 
+    #[test]
+    fn a_staged_skill_loads_as_staged() {
+        let tmp = tempfile::tempdir().unwrap();
+        skill(
+            tmp.path(),
+            "staged",
+            b"---\nname: staged\ndescription: d\n---\nbody\n",
+            true,
+        );
+        let loaded = SkillLoader::load_file(&tmp.path().join("staged/SKILL.md")).unwrap();
+        assert!(matches!(
+            loaded.signature,
+            super::LoadedSignature::Staged { .. }
+        ));
+    }
+
+    #[test]
+    fn a_bundled_preset_skill_loads_by_content_and_an_edit_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../preset/zirkel/skills/aggregator/SKILL.md"),
+        )
+        .unwrap();
+        let dir = skill(tmp.path(), "aggregator", &md, false);
+        let loaded = SkillLoader::load_file(&dir.join("SKILL.md")).unwrap();
+        assert_eq!(loaded.signature, super::LoadedSignature::Shipped);
+
+        let mut edited = md.clone();
+        edited.extend_from_slice(b" ");
+        std::fs::write(dir.join("SKILL.md"), &edited).unwrap();
+        assert!(SkillLoader::load_file(&dir.join("SKILL.md")).is_err());
+    }
+
     /// Every directory with a SKILL.md is either loaded or refused with
     /// the reason its load gave; a directory without one is neither.
-    /// No registry root here, so this is the floor.
+    /// Under the compiled registry root.
     #[test]
     fn a_skill_that_does_not_load_is_reported_with_its_reason() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1014,7 +1062,7 @@ mod load_dir_tests {
             "{refused:?}"
         );
         assert_eq!(refused[2], ("loose", &Refusal::Unsigned, false));
-        assert_eq!(refused[3], ("tampered", &Refusal::SignatureMismatch, false));
+        assert_eq!(refused[3], ("tampered", &Refusal::NotDelegated, false));
         assert_eq!(refused[4], ("weather", &Refusal::Unsigned, true));
         assert_eq!(
             found.refused[3].path,

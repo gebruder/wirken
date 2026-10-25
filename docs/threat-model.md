@@ -252,7 +252,7 @@ Who holds what, so a precondition can be compared with an impact:
   them, by their own platform id or by a group entry for the conversation they
   write in; anyone else's messages are dropped at the gateway before they
   reach a session. An admitted chat user can send messages and attachments on
-  their channel. They hold no permission authority. Permissions key on `(action_key, agent_id)`,
+  their channel. They hold no permission authority. Permissions key on `(action_key, agent_id, channel)`,
   not on the sender: a Tier 2 grant one user's prompt earned applies to every
   user of that agent on that channel until it expires
   ([permissions-and-identity.md](permissions-and-identity.md)). Approvals on

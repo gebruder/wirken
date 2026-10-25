@@ -409,19 +409,9 @@ fn skill_without_permissions_block_loads_with_default_deny() {
     );
 }
 
-/// Self-sign a test skill directory with a fresh one-shot Ed25519
-/// keypair so the loader's signature gate accepts the bundle without
-/// resorting to env-var bypasses. Mirrors what
-/// [`crate::bundled_skills::install_bundled_skills`] does on the
-/// install path.
+/// Sign a test skill under this process's staging root.
 fn sign_test_skill(skill_dir: &std::path::Path) {
-    use wirken_gateway::skill_registry::{generate_signing_keypair, hex_decode_public, sign_skill};
-    let (secret_hex, _) = generate_signing_keypair();
-    let bytes = hex_decode_public(&secret_hex).expect("hex");
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    let key = ed25519_dalek::SigningKey::from_bytes(&arr);
-    sign_skill(skill_dir, &key).expect("sign test skill");
+    wirken_gateway::skill_registry::stage_sign_skill(skill_dir).expect("sign test skill");
 }
 
 // ---------------------------------------------------------------------------
@@ -577,7 +567,7 @@ fn c3_forged_signature_fails_to_load() {
     let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
     let msg = format!("{err}");
     assert!(
-        msg.contains("SKILL.sig does not match SKILL.md"),
+        msg.contains("the signature does not verify"),
         "expected Invalid-signature error, got {msg}"
     );
 }

@@ -251,7 +251,7 @@ pub fn stage_walk_skills(
         let dest = dest_dir.join("SKILL.md");
         let wrapped = wrap_with_wirken_frontmatter(name, run_id, scoring, exec_available, &body);
         std::fs::write(&dest, wrapped).with_context(|| format!("write {}", dest.display()))?;
-        wirken_agent::bundled_skills::self_sign_skill_dir(&dest_dir)
+        wirken_agent::bundled_skills::stage_sign_skill_dir(&dest_dir)
             .with_context(|| format!("sign staged walk skill at {}", dest_dir.display()))?;
     }
     Ok(staged)
@@ -957,7 +957,7 @@ mod tests {
     /// Each staged walk dir carries a SKILL.sig + SKILL.pub pair that
     /// verifies under the same loader gate the agent runtime applies.
     /// Catches the silent regression where stage_walk_skills stops
-    /// calling self_sign_skill_dir and walks load empty again.
+    /// calling stage_sign_skill_dir and walks load empty again.
     #[test]
     fn stage_walk_skills_self_signs_each_staged_dir() {
         use wirken_gateway::skill_registry::{

@@ -6,17 +6,10 @@ use wirken_audit::hex::decode as hex_decode;
 
 use crate::error::GatewayError;
 
-/// Compile-time-bundled hex-encoded Ed25519 public key of the wirken
-/// skill-registry root. Empty string means "no root anchor configured
-/// in this build" — the verification path then falls back to trusting
-/// the registry index's per-entry `signer_key` directly, which is the
-/// pre-anchor behavior.
-///
-/// Rotation requires rebuilding the binary against a fresh key file.
-/// This is intentional: a registry-anchored trust root that lives on
-/// disk under the same UID as the gateway adds no real defense; the
-/// anchor is meaningful only when the binary itself is what an
-/// attacker cannot replace without operator action.
+/// Compiled-in registry root: the project root in
+/// `skills/REGISTRY-ROOT.pub`. Used when the operator has installed no
+/// root of their own. An empty file builds without one, and skills then
+/// load on their own signature.
 pub const BUNDLED_REGISTRY_PUBKEY_HEX: &str = include_str!("wirken-registry-pubkey.pub");
 
 /// Parse the bundled root key into a [`VerifyingKey`]. Returns `None`
@@ -127,14 +120,17 @@ pub fn save_registry_root(data_dir: &Path, pubkey_hex: &str) -> Result<(), Gatew
     Ok(())
 }
 
-/// The operator registry root as it stands under `data_dir`.
+/// The registry root in effect for `data_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryRootState {
-    /// No root file: skills load at the self-signed floor.
+    /// No operator root and no compiled root: skills load on their own
+    /// signature.
     Absent,
-    /// A root file holding a usable key: skills need a signer it
-    /// delegated.
+    /// The operator's root file holds a usable key: skills need a signer
+    /// it delegated.
     Pinned(VerifyingKey),
+    /// No operator root; the compiled root applies.
+    Compiled(VerifyingKey),
     /// A root file that cannot be read or does not parse. The loader
     /// refuses every skill under it. `reason` says what is wrong and
     /// does not carry the file's path, so it can be reported without
@@ -142,13 +138,18 @@ pub enum RegistryRootState {
     Unusable { reason: String },
 }
 
-/// Read the operator registry root under `data_dir`. The one place its
-/// file is read and parsed; [`load_registry_root`] and the status
-/// report both go through it.
+/// The registry root for `data_dir`: the operator's root file, else the
+/// compiled root. Install, load and the status report all resolve it
+/// here.
 pub fn registry_root_state(data_dir: &Path) -> RegistryRootState {
     let raw = match std::fs::read_to_string(registry_root_path(data_dir)) {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RegistryRootState::Absent,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return match bundled_registry_pubkey() {
+                Some(key) => RegistryRootState::Compiled(key),
+                None => RegistryRootState::Absent,
+            };
+        }
         Err(e) => {
             return RegistryRootState::Unusable {
                 reason: format!("unreadable: {e}"),
@@ -163,21 +164,17 @@ pub fn registry_root_state(data_dir: &Path) -> RegistryRootState {
     }
 }
 
-/// Resolve the operator-set registry root, if one is installed under
-/// `data_dir`.
+/// The registry root in effect for `data_dir`, per
+/// [`registry_root_state`].
 ///
-/// - `Ok(None)`: no root file present. The operator has not opted into
-///   identity anchoring; the load path keeps its self-signed floor.
-/// - `Ok(Some(key))`: a well-formed root key is present.
-/// - `Err(..)`: the file is present but unreadable or does not parse
-///   as a key. The load gate treats this as fail-closed (a
-///   configured-but-unusable anchor refuses skills rather than
-///   silently downgrading to the floor), so a corrupted or truncated
-///   anchor cannot disable strict mode unnoticed.
+/// - `Ok(None)`: no root at all; skills load on their own signature.
+/// - `Ok(Some(key))`: the operator's root, else the compiled root.
+/// - `Err(..)`: the operator's root file is unreadable or does not
+///   parse. Fail closed: every skill is refused.
 pub fn load_registry_root(data_dir: &Path) -> Result<Option<VerifyingKey>, GatewayError> {
     match registry_root_state(data_dir) {
         RegistryRootState::Absent => Ok(None),
-        RegistryRootState::Pinned(key) => Ok(Some(key)),
+        RegistryRootState::Pinned(key) | RegistryRootState::Compiled(key) => Ok(Some(key)),
         RegistryRootState::Unusable { reason } => Err(GatewayError::Config(format!(
             "registry root {} is present but {reason}; refusing to load skills with an \
              unusable anchor",
@@ -434,6 +431,33 @@ pub fn delegate_sign_skill(
     std::fs::write(skill_dir.join("SKILL.deleg"), &deleg_hex)
         .map_err(|e| GatewayError::Config(format!("write delegation: {e}")))?;
     Ok(())
+}
+
+/// Root for skills this process stages from content it derived itself.
+/// Generated once per process and never written to disk, so no other
+/// process can delegate under it.
+fn staging_root() -> &'static SigningKey {
+    static ROOT: std::sync::OnceLock<SigningKey> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        use rand::Rng;
+        let mut secret = [0u8; 32];
+        rand::rng().fill_bytes(&mut secret);
+        SigningKey::from_bytes(&secret)
+    })
+}
+
+/// Public key of this process's staging root.
+pub fn staging_root_public() -> VerifyingKey {
+    staging_root().verifying_key()
+}
+
+/// Sign `skill_dir` with a fresh key delegated by this process's staging
+/// root. Such a skill loads only in this process.
+pub fn stage_sign_skill(skill_dir: &Path) -> Result<(), GatewayError> {
+    use rand::Rng;
+    let mut secret = [0u8; 32];
+    rand::rng().fill_bytes(&mut secret);
+    delegate_sign_skill(skill_dir, &SigningKey::from_bytes(&secret), staging_root())
 }
 
 /// Generate a new Ed25519 keypair for skill signing.
@@ -1113,12 +1137,64 @@ mod tests {
         sign_skill(&skill_dir, &signing).unwrap();
         let sig_hex = std::fs::read_to_string(skill_dir.join("SKILL.sig")).unwrap();
         let key_hex = hex_encode(&signing.verifying_key().to_bytes());
-        match verify_skill_with_expected_key(&skill_dir, &md(&skill_dir), sig_hex.trim(), &key_hex)
-            .unwrap()
+        match verify_skill_with_expected_key_and_delegation(
+            &skill_dir,
+            &md(&skill_dir),
+            sig_hex.trim(),
+            &key_hex,
+            None,
+            None,
+        )
+        .unwrap()
         {
             VerifyResult::Valid { .. } => {}
             other => panic!("expected Valid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_compiled_root_is_the_project_root() {
+        let committed = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../skills/REGISTRY-ROOT.pub"
+        ))
+        .unwrap();
+        assert_eq!(BUNDLED_REGISTRY_PUBKEY_HEX.trim(), committed.trim());
+        assert!(bundled_registry_pubkey().is_some());
+    }
+
+    #[test]
+    fn with_no_operator_root_the_compiled_root_applies() {
+        let tmp = TempDir::new().unwrap();
+        let compiled = bundled_registry_pubkey().unwrap();
+        assert_eq!(
+            registry_root_state(tmp.path()),
+            RegistryRootState::Compiled(compiled)
+        );
+        assert_eq!(load_registry_root(tmp.path()).unwrap(), Some(compiled));
+
+        let own = random_signing_key().verifying_key();
+        save_registry_root(tmp.path(), &hex_encode(&own.to_bytes())).unwrap();
+        assert_eq!(load_registry_root(tmp.path()).unwrap(), Some(own));
+    }
+
+    #[test]
+    fn a_staged_skill_verifies_under_the_staging_root_only() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("staged");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: staged\n---\nbody").unwrap();
+        stage_sign_skill(&skill_dir).unwrap();
+        let md = md(&skill_dir);
+        assert!(matches!(
+            verify_skill_delegated(&skill_dir, &md, &staging_root_public()).unwrap(),
+            VerifyResult::Valid { .. }
+        ));
+        // Another process's staging root is any other key.
+        assert_eq!(
+            verify_skill_delegated(&skill_dir, &md, &random_signing_key().verifying_key()).unwrap(),
+            VerifyResult::Invalid
+        );
     }
 
     #[test]

@@ -97,11 +97,15 @@ pub async fn install(name: &str) -> Result<()> {
     let skill_path = skill_dir.join("SKILL.md");
     std::fs::write(&skill_path, &content)?;
 
-    // Verify signature against the registry's expected key (not a bundled SKILL.pub).
-    // This prevents an attacker from signing a tampered skill with their own key.
-    // When the binary carries a bundled registry root key, the entry's
-    // `signer_key` must be delegated by that root via the
-    // `signer_key_delegation` field; otherwise the install is refused.
+    // Verify against the index's signer key, delegated by the same root
+    // the loader uses: the operator's, else the compiled one.
+    let root = match wirken_gateway::skill_registry::load_registry_root(&cfg.data_dir) {
+        Ok(root) => root,
+        Err(e) => {
+            std::fs::remove_dir_all(&skill_dir)?;
+            return Err(e.into());
+        }
+    };
     if let (Some(sig_hex), Some(key_hex)) = (&entry.signature, &entry.signer_key) {
         let delegation = entry.signer_key_delegation.as_deref();
         // The downloaded bytes are what is checked, not a read back
@@ -112,7 +116,7 @@ pub async fn install(name: &str) -> Result<()> {
             sig_hex,
             key_hex,
             delegation,
-            wirken_gateway::skill_registry::bundled_registry_pubkey().as_ref(),
+            root.as_ref(),
         )?;
         match result {
             VerifyResult::Valid { signer } => {
@@ -152,7 +156,9 @@ pub async fn install(name: &str) -> Result<()> {
             }
             VerifyResult::Unsigned => {}
         }
-    } else if wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_SKILLS") {
+    } else if root.is_none()
+        && wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_SKILLS")
+    {
         tracing::warn!(
             "WIRKEN_ALLOW_UNSIGNED_SKILLS=1: installing '{}' without a registry-anchored \
              signer key; the bundle's provenance is unverified",
@@ -162,8 +168,7 @@ pub async fn install(name: &str) -> Result<()> {
     } else {
         std::fs::remove_dir_all(&skill_dir)?;
         anyhow::bail!(
-            "Skill '{}' has no signer_key in the registry index; refusing to install. \
-             Set WIRKEN_ALLOW_UNSIGNED_SKILLS=1 to opt in.",
+            "Skill '{}' has no signer_key in the registry index; refusing to install.",
             entry.name
         );
     }
@@ -179,6 +184,8 @@ fn signed_word(signature: &LoadedSignature) -> &'static str {
     match signature {
         LoadedSignature::SelfSigned { .. } => "self-signed",
         LoadedSignature::Delegated { .. } => "delegated",
+        LoadedSignature::Staged { .. } => "staged",
+        LoadedSignature::Shipped => "shipped",
         LoadedSignature::Unsigned => "no",
     }
 }
@@ -1025,13 +1032,13 @@ mod trust_root_tests {
         for f in ["SKILL.sig", "SKILL.pub", "SKILL.deleg"] {
             std::fs::remove_file(weather.join(f)).unwrap();
         }
-        wirken_agent::bundled_skills::self_sign_skill_dir(&weather).unwrap();
+        wirken_agent::bundled_skills::stage_sign_skill_dir(&weather).unwrap();
 
         // An operator's own skill, self-signed.
         let mine = skills.join("mine");
         std::fs::create_dir_all(&mine).unwrap();
         std::fs::write(mine.join("SKILL.md"), "---\nname: mine\n---\nbody\n").unwrap();
-        wirken_agent::bundled_skills::self_sign_skill_dir(&mine).unwrap();
+        wirken_agent::bundled_skills::stage_sign_skill_dir(&mine).unwrap();
 
         // Loaded under the unsigned opt-in.
         let loose = skills.join("loose");

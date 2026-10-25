@@ -2358,6 +2358,8 @@ function renderAbout() {
   const root = (status.posture || {}).skill_registry_root || {};
   if (root.state === 'pinned') {
     kvRow(grid, 'skill root', el('span', null, 'pinned · skills load only under a signer it delegated'));
+  } else if (root.state === 'compiled') {
+    kvRow(grid, 'skill root', el('span', null, 'project root · skills load only under a signer it delegated'));
   } else if (root.state === 'absent') {
     kvRow(grid, 'skill root', el('span', null, 'none · skills load on their own signature'));
   } else if (root.state === 'unusable') {
@@ -3817,6 +3819,7 @@ pub async fn status_snapshot(
         match wirken_gateway::skill_registry::registry_root_state(&cfg.data_dir) {
             RegistryRootState::Absent => json!({ "state": "absent" }),
             RegistryRootState::Pinned(_) => json!({ "state": "pinned" }),
+            RegistryRootState::Compiled(_) => json!({ "state": "compiled" }),
             RegistryRootState::Unusable { reason } => json!({
                 "state": "unusable",
                 "file": REGISTRY_ROOT_FILE,
@@ -3827,9 +3830,9 @@ pub async fn status_snapshot(
     let posture = json!({
         "audit_verify_every_flushes": std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES").ok(),
         "sandbox_mode_off": sb.mode == SandboxMode::Off,
-        // True only for a usable root; `skill_registry_root` carries the
-        // three states.
-        "skill_registry_root_pinned": skill_root["state"] == "pinned",
+        // True for a usable root, the operator's or the compiled one.
+        "skill_registry_root_pinned": skill_root["state"] == "pinned"
+            || skill_root["state"] == "compiled",
         "skill_registry_root": skill_root,
     });
 
@@ -4742,9 +4745,10 @@ pub(crate) fn tool_tier_entry(name: &str, description: &str) -> serde_json::Valu
 /// Never a tick on its own.
 fn skill_signature_word(signature: &LoadedSignature) -> (&'static str, Option<String>) {
     match signature {
-        LoadedSignature::SelfSigned { signer } | LoadedSignature::Delegated { signer } => {
-            ("signed", Some(signer.clone()))
-        }
+        LoadedSignature::SelfSigned { signer }
+        | LoadedSignature::Delegated { signer }
+        | LoadedSignature::Staged { signer } => ("signed", Some(signer.clone())),
+        LoadedSignature::Shipped => ("signed", None),
         LoadedSignature::Unsigned => ("unsigned", None),
     }
 }
@@ -5999,18 +6003,18 @@ mod tests {
         assert!(snap["hooks"].is_null(), "hook counts are not plumbed yet");
     }
 
-    /// The skill registry root is reported in one of three states, and
+    /// The skill registry root is reported by its state, and
     /// an unusable one names its file and what is wrong without the host
     /// path.
     #[tokio::test]
-    async fn status_snapshot_reports_the_skill_root_in_three_states() {
+    async fn status_snapshot_reports_the_skill_root_state() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = cfg_at(dir.path());
         let root = |snap: &serde_json::Value| snap["posture"]["skill_registry_root"].clone();
 
         let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
-        assert_eq!(root(&snap), serde_json::json!({ "state": "absent" }));
-        assert_eq!(snap["posture"]["skill_registry_root_pinned"], false);
+        assert_eq!(root(&snap), serde_json::json!({ "state": "compiled" }));
+        assert_eq!(snap["posture"]["skill_registry_root_pinned"], true);
 
         let key = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]).verifying_key();
         wirken_gateway::skill_registry::save_registry_root(
@@ -7733,11 +7737,7 @@ mod tests {
             format!("{frontmatter}\nDo the demo thing.\n"),
         )
         .unwrap();
-        // The loader refuses an unsigned skill, so this one is signed
-        // with a throwaway key; the route reports the word and the
-        // signer, not the fact of a check.
-        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        wirken_gateway::skill_registry::sign_skill(&skill_dir, &key).expect("signs");
+        wirken_gateway::skill_registry::stage_sign_skill(&skill_dir).expect("signs");
         let skill = wirken_agent::skill::SkillLoader::load_file(&skill_dir.join("SKILL.md"))
             .expect("skill loads");
         let workspace = dir.path().join("workspace");

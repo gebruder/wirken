@@ -38,7 +38,7 @@ fn publish(registry: &Path, base_url: &str, name: &str) -> SkillEntry {
 }
 
 #[test]
-fn an_installed_skill_loads_under_the_root_only_with_its_delegation() {
+fn install_and_load_both_need_a_delegation_under_the_root() {
     let registry = tempfile::tempdir().unwrap();
     let base_url = serve_dir(registry.path().to_path_buf());
 
@@ -81,33 +81,31 @@ fn an_installed_skill_loads_under_the_root_only_with_its_delegation() {
 
     run(&["skills", "trust-root", &root_pub]);
     run(&["skills", "install", "delegated-skill"]);
-    run(&["skills", "install", "plain-skill"]);
+
+    // Install checks the same root load does, so a signer the root did
+    // not delegate is refused before anything is left on disk.
+    let out = wirken(data.path())
+        .env("WIRKEN_SKILLS_INDEX", format!("{base_url}/index.json"))
+        .args(["skills", "install", "plain-skill"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Signature verification failed"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let skills = data.path().join("skills");
     assert!(skills.join("delegated-skill/SKILL.deleg").is_file());
-    assert!(!skills.join("plain-skill/SKILL.deleg").exists());
+    assert!(!skills.join("plain-skill").exists());
 
-    // `skills list` prints a row for every installed skill: the one the
-    // load gate accepted as delegated, the refused one with its reason.
-    // It is not a bundled copy, so its row does not point at the restore.
     let listed = run(&["skills", "list"]);
-    let row = |name: &str| {
-        listed
-            .lines()
-            .find(|line| line.trim_start().starts_with(&format!("{name} ")))
-            .unwrap_or_else(|| panic!("no row for {name}:\n{listed}"))
-            .to_string()
-    };
-    assert!(row("delegated-skill").ends_with("delegated"), "{listed}");
-    let plain = row("plain-skill");
-    assert!(
-        plain.ends_with("refused: signer not delegated by this root"),
-        "{listed}"
-    );
-    assert!(
-        listed.contains("2 skills installed, 1 refused."),
-        "{listed}"
-    );
+    let row = listed
+        .lines()
+        .find(|line| line.trim_start().starts_with("delegated-skill "))
+        .unwrap_or_else(|| panic!("no row for delegated-skill:\n{listed}"));
+    assert!(row.ends_with("delegated"), "{listed}");
 }
 
 /// With no index at the URL, `install` and `search` stop with an error

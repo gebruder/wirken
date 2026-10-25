@@ -81,7 +81,7 @@ fn a_refused_exec_is_skipped_and_writes_stay_under_lyrik() {
     for stale in ["SKILL.sig", "SKILL.pub"] {
         std::fs::remove_file(data.join("skills/notes").join(stale)).unwrap();
     }
-    wirken_agent::bundled_skills::self_sign_skill_dir(&data.join("skills/notes")).unwrap();
+    wirken_agent::bundled_skills::stage_sign_skill_dir(&data.join("skills/notes")).unwrap();
 
     let finding = format!(".lyrik/state/runs/{RUN}/staging/sink-walk/findings/finding-001.json");
     let model = ScriptedModel::start(vec![

@@ -23,6 +23,14 @@ Revisited when both move to p256/p384 0.14.
   `DecidedBy` column. **For wirken-siem:** read `approver_display` for the
   name, and add a `DecidedBy` string column to the `Custom-WirkenSession_CL`
   DCR stream and table.
+- Skills load only under a registry root by default. The project root from
+  `skills/REGISTRY-ROOT.pub` is compiled in; `wirken skills trust-root`
+  replaces it. Install and load check the same root. Bundled preset skills
+  load by content, and skills a Lyrik run stages load in that process only.
+  `WIRKEN_ALLOW_UNSIGNED_SKILLS` applies only to a build without a compiled
+  root. **Operator action:** a self-signed skill of your own no longer loads;
+  install a root of your own and sign it with `wirken skills sign --root-key`,
+  and re-sign the bundled set under that root.
 - A persisted Tier 2 grant is keyed on agent and channel, and applies only on
   that channel. `wirken permissions approve` takes `--channel` (or
   `--session`), and `revoke` takes `--channel`. **Operator action:** grants

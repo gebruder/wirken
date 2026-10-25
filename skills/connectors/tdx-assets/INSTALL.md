@@ -12,16 +12,14 @@ refresh) is recurring until issue
 cp -r tdx-assets ~/.wirken/skills/tdx-assets/
 ```
 
-## 2. Sign it (preferred) or opt into unsigned
+## 2. Sign it under your registry root
 
-Wirken refuses unsigned skills at load by default. Sign it:
+Wirken loads a skill only when its signer is delegated by the registry root.
+Sign it under yours (see docs/skills.md):
 
 ```bash
-wirken skills sign ~/.wirken/skills/tdx-assets/
+wirken skills sign --root-key <your-root-seed> ~/.wirken/skills/tdx-assets/
 ```
-
-The alternative, `WIRKEN_ALLOW_UNSIGNED_SKILLS=1`, loads the skill
-without a signature. Prefer signing: it makes any later edit to SKILL.md fail the load-time check instead of silently taking effect. Use the env var only for a throwaway test.
 
 ## 3. Point the skill at your tenant
 

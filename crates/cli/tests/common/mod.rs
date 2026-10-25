@@ -131,10 +131,45 @@ pub fn write_skill_reading(
         ),
     )
     .unwrap();
-    for stale in ["SKILL.sig", "SKILL.pub"] {
+    for stale in ["SKILL.sig", "SKILL.pub", "SKILL.deleg"] {
         let _ = std::fs::remove_file(dir.join(stale));
     }
-    wirken_agent::bundled_skills::self_sign_skill_dir(dir).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[0x5b; 32]);
+    wirken_gateway::skill_registry::delegate_sign_skill(dir, &signer, &test_root()).unwrap();
+    if let Some(data_dir) = data_dir_of(dir) {
+        trust_test_root(&data_dir);
+    }
+}
+
+/// The registry root test skills are delegated under.
+pub fn test_root() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[0x5a; 32])
+}
+
+/// Install [`test_root`] as the operator registry root of `data_dir`.
+pub fn trust_test_root(data_dir: &Path) {
+    let public = test_root().verifying_key().to_bytes();
+    wirken_gateway::skill_registry::save_registry_root(
+        data_dir,
+        &wirken_gateway::skill_registry::hex_encode_public(&public),
+    )
+    .unwrap();
+}
+
+/// The data dir a skill at `<data>/skills/<name>` or
+/// `<data>/agents/<id>/skills/<name>` loads from.
+fn data_dir_of(skill_dir: &Path) -> Option<std::path::PathBuf> {
+    let skills = skill_dir.parent()?;
+    if skills.file_name()? != "skills" {
+        return None;
+    }
+    let owner = skills.parent()?;
+    match owner.parent() {
+        Some(agents) if agents.file_name() == Some(std::ffi::OsStr::new("agents")) => {
+            agents.parent().map(Path::to_path_buf)
+        }
+        _ => Some(owner.to_path_buf()),
+    }
 }
 
 /// Register an ollama-provider agent served by `model`.

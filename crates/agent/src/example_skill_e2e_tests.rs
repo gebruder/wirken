@@ -16,10 +16,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ed25519_dalek::SigningKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use wirken_gateway::skill_registry::sign_skill;
 
 use crate::egress::{EgressClient, EgressEnforcement};
 use crate::error::AgentError;
@@ -35,17 +33,13 @@ const SKILL_MD: &str = concat!(
 );
 const TOKEN: &str = "eyJ.FAKE-TDX-BEARER.DO-NOT-LEAK";
 
-fn signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[7u8; 32]) // throwaway; signs a temp copy only
-}
-
 /// Copy the committed SKILL.md into `<tmp>/tdx-assets/`, sign it, load it.
 fn load_signed_skill(tmp: &Path) -> Vec<Skill> {
     let dir = tmp.join("tdx-assets");
     std::fs::create_dir_all(&dir).unwrap();
     let md = std::fs::read_to_string(SKILL_MD).expect("read committed SKILL.md");
     std::fs::write(dir.join("SKILL.md"), md).unwrap();
-    sign_skill(&dir, &signing_key()).expect("sign_skill");
+    wirken_gateway::skill_registry::stage_sign_skill(&dir).expect("sign");
     assert!(dir.join("SKILL.sig").is_file() && dir.join("SKILL.pub").is_file());
     SkillLoader::load_dir(tmp)
         .expect("load the signed skill")

@@ -57,9 +57,8 @@ a signature on the host. See [skills.md](skills.md) for the operator side.
 
 **Verification at install.** `wirken skills install` calls
 `verify_skill_with_expected_key_and_delegation` on the downloaded bytes against
-the registry-supplied `signer_key`. When the binary embeds a non-empty
-`wirken-registry-pubkey.pub` at build time, that key must also carry a
-`signer_key_delegation` signature by the bundled root. A download over the
+the registry-supplied `signer_key`, which must carry a `signer_key_delegation`
+by the same root the loader uses (below). A download over the
 `SKILL.md` size limit (below) is refused. `skill_registry.rs:415-510`.
 
 **Signing the registry index.** `scripts/sign-skills-index.sh`, which runs
@@ -67,28 +66,28 @@ the registry-supplied `signer_key`. When the binary embeds a non-empty
 For each entry it checks the entry's signature against the `SKILL.md` in a
 local checkout of the registry, writes `signer_key_delegation` and adds
 `sha256` where the entry has none; any entry that fails the check refuses the
-whole index. `wirken-registry-pubkey.pub` and `wirken-mcp-pubkey.pub` ship
-empty, so a build carries no bundled anchor until a root public key is
-committed there.
+whole index. `wirken-registry-pubkey.pub` holds the project root from
+`skills/REGISTRY-ROOT.pub`; `wirken-mcp-pubkey.pub` ships empty.
 
 **Verification at load.** Every `SkillLoader::load_file` reads `SKILL.md`
 once, refusing a file over 1 MiB (`MAX_SKILL_MD_BYTES`) rather than
 truncating it. The gate runs over those bytes before any frontmatter parse,
 path templating or binary probe, and the parser reads the same bytes, so a
-`SKILL.md` replaced on disk after the read never loads. The gate branches on
-whether an operator registry root is installed:
+`SKILL.md` replaced on disk after the read never loads. The root is the
+operator's (`<data_dir>/registry-root.pub`) when installed, else the compiled
+project root:
 
-- **No root (the floor).** `verify_skill_self_signed` against the on-disk
-  `SKILL.sig` and `SKILL.pub`. A bundle with no signature is refused unless
-  `WIRKEN_ALLOW_UNSIGNED_SKILLS=1`, which warns on stderr and proceeds. A
-  present-but-bad signature is always refused. No audit row is written for the
-  bypass: skill loading runs before any session chain exists and the load path
-  holds no audit handle.
-- **Root configured (strict).** `verify_skill_delegated`: the signer
-  (`SKILL.pub`) must be delegated by the root via `SKILL.deleg`, and the
-  bundle signature must verify under that signer. A self-signed-only bundle
-  and an unsigned bundle are both refused, and the unsigned bypass does not
-  apply once a root is set.
+- `verify_skill_delegated`: the signer (`SKILL.pub`) must be delegated by the
+  root via `SKILL.deleg`, and the bundle signature must verify under that
+  signer. A self-signed-only bundle and an unsigned bundle are refused.
+- A bundled preset skill whose `SKILL.md` matches the copy compiled into the
+  binary byte for byte loads without signature files.
+- A skill the running process staged, such as the skills a Lyrik run stages,
+  is delegated under a root the process generates in memory, and loads in that
+  process only.
+- In a build without a compiled root, the gate falls back to
+  `verify_skill_self_signed`, and `WIRKEN_ALLOW_UNSIGNED_SKILLS=1` admits a
+  bundle with no signature.
 
 Source: `crates/agent/src/skill.rs` (`verify_skill_signature`,
 `verify_skill_signature_with_root`), `skill_registry.rs` (`read_skill_md`,
@@ -98,32 +97,21 @@ Source: `crates/agent/src/skill.rs` (`verify_skill_signature`,
 operator-controlled Ed25519 root public key at `<data_dir>/registry-root.pub`.
 The file is integrity-sensitive, not secret: mode 0o644, so a non-owner
 process cannot replace the anchor while any reader may verify against it. This
-is runtime operator state, separate from the compile-time
-`wirken-registry-pubkey.pub`. The matching root **private** key never ships
+is runtime operator state and replaces the compiled root. The matching root **private** key never ships
 and never lands on the gateway host; it signs per-skill delegations offline.
 The gate resolves the root from the same `default_data_dir()` the running
 gateway uses, so the two never look in different directories.
 
-**Absent versus corrupt root.** Absent is the intended default: no root file
-means the self-signed floor and skills load normally. A root file present but
-unparseable is a misconfigured strict anchor and is fail-closed: it refuses
-every skill and surfaces as `AgentError::RegistryRootUnusable` at error level,
-so a fat-fingered hex reads as "root is corrupt" rather than a silent
-no-skills-load that looks like the floor failing.
+**Absent versus corrupt root.** No root file means the compiled root. A root
+file present but unparseable fails closed: it refuses every skill and surfaces
+as `AgentError::RegistryRootUnusable` at error level.
 
-**Revocation and containment.** The presence of the root file is revocable by
-anyone with gateway-UID write, so the file is not the anchor: the offline
-private key is, and what the file does is opt the loader into demanding
-delegation from it. Deleting the file downgrades strict back to the floor; it
-grants nothing. An attacker who removes it cannot forge a delegated bundle,
-because that needs a root private key that never ships, and the floor still
-rejects unsigned and invalid bundles. The worst the deletion buys is
-acceptance of a self-signed bundle the attacker must also plant: two
-host-write actions on a host where they already hold gateway-UID write.
-
-The precise claim this supports: **skills are tamper-evident by default and
-identity-anchored when an operator configures a root, with the root key held
-offline.** It should not be rounded up to "identity-anchored" unqualified.
+**Revocation and containment.** The root file is writable by anyone with
+gateway-UID write, so the file is not the anchor: the offline private key is.
+Deleting it falls back to the compiled project root; it grants nothing.
+Replacing it with a root the attacker holds lets that attacker's delegated
+skills load, which needs gateway-UID write on a host where they already hold
+it.
 
 ## MCP entry signing
 

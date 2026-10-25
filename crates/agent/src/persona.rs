@@ -172,21 +172,9 @@ mod tests {
         }
     }
 
-    /// Self-sign a skill bundle so `SkillLoader::load_dir` accepts
-    /// it. Mirrors the `sign_for_test` helper in `preset.rs` tests:
-    /// generate an ephemeral keypair, sign the bundle, discard the
-    /// key. Without this the loader's signature gate rejects every
-    /// unsigned skill and the test would have to set
-    /// `WIRKEN_ALLOW_UNSIGNED_SKILLS` (a cross-test env var that
-    /// races under parallel test execution).
+    /// Sign a skill bundle under this process's staging root.
     fn sign_skill_for_test(skill_dir: &Path) {
-        let (secret_hex, _) = wirken_gateway::skill_registry::generate_signing_keypair();
-        let bytes =
-            wirken_gateway::skill_registry::hex_decode_public(&secret_hex).expect("hex decode");
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        let key = ed25519_dalek::SigningKey::from_bytes(&arr);
-        wirken_gateway::skill_registry::sign_skill(skill_dir, &key).expect("sign test skill");
+        wirken_gateway::skill_registry::stage_sign_skill(skill_dir).expect("sign test skill");
     }
 
     fn write_minimal_preset(presets_dir: &Path, name: &str, skill_dir_name: &str) {
