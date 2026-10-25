@@ -67,6 +67,19 @@ ignore = [
     # pure-Rust SEV-SNP certificate-chain verifier tinfoil enables.
     { id = "RUSTSEC-2023-0071", reason = "The Marvin Attack is a timing sidechannel in RSA private-key operations (decryption and signing). Only public-key verification is reachable here: sev's crypto_nossl path uses rsa::RsaPublicKey with rsa::pss::VerifyingKey and rsa::signature::Verifier to check the SEV-SNP certificate chain, and tinfoil uses RsaPublicKey with Pkcs1v15Sign the same way. RsaPrivateKey, pss::SigningKey, pkcs1v15::SigningKey, Pkcs1v15Encrypt, Oaep and decrypt appear in zero files across both trees. The rsa crate has no patched release. Revisit if sev or tinfoil grows a private-key operation, or when rsa ships a constant-time implementation." },
 
+    # crypto-bigint 0.5.5, reached only by:
+    #   elliptic-curve 0.13.8 -> ecdsa 0.16.9 / primeorder 0.13.6
+    #     -> p256 0.13.2 / p384 0.13.1
+    #     -> tinfoil v0.1.1 (git) -> wirken-agent
+    #     -> sev 7.1.0 (p384) -> tinfoil v0.1.1 (git) -> wirken-agent
+    # Added 2026-10-25. tinfoil runs only for an agent whose provider is
+    # `tinfoil`, through `tinfoil::Client::new_default_with_api_key`
+    # (crates/agent/src/llm.rs). The fix exists only from crypto-bigint
+    # 0.7.6, which needs elliptic-curve 0.14 and so p256/p384 0.14; sev
+    # 8.0.0 still requires p384 0.13 and tinfoil-rs v0.2.2 still pins
+    # p256/p384 0.13, so no version of either takes it today.
+    { id = "RUSTSEC-2026-0387", reason = "Constant-time arithmetic that could branch on secret values, leaking secret integers through timing. Only ECDSA verification on public inputs reaches it here: tinfoil uses p256 and p384 VerifyingKey to check Sigstore bundles, Fulcio certificates, transparency-log checkpoints and the SEV-SNP certificate chain, and sev uses p384 VerifyingKey to check the SNP attestation report. Keys, signatures and messages on that path are all public, so there is no secret for the timing to reveal. tinfoil constructs a SigningKey only in a #[cfg(test)] module; sev's signing code is behind its `openssl` and `sev` features, which tinfoil does not enable (it enables `snp` and `crypto_nossl`). Revisit when sev and tinfoil-rs move to p256/p384 0.14, or if either grows a private-key operation on these curves." },
+
     # proc-macro-error2 2.0.1, reached only by:
     #   aquamarine 0.6.0 (proc-macro) -> teloxide 0.17.0
     #     -> wirken-adapter-telegram -> wirken-cli

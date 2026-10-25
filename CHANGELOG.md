@@ -10,6 +10,13 @@ tagged.
 
 ## [Unreleased]
 
+RUSTSEC-2026-0387 (crypto-bigint 0.5.5, constant-time arithmetic that could
+branch on secret values) is deferred and ignored in `deny.toml`. It is
+reached only through tinfoil and sev, which use p256 and p384 for ECDSA
+verification on public inputs, for an agent whose provider is `tinfoil`.
+The fix needs p256/p384 0.14, which neither sev 8.0.0 nor tinfoil-rs v0.2.2
+takes yet; it is revisited when both do.
+
 ### Fixed
 
 - A turn that reaches a ChatGPT plan's usage limit replies, in `wirken chat`
