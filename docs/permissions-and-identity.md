@@ -1,8 +1,6 @@
 # Permissions and Identity
 
-How Wirken maps platform user identity to authorization decisions. This doc is split into two sections: **What exists today** describes current code behavior, **Planned** describes the intended direction that is not yet implemented.
-
-If you are deploying Wirken for a team, read both sections before designing your authorization model. The gap between them is load-bearing.
+How Wirken maps platform user identity to authorization decisions.
 
 ## What exists today
 

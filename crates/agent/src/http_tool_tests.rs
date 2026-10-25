@@ -1,5 +1,4 @@
-//! Tests for the `http_request` built-in tool. Every scenario in
-//! `docs/design/http-request-tool.md` is encoded here.
+//! Tests for the `http_request` built-in tool.
 //!
 //! Network-exercising tests drive the real handler against a loopback
 //! `TcpListener` over `http://localhost` (permitted only under

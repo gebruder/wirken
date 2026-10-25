@@ -705,9 +705,3 @@ that a cited file and line exist and the funnel accounts for every finding the
 model staged, but nothing checks for a finding the model did not stage. An
 approved `exec` command also still runs the target's code, inside the
 sandbox.
-
-## When markdown is not enough
-
-If real use surfaces a boundary that `.lyrik/config.json` plus the `SKILL.md`
-cannot carry, record it in `skills/lyrik/FOLLOWUPS.md` rather than growing
-this guide or the skill body into a substitute for it.

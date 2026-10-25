@@ -728,10 +728,8 @@ mod tests {
         }
     }
 
-    /// The smallest form of the same defect, from
-    /// `fuzz/artifacts/injection_scan/README.md`. The forty-byte
-    /// window past an eighteen-byte match ends at byte 58, one byte
-    /// into a two-byte character.
+    /// The forty-byte window past an eighteen-byte match ends at byte
+    /// 58, one byte into a two-byte character.
     #[test]
     fn the_evidence_window_does_not_split_a_character() {
         let msg = format!("<|im_start|>system{}\u{e9}", "a".repeat(39));

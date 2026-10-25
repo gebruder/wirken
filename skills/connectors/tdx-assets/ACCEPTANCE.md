@@ -4,7 +4,7 @@ These need a real TDX tenant, so they can't be checked from the skill
 source alone. Run them before first production use. The checks that do
 not need a tenant (skill loads/signs, slash interceptor, system-prompt
 gating, credential binding, egress allowlist, POST-path gate, negative
-host/binding) already pass; see the verification output in the report.
+host/binding) are covered without one.
 
 ## Contract
 

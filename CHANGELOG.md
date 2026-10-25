@@ -2803,11 +2803,7 @@ This tag produced no release: the Windows job of the release build failed, so no
   boundary (which previously showed only `agent_id` and
   `credential_id`). `None` for operator-originated sessions (CLI, cron,
   subagent recursion); an `Option`, never an empty string. Defaulted on
-  deserialize so pre-1.12.0 rows read cleanly. Part A of the
-  on-behalf-of identity work in `docs/design/obo-identity.md`; Part B
-  (RFC 8693 token exchange against an external security token service)
-  remains a design proposal pending an STS choice, with no code or
-  feature flag shipped.
+  deserialize so pre-1.12.0 rows read cleanly.
 
 ## [1.11.1] - 2026-07-19
 
@@ -2890,8 +2886,7 @@ This tag produced no release: the Windows job of the release build failed, so no
   vault-held credentials injected host-side as `Authorization: Bearer`,
   never visible to the model or placed in a model-composed body.
   Read-oriented: `GET`/`HEAD` plus explicitly declared POST paths; other
-  verbs are refused. Design note:
-  [docs/design/http-request-tool.md](docs/design/http-request-tool.md).
+  verbs are refused.
 - Two skill permission fields: `credentials.allow` (which vault
   credentials a skill may name) and `http.post_paths` (the exact POST
   endpoints it may call). The permissions block is `deny_unknown_fields`,
@@ -4317,8 +4312,7 @@ serde envelope.
   cache fields default to zero. The streaming dispatch does not
   yet capture usage and writes zeros; bench mode and
   economics-reporting runs must use the non-streaming path until
-  the `wirken-streaming-token-usage` follow-up ships (see
-  `skills/lyrik/FOLLOWUPS.md` §5). This closes the gap surfaced by
+  the `wirken-streaming-token-usage` follow-up ships. This closes the gap surfaced by
   run-005 against the canonical AVB pin where the session log
   recorded `tokens_in: 0, tokens_out: 0` for every anthropic
   response.
