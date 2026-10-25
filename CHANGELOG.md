@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-10-26
+
 RUSTSEC-2026-0387 (crypto-bigint 0.5.5) is ignored in `deny.toml`: it is
 reached only through ECDSA verification on public inputs in tinfoil and sev.
 Revisited when both move to p256/p384 0.14.

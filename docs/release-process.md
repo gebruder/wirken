@@ -22,7 +22,7 @@ ssh-keygen -lf "$REPO"/KEYS   # must match the fingerprint in SECURITY.md
 
 ## Version scheme
 
-Semver on `X.Y.Z`, currently in the `2.x` series. Patch for bug fixes and
+Semver on `X.Y.Z`, currently in the `3.x` series. Patch for bug fixes and
 docs; minor for features and new adapters; major for a change to the CLI, the
 on-disk audit format or configuration that requires operator action, and never
 for a crate API change alone. Every workspace crate shares
