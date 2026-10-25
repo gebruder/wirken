@@ -450,12 +450,19 @@ pub fn open_permission_store(
         seal_operator_lane(log.as_ref(), OPERATOR_PERMISSIONS_SESSION);
         eprintln!(
             "  Removed {} stored permission row(s) the gate cannot act on: {} whose action key \
-             is Tier 1 or Tier 3, {} past their expiry. Recorded under the \
-             '{OPERATOR_PERMISSIONS_SESSION}' audit session.",
+             is Tier 1 or Tier 3, {} past their expiry, {} stored without a channel. Recorded \
+             under the '{OPERATOR_PERMISSIONS_SESSION}' audit session.",
             report.len(),
             report.not_storable.len(),
             report.lapsed.len(),
+            report.unscoped.len(),
         );
+        if !report.unscoped.is_empty() {
+            eprintln!(
+                "  Grants now apply per channel; grant again with `wirken permissions approve \
+                 <key> --agent <id> --channel <channel>`."
+            );
+        }
     }
     Ok(store)
 }
