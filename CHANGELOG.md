@@ -61,7 +61,9 @@ takes yet; it is revisited when both do.
   the drops written without one since the previous. Each allowlist change is
   an `inbound_sender_added` or `inbound_sender_removed` row on the signed
   `gateway-senders` lane, sealed by a chain head; an add whose row cannot be
-  written is undone. `wirken senders` refuses inside a Wirken `exec`.
+  written is undone. `wirken senders` refuses inside a Wirken `exec`, every
+  subcommand alike, and each refusal is an `operator_command_refused` row on
+  `gateway-senders`, sealed and forwarded by default.
   `tests/hostile/corpus.jsonl` gains inbound lines replayed through the
   check: an unknown sender beside an allowed one, a sender id equal to an
   allowed group, a conversation id equal to an allowed sender, an allowed id

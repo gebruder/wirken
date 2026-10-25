@@ -84,7 +84,8 @@ next message, with no restart. Each change is an `inbound_sender_added` or
 drop an `inbound_sender_refused` row on `gateway-inbound`, at most one per
 sender a minute and thirty a minute in all, with the rest counted on the next
 row ([audit-cli.md](audit-cli.md)). `wirken senders` refuses to run inside a
-Wirken `exec`.
+Wirken `exec`, and records each refusal as an `operator_command_refused` row on
+`gateway-senders`.
 
 The sender id is the one the platform reports to the adapter. Wirken does not
 authenticate the person behind it; an entry trusts the platform's account.

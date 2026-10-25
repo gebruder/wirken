@@ -1904,6 +1904,22 @@ pub enum SessionEvent {
         group: bool,
         removed_by: String,
     },
+    /// An allowlist command refused before it opened anything, because
+    /// it ran inside a Wirken `exec` (the `WIRKEN_EXEC` marker was
+    /// set). Written on that command's own lane,
+    /// [`OPERATOR_SENDERS_SESSION`] for `wirken senders`, and sealed by
+    /// a chain head, like [`Self::UpdateRefused`], so an operator can
+    /// see that a model tried to change or read who may drive or
+    /// approve for an agent through a command approved for something
+    /// else. Forwarded to a SIEM by default.
+    OperatorCommandRefused {
+        /// `senders`.
+        command: String,
+        /// The subcommand asked for: `add`, `remove`, `list`, `refused`.
+        invocation: String,
+        /// Why it was refused: `inside_exec`.
+        reason: String,
+    },
     /// One veto-hook invocation completed. Emitted per hook per tool
     /// call (in series, in `hook_registry` insertion order). The
     /// invocation runs after Wirken's tier and per-skill permission

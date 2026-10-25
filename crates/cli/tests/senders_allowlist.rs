@@ -144,7 +144,9 @@ fn an_unknown_channel_or_a_padded_id_is_refused() {
 }
 
 /// Every subcommand refuses under the exec marker before it opens the
-/// allowlist, so nothing is created and nothing is admitted.
+/// allowlist, so nothing is created and nothing is admitted, and each
+/// refusal is an `operator_command_refused` row on the sealed
+/// `gateway-senders` lane naming what was asked for.
 #[cfg(not(windows))]
 #[test]
 fn every_subcommand_refuses_inside_a_wirken_exec() {
@@ -160,6 +162,29 @@ fn every_subcommand_refuses_inside_a_wirken_exec() {
         assert!(err.contains("inside a Wirken exec"), "{args:?}: {err}");
     }
     assert!(!tmp.path().join("senders.db").exists());
+    assert_eq!(refusals(tmp.path()), ["add", "remove", "list", "refused"]);
+    assert!(sealed(tmp.path()));
+    assert!(rows(tmp.path()).is_empty(), "nothing was added or removed");
+}
+
+/// The `invocation` of every `operator_command_refused` row for
+/// `senders` with reason `inside_exec` on the lane, in order.
+fn refusals(data: &std::path::Path) -> Vec<String> {
+    let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
+    db.prepare(
+        "SELECT json_extract(payload, '$.invocation')
+           FROM session_events
+          WHERE session_id = 'gateway-senders'
+            AND json_extract(payload, '$.kind') = 'operator_command_refused'
+            AND json_extract(payload, '$.command') = 'senders'
+            AND json_extract(payload, '$.reason') = 'inside_exec'
+          ORDER BY seq",
+    )
+    .unwrap()
+    .query_map([], |r| r.get(0))
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
 }
 
 /// `refused` reads the gateway's refusal rows back, newest first, with

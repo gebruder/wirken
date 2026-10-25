@@ -4444,6 +4444,7 @@ pub fn session_events(
             SessionEvent::InboundSenderRefused { .. } => None,
             SessionEvent::InboundSenderAdded { .. } => None,
             SessionEvent::InboundSenderRemoved { .. } => None,
+            SessionEvent::OperatorCommandRefused { .. } => None,
             // The hook's verdict is already the outcome on the tool row it
             // gated.
             SessionEvent::HookDispatched { .. } => None,

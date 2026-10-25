@@ -545,6 +545,8 @@ impl OtelProjector {
             SessionEvent::InboundSenderRefused { .. } => Vec::new(),
             SessionEvent::InboundSenderAdded { .. } => Vec::new(),
             SessionEvent::InboundSenderRemoved { .. } => Vec::new(),
+            // An operator's command, refused outside any run.
+            SessionEvent::OperatorCommandRefused { .. } => Vec::new(),
             // The verdict lands on the tool result the tool span already
             // times.
             SessionEvent::HookDispatched { .. } => Vec::new(),

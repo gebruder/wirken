@@ -357,7 +357,8 @@ wirken senders refused [CHANNEL] [-n N]
 conversation id and admits every member of it. `refused` lists the most recent
 messages the gateway dropped, newest first, with the sender and conversation
 ids to admit. Changes apply to the next message without a restart. Every
-subcommand refuses inside a Wirken `exec`. See
+subcommand refuses inside a Wirken `exec` and records the refusal on the
+`gateway-senders` lane. See
 [channels.md](channels.md#who-reaches-the-agent).
 
 ## wirken cron

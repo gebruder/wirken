@@ -879,6 +879,8 @@ fn extract_identity_for_sentinel(
         // operator labels, off the sender column like `revoked_by`.
         SessionEvent::InboundSenderAdded { .. } => (None, None, None),
         SessionEvent::InboundSenderRemoved { .. } => (None, None, None),
+        // An operator's command refused outside any conversation.
+        SessionEvent::OperatorCommandRefused { .. } => (None, None, None),
         // A hook id and an error; none of the three.
         SessionEvent::HookCrashed { .. } => (None, None, None),
         // A server name and a signer; none of the three.
@@ -1142,6 +1144,11 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::InboundSenderRemoved {
             channel, id, group, ..
         } => format!("inbound_sender_removed channel={channel} id={id} group={group}"),
+        SessionEvent::OperatorCommandRefused {
+            command,
+            invocation,
+            reason,
+        } => format!("{command} {invocation} refused: {reason}"),
         // A hook id, a tool and a decision.
         SessionEvent::HookDispatched { .. } => debug_summary(event),
         // A hook id and an error.
@@ -1280,6 +1287,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
         },
         SessionEvent::AdapterRestartAbandoned { .. } => "error",
         SessionEvent::InboundSenderRefused { .. } => "warn",
+        SessionEvent::OperatorCommandRefused { .. } => "warn",
         SessionEvent::McpServerExited {
             stopped_by_proxy, ..
         } => {

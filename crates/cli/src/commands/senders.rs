@@ -10,7 +10,8 @@
 //!
 //! Every subcommand refuses under the `exec` marker: the allowlist
 //! decides who can drive an agent, so an agent's own command cannot be
-//! what changes it.
+//! what changes it. The refusal is an `operator_command_refused` row on
+//! the same lane.
 
 use anyhow::{Context, Result, bail};
 
@@ -22,9 +23,27 @@ use wirken_gateway::sender_registry::{SenderRegistry, validate_channel, validate
 
 use super::{config, local_operator, open_signed_session_log, seal_operator_lane};
 
-/// Refuse under the `exec` marker, before anything is opened.
-fn refuse_inside_exec() -> Result<()> {
+/// Refuse under the `exec` marker, before the allowlist is opened, and
+/// record the refusal on the lane. The row is best effort: a log that
+/// cannot be opened is reported and the refusal stands.
+fn refuse_inside_exec(invocation: &str) -> Result<()> {
     if std::env::var_os(wirken_agent::tool::EXEC_MARKER_ENV).is_some() {
+        let recorded = open_signed_session_log(&config()).and_then(|log| {
+            record(
+                &log,
+                SessionEvent::OperatorCommandRefused {
+                    command: "senders".to_string(),
+                    invocation: invocation.to_string(),
+                    reason: "inside_exec".to_string(),
+                },
+            )
+        });
+        if let Err(e) = recorded {
+            tracing::warn!(
+                error = %e,
+                "could not record the refusal on the {OPERATOR_SENDERS_SESSION} lane"
+            );
+        }
         bail!(
             "wirken senders refuses to run inside a Wirken exec ({} is set); run it \
              yourself, from a terminal",
@@ -58,7 +77,7 @@ fn record(log: &SqliteSessionLog, event: SessionEvent) -> Result<()> {
 /// whose row cannot be written is taken out again, so nobody is
 /// admitted without one.
 pub fn add(channel: &str, id: &str, group: bool, label: Option<&str>) -> Result<()> {
-    refuse_inside_exec()?;
+    refuse_inside_exec("add")?;
     validate_channel(channel).map_err(|e| anyhow::anyhow!("{e}"))?;
     validate_id(id).map_err(|e| anyhow::anyhow!("{e}"))?;
     let label = label.unwrap_or("");
@@ -106,7 +125,7 @@ pub fn add(channel: &str, id: &str, group: bool, label: Option<&str>) -> Result<
 /// Take `id` off `channel`. The removal stands even if its row cannot
 /// be written: failing to record it is no reason to keep admitting.
 pub fn remove(channel: &str, id: &str, group: bool) -> Result<()> {
-    refuse_inside_exec()?;
+    refuse_inside_exec("remove")?;
     validate_channel(channel).map_err(|e| anyhow::anyhow!("{e}"))?;
     let registry = open_registry()?;
     let removed = registry
@@ -151,7 +170,7 @@ pub fn remove(channel: &str, id: &str, group: bool) -> Result<()> {
 
 /// Print the allowlist, or one channel's.
 pub fn list(channel: Option<&str>) -> Result<()> {
-    refuse_inside_exec()?;
+    refuse_inside_exec("list")?;
     if let Some(c) = channel {
         validate_channel(c).map_err(|e| anyhow::anyhow!("{e}"))?;
     }
@@ -188,7 +207,7 @@ const PAGE: u64 = 512;
 /// Print the most recent refusal rows, newest first, optionally for
 /// one channel.
 pub fn refused(channel: Option<&str>, limit: usize) -> Result<()> {
-    refuse_inside_exec()?;
+    refuse_inside_exec("refused")?;
     if let Some(c) = channel {
         validate_channel(c).map_err(|e| anyhow::anyhow!("{e}"))?;
     }
