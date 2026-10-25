@@ -25,7 +25,7 @@ use wirken_audit::ApprovalSource;
 use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingDecision, PendingRequest};
 use wirken_gateway::sse_approval_registry::{SseApprovalRegistry, SseEvent};
 
-use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
+use crate::approval_gate::{ApprovalGate, ApprovalOutcome, DecisionActor};
 use crate::error::PermissionDenialContext;
 
 /// Default wall-clock cap on an SSE approval await. Same 300s
@@ -175,11 +175,11 @@ impl ApprovalGate for SseApprovalGate {
                     // /api/approvals handler always supplies
                     // `Some("webchat")`; the fallback covers a
                     // theoretical resolver that doesn't.
-                    actor: actor.or_else(|| Some("webchat".to_string())),
+                    actor: actor.or_else(|| Some(DecisionActor::new("webchat"))),
                 },
                 PendingDecision::Deny { reason, actor } => ApprovalOutcome::Denied {
                     reason,
-                    actor: actor.or_else(|| Some("webchat".to_string())),
+                    actor: actor.or_else(|| Some(DecisionActor::new("webchat"))),
                 },
                 PendingDecision::Timeout => ApprovalOutcome::Timeout,
             },
@@ -418,14 +418,18 @@ mod tests {
         queue_for_resolver.resolve(
             &request_id,
             PendingDecision::Allow {
-                actor: Some("webchat".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "webchat",
+                )),
             },
         );
         let outcome = gate_task.await.unwrap();
         assert_eq!(
             outcome,
             ApprovalOutcome::Approved {
-                actor: Some("webchat".into())
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "webchat"
+                ))
             }
         );
     }
@@ -453,7 +457,9 @@ mod tests {
             &request_id,
             PendingDecision::Deny {
                 reason: Some("rm is too dangerous".into()),
-                actor: Some("webchat".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "webchat",
+                )),
             },
         );
         let outcome = gate_task.await.unwrap();
@@ -461,7 +467,9 @@ mod tests {
             outcome,
             ApprovalOutcome::Denied {
                 reason: Some("rm is too dangerous".into()),
-                actor: Some("webchat".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "webchat"
+                )),
             }
         );
     }
@@ -518,7 +526,9 @@ mod tests {
                     &request_id,
                     PendingDecision::Deny {
                         reason: None,
-                        actor: Some("webchat".into()),
+                        actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                            "webchat",
+                        )),
                     },
                 );
             }

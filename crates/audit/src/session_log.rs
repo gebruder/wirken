@@ -1000,6 +1000,15 @@ pub enum SessionEvent {
         /// `None` for other tools and for denials no operator saw.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exec_location: Option<ExecLocation>,
+        /// Who declined, as the deciding surface verified them, in the
+        /// same terms as `PermissionApproved.approved_by`. Absent on a
+        /// denial no one made: a policy, tier or timeout denial.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        denied_by: Option<String>,
+        /// The decider's display label as the surface supplied it.
+        /// Unverified.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        denier_display: Option<String>,
     },
     /// Operator approved a Tier 2 action. `scope` distinguishes
     /// SQLite-persisted approvals (the default) from session-scoped
@@ -1011,13 +1020,26 @@ pub enum SessionEvent {
     /// `session_id` is populated iff `scope == Session`; the field
     /// is omitted from the wire shape otherwise so SIEM consumers
     /// pivoting on it do not match persisted approvals by accident.
-    /// `approved_by` carries the operator label exactly as the
-    /// gateway recorded it (`approved_by` on
-    /// `crate::permissions::Approval`).
+    /// `approved_by` is the identity the deciding surface verified: a
+    /// channel approver's platform user id (checked against the
+    /// approver allowlist), `operator:<key id>` from the terminal or
+    /// the permissions socket, `webchat:<label>` for a webchat login,
+    /// the surface label (`stdin`, `cli`) when the surface names no one,
+    /// or for a grant written by `wirken permissions approve` the local
+    /// OS user. `approver_display` is the label the surface supplied
+    /// beside it, which nothing checks. Before 3.0.0 a channel
+    /// approval's `approved_by` held that display label instead; the
+    /// session's `session_start` chain head names the build that wrote
+    /// the row.
     PermissionApproved {
         action_key: String,
         agent_id: String,
         approved_by: String,
+        /// The decider's display label as the surface supplied it, a
+        /// platform display name or the local user. Unverified; absent
+        /// when the surface gave none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approver_display: Option<String>,
         #[serde(default)]
         scope: ApprovalScopeKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]

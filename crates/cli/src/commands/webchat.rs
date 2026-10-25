@@ -3502,11 +3502,15 @@ async fn route_decision(
     let actor = caller.actor();
     let decision = match decision_str {
         "allow" => PendingDecision::Allow {
-            actor: Some(actor.clone()),
+            actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                actor.clone(),
+            )),
         },
         "deny" => PendingDecision::Deny {
             reason,
-            actor: Some(actor.clone()),
+            actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                actor.clone(),
+            )),
         },
         _ => {
             return Response::Complete(json_bad_request(
@@ -6526,6 +6530,8 @@ mod tests {
                     adapter_id: None,
                     sender_id: None,
                     exec_location: None,
+                    denied_by: None,
+                    denier_display: None,
                 },
             ),
             (
@@ -6595,6 +6601,7 @@ mod tests {
                     tier: Some("tier2".into()),
                     expires_at: Some(stamp("2026-10-20T00:00:00Z")),
                     exec_location: None,
+                    approver_display: None,
                 },
             ),
             (
@@ -10084,7 +10091,7 @@ mod tests {
         assert!(complete(&resp).starts_with("HTTP/1.1 200 OK"));
         match rx.await.unwrap() {
             wirken_gateway::pending_approvals::PendingDecision::Allow { actor } => {
-                assert_eq!(actor.as_deref(), Some(format!("webchat:{label}").as_str()))
+                assert_eq!(actor.map(|a| a.id), Some(format!("webchat:{label}")))
             }
             other => panic!("{other:?}"),
         }
@@ -10102,7 +10109,7 @@ mod tests {
         assert!(complete(&resp).starts_with("HTTP/1.1 200 OK"));
         match rx.await.unwrap() {
             wirken_gateway::pending_approvals::PendingDecision::Deny { actor, .. } => {
-                assert_eq!(actor.as_deref(), Some("webchat:bearer"))
+                assert_eq!(actor.map(|a| a.id).as_deref(), Some("webchat:bearer"))
             }
             other => panic!("{other:?}"),
         }

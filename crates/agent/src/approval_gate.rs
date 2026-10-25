@@ -22,16 +22,16 @@
 use async_trait::async_trait;
 
 use wirken_audit::ApprovalSource;
+pub use wirken_gateway::pending_approvals::DecisionActor;
 
 use crate::error::PermissionDenialContext;
 
 /// Outcome of a single approval-gate consult.
 ///
-/// `actor` carries an optional operator-identity label (e.g. an OS
-/// username from the CLI invocation, an authenticated SSE session
-/// user, a Telegram user-id-or-handle). When `Some`, the runtime
-/// records it as the audit row's `approved_by` / `denied_by` field
-/// — the actor in the actor-vs-surface split. When `None`, the
+/// `actor` carries who decided, as the surface verified them
+/// ([`DecisionActor`]): its `id` becomes the audit row's
+/// `approved_by` / `denied_by` and its `display`, when there is one,
+/// `approver_display` / `denier_display`. When `None`, the
 /// runtime falls back to the surface-derived default label
 /// (`"stdin"`, `"cli"`, etc.) so the chain always has a non-empty
 /// value. The structured `approved_via` / `denied_via` field on the
@@ -44,11 +44,11 @@ use crate::error::PermissionDenialContext;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved {
-        actor: Option<String>,
+        actor: Option<DecisionActor>,
     },
     Denied {
         reason: Option<String>,
-        actor: Option<String>,
+        actor: Option<DecisionActor>,
     },
     Timeout,
 }

@@ -121,13 +121,13 @@ Seven events, so a reviewer can tell seven different situations apart.
 
 | Event | Means |
 | --- | --- |
-| `PermissionApproved` | A grant was written where none existed. Carries the `tier` granted and the `expires_at` written, so the row says what was granted and for how long without a lookup against the store. |
+| `PermissionApproved` | A grant was written where none existed. Carries the `tier` granted and the `expires_at` written, so the row says what was granted and for how long without a lookup against the store. `approved_by` is the decider's verified identity (a channel approver's platform user id, `operator:<key id>`, `webchat:<label>`), and `approver_display` the unverified name beside it; see [audit-cli.md](audit-cli.md). |
 | `PermissionRevoked` | An operator took a grant back. Carries `revoked_by` and the `tier` and `expires_at` the row held, which is the only surviving record of what was removed. |
 | `PermissionApprovalRefused` | A decision arrived from a caller the gate would not take it from: another channel's request, or another conversation's. Carries `request_id`, `caller` and `reason`. The attempt is recorded whether or not it succeeded, so enumerating request ids leaves a trail. |
 | `PermissionRenewed` | A grant was written over one that was already there. Carries `previous_expires_at` alongside `expires_at`. |
 | `PermissionGrantExpired` | A grant was found lapsed and dropped. Carries the `expired_at` the row held. `detected_by: tool_call` means a call hit it, and the tool and tier are on the row; `detected_by: store_open` means the sweep found it, with no tool and no tier because no call was involved. |
 | `PermissionGrantPruned` | A grant was dropped because its key is Tier 1 or Tier 3 and the gate could never read it. Nothing ran out. Sweep only. |
-| `PermissionDenied` | The call was refused. |
+| `PermissionDenied` | The call was refused. A denial someone made carries `denied_by` and `denier_display`. |
 
 The store keeps one row per key and renewal overwrites in place, so `previous_expires_at` on a renewal row is the only surviving record of the window that was discarded. A key granted once and renewed twenty times is otherwise indistinguishable from one granted yesterday.
 

@@ -1381,6 +1381,7 @@ mod replay_tests {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();
@@ -1499,6 +1500,7 @@ mod replay_tests {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();

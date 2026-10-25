@@ -102,7 +102,7 @@ only what it lists is forwarded and the default set is ignored. It wins over
 | Webhook | Mixed legacy and typed entries in one JSON array | Single POST per flush |
 | Splunk HEC | NDJSON, one event per line; legacy `sourcetype: "wirken:audit"`, typed `wirken:session` with `event.level` | One HEC token for both |
 | Datadog | JSON array per POST; typed entries carry `ddtags: kind:<variant>`, all carry `ddsource: "wirken"` and `status` | One endpoint |
-| Sentinel | PascalCase columns matching the DCR stream; legacy carries `Action`/`Target`, typed carries `Kind`/`Level`/`AgentId`/`AdapterId`/`SenderId`/`Event` | Two: legacy to `Custom-WirkenAudit`, typed to the configured `sentinel_typed.endpoint` |
+| Sentinel | PascalCase columns matching the DCR stream; legacy carries `Action`/`Target`, typed carries `Kind`/`Level`/`AgentId`/`AdapterId`/`SenderId`/`DecidedBy`/`Event` | Two: legacy to `Custom-WirkenAudit`, typed to the configured `sentinel_typed.endpoint` |
 
 The Sentinel split is a DCR constraint, not a design choice: the legacy
 stream's DCR pins specific columns and rejects rows that do not match, so the
@@ -180,7 +180,8 @@ platform id and sometimes a human-readable role cannot be joined on
 either. The labels this keeps out are the `caller` on a refused approval,
 the `revoked_by` on a revocation, the `approved_by` on a grant and its
 renewal, and the `actor` on an import row. They stay on the row inside
-`Event`, which the envelope carries beside the columns.
+`Event`, which the envelope carries beside the columns; a grant's
+`approved_by` and a denial's `denied_by` are also in `DecidedBy`, below.
 
 Fourteen variants carried one of the three and were read for none of
 them, so a permission denial arrived with no channel and no sender, an
@@ -197,9 +198,20 @@ before the typed events, `adapter.connect`, `adapter.disconnect`,
 `adapter.restart` and `adapter.restart_abandoned`, fill `AdapterId` from
 their target, which is the adapter id.
 
-If an operator identity ever needs a column of its own it gets one under
-its own name, covering every variant that carries such a label rather
-than the one that prompted it.
+`DecidedBy` is the column for who decided an approval request, and it
+holds a verified identity only: `approved_by` on a `permission_approved`
+row and `denied_by` on a `permission_denied` row someone made, which is a
+channel approver's platform user id checked against the approver
+allowlist, `operator:<key id>` from the terminal or the permissions
+socket, `webchat:<label>` for a webchat login, or a surface label such as
+`stdin` when the surface names no one. It is null on every other row and
+on a denial no one made (a policy, tier or timeout denial). The display
+name a surface supplied beside the decider (`approver_display`,
+`denier_display`), a refused approval's `caller`, a revocation's
+`revoked_by` and an import's `actor` are not verified decisions and stay
+inside `Event`. Before 3.0.0 a channel approval's `approved_by` was the
+approver's display name; a Sentinel table that stores `DecidedBy` has to
+declare it in its DCR stream and table, as `Level` does.
 
 ### What the typed summary carries
 

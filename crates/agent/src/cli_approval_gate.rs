@@ -168,7 +168,9 @@ mod tests {
         let result = queue.resolve(
             &id,
             PendingDecision::Allow {
-                actor: Some("davi".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi",
+                )),
             },
         );
         assert_eq!(
@@ -179,7 +181,9 @@ mod tests {
         assert_eq!(
             outcome,
             ApprovalOutcome::Approved {
-                actor: Some("davi".into())
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi"
+                ))
             }
         );
     }
@@ -206,7 +210,9 @@ mod tests {
             &id,
             PendingDecision::Deny {
                 reason: Some("not safe".into()),
-                actor: Some("davi".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi",
+                )),
             },
         );
         let outcome = gate_task.await.unwrap();
@@ -214,7 +220,9 @@ mod tests {
             outcome,
             ApprovalOutcome::Denied {
                 reason: Some("not safe".into()),
-                actor: Some("davi".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi"
+                )),
             }
         );
     }

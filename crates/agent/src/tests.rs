@@ -11210,12 +11210,16 @@ mod sandbox_egress_live {
             self.asked.lock().unwrap().push(ctx.clone());
             if self.allow {
                 crate::approval_gate::ApprovalOutcome::Approved {
-                    actor: Some("test-operator".into()),
+                    actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                        "test-operator",
+                    )),
                 }
             } else {
                 crate::approval_gate::ApprovalOutcome::Denied {
                     reason: Some("test says no".into()),
-                    actor: Some("test-operator".into()),
+                    actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                        "test-operator",
+                    )),
                 }
             }
         }
@@ -13814,6 +13818,7 @@ mod exec_location_disagreements {
                 mode,
                 text: text.into(),
             }),
+            approver_display: None,
         }
     }
 
@@ -14043,7 +14048,9 @@ mod webchat_approval_reaches_the_page {
             &request_id,
             PendingDecision::Deny {
                 reason: None,
-                actor: Some("webchat".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "webchat",
+                )),
             },
         );
         turn.await.unwrap().expect("the turn ends with a reply");

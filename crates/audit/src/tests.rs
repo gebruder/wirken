@@ -1142,6 +1142,8 @@ mod session {
                     adapter_id: None,
                     sender_id: None,
                     exec_location: None,
+                    denied_by: None,
+                    denier_display: None,
                 },
             ),
             (
@@ -1395,6 +1397,8 @@ mod session {
                 adapter_id: None,
                 sender_id: None,
                 exec_location: None,
+                denied_by: None,
+                denier_display: None,
             },
         )
         .unwrap();
@@ -1453,6 +1457,7 @@ mod session {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();
@@ -3364,6 +3369,8 @@ fn every_session_event() -> Vec<SessionEvent> {
             adapter_id: None,
             sender_id: None,
             exec_location: None,
+            denied_by: None,
+            denier_display: None,
         },
         SessionEvent::PermissionApproved {
             action_key: String::new(),
@@ -3377,6 +3384,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             tier: None,
             expires_at: None,
             exec_location: None,
+            approver_display: None,
         },
         SessionEvent::PermissionRevoked {
             action_key: String::new(),
@@ -4031,6 +4039,8 @@ fn find_permission_denials_matches_on_the_logical_agent_id() {
             adapter_id: None,
             sender_id: None,
             exec_location: None,
+            denied_by: None,
+            denier_display: None,
         },
     )
     .unwrap();
@@ -4306,6 +4316,7 @@ fn legacy_view_projects_native_session_payloads_into_detail() {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();

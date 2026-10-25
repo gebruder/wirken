@@ -3882,6 +3882,8 @@ impl Agent {
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
                         exec_location: None,
+                        denied_by: None,
+                        denier_display: None,
                     },
                 )?;
                 return Ok(crate::tool::ToolResult {
@@ -3960,6 +3962,8 @@ impl Agent {
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
                             exec_location: None,
+                            denied_by: None,
+                            denier_display: None,
                         },
                     )?;
                     return Ok(crate::tool::ToolResult {
@@ -4489,11 +4493,17 @@ impl Agent {
         match outcome {
             Some(crate::approval_gate::ApprovalOutcome::Approved { actor }) => {
                 if let Some(src) = source.clone() {
-                    let approved_by = actor.unwrap_or_else(|| approved_by_label(&src));
+                    // The verified identity, or the surface's own label
+                    // when the surface names no one.
+                    let approved_by = actor
+                        .as_ref()
+                        .map(|a| a.id.clone())
+                        .unwrap_or_else(|| approved_by_label(&src));
                     if let Err(e) = wirken_gateway::permissions::emit_operator_approval(
                         &ctx.action.approval_key(),
                         &ctx.agent_id,
                         &approved_by,
+                        actor.as_ref().and_then(|a| a.display.as_deref()),
                         src,
                         &*self.session_log,
                         &self.session_handle,
@@ -4549,20 +4559,15 @@ impl Agent {
                     Err(e) => Err(e),
                 }
             }
-            Some(crate::approval_gate::ApprovalOutcome::Denied { reason, actor: _ }) => {
-                // The actor on a Denied outcome is recorded as the
-                // PermissionDenied row's trigger context via the
-                // existing `agent_id` + surface fields; the audit
-                // schema does not have a per-row `denied_by` field
-                // today (the denial path uses denial_source +
-                // denied_via to attribute who declined, not who
-                // they were). Future schema extension: add
-                // `denied_by_actor: Option<String>` if a SIEM
-                // detection needs per-operator denials separated
-                // from per-surface denials. For now actor is
-                // accepted on the wire but not separately
-                // recorded; the reason and surface are what's
-                // operationally load-bearing.
+            Some(crate::approval_gate::ApprovalOutcome::Denied { reason, actor }) => {
+                // Who declined, in the same terms as an approval's
+                // `approved_by`: the verified identity, or the surface's
+                // own label when the surface names no one.
+                let denied_by = actor
+                    .as_ref()
+                    .map(|a| a.id.clone())
+                    .or_else(|| source.as_ref().map(approved_by_label));
+                let denier_display = actor.as_ref().and_then(|a| a.display.clone());
                 let denial_reason = reason.clone();
                 self.log_event(
                     TrustLevel::System,
@@ -4578,6 +4583,8 @@ impl Agent {
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
                         exec_location: ctx.exec_location.clone(),
+                        denied_by,
+                        denier_display,
                     },
                 )?;
                 let output = match reason.as_deref() {
@@ -4617,6 +4624,8 @@ impl Agent {
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
                         exec_location: ctx.exec_location.clone(),
+                        denied_by: None,
+                        denier_display: None,
                     },
                 )?;
                 denials.push(ctx);
@@ -4663,6 +4672,8 @@ impl Agent {
                 adapter_id: self.current_inbound.adapter_id.clone(),
                 sender_id: self.current_inbound.sender_id.clone(),
                 exec_location: None,
+                denied_by: None,
+                denier_display: None,
             },
         )?;
         Ok(())

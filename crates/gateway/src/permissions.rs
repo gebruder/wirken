@@ -1622,6 +1622,7 @@ pub fn approve_and_log_by_key_with_expiry(
                 ApprovalScope::Session { .. } => None,
             },
             exec_location: None,
+            approver_display: None,
         },
     };
     log.append(handle, wirken_audit::TrustLevel::System, event)?;
@@ -1658,6 +1659,7 @@ pub fn emit_operator_approval(
     action_key: &str,
     agent_id: &str,
     approved_by: &str,
+    approver_display: Option<&str>,
     approved_via: wirken_audit::ApprovalSource,
     log: &dyn wirken_audit::SessionLog,
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
@@ -1682,6 +1684,7 @@ pub fn emit_operator_approval(
             // is no window to name.
             expires_at: None,
             exec_location: exec_location.cloned(),
+            approver_display: approver_display.map(str::to_string),
         },
     )?;
     Ok(())
@@ -2581,6 +2584,7 @@ mod tier_tests {
             "shell:ls",
             "slackbot",
             "davi",
+            None,
             wirken_audit::ApprovalSource::Cli,
             &log,
             &handle,
@@ -2613,6 +2617,7 @@ mod tier_tests {
             "shell:date",
             "slackbot",
             "davi",
+            None,
             wirken_audit::ApprovalSource::Cli,
             &log,
             &handle,
@@ -2826,6 +2831,7 @@ mod tier_tests {
                     tier: None,
                     expires_at: None,
                     exec_location: None,
+                    approver_display: None,
                 },
             )
             .unwrap();
@@ -2866,6 +2872,7 @@ mod tier_tests {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();
@@ -2902,6 +2909,7 @@ mod tier_tests {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();
@@ -2920,6 +2928,7 @@ mod tier_tests {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();
@@ -2941,6 +2950,7 @@ mod tier_tests {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();
@@ -2980,6 +2990,7 @@ mod tier_tests {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
         )
         .unwrap();

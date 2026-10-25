@@ -10,6 +10,29 @@ tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- **The meaning of `permission_approved.approved_by` changes.** It is now
+  the identity the deciding surface verified: a channel approver's platform
+  user id, checked against the approver allowlist; `operator:<key id>` from
+  the terminal or the permissions socket; `webchat:<label>` for a webchat
+  login. The display name the surface supplied beside it, which anyone can
+  set, moves to its own field, `approver_display`. Before, a channel
+  approval recorded the display name in `approved_by`, so an approver could
+  appear under any name they chose, and a terminal or permissions-socket
+  approval recorded `<name> (operator key <id>)`. A denial someone made now
+  records `denied_by` and `denier_display` in the same terms; before, no
+  denial named its decider. The Sentinel typed row gains a `DecidedBy`
+  column holding `approved_by` or `denied_by` and nothing else. This is why
+  the release is 3.0.0: the audit schema version is the workspace version,
+  and an existing field changes meaning. Rows written before it keep the old
+  meaning; the `build` on each session's `session_start` chain head says
+  which build wrote them. **For wirken-siem:** a detection or workbook that
+  reads `approved_by` as a display name reads an id now, and should read
+  `approver_display` for the name; the field index gains `approver_display`,
+  `denied_by` and `denier_display`; and the `Custom-WirkenSession_CL` DCR
+  stream and table need a `DecidedBy` string column to store the new one.
+
 RUSTSEC-2026-0387 (crypto-bigint 0.5.5, constant-time arithmetic that could
 branch on secret values) is deferred and ignored in `deny.toml`. It is
 reached only through tinfoil and sev, which use p256 and p384 for ECDSA

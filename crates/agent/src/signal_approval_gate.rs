@@ -319,14 +319,18 @@ mod tests {
         queue_for_resolver.resolve(
             &request_id,
             PendingDecision::Allow {
-                actor: Some("davi".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi",
+                )),
             },
         );
         let outcome = gate_task.await.unwrap();
         assert_eq!(
             outcome,
             ApprovalOutcome::Approved {
-                actor: Some("davi".into())
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi"
+                ))
             }
         );
     }
@@ -358,7 +362,9 @@ mod tests {
             &request_id,
             PendingDecision::Deny {
                 reason: Some("rm is too dangerous".into()),
-                actor: Some("davi".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi",
+                )),
             },
         );
         let outcome = gate_task.await.unwrap();
@@ -366,7 +372,9 @@ mod tests {
             outcome,
             ApprovalOutcome::Denied {
                 reason: Some("rm is too dangerous".into()),
-                actor: Some("davi".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new(
+                    "davi"
+                )),
             }
         );
     }

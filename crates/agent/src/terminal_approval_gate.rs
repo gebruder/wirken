@@ -287,13 +287,13 @@ mod tests {
         queue.resolve(
             &request_id,
             PendingDecision::Allow {
-                actor: Some("op".into()),
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new("op")),
             },
         );
         assert_eq!(
             task.await.unwrap(),
             ApprovalOutcome::Approved {
-                actor: Some("op".into())
+                actor: Some(wirken_gateway::pending_approvals::DecisionActor::new("op"))
             }
         );
     }

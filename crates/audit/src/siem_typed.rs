@@ -831,6 +831,7 @@ mod tests {
             tier: None,
             expires_at: None,
             exec_location: Some(told),
+            approver_display: None,
         };
         assert!(!should_forward(&approval, &cfg));
     }

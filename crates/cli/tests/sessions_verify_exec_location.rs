@@ -43,6 +43,7 @@ fn write_session(data: &Path, ran: (SandboxModeLabel, SandboxRuntimeLabel)) {
                 mode: SandboxModeLabel::ExecOnly,
                 text: TOLD.into(),
             }),
+            approver_display: None,
         },
     )
     .unwrap();

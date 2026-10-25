@@ -531,6 +531,7 @@ pub fn build_sentinel_typed_payload(
                 "AgentId": agent_id,
                 "AdapterId": adapter_id,
                 "SenderId": sender_id,
+                "DecidedBy": extract_decider(&stored.event),
                 "Event": stored.event,
                 "Hostname": hostname(),
             })
@@ -577,6 +578,24 @@ pub fn build_webhook_typed_request(
     Ok((body, signature))
 }
 
+/// Who decided an approval request, by the identity the deciding
+/// surface verified: `approved_by` on an approval, `denied_by` on a
+/// denial someone made. This is the decider column the paragraph on
+/// [`extract_identity_for_sentinel`] leaves room for, and it holds a
+/// verified identity only: a channel approver's platform user id,
+/// `operator:<key id>`, `webchat:<label>`, or a surface label when the
+/// surface names no one. Display labels, refused callers, revokers and
+/// import actors are not decisions anyone was verified for, and stay in
+/// the payload.
+fn extract_decider(event: &crate::session_log::SessionEvent) -> Option<String> {
+    use crate::session_log::SessionEvent;
+    match event {
+        SessionEvent::PermissionApproved { approved_by, .. } => Some(approved_by.clone()),
+        SessionEvent::PermissionDenied { denied_by, .. } => denied_by.clone(),
+        _ => None,
+    }
+}
+
 /// Pull adapter_id / sender_id / agent_id out of any variant that
 /// carries them. Returns `(adapter_id, sender_id, agent_id)`.
 ///
@@ -590,9 +609,8 @@ pub fn build_webhook_typed_request(
 ///
 /// Those labels are not lost: the Sentinel and webhook envelopes
 /// carry the typed payload beside these columns, so every field stays
-/// on the row. If an operator identity ever needs a column of its
-/// own, it gets one under its own name and covers every variant that
-/// carries such a label, not just the one that prompted it.
+/// on the row. Who decided an approval request has a column of its
+/// own, [`extract_decider`], holding a verified identity only.
 fn extract_identity_for_sentinel(
     event: &crate::session_log::SessionEvent,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -1752,6 +1770,72 @@ mod identity_tests {
         }
     }
 
+    /// The Sentinel row's `DecidedBy` holds the verified decider of an
+    /// approval or a denial, and nothing else: not the display label
+    /// beside it, not the requester, and on no other kind of row.
+    #[test]
+    fn decided_by_is_the_verified_decider_only() {
+        use crate::session_log::{
+            ApprovalScopeKind, DenialSource, HashHex, SessionId, StoredSessionEvent, TrustLevel,
+        };
+        let denial = |denied_by: Option<&str>| SessionEvent::PermissionDenied {
+            tool: "exec".into(),
+            action_key: "shell:rm".into(),
+            denial_source: DenialSource::Tier,
+            tier: None,
+            agent_id: "worker".into(),
+            trigger: None,
+            denied_via: None,
+            denial_reason: None,
+            adapter_id: Some("signal".into()),
+            sender_id: Some("U9".into()),
+            exec_location: None,
+            denied_by: denied_by.map(str::to_string),
+            denier_display: Some("davi".into()),
+        };
+        let approved = SessionEvent::PermissionApproved {
+            action_key: "shell:ls".into(),
+            agent_id: "worker".into(),
+            approved_by: "U1".into(),
+            approver_display: Some("Alice (security lead)".into()),
+            scope: ApprovalScopeKind::OneShot,
+            session_id: None,
+            approved_via: None,
+            adapter_id: Some("signal".into()),
+            sender_id: Some("U9".into()),
+            tier: None,
+            expires_at: None,
+            exec_location: None,
+        };
+        let refused = SessionEvent::PermissionApprovalRefused {
+            request_id: "req-1".into(),
+            action_key: None,
+            caller: "U7".into(),
+            reason: crate::ApprovalRefusalReason::UnauthorizedActor,
+            adapter_id: Some("signal".into()),
+        };
+        assert_eq!(extract_decider(&approved).as_deref(), Some("U1"));
+        assert_eq!(
+            extract_decider(&denial(Some("operator:abc123"))).as_deref(),
+            Some("operator:abc123")
+        );
+        assert_eq!(extract_decider(&denial(None)), None);
+        assert_eq!(extract_decider(&refused), None);
+        let row = build_sentinel_typed_payload(&[&StoredSessionEvent {
+            id: 1,
+            session_id: SessionId::new("default/signal/dm-1"),
+            seq: 0,
+            ts: chrono::Utc::now(),
+            trust: TrustLevel::System,
+            event: approved,
+            leaf_hash: HashHex(String::new()),
+            prev_hash: HashHex(String::new()),
+            hash: HashHex(String::new()),
+        }]);
+        assert_eq!(row[0]["DecidedBy"], "U1");
+        assert_eq!(row[0]["SenderId"], "U9");
+    }
+
     /// The identity columns hold the field they are named after. An
     /// operator or role label is a different kind of name, and a
     /// column that sometimes holds a platform id and sometimes a role
@@ -1816,6 +1900,7 @@ mod identity_tests {
                 tier: None,
                 expires_at: None,
                 exec_location: None,
+                approver_display: None,
             },
             SessionEvent::PermissionRenewed {
                 action_key: "shell:ls".into(),
@@ -1841,6 +1926,8 @@ mod identity_tests {
                 adapter_id: Some("slack".into()),
                 sender_id: Some("U123".into()),
                 exec_location: None,
+                denied_by: None,
+                denier_display: None,
             },
             // `actor_id` on a bridged legacy row.
             SessionEvent::AuditLegacy {
@@ -2032,6 +2119,8 @@ mod identity_tests {
                     adapter_id: adapter(),
                     sender_id: sender(),
                     exec_location: None,
+                    denied_by: None,
+                    denier_display: None,
                 },
                 Some("slack"),
                 Some("U123"),
@@ -2050,6 +2139,7 @@ mod identity_tests {
                     tier: None,
                     expires_at: None,
                     exec_location: None,
+                    approver_display: None,
                 },
                 Some("slack"),
                 Some("U123"),

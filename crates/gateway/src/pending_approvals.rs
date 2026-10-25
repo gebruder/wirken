@@ -31,22 +31,54 @@ use chrono::{DateTime, Utc};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+/// Who decided an approval request.
+///
+/// `id` is the identity the surface verified: a channel approver's
+/// platform user id, checked against the approver allowlist; a
+/// terminal or CLI operator's `operator:<key id>`, checked by the
+/// operator-key handshake; a webchat login's `webchat:<label>`. It is
+/// what the audit row's `approved_by` or `denied_by` holds. `display`
+/// is a human label the surface supplied beside it, a platform display
+/// name or the local user, which anyone can set and nothing checks; it
+/// is recorded in a field of its own and never in place of the id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionActor {
+    pub id: String,
+    pub display: Option<String>,
+}
+
+impl DecisionActor {
+    /// An actor with no display label.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            display: None,
+        }
+    }
+
+    /// The same actor with `display`, when it is not empty.
+    pub fn with_display(mut self, display: impl Into<String>) -> Self {
+        let display = display.into();
+        self.display = (!display.is_empty()).then_some(display);
+        self
+    }
+}
+
 /// Decision communicated from the queue back to the awaiting gate.
 /// Same three-valued shape as `agent::approval_gate::ApprovalOutcome`;
 /// the gate maps `Allow ↔ Approved`, `Deny ↔ Denied`, `Timeout`
-/// passes through. `actor` is the operator-identity label the IPC
-/// handler reads from the JSON request (e.g. `$USER`); the gate
-/// threads it into `ApprovalOutcome.actor` so the audit row's
-/// `approved_by` carries the operator's identity rather than the
-/// surface-derived default.
+/// passes through. `actor` is who decided, as the surface verified
+/// them; the gate threads it into `ApprovalOutcome.actor` so the audit
+/// row's `approved_by` or `denied_by` carries that identity rather than
+/// the surface-derived default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingDecision {
     Allow {
-        actor: Option<String>,
+        actor: Option<DecisionActor>,
     },
     Deny {
         reason: Option<String>,
-        actor: Option<String>,
+        actor: Option<DecisionActor>,
     },
     Timeout,
 }
@@ -324,14 +356,14 @@ mod tests {
             &id,
             PendingDecision::Deny {
                 reason: Some("looks dangerous".into()),
-                actor: Some("davi".into()),
+                actor: Some(DecisionActor::new("U1").with_display("davi")),
             },
         );
         let decision = rx.await.unwrap();
         match decision {
             PendingDecision::Deny { reason, actor } => {
                 assert_eq!(reason.as_deref(), Some("looks dangerous"));
-                assert_eq!(actor.as_deref(), Some("davi"));
+                assert_eq!(actor, Some(DecisionActor::new("U1").with_display("davi")));
             }
             other => panic!("expected Deny, got {other:?}"),
         }

@@ -3651,8 +3651,15 @@ fn process_permissions_request(
         } => {
             let result = queue.resolve(
                 &request_id,
+                // The key is the verified identity; the name beside it is
+                // the client's to give.
                 PendingDecision::Allow {
-                    actor: Some(format!("{approved_by} (operator key {key_id})")),
+                    actor: Some(
+                        wirken_gateway::pending_approvals::DecisionActor::new(format!(
+                            "operator:{key_id}"
+                        ))
+                        .with_display(approved_by),
+                    ),
                 },
             );
             PermissionsResponse::Decision {
@@ -3675,7 +3682,12 @@ fn process_permissions_request(
                 &request_id,
                 PendingDecision::Deny {
                     reason,
-                    actor: Some(format!("{denied_by} (operator key {key_id})")),
+                    actor: Some(
+                        wirken_gateway::pending_approvals::DecisionActor::new(format!(
+                            "operator:{key_id}"
+                        ))
+                        .with_display(denied_by),
+                    ),
                 },
             );
             PermissionsResponse::Decision {
@@ -4774,19 +4786,25 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                 );
                 return Ok(());
             }
-            // Prefer the wire-supplied display name; fall back
-            // to the registry's stored display, then to the
-            // user id as a last resort. The chosen value lands
-            // on the audit row's `approved_by` / actor field.
+            // The verified platform user id is the actor, and the row's
+            // `approved_by` / `denied_by`. The display name rides beside
+            // it: the wire-supplied one, which the adapter took from the
+            // platform and anyone can set, else the one the operator gave
+            // the registry. It never stands in for the id.
             let actor = if let Some(actor) = terminal_actor {
                 actor
-            } else if !user_display.is_empty() {
-                user_display
             } else {
-                approver_registry
-                    .display_name(adapter_id, &user_id)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| user_id.clone())
+                let display = if user_display.is_empty() {
+                    approver_registry
+                        .display_name(adapter_id, &user_id)
+                        .unwrap_or_default()
+                } else {
+                    wirken_agent::ansi::strip_control_sequences(&user_display)
+                        .trim()
+                        .to_string()
+                };
+                wirken_gateway::pending_approvals::DecisionActor::new(user_id.clone())
+                    .with_display(display)
             };
             let pending = match decision {
                 ApprovalDecisionKind::Allow => {
@@ -4961,7 +4979,7 @@ fn terminal_decision_actor(
     connection: &TerminalConnection,
     request_id: &str,
     user_display: &str,
-) -> Option<String> {
+) -> Option<wirken_gateway::pending_approvals::DecisionActor> {
     let caller = format!("operator:{}", peer.key_id);
     let Some(request) = conn.pending_approvals.show(request_id) else {
         tracing::warn!(
@@ -4996,16 +5014,10 @@ fn terminal_decision_actor(
         );
         return None;
     }
-    // The display name is the client's to give, as the name is on the
-    // permissions socket; the key beside it is the gateway's.
+    // The key is the verified identity, the gateway's; the display name
+    // is the client's to give, as the name is on the permissions socket.
     let display = wirken_agent::ansi::strip_control_sequences(user_display);
-    let display = display.trim();
-    let display = if display.is_empty() {
-        TERMINAL_CHANNEL
-    } else {
-        display
-    };
-    Some(format!("{display} (operator key {})", peer.key_id))
+    Some(wirken_gateway::pending_approvals::DecisionActor::new(caller).with_display(display.trim()))
 }
 
 enum InboundAction {
@@ -7580,10 +7592,10 @@ mod same_connection_approval_tests {
             .collect();
         assert!(
             lane.iter().any(|e| matches!(e,
-                SessionEvent::PermissionApproved { approved_via, approved_by, .. }
+                SessionEvent::PermissionApproved { approved_via, approved_by, approver_display, .. }
                     if *approved_via == Some(wirken_audit::ApprovalSource::ChannelAdapter {
                         channel: "signal".into()
-                    }) && approved_by == "davi")),
+                    }) && approved_by == "U1" && approver_display.as_deref() == Some("davi"))),
             "{lane:?}"
         );
 
@@ -7598,8 +7610,10 @@ mod same_connection_approval_tests {
     }
 }
 
-/// An approver removed while the gateway runs is refused on the next
-/// decision, with no restart: the registry is read on every decision.
+/// Channel approvals end to end through the gateway's own connection
+/// handler, on a Signal adapter whose approval group is `group-1` and
+/// whose one approver is `U1`: what the signed row records about who
+/// decided, and who is refused.
 #[cfg(all(test, unix))]
 mod approver_removed_mid_run_tests {
     use super::*;
@@ -7608,166 +7622,249 @@ mod approver_removed_mid_run_tests {
     use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, test_pair};
 
     /// Long enough for an answer that is read to land well inside it,
-    /// short enough that the refused request's wait ends the test.
+    /// short enough that a refused request's wait ends the test.
     const GATE_TIMEOUT: Duration = Duration::from_secs(3);
     const TURN_DEADLINE: Duration = Duration::from_secs(20);
 
-    async fn send(writer: &mut IpcFrameWriter, id: &str) {
-        let mut msg = capnp::message::Builder::new_default();
-        {
-            let mut m = msg.init_root::<frame::Builder<'_>>().init_inbound();
-            m.set_id(id);
-            m.set_sender_id("U1");
-            m.set_sender_name("davi");
-            m.set_channel("signal");
-            m.set_conversation_id("dm-1");
-            m.set_text("list the files");
-            m.set_metadata("{}");
-        }
-        writer.write_message(&msg).await.unwrap();
+    /// How the adapter side answers each approval request.
+    struct Answer {
+        user: &'static str,
+        display: &'static str,
+        allow: bool,
     }
 
-    /// Answer every approval request as U1 until the turn's reply, and
-    /// return it.
-    async fn answer_as_u1(reader: &mut IpcFrameReader, writer: &mut IpcFrameWriter) -> String {
-        loop {
-            let msg = reader.read_message().await.unwrap();
-            let request_id = match msg
-                .get_root::<frame::Reader<'_>>()
-                .unwrap()
-                .which()
-                .unwrap()
-            {
-                frame::ApprovalRequest(r) => r.unwrap().get_request_id().unwrap().to_string(),
-                frame::Outbound(o) => return o.unwrap().get_text().unwrap().to_string().unwrap(),
-                _ => continue,
-            };
-            let mut decision = capnp::message::Builder::new_default();
-            {
-                let mut d = decision
-                    .init_root::<frame::Builder<'_>>()
-                    .init_approval_decision();
-                d.set_request_id(request_id.unwrap());
-                d.set_actor_user_id("U1");
-                d.set_actor_display("davi");
-                d.init_decision().set_allow(());
+    const U1_ALLOWS: Answer = Answer {
+        user: "U1",
+        display: "davi",
+        allow: true,
+    };
+
+    struct Harness {
+        _tmp: tempfile::TempDir,
+        reader: IpcFrameReader,
+        writer: IpcFrameWriter,
+        connection: tokio::task::JoinHandle<Result<()>>,
+        queue: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
+        approvers_db: std::path::PathBuf,
+        sessions_db: std::path::PathBuf,
+        audit: Arc<AuditWriter>,
+        audit_task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Harness {
+        /// A gateway whose model answers each message with `replies`.
+        async fn start(replies: Vec<String>) -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let model = super::scripted_model::serve(replies).await;
+            let workspace = tmp.path().join("workspace");
+            std::fs::create_dir_all(&workspace).unwrap();
+            let sessions_db = tmp.path().join("sessions.db");
+            let log = Arc::new(SqliteSessionLog::open(&sessions_db).unwrap());
+            let mut configs = super::scripted_model::default_agent(model, workspace);
+            if let Some(agent) = configs.get_mut("default") {
+                agent.sandbox.mode = wirken_agent::sandbox::SandboxMode::Off;
             }
-            writer.write_message(&decision).await.unwrap();
+            let factory = AgentFactory::new(
+                configs,
+                log.clone(),
+                Arc::new(std::sync::Mutex::new(
+                    wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
+                        ":memory:",
+                    ))
+                    .unwrap(),
+                )),
+            );
+            let identity = AdapterIdentity::generate("signal");
+            let registry = AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap();
+            registry
+                .register("signal", &identity.public_key_bytes(), "signal")
+                .unwrap();
+            let approvers_db = tmp.path().join("approvers.db");
+            let approvers = Arc::new(
+                wirken_gateway::approver_registry::ApproverRegistry::open(&approvers_db).unwrap(),
+            );
+            approvers
+                .set_approval_conversation("signal", "group-1")
+                .unwrap();
+            approvers.register("signal", "U1", "davi").unwrap();
+            let queue = Arc::new(wirken_gateway::pending_approvals::PendingApprovalQueue::new());
+            let dispatcher = Arc::new(OutboundDispatcher::new());
+            factory.attach_signal_approval_gate(Arc::new(
+                wirken_agent::signal_approval_gate::SignalApprovalGate::with_timeout(
+                    queue.clone(),
+                    approvers.clone(),
+                    dispatcher.clone(),
+                    GATE_TIMEOUT,
+                ),
+            ));
+            let (audit, audit_task) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
+            let audit = Arc::new(audit);
+            let (gateway_end, adapter_end) = test_pair().unwrap();
+            let connection = tokio::spawn(handle_adapter_connection(
+                gateway_end,
+                Arc::new(Mutex::new(registry)),
+                factory,
+                audit.clone(),
+                Arc::new(Mutex::new(
+                    SessionStore::open(&tmp.path().join("store.db"), 3600).unwrap(),
+                )),
+                Arc::new(Router::new()),
+                Arc::new(InjectionDetector::new()),
+                dispatcher,
+                queue.clone(),
+                approvers,
+                Arc::new(test_inbound_gate(tmp.path(), &[("signal", "U1")])),
+                Arc::new(HashMap::new()),
+                super::super::connection_tasks::AdapterIdSlot::default(),
+                log.clone(),
+                None,
+                TerminalSetup {
+                    sessions: Arc::new(TerminalSessions::new()),
+                    log: log.clone(),
+                    data_dir: tmp.path().to_path_buf(),
+                },
+            ));
+            let (mut reader, mut writer) = split_stream(adapter_end);
+            perform_adapter_handshake(&mut reader, &mut writer, &identity)
+                .await
+                .unwrap();
+            Self {
+                _tmp: tmp,
+                reader,
+                writer,
+                connection,
+                queue,
+                approvers_db,
+                sessions_db,
+                audit,
+                audit_task,
+            }
+        }
+
+        /// Send a message from U1 and answer every approval request it
+        /// raises with `answer`, until the turn's reply, which is
+        /// returned.
+        async fn turn(&mut self, id: &str, answer: &Answer) -> String {
+            let mut msg = capnp::message::Builder::new_default();
+            {
+                let mut m = msg.init_root::<frame::Builder<'_>>().init_inbound();
+                m.set_id(id);
+                m.set_sender_id("U1");
+                m.set_sender_name("davi");
+                m.set_channel("signal");
+                m.set_conversation_id("dm-1");
+                m.set_text("list the files");
+                m.set_metadata("{}");
+            }
+            self.writer.write_message(&msg).await.unwrap();
+            let (reader, writer) = (&mut self.reader, &mut self.writer);
+            tokio::time::timeout(TURN_DEADLINE, async {
+                loop {
+                    let msg = reader.read_message().await.unwrap();
+                    let request_id = match msg
+                        .get_root::<frame::Reader<'_>>()
+                        .unwrap()
+                        .which()
+                        .unwrap()
+                    {
+                        frame::ApprovalRequest(r) => {
+                            r.unwrap().get_request_id().unwrap().to_string()
+                        }
+                        frame::Outbound(o) => {
+                            return o.unwrap().get_text().unwrap().to_string().unwrap();
+                        }
+                        _ => continue,
+                    };
+                    let mut decision = capnp::message::Builder::new_default();
+                    {
+                        let mut d = decision
+                            .init_root::<frame::Builder<'_>>()
+                            .init_approval_decision();
+                        d.set_request_id(request_id.unwrap());
+                        d.set_actor_user_id(answer.user);
+                        d.set_actor_display(answer.display);
+                        if answer.allow {
+                            d.init_decision().set_allow(());
+                        } else {
+                            d.init_decision().set_deny("not now");
+                        }
+                    }
+                    writer.write_message(&decision).await.unwrap();
+                }
+            })
+            .await
+            .expect("the turn ends")
+        }
+
+        /// The kind and the named fields of every approval row, in order.
+        fn rows(&self, fields: &[&str]) -> Vec<Vec<Option<String>>> {
+            let conn = rusqlite::Connection::open(&self.sessions_db).unwrap();
+            let cols: Vec<String> = std::iter::once("json_extract(payload, '$.kind')".to_string())
+                .chain(
+                    fields
+                        .iter()
+                        .map(|f| format!("json_extract(payload, '$.{f}')")),
+                )
+                .collect();
+            let sql = format!(
+                "SELECT {} FROM session_events
+                  WHERE json_extract(payload, '$.kind') IN
+                        ('permission_approved', 'permission_denied', 'permission_approval_refused')
+                  ORDER BY id",
+                cols.join(", ")
+            );
+            conn.prepare(&sql)
+                .unwrap()
+                .query_map([], |r| {
+                    (0..cols.len())
+                        .map(|i| r.get::<_, Option<String>>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        }
+
+        async fn finish(self) {
+            let Self {
+                reader,
+                writer,
+                connection,
+                audit,
+                audit_task,
+                ..
+            } = self;
+            drop((reader, writer));
+            tokio::time::timeout(Duration::from_secs(15), connection)
+                .await
+                .expect("the connection handler returns")
+                .unwrap()
+                .unwrap();
+            drop(audit);
+            audit_task.await.unwrap();
         }
     }
 
-    /// `(kind, caller, reason)` of every approval row in the log.
-    fn approval_rows(db: &std::path::Path) -> Vec<(String, Option<String>, Option<String>)> {
-        let conn = rusqlite::Connection::open(db).unwrap();
-        conn.prepare(
-            "SELECT json_extract(payload, '$.kind'), json_extract(payload, '$.caller'),
-                    json_extract(payload, '$.reason')
-               FROM session_events
-              WHERE json_extract(payload, '$.kind')
-                    IN ('permission_approved', 'permission_approval_refused')
-              ORDER BY id",
-        )
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
+    fn s(v: &str) -> Option<String> {
+        Some(v.to_string())
+    }
+
+    fn exec_then(text: &str) -> Vec<String> {
+        vec![
+            super::scripted_model::tool_call_completion("exec", r#"{"command":"ls"}"#),
+            super::scripted_model::text_completion(text),
+        ]
     }
 
     #[tokio::test]
     async fn an_approver_removed_mid_run_is_refused_on_the_next_decision() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let model = super::scripted_model::serve(vec![
-            super::scripted_model::tool_call_completion("exec", r#"{"command":"ls"}"#),
-            super::scripted_model::text_completion("Done."),
-            super::scripted_model::tool_call_completion("exec", r#"{"command":"ls"}"#),
-            super::scripted_model::text_completion("Not run."),
-        ])
-        .await;
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let sessions_db = tmp.path().join("sessions.db");
-        let log = Arc::new(SqliteSessionLog::open(&sessions_db).unwrap());
-        let mut configs = super::scripted_model::default_agent(model, workspace);
-        if let Some(agent) = configs.get_mut("default") {
-            agent.sandbox.mode = wirken_agent::sandbox::SandboxMode::Off;
-        }
-        let factory = AgentFactory::new(
-            configs,
-            log.clone(),
-            Arc::new(std::sync::Mutex::new(
-                wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
-                    ":memory:",
-                ))
-                .unwrap(),
-            )),
-        );
-        let identity = AdapterIdentity::generate("signal");
-        let registry = AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap();
-        registry
-            .register("signal", &identity.public_key_bytes(), "signal")
-            .unwrap();
-        let approvers_db = tmp.path().join("approvers.db");
-        let approvers = Arc::new(
-            wirken_gateway::approver_registry::ApproverRegistry::open(&approvers_db).unwrap(),
-        );
-        approvers
-            .set_approval_conversation("signal", "group-1")
-            .unwrap();
-        approvers.register("signal", "U1", "davi").unwrap();
-        let queue = Arc::new(wirken_gateway::pending_approvals::PendingApprovalQueue::new());
-        let dispatcher = Arc::new(OutboundDispatcher::new());
-        factory.attach_signal_approval_gate(Arc::new(
-            wirken_agent::signal_approval_gate::SignalApprovalGate::with_timeout(
-                queue.clone(),
-                approvers.clone(),
-                dispatcher.clone(),
-                GATE_TIMEOUT,
-            ),
-        ));
-        let (audit, audit_task) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
-        let audit = Arc::new(audit);
-        let (gateway_end, adapter_end) = test_pair().unwrap();
-        let connection = tokio::spawn(handle_adapter_connection(
-            gateway_end,
-            Arc::new(Mutex::new(registry)),
-            factory,
-            audit.clone(),
-            Arc::new(Mutex::new(
-                SessionStore::open(&tmp.path().join("store.db"), 3600).unwrap(),
-            )),
-            Arc::new(Router::new()),
-            Arc::new(InjectionDetector::new()),
-            dispatcher,
-            queue.clone(),
-            approvers,
-            Arc::new(test_inbound_gate(tmp.path(), &[("signal", "U1")])),
-            Arc::new(HashMap::new()),
-            super::super::connection_tasks::AdapterIdSlot::default(),
-            log.clone(),
-            None,
-            TerminalSetup {
-                sessions: Arc::new(TerminalSessions::new()),
-                log: log.clone(),
-                data_dir: tmp.path().to_path_buf(),
-            },
-        ));
-        let (mut reader, mut writer) = split_stream(adapter_end);
-        perform_adapter_handshake(&mut reader, &mut writer, &identity)
-            .await
-            .unwrap();
-
-        // U1 approves the first request.
-        send(&mut writer, "m-1").await;
-        let reply = tokio::time::timeout(TURN_DEADLINE, answer_as_u1(&mut reader, &mut writer))
-            .await
-            .unwrap();
-        assert_eq!(reply, "Done.");
+        let mut h = Harness::start([exec_then("Done."), exec_then("Not run.")].concat()).await;
+        assert_eq!(h.turn("m-1", &U1_ALLOWS).await, "Done.");
 
         // `wirken approvers remove`, on its own connection, while the
         // gateway runs.
         assert!(
-            wirken_gateway::approver_registry::ApproverRegistry::open(&approvers_db)
+            wirken_gateway::approver_registry::ApproverRegistry::open(&h.approvers_db)
                 .unwrap()
                 .unregister("signal", "U1")
                 .unwrap()
@@ -7775,35 +7872,67 @@ mod approver_removed_mid_run_tests {
 
         // U1 answers the next request the same way, and is refused: the
         // gate waits out its timeout and the call does not run.
-        send(&mut writer, "m-2").await;
-        let reply = tokio::time::timeout(TURN_DEADLINE, answer_as_u1(&mut reader, &mut writer))
-            .await
-            .unwrap();
-        assert_eq!(reply, "Not run.");
-        assert!(queue.is_empty(), "the refused request timed out");
-
-        let rows = approval_rows(&sessions_db);
+        assert_eq!(h.turn("m-2", &U1_ALLOWS).await, "Not run.");
+        assert!(h.queue.is_empty(), "the refused request timed out");
         assert_eq!(
-            rows,
+            h.rows(&["caller", "reason"]),
             vec![
-                ("permission_approved".to_string(), None, None),
-                (
-                    "permission_approval_refused".to_string(),
-                    Some("U1".to_string()),
-                    Some("unauthorized_actor".to_string())
-                ),
+                vec![s("permission_approved"), None, None],
+                vec![
+                    s("permission_approval_refused"),
+                    s("U1"),
+                    s("unauthorized_actor")
+                ],
+                vec![s("permission_denied"), None, None],
             ],
-            "one approval before the removal, one refusal after it"
+            "one approval before the removal, one refusal after it, and the timeout's denial"
         );
+        h.finish().await;
+    }
 
-        drop((reader, writer));
-        tokio::time::timeout(Duration::from_secs(15), connection)
-            .await
-            .expect("the connection handler returns")
-            .unwrap()
-            .unwrap();
-        drop(audit);
-        audit_task.await.unwrap();
+    /// An approver who sends a display name of their choosing is still
+    /// recorded by the id the allowlist verified; the name is kept in
+    /// its own field.
+    #[tokio::test]
+    async fn an_approver_spoofing_a_display_name_is_recorded_by_their_true_id() {
+        let mut h = Harness::start(exec_then("Done.")).await;
+        let spoofed = Answer {
+            user: "U1",
+            display: "Alice (security lead)",
+            allow: true,
+        };
+        assert_eq!(h.turn("m-1", &spoofed).await, "Done.");
+        assert_eq!(
+            h.rows(&["approved_by", "approver_display"]),
+            vec![vec![
+                s("permission_approved"),
+                s("U1"),
+                s("Alice (security lead)")
+            ]]
+        );
+        h.finish().await;
+    }
+
+    /// A denial records who declined, by verified id, and their display.
+    #[tokio::test]
+    async fn a_deny_records_its_actor() {
+        let mut h = Harness::start(exec_then("Not run.")).await;
+        let deny = Answer {
+            user: "U1",
+            display: "davi",
+            allow: false,
+        };
+        assert_eq!(h.turn("m-1", &deny).await, "Not run.");
+        assert_eq!(
+            h.rows(&["denied_by", "denier_display", "denial_reason"]),
+            vec![vec![
+                s("permission_denied"),
+                s("U1"),
+                s("davi"),
+                s("not now")
+            ]]
+        );
+        h.finish().await;
     }
 }
 
@@ -8592,10 +8721,11 @@ mod terminal_channel_tests {
         let lane = gw.session("default/terminal/c-3");
         assert!(
             lane.iter().any(|e| matches!(e,
-                SessionEvent::PermissionApproved { approved_via, approved_by, .. }
+                SessionEvent::PermissionApproved { approved_via, approved_by, approver_display, .. }
                     if *approved_via == Some(wirken_audit::ApprovalSource::ChannelAdapter {
                         channel: "terminal".into()
-                    }) && *approved_by == format!("davi (operator key {key})"))),
+                    }) && *approved_by == format!("operator:{key}")
+                        && approver_display.as_deref() == Some("davi"))),
             "{lane:?}"
         );
     }
