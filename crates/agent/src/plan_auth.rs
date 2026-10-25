@@ -335,14 +335,16 @@ pub fn store_plan(
     entry: &str,
     cred: &OAuthCredential,
 ) -> Result<(), String> {
+    let mut binding = wirken_vault::Binding::default();
+    binding.grant(wirken_vault::Destination::Plan);
     store
-        .store_with_kind(
+        .store_bound(
             entry,
             "oauth",
             &secret_of(cred),
             None,
             None,
-            &[],
+            &binding,
             CredentialKind::PlanSignIn,
         )
         .map_err(|e| format!("store credential '{entry}': {e}"))
@@ -358,6 +360,12 @@ pub fn load_plan(store: &CredentialStore, entry: &str) -> Result<OAuthCredential
         return Err(format!(
             "credential '{entry}' is not a plan sign-in. Run `wirken credentials authorize \
              {entry}`."
+        ));
+    }
+    if !meta.binding.permits(&wirken_vault::Destination::Plan) {
+        return Err(format!(
+            "plan sign-in '{entry}' may not be sent to the plan endpoints. Allow it with \
+             `wirken credentials grant {entry} --plan`."
         ));
     }
     parse_credential(&secret, entry)

@@ -570,6 +570,11 @@ impl OtelProjector {
             // A credential handed to the proxy; no span to attach it to.
             SessionEvent::McpCredentialRefetched { .. } => Vec::new(),
             SessionEvent::McpCredentialRefreshDiscarded { .. } => Vec::new(),
+            SessionEvent::CredentialDestinationRefused { .. }
+            | SessionEvent::CredentialDestinationGranted { .. }
+            | SessionEvent::CredentialDestinationRevoked { .. }
+            | SessionEvent::CredentialHandedOut { .. }
+            | SessionEvent::VaultMigrated { .. } => Vec::new(),
             // A refusal; the row it replaced carries the refusal text.
             SessionEvent::LeakRefused { .. } => Vec::new(),
             // A failed model call produces no chat span; the request

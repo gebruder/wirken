@@ -109,13 +109,19 @@ fn bearer_header(token: &str) -> Result<HeaderValue, ProxyError> {
 /// Bearer-token provider. The token is the value the gateway handed
 /// over under the credential's name.
 pub struct BearerAuth {
+    pin: crate::credentials::ServerPin,
     credential_name: String,
     credentials: SharedCredentials,
 }
 
 impl BearerAuth {
-    pub fn new(credential_name: String, credentials: SharedCredentials) -> Self {
+    pub fn new(
+        pin: crate::credentials::ServerPin,
+        credential_name: String,
+        credentials: SharedCredentials,
+    ) -> Self {
         Self {
+            pin,
             credential_name,
             credentials,
         }
@@ -125,12 +131,15 @@ impl BearerAuth {
 #[async_trait]
 impl AuthProvider for BearerAuth {
     async fn authorization_header(&mut self) -> Result<Option<HeaderValue>, ProxyError> {
-        let secret = self.credentials.get(&self.credential_name).ok_or_else(|| {
-            ProxyError::Vault(format!(
-                "bearer credential '{}' was not handed to the proxy",
-                self.credential_name
-            ))
-        })?;
+        let secret = self
+            .credentials
+            .get_for(&self.pin, &self.credential_name)
+            .ok_or_else(|| {
+                ProxyError::Vault(format!(
+                    "bearer credential '{}' was not handed to the proxy for server '{}'",
+                    self.credential_name, self.pin.server
+                ))
+            })?;
         // `secret.expose()` returns a `&str` backed by the zeroized
         // `VaultSecret`; `bearer_header` zeroes its own intermediate.
         let header = bearer_header(secret.expose())?;
@@ -154,6 +163,7 @@ impl AuthProvider for BearerAuth {
 /// will find only one winner inside the critical section; the other
 /// will re-read the refreshed token and not ask again.
 pub struct OAuth2Auth {
+    pin: crate::credentials::ServerPin,
     credential_name: String,
     provider: String,
     credentials: SharedCredentials,
@@ -162,12 +172,14 @@ pub struct OAuth2Auth {
 
 impl OAuth2Auth {
     pub fn new(
+        pin: crate::credentials::ServerPin,
         credential_name: String,
         provider: String,
         credentials: SharedCredentials,
         refresh_lock: Arc<tokio::sync::Mutex<()>>,
     ) -> Self {
         Self {
+            pin,
             credential_name,
             provider,
             credentials,
@@ -176,7 +188,7 @@ impl OAuth2Auth {
     }
 
     fn load_current(&self) -> Result<OAuthCredential, ProxyError> {
-        self.credentials.oauth(&self.credential_name)
+        self.credentials.oauth_for(&self.pin, &self.credential_name)
     }
 }
 
@@ -256,11 +268,25 @@ mod handed_tests {
     #[tokio::test]
     async fn a_bearer_token_is_the_handed_value_and_nothing_else() {
         let credentials = handed(&[("linear-token", "lin_abc")]);
-        let mut auth = BearerAuth::new("linear-token".into(), credentials.clone());
+        let mut auth = BearerAuth::new(
+            crate::credentials::ServerPin {
+                server: "test".into(),
+                entry: "sha256:test".into(),
+            },
+            "linear-token".into(),
+            credentials.clone(),
+        );
         let header = auth.authorization_header().await.unwrap().unwrap();
         assert_eq!(header.to_str().unwrap(), "Bearer lin_abc");
 
-        let mut other = BearerAuth::new("notion-token".into(), credentials);
+        let mut other = BearerAuth::new(
+            crate::credentials::ServerPin {
+                server: "test".into(),
+                entry: "sha256:test".into(),
+            },
+            "notion-token".into(),
+            credentials,
+        );
         let err = other.authorization_header().await.unwrap_err().to_string();
         assert!(err.contains("not handed to the proxy"), "{err}");
     }
@@ -279,6 +305,10 @@ mod handed_tests {
         };
         let credentials = handed(&[("linear-oauth", &serde_json::to_string(&cred).unwrap())]);
         let mut auth = OAuth2Auth::new(
+            crate::credentials::ServerPin {
+                server: "test".into(),
+                entry: "sha256:test".into(),
+            },
             "linear-oauth".into(),
             "linear".into(),
             credentials,

@@ -38,7 +38,7 @@ pub use oauth::{
     default_selected_scopes, load_oauth_public, lookup_provider, parse_public_view,
     run_authorization_code_flow, store_oauth,
 };
-pub use runner::{ConfiguredCredentials, configured_credentials, run};
+pub use runner::{ConfiguredCredentials, configured_credentials, run, server_entries};
 pub use tool_error::{McpToolError, detect_scope_not_granted};
 
 #[cfg(test)]

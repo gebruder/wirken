@@ -649,4 +649,9 @@ mod tests {
             Verdict::Refused { record: None, .. }
         ));
     }
+
+    #[test]
+    fn the_vaults_adapters_are_these_channels() {
+        assert_eq!(CHANNELS, wirken_vault::ADAPTERS);
+    }
 }

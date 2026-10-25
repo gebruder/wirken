@@ -1018,6 +1018,15 @@ enum VaultCommands {
     /// Used after a forgotten passphrase, where the vault refuses to
     /// overwrite the keychain it cannot unwrap. Requires typing `reset`.
     Reset,
+    /// Re-seal a vault from before destination binding: back it up,
+    /// propose where each credential may go, ask for `yes`, re-seal in
+    /// one transaction and verify. Takes the passphrase at a terminal.
+    Migrate {
+        /// Write the proposal to this file to edit, or read it back
+        /// when the file exists
+        #[arg(long, value_name = "FILE")]
+        edit: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1043,12 +1052,25 @@ enum CredentialCommands {
         /// stripped. Mutually exclusive with --stdin.
         #[arg(long, conflicts_with = "stdin")]
         value_file: Option<std::path::PathBuf>,
-        /// Bind this credential to a host the `http_request` tool may
-        /// send it to (repeatable). A credential with no `--host` is
-        /// unusable by `http_request` (deny by default), and the
-        /// binding cannot be widened by a skill's permissions block.
+        /// Host `http_request` may send it to (repeatable)
         #[arg(long = "host")]
         host: Vec<String>,
+        /// MCP server it may be handed to, pinned to the server's signed
+        /// entry (repeatable)
+        #[arg(long = "mcp-server")]
+        mcp_server: Vec<String>,
+        /// Model provider it may authenticate to, with --base-url
+        #[arg(long, requires = "base_url")]
+        provider: Option<String>,
+        /// Base URL of that provider; its origin is what is allowed
+        #[arg(long, requires = "provider")]
+        base_url: Option<String>,
+        /// Channel adapter it may be handed to (repeatable)
+        #[arg(long = "adapter")]
+        adapter: Vec<String>,
+        /// The plan sign-in endpoints
+        #[arg(long)]
+        plan: bool,
         /// Store the value as an identifier (an address, a number, a
         /// URL) rather than a secret. Leak detection refuses
         /// model-authored content that contains a stored secret; an
@@ -1119,6 +1141,56 @@ enum CredentialCommands {
     Remove {
         /// Credential name
         name: String,
+    },
+    /// Allow a credential a destination. Takes the vault passphrase at a
+    /// terminal; refuses inside a Wirken `exec`.
+    Grant {
+        /// Credential name
+        name: String,
+        /// Host `http_request` may send it to (repeatable)
+        #[arg(long = "host")]
+        host: Vec<String>,
+        /// MCP server it may be handed to, pinned to the server's signed
+        /// entry (repeatable)
+        #[arg(long = "mcp-server")]
+        mcp_server: Vec<String>,
+        /// Model provider it may authenticate to, with --base-url
+        #[arg(long, requires = "base_url")]
+        provider: Option<String>,
+        /// Base URL of that provider; its origin is what is allowed
+        #[arg(long, requires = "provider")]
+        base_url: Option<String>,
+        /// Channel adapter it may be handed to (repeatable)
+        #[arg(long = "adapter")]
+        adapter: Vec<String>,
+        /// The plan sign-in endpoints
+        #[arg(long)]
+        plan: bool,
+    },
+    /// Remove a destination from a credential. Takes the vault
+    /// passphrase at a terminal; refuses inside a Wirken `exec`.
+    Revoke {
+        /// Credential name
+        name: String,
+        /// Host `http_request` may send it to (repeatable)
+        #[arg(long = "host")]
+        host: Vec<String>,
+        /// MCP server it may be handed to, pinned to the server's signed
+        /// entry (repeatable)
+        #[arg(long = "mcp-server")]
+        mcp_server: Vec<String>,
+        /// Model provider it may authenticate to, with --base-url
+        #[arg(long, requires = "base_url")]
+        provider: Option<String>,
+        /// Base URL of that provider; its origin is what is allowed
+        #[arg(long, requires = "provider")]
+        base_url: Option<String>,
+        /// Channel adapter it may be handed to (repeatable)
+        #[arg(long = "adapter")]
+        adapter: Vec<String>,
+        /// The plan sign-in endpoints
+        #[arg(long)]
+        plan: bool,
     },
     /// Show one credential's non-secret metadata (provider, granted
     /// scopes for OAuth, timestamps). The secret value is never
@@ -1574,13 +1646,25 @@ async fn main() -> Result<()> {
                 stdin,
                 value_file,
                 host,
+                mcp_server,
+                provider,
+                base_url,
+                adapter,
+                plan,
                 identifier,
             } => {
                 commands::credential::add(
                     &name,
                     channel.as_deref(),
                     commands::credential::ValueSource::from_flags(stdin, value_file),
-                    &host,
+                    &commands::credential_binding::Destinations {
+                        hosts: host,
+                        mcp_servers: mcp_server,
+                        provider,
+                        base_url,
+                        adapters: adapter,
+                        plan,
+                    },
                     if identifier {
                         wirken_vault::CredentialKind::Identifier
                     } else {
@@ -1613,6 +1697,44 @@ async fn main() -> Result<()> {
                 commands::plan_sign_in::import(&entry, &from).await
             }
             CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
+            CredentialCommands::Grant {
+                name,
+                host,
+                mcp_server,
+                provider,
+                base_url,
+                adapter,
+                plan,
+            } => commands::credential_binding::grant(
+                &name,
+                &commands::credential_binding::Destinations {
+                    hosts: host,
+                    mcp_servers: mcp_server,
+                    provider,
+                    base_url,
+                    adapters: adapter,
+                    plan,
+                },
+            ),
+            CredentialCommands::Revoke {
+                name,
+                host,
+                mcp_server,
+                provider,
+                base_url,
+                adapter,
+                plan,
+            } => commands::credential_binding::revoke(
+                &name,
+                &commands::credential_binding::Destinations {
+                    hosts: host,
+                    mcp_servers: mcp_server,
+                    provider,
+                    base_url,
+                    adapters: adapter,
+                    plan,
+                },
+            ),
             CredentialCommands::Show { name } => commands::credential::show(&name).await,
             CredentialCommands::Rescope {
                 name,
@@ -1623,6 +1745,7 @@ async fn main() -> Result<()> {
         },
         Commands::Vault(cmd) => match cmd {
             VaultCommands::Reset => commands::vault::reset(),
+            VaultCommands::Migrate { edit } => commands::vault::migrate(edit),
         },
         Commands::Approvers(cmd) => match cmd {
             ApproverCommands::Add {

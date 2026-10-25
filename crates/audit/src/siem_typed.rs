@@ -148,6 +148,12 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::McpCredentialRefetched { .. } => true,
         // A refresh that lost to a removal or a new sign-in.
         SessionEvent::McpCredentialRefreshDiscarded { .. } => true,
+        // Where credentials may go, and where they went.
+        SessionEvent::CredentialDestinationRefused { .. }
+        | SessionEvent::CredentialDestinationGranted { .. }
+        | SessionEvent::CredentialDestinationRevoked { .. }
+        | SessionEvent::CredentialHandedOut { .. }
+        | SessionEvent::VaultMigrated { .. } => true,
         SessionEvent::LeakRefused { .. } => true,
         SessionEvent::EgressHookDispatched { .. } => true,
         SessionEvent::ToolOutputRedacted { .. } => true,
@@ -338,6 +344,11 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::McpServerRestartAbandoned { .. } => "mcp_server_restart_abandoned",
         SessionEvent::McpCredentialRefetched { .. } => "mcp_credential_refetched",
         SessionEvent::McpCredentialRefreshDiscarded { .. } => "mcp_credential_refresh_discarded",
+        SessionEvent::CredentialDestinationRefused { .. } => "credential_destination_refused",
+        SessionEvent::CredentialDestinationGranted { .. } => "credential_destination_granted",
+        SessionEvent::CredentialDestinationRevoked { .. } => "credential_destination_revoked",
+        SessionEvent::CredentialHandedOut { .. } => "credential_handed_out",
+        SessionEvent::VaultMigrated { .. } => "vault_migrated",
         SessionEvent::LeakRefused { .. } => "leak_refused",
         SessionEvent::EgressHookDispatched { .. } => "egress_hook_dispatched",
         SessionEvent::SandboxEgressVerdict { .. } => "sandbox_egress_verdict",

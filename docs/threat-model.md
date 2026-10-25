@@ -200,7 +200,10 @@ What the controls protect, in the order a loss matters:
     `vault.db` without the passphrase or device key, AEAD or KDF misuse, and a
     secret reaching a log, an error message, a URL, an audit row, a SIEM
     payload, the model's context, another channel's adapter or a child's
-    environment.
+    environment. Each entry's destinations are sealed into its encryption
+    and checked before every handoff (`crates/vault/src/binding.rs`); in
+    scope: a value handed to a destination its binding does not allow, and a
+    binding changed without the vault key.
 
 12. **Audit chain.** `SessionLog::append` and `verify`
     (`crates/audit/src/session_log.rs`), head signing

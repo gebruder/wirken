@@ -271,6 +271,43 @@ pub async fn run(
     }
 }
 
+/// The first release that reads a vault with destination binding.
+const BINDING_SINCE: Version = Version(3, 0, 0);
+
+/// Why rolling back to `kept_version` would leave a vault it cannot
+/// read, or `None`.
+fn vault_blocks_rollback(
+    data_dir: &Path,
+    vault_db: &Path,
+    kept_version: &str,
+) -> Result<Option<String>> {
+    let Some(format) = wirken_vault::CredentialStore::format_at(vault_db)? else {
+        return Ok(None);
+    };
+    let kept = Version::parse(kept_version.trim_start_matches('v'))?;
+    if format < wirken_vault::BOUND_FORMAT || kept >= BINDING_SINCE {
+        return Ok(None);
+    }
+    let backup = std::fs::read_dir(data_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with("vault.db.pre-binding-") && n.ends_with(".bak"))
+        .max();
+    let since = backup
+        .as_deref()
+        .and_then(|n| n.strip_prefix("vault.db.pre-binding-"))
+        .and_then(|n| n.strip_suffix(".bak"))
+        .unwrap_or("an earlier migration");
+    Ok(Some(format!(
+        "This vault was re-sealed with destination binding on {since}. wirken {kept_version} \
+         cannot read it. To go back, restore {} yourself, accepting that credentials added or \
+         changed since are lost, then roll back.",
+        backup.as_deref().unwrap_or("the pre-binding backup")
+    )))
+}
+
 /// Every form of `wirken update` refuses under the `exec` marker, before
 /// it fetches, reads or writes anything, and the refusal is recorded on
 /// the `gateway-install` lane as [`wirken_audit::SessionEvent::UpdateRefused`].
@@ -446,6 +483,22 @@ pub async fn run_rollback() -> Result<()> {
     let exe = running_binary()?;
     let kept = install::kept(&exe)?;
     let current = crate::build_info::VERSION;
+    let cfg = super::config();
+    if let Some(why) = vault_blocks_rollback(&cfg.data_dir, &cfg.vault_db_path(), &kept.version)? {
+        let recorded = super::open_signed_session_log(&cfg).and_then(|log| {
+            record_on(
+                &log,
+                wirken_audit::SessionEvent::UpdateRefused {
+                    invocation: "rollback".to_string(),
+                    reason: "vault_format".to_string(),
+                },
+            )
+        });
+        if let Err(e) = recorded {
+            tracing::warn!(error = %e, "could not record the refusal on the {INSTALL_LANE} lane");
+        }
+        bail!("{why}");
+    }
     confirm(
         format!(
             "Roll back wirken {current} to {} at {}?",
@@ -506,6 +559,43 @@ mod tests {
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const TARGET: &str = "x86_64-unknown-linux-musl";
+
+    /// A migrated vault blocks a rollback to a binary from before
+    /// destination binding, naming the backup; nothing else does.
+    #[test]
+    fn a_migrated_vault_blocks_a_rollback_past_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("vault.db");
+        assert!(
+            vault_blocks_rollback(dir.path(), &db, "2.5.1")
+                .unwrap()
+                .is_none()
+        );
+
+        wirken_vault::CredentialStore::open_with_key(
+            &db,
+            wirken_vault::VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("vault.db.pre-binding-20261025T120000Z.bak"),
+            "",
+        )
+        .unwrap();
+        let why = vault_blocks_rollback(dir.path(), &db, "2.5.1")
+            .unwrap()
+            .unwrap();
+        assert!(why.contains("20261025T120000Z"), "{why}");
+        assert!(
+            why.contains("vault.db.pre-binding-20261025T120000Z.bak"),
+            "{why}"
+        );
+        assert!(
+            vault_blocks_rollback(dir.path(), &db, "3.0.0")
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn releases() -> Vec<Release> {
         let a = [("wirken-x86_64-unknown-linux-musl", SHA)];

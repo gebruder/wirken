@@ -4600,6 +4600,11 @@ pub fn session_events(
             // gateway's own lane, not a conversation's.
             SessionEvent::McpCredentialRefetched { .. } => None,
             SessionEvent::McpCredentialRefreshDiscarded { .. } => None,
+            SessionEvent::CredentialDestinationRefused { .. }
+            | SessionEvent::CredentialDestinationGranted { .. }
+            | SessionEvent::CredentialDestinationRevoked { .. }
+            | SessionEvent::CredentialHandedOut { .. }
+            | SessionEvent::VaultMigrated { .. } => None,
             // Without the credential's name, which the page withholds as
             // it does on the `http_request` row.
             SessionEvent::LeakRefused {

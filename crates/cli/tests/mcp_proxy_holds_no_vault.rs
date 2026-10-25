@@ -32,8 +32,35 @@ fn data_dir(out: &Path) -> tempfile::TempDir {
         r#"{"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:9"}"#,
     )
     .unwrap();
+    let script = format!(
+        r#"printf %s "$TOKEN" > {out}; read a; printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"t","version":"1"}}}}}}\n'; read b; read c; printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[]}}}}\n'; cat >/dev/null"#,
+        out = out.display()
+    );
+    let mcp = serde_json::json!({ "servers": { "probe": {
+        "command": "sh",
+        "args": ["-c", script],
+        "env": { "TOKEN": "vault:github-token" },
+        "sandbox": "off"
+    }}});
+    std::fs::write(dir.path().join("mcp.json"), mcp.to_string()).unwrap();
+    // A signed entry, and the token allowed to it.
+    let signed = Command::new(env!("CARGO_BIN_EXE_wirken"))
+        .args(["mcp", "sign", "probe"])
+        .env("WIRKEN_DATA_DIR", dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(signed.success());
     let mut add = Command::new(env!("CARGO_BIN_EXE_wirken"))
-        .args(["credentials", "add", "github-token", "--stdin"])
+        .args([
+            "credentials",
+            "add",
+            "github-token",
+            "--stdin",
+            "--mcp-server",
+            "probe",
+        ])
         .env("WIRKEN_DATA_DIR", dir.path())
         .env(PASSPHRASE_ENV, PASSPHRASE)
         .stdin(Stdio::piped())
@@ -48,17 +75,6 @@ fn data_dir(out: &Path) -> tempfile::TempDir {
         .unwrap();
     assert!(add.wait().unwrap().success());
 
-    let script = format!(
-        r#"printf %s "$TOKEN" > {out}; read a; printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"t","version":"1"}}}}}}\n'; read b; read c; printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[]}}}}\n'; cat >/dev/null"#,
-        out = out.display()
-    );
-    let mcp = serde_json::json!({ "servers": { "probe": {
-        "command": "sh",
-        "args": ["-c", script],
-        "env": { "TOKEN": "vault:github-token" },
-        "sandbox": "off"
-    }}});
-    std::fs::write(dir.path().join("mcp.json"), mcp.to_string()).unwrap();
     dir
 }
 

@@ -189,17 +189,26 @@ async fn a_rotated_bearer_token_reaches_the_proxy_after_one_refused_call() {
         r#"{"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:9"}"#,
     )
     .unwrap();
-    wirken(
-        data.path(),
-        &["credentials", "add", "linear-token", "--stdin"],
-        "tok-1",
-    );
     let mcp = serde_json::json!({ "servers": { "remote": {
         "transport": "http",
         "url": server.url,
         "auth": {"type": "bearer", "credential": "vault:linear-token"},
     }}});
     std::fs::write(data.path().join("mcp.json"), mcp.to_string()).unwrap();
+    // A signed entry, and the token allowed to it.
+    wirken(data.path(), &["mcp", "sign", "remote"], "");
+    wirken(
+        data.path(),
+        &[
+            "credentials",
+            "add",
+            "linear-token",
+            "--stdin",
+            "--mcp-server",
+            "remote",
+        ],
+        "tok-1",
+    );
 
     let mut gateway = Command::new(env!("CARGO_BIN_EXE_wirken"))
         .args(["run", "--port", &free_port().to_string()])

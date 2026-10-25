@@ -140,11 +140,7 @@ pub async fn show(name: &str) -> Result<()> {
     if let Some(rot) = meta.rotation_due_at {
         println!("    rotation due:   {}", rot.format("%Y-%m-%d %H:%M:%S"));
     }
-    if meta.allowed_hosts.is_empty() {
-        println!("    http hosts:     (none — not usable by http_request)");
-    } else {
-        println!("    http hosts:     {}", meta.allowed_hosts.join(", "));
-    }
+    super::credential_binding::print_binding(&meta.binding);
 
     if meta.channel == OAUTH_CHANNEL {
         let public = load_oauth_public(&store, name)
@@ -348,7 +344,7 @@ impl ValueSource {
 /// host binding is not a place to guess at intent, so anything
 /// ambiguous is an error the operator can see rather than a silent
 /// rewrite they cannot.
-fn normalize_host(raw: &str) -> Result<String> {
+pub(crate) fn normalize_host(raw: &str) -> Result<String> {
     if raw.trim().is_empty() {
         return Err(anyhow!("invalid --host: empty"));
     }
@@ -394,17 +390,32 @@ pub async fn add(
     name: &str,
     channel: Option<&str>,
     source: ValueSource,
-    allowed_hosts: &[String],
+    destinations: &super::credential_binding::Destinations,
     kind: wirken_vault::CredentialKind,
 ) -> Result<()> {
     let cfg = config();
 
-    // Normalized before the value is read, so a rejected binding fails
+    // Resolved before the value is read, so a rejected binding fails
     // before the operator is prompted for a secret.
-    let allowed_hosts = allowed_hosts
+    let allowed_hosts = destinations
+        .hosts
         .iter()
         .map(|h| normalize_host(h))
         .collect::<Result<Vec<_>>>()?;
+    let others = super::credential_binding::Destinations {
+        hosts: Vec::new(),
+        ..destinations.clone()
+    }
+    .resolve(&cfg.data_dir)?;
+    let mut binding = wirken_vault::default_binding(name, channel.unwrap_or(""));
+    for d in allowed_hosts
+        .iter()
+        .cloned()
+        .map(wirken_vault::Destination::Host)
+        .chain(others)
+    {
+        binding.grant(d);
+    }
 
     let value = read_credential_value(name, source)?;
     if value.is_empty() {
@@ -419,28 +430,19 @@ pub async fn add(
 
     let secret = VaultSecret::new(value);
     store
-        .store_with_kind(
+        .store_bound(
             name,
             channel.unwrap_or(""),
             &secret,
             None,
             None,
-            &allowed_hosts,
+            &binding,
             kind,
         )
         .context(format!("Failed to store '{name}'"))?;
 
-    let kind = kind.as_str();
-    if allowed_hosts.is_empty() {
-        println!(
-            "  Credential '{name}' stored as {kind} (no host binding; not usable by http_request)."
-        );
-    } else {
-        println!(
-            "  Credential '{name}' stored as {kind}, bound to: {}",
-            allowed_hosts.join(", ")
-        );
-    }
+    println!("  Credential '{name}' stored as {}.", kind.as_str());
+    super::credential_binding::print_binding(&binding);
     Ok(())
 }
 

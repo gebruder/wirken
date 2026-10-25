@@ -173,6 +173,10 @@ impl ProxyRegistry {
         }
 
         for (name, server_config) in &config.servers {
+            let pin = crate::credentials::ServerPin {
+                server: name.clone(),
+                entry: crate::mcp_signing::entry_digest(name, server_config),
+            };
             let decision = pre_spawn_verify(name, server_config, bundled_root.as_ref());
             let signer = match &decision {
                 PreSpawnDecision::Spawn { signer } => signer.clone(),
@@ -218,7 +222,7 @@ impl ProxyRegistry {
                     sandbox,
                     ..
                 } => {
-                    let resolved_env = resolve_env(env, &credentials);
+                    let resolved_env = resolve_env(env, &credentials, &pin);
 
                     let spawned = start_stdio(
                         &self.sandbox,
@@ -302,6 +306,7 @@ impl ProxyRegistry {
                             command: command.clone(),
                             args: args.clone(),
                             env: env.clone(),
+                            pin: pin.clone(),
                             sandbox,
                             host: self.sandbox.clone(),
                             first,
@@ -312,6 +317,7 @@ impl ProxyRegistry {
                     let auth_provider: Box<dyn AuthProvider> = match auth {
                         None => Box::new(NoAuth),
                         Some(McpAuth::Bearer { credential }) => Box::new(BearerAuth::new(
+                            pin.clone(),
                             strip_vault_prefix(credential).to_string(),
                             credentials.clone(),
                         )),
@@ -322,6 +328,7 @@ impl ProxyRegistry {
                             let cred_name = strip_vault_prefix(credential).to_string();
                             let refresh_lock = self.oauth_refresh_lock(&cred_name);
                             Box::new(OAuth2Auth::new(
+                                pin.clone(),
                                 cred_name,
                                 provider.clone(),
                                 credentials.clone(),
@@ -750,11 +757,12 @@ fn pre_spawn_verify(
 pub(crate) fn resolve_env(
     env: &HashMap<String, String>,
     credentials: &crate::credentials::ProxyCredentials,
+    pin: &crate::credentials::ServerPin,
 ) -> HashMap<String, String> {
     env.iter()
         .map(|(k, v)| {
             let resolved = match v.strip_prefix("vault:") {
-                Some(vault_key) => match credentials.get(vault_key) {
+                Some(vault_key) => match credentials.get_for(pin, vault_key) {
                     Some(secret) => secret.expose().to_string(),
                     None => {
                         tracing::warn!(
@@ -775,21 +783,28 @@ pub(crate) fn resolve_env(
 /// servers. The gateway hands the proxy the union of these over every
 /// agent's config.
 pub fn vault_names(config: &McpConfig) -> std::collections::BTreeSet<String> {
+    config
+        .servers
+        .values()
+        .flat_map(server_vault_names)
+        .collect()
+}
+
+/// The vault names one server entry reads.
+pub fn server_vault_names(server: &McpServerConfig) -> std::collections::BTreeSet<String> {
     let mut names = std::collections::BTreeSet::new();
-    for server in config.servers.values() {
-        match server {
-            McpServerConfig::Stdio { env, .. } => names.extend(
-                env.values()
-                    .filter_map(|v| v.strip_prefix("vault:"))
-                    .map(str::to_string),
-            ),
-            McpServerConfig::Http { auth, .. } => match auth {
-                Some(McpAuth::Bearer { credential } | McpAuth::Oauth2 { credential, .. }) => {
-                    names.insert(strip_vault_prefix(credential).to_string());
-                }
-                None => {}
-            },
-        }
+    match server {
+        McpServerConfig::Stdio { env, .. } => names.extend(
+            env.values()
+                .filter_map(|v| v.strip_prefix("vault:"))
+                .map(str::to_string),
+        ),
+        McpServerConfig::Http { auth, .. } => match auth {
+            Some(McpAuth::Bearer { credential } | McpAuth::Oauth2 { credential, .. }) => {
+                names.insert(strip_vault_prefix(credential).to_string());
+            }
+            None => {}
+        },
     }
     names
 }
@@ -843,7 +858,11 @@ mod scope_tests {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-        let resolved = resolve_env(&env, &credentials);
+        let pin = crate::credentials::ServerPin {
+            server: "own".into(),
+            entry: "sha256:own".into(),
+        };
+        let resolved = resolve_env(&env, &credentials, &pin);
         assert_eq!(resolved["OWN"], "stdio-key-value");
         assert_eq!(resolved["OTHER"], "vault:telegram-token");
         assert_eq!(resolved["PLAIN"], "info");

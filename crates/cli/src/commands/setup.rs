@@ -113,15 +113,15 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
                 .context("Failed to open credential store")?;
             let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
-            store
-                .store(
-                    &format!("{}-api-key", choice.provider),
-                    &choice.provider,
-                    &VaultSecret::new(key.secret.clone()),
-                    None,
-                    Some(rotation_due),
-                )
-                .context("Failed to store API key")?;
+            super::destinations::store_provider_key(
+                &store,
+                &format!("{}-api-key", choice.provider),
+                &choice.provider,
+                &choice.base_url,
+                &VaultSecret::new(key.secret.clone()),
+                Some(rotation_due),
+            )
+            .context("Failed to store API key")?;
             println!("  API key encrypted and stored.");
         }
 

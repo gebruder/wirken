@@ -77,7 +77,7 @@ A refused server is not retried at load; fix the entry or the host and restart t
 
 ## Using vault secrets in MCP config
 
-Prefix an `env` value with `vault:` to resolve it from the encrypted credential vault. The vault entry must already exist. Vault entries are populated by `wirken setup` (provider API key), `wirken channel add` (per-channel tokens), and `wirken credentials add NAME`, which stores an arbitrary secret under `NAME` for reference as `vault:NAME` in `mcp.json`.
+Prefix an `env` value with `vault:` to resolve it from the encrypted credential vault. The vault entry must already exist. Vault entries are populated by `wirken setup` (provider API key), `wirken channel add` (per-channel tokens), and `wirken credentials add NAME`, which stores an arbitrary secret under `NAME` for reference as `vault:NAME` in `mcp.json`. The server gets the value only when its entry is signed and the credential is granted to it: `wirken mcp sign <server>`, then `wirken credentials grant NAME --mcp-server <server>` ([credentials.md](credentials.md#where-a-credential-may-go)).
 
 By default a `vault:` value is delivered as a file, not as an environment variable. `TOKEN` becomes `TOKEN_FILE=/run/wirken-secrets/TOKEN`, pointing at a file readable only by the server's uid, in a memory-backed host directory (`$XDG_RUNTIME_DIR`, else `/dev/shm`) mounted read-only. The value is in no process environment and in no container configuration. The file is removed when the server stops.
 

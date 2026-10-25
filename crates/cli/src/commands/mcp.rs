@@ -141,6 +141,32 @@ pub async fn authorize(
     store_oauth(&store, &credential_name, &cred)
         .map_err(|e| anyhow::anyhow!("vault write failed: {e}"))?;
 
+    // Handed to this server's signed entry only.
+    match wirken_mcp_proxy::mcp_signing::verified_entry_digest(server, server_cfg) {
+        Some(digest) => {
+            let destination = super::destinations::mcp_server(server, &digest);
+            store.update_binding_exclusive(
+                &credential_name,
+                std::time::Duration::from_secs(10),
+                |b| {
+                    let mut b = b.clone();
+                    b.grant(destination.clone()).then_some(b)
+                },
+            )?;
+            if let Err(e) =
+                super::credential_binding::record_granted(&credential_name, &destination)
+            {
+                eprintln!("  The grant stands, but its row could not be written: {e:#}");
+            }
+            println!("  '{credential_name}' may go to the '{server}' entry as signed now.");
+        }
+        None => println!(
+            "  The '{server}' entry is not signed, so '{credential_name}' goes nowhere yet. \
+             Run `wirken mcp sign {server}`, then `wirken credentials grant \
+             {credential_name} --mcp-server {server}`."
+        ),
+    }
+
     println!();
     println!("  Authorized. Tokens stored in vault under '{credential_name}'.");
     println!("  The MCP proxy will refresh the access token automatically when it expires.");
@@ -209,6 +235,12 @@ pub fn sign(server: &str, agent: Option<&str>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("write {}: {e}", mcp_path.display()))?;
 
     println!("  Signed: {server} in {}", mcp_path.display());
+    let reads: Vec<String> = wirken_mcp_proxy::mcp_registry::server_vault_names(entry)
+        .into_iter()
+        .collect();
+    if !reads.is_empty() {
+        super::credential_binding::offer_repin(server, &reads);
+    }
     #[allow(
         clippy::string_slice,
         reason = "the signature is hex this binary just encoded: 128 ASCII chars"

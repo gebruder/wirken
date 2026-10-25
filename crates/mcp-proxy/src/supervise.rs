@@ -93,6 +93,8 @@ pub(crate) struct Pending {
     pub command: String,
     pub args: Vec<String>,
     pub env: std::collections::HashMap<String, String>,
+    /// The entry this server runs, for resolving its credentials.
+    pub pin: crate::credentials::ServerPin,
     pub sandbox: StdioSandbox,
     pub host: SandboxHost,
     /// The container id of the run under way, or why there is none.
@@ -312,7 +314,7 @@ impl ServerLife for ContainerLife {
         // at spawn, or sent again after an HTTP server refused it. A value
         // rotated in the vault reaches a stdio server at the next gateway
         // start.
-        let resolved = resolve_env(&p.env, &self.credentials);
+        let resolved = resolve_env(&p.env, &self.credentials, &p.pin);
         let entry = StdioEntry {
             agent_id: &p.agent_id,
             server: &p.server,

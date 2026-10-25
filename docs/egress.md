@@ -62,10 +62,13 @@ A credential is bound to permitted hosts in the vault, by the operator:
 
 ```bash
 wirken credentials add records-api --host records.example.org
+wirken credentials grant records-api --host api.records.example.org
 ```
 
-The resolver checks the request host against the credential's stored
-`allowed_hosts` (exact, case-insensitive) before returning the secret, so a
+The binding is sealed into the credential's encryption
+([credentials.md](credentials.md#where-a-credential-may-go)). The resolver
+checks the request host against it (exact, case-insensitive) before
+returning the secret, so a
 request to any other host is refused and the secret is never injected,
 whatever the skill's `egress.domains` allows. A credential with no `--host`
 is unusable by `http_request` at all. The effective destination set is the

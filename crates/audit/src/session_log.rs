@@ -2103,6 +2103,46 @@ pub enum SessionEvent {
     /// changed during the refresh. `reason`: `removed`, `reauthorized` or
     /// `unreadable`. On the [`MCP_CREDENTIAL_SESSION`] lane.
     McpCredentialRefreshDiscarded { credential: String, reason: String },
+    /// A credential not handed to a destination its binding does not
+    /// allow. `named_by` is the configuration that named it. On the
+    /// [`CREDENTIALS_SESSION`] lane.
+    CredentialDestinationRefused {
+        credential: String,
+        destination_kind: String,
+        destination: String,
+        named_by: String,
+    },
+    /// The operator allowed `credential` a destination. On the
+    /// [`CREDENTIALS_SESSION`] lane.
+    CredentialDestinationGranted {
+        credential: String,
+        destination_kind: String,
+        destination: String,
+        granted_by: String,
+    },
+    /// The operator removed a destination from `credential`. On the
+    /// [`CREDENTIALS_SESSION`] lane.
+    CredentialDestinationRevoked {
+        credential: String,
+        destination_kind: String,
+        destination: String,
+        revoked_by: String,
+    },
+    /// `credential` was handed to a destination, at gateway start or a
+    /// respawn. Never the value. On the [`CREDENTIALS_SESSION`] lane.
+    CredentialHandedOut {
+        credential: String,
+        destination_kind: String,
+        destination: String,
+    },
+    /// The vault was re-sealed with destination binding. `backup` is
+    /// the backup's file name. On the [`CREDENTIALS_SESSION`] lane.
+    VaultMigrated {
+        rows: u64,
+        from_format: u32,
+        to_format: u32,
+        backup: String,
+    },
     /// Content contained a stored secret and was refused before it
     /// went further: a tool's output before it entered the
     /// conversation, a tool call's arguments as the model wrote them,
@@ -2456,6 +2496,10 @@ pub const ADAPTER_LIFECYCLE_SESSION: &str = "gateway-adapters";
 /// requests on: [`SessionEvent::McpCredentialRefetched`]. The proxy
 /// writes its own rows on `gateway-mcp`; each lane has one writer.
 pub const MCP_CREDENTIAL_SESSION: &str = "gateway-mcp-credentials";
+
+/// Lane for credential destination grants, revocations, refusals and
+/// handoffs, and the vault migration.
+pub const CREDENTIALS_SESSION: &str = "gateway-credentials";
 
 /// Lane for [`SessionEvent::InboundSenderRefused`].
 pub const INBOUND_SENDERS_SESSION: &str = "gateway-inbound";

@@ -41,4 +41,18 @@ pub enum VaultError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The vault predates destination binding.
+    #[error("this vault predates destination binding; run `wirken vault migrate` at a terminal")]
+    NeedsMigration,
+
+    #[error("the vault is already migrated")]
+    AlreadyMigrated,
+
+    /// The credential's binding does not allow this destination.
+    #[error("credential '{name}' may not be sent to {}; allow it with `wirken credentials grant {name} {}`", .destination.describe(), .destination.grant_flags())]
+    NotPermitted {
+        name: String,
+        destination: crate::binding::Destination,
+    },
 }

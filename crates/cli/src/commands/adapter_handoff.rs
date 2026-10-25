@@ -60,19 +60,33 @@ impl Handoff {
     /// Resolve `adapter_id`'s set from the vault. A name the vault does
     /// not hold, or holds expired, is left out, and the adapter reports
     /// a missing required credential as it did when it read the vault
-    /// itself.
-    /// Each value read is learned by `leak`.
+    /// itself. A credential whose binding does not allow this adapter
+    /// refuses the whole hand-off, with the names refused.
+    /// Each value read is learned by `leak`; each hand-off and refusal
+    /// is recorded on `log` when given.
     pub(crate) fn resolve(
         store: &CredentialStore,
         adapter_id: &str,
         leak: &wirken_gateway::leak::LeakMatcher,
-    ) -> Self {
+        log: Option<&dyn wirken_audit::SessionLog>,
+    ) -> Result<Self, Vec<String>> {
+        let destination = wirken_vault::Destination::Adapter(adapter_id.to_string());
         let mut credentials = BTreeMap::new();
+        let mut refused = Vec::new();
         for name in credential_names(adapter_id) {
-            match store.retrieve(&name) {
+            match store.retrieve_for(&name, &destination) {
                 Ok((secret, meta)) => {
                     leak.learn(&name, secret.expose(), meta.kind);
                     credentials.insert(name, secret);
+                }
+                Err(VaultError::NotPermitted { .. }) => {
+                    super::destinations::refused(
+                        log,
+                        &name,
+                        &destination,
+                        &format!("adapter {adapter_id}"),
+                    );
+                    refused.push(name);
                 }
                 Err(VaultError::NotFound(_)) => {}
                 Err(e) => tracing::warn!(
@@ -83,7 +97,15 @@ impl Handoff {
                 ),
             }
         }
-        Self { credentials }
+        if !refused.is_empty() {
+            return Err(refused);
+        }
+        if let Some(log) = log {
+            for name in credentials.keys() {
+                super::destinations::handed_out(log, name, &destination);
+            }
+        }
+        Ok(Self { credentials })
     }
 
     /// A hand-off of exactly `credentials`.
@@ -422,8 +444,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = full_vault(dir.path());
         for (adapter, names) in BEFORE {
-            let mut handoff =
-                Handoff::resolve(&store, adapter, &wirken_gateway::leak::LeakMatcher::new());
+            let mut handoff = Handoff::resolve(
+                &store,
+                adapter,
+                &wirken_gateway::leak::LeakMatcher::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
                 sorted(handoff.names()),
                 sorted(names.iter().copied()),
@@ -443,7 +470,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = full_vault(dir.path());
         let leak = wirken_gateway::leak::LeakMatcher::new();
-        Handoff::resolve(&store, "signal", &leak);
+        Handoff::resolve(&store, "signal", &leak, None).unwrap();
         for name in ["signal-token", "signal-adapter-key"] {
             assert_eq!(
                 leak.find(&format!("x {} y", value_for(name))).as_deref(),
@@ -478,7 +505,13 @@ mod tests {
                 None,
             )
             .unwrap();
-        let handoff = Handoff::resolve(&store, "signal", &wirken_gateway::leak::LeakMatcher::new());
+        let handoff = Handoff::resolve(
+            &store,
+            "signal",
+            &wirken_gateway::leak::LeakMatcher::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(sorted(handoff.names()), sorted(["signal-token"]));
     }
 
@@ -487,9 +520,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = full_vault(dir.path());
         for (adapter, names) in BEFORE {
-            let encoded =
-                Handoff::resolve(&store, adapter, &wirken_gateway::leak::LeakMatcher::new())
-                    .encode();
+            let encoded = Handoff::resolve(
+                &store,
+                adapter,
+                &wirken_gateway::leak::LeakMatcher::new(),
+                None,
+            )
+            .unwrap()
+            .encode();
             let mut decoded = Handoff::read_from(&encoded[..]).unwrap();
             assert_eq!(sorted(decoded.names()), sorted(names.iter().copied()));
             for name in *names {
@@ -608,7 +646,13 @@ mod tests {
             configure_adapter_command(&mut cmd, adapter, dir.path(), &dir.path().join("gw.sock"));
             let child = spawn_with_handoff(
                 &mut cmd,
-                Handoff::resolve(&store, adapter, &wirken_gateway::leak::LeakMatcher::new()),
+                Handoff::resolve(
+                    &store,
+                    adapter,
+                    &wirken_gateway::leak::LeakMatcher::new(),
+                    None,
+                )
+                .unwrap(),
             )
             .unwrap();
             let out =
@@ -619,5 +663,37 @@ mod tests {
             let received = Handoff::read_from(&out.stdout[..]).unwrap();
             assert_eq!(sorted(received.names()), sorted(names.iter().copied()));
         }
+    }
+
+    /// A credential no longer allowed to its adapter stops the hand-off.
+    #[test]
+    fn a_credential_not_allowed_to_its_adapter_refuses_the_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = full_vault(dir.path());
+        store
+            .update_binding_exclusive("slack-app-token", std::time::Duration::from_secs(1), |b| {
+                let mut b = b.clone();
+                b.revoke(&wirken_vault::Destination::Adapter("slack".into()));
+                Some(b)
+            })
+            .unwrap();
+        let refused = Handoff::resolve(
+            &store,
+            "slack",
+            &wirken_gateway::leak::LeakMatcher::new(),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused, vec!["slack-app-token".to_string()]);
+        assert!(
+            Handoff::resolve(
+                &store,
+                "discord",
+                &wirken_gateway::leak::LeakMatcher::new(),
+                None
+            )
+            .is_ok()
+        );
     }
 }

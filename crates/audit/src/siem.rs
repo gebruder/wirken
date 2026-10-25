@@ -909,6 +909,11 @@ fn extract_identity_for_sentinel(
         // A credential name; none of the three.
         SessionEvent::McpCredentialRefetched { .. } => (None, None, None),
         SessionEvent::McpCredentialRefreshDiscarded { .. } => (None, None, None),
+        SessionEvent::CredentialDestinationRefused { .. }
+        | SessionEvent::CredentialDestinationGranted { .. }
+        | SessionEvent::CredentialDestinationRevoked { .. }
+        | SessionEvent::CredentialHandedOut { .. }
+        | SessionEvent::VaultMigrated { .. } => (None, None, None),
         // Refused content in one agent's session, from a channel when
         // a sender's message drove it.
         SessionEvent::LeakRefused {
@@ -1235,6 +1240,46 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::McpCredentialRefreshDiscarded { credential, reason } => {
             format!("mcp_credential_refresh_discarded credential={credential} reason={reason}")
         }
+        SessionEvent::CredentialDestinationRefused {
+            credential,
+            destination_kind,
+            destination,
+            named_by,
+        } => format!(
+            "credential_destination_refused credential={credential} \
+             {destination_kind}={destination} named_by={named_by}"
+        ),
+        SessionEvent::CredentialDestinationGranted {
+            credential,
+            destination_kind,
+            destination,
+            granted_by,
+        } => format!(
+            "credential_destination_granted credential={credential} \
+             {destination_kind}={destination} by={granted_by}"
+        ),
+        SessionEvent::CredentialDestinationRevoked {
+            credential,
+            destination_kind,
+            destination,
+            revoked_by,
+        } => format!(
+            "credential_destination_revoked credential={credential} \
+             {destination_kind}={destination} by={revoked_by}"
+        ),
+        SessionEvent::CredentialHandedOut {
+            credential,
+            destination_kind,
+            destination,
+        } => format!(
+            "credential_handed_out credential={credential} {destination_kind}={destination}"
+        ),
+        SessionEvent::VaultMigrated {
+            rows,
+            from_format,
+            to_format,
+            ..
+        } => format!("vault_migrated rows={rows} from={from_format} to={to_format}"),
         SessionEvent::LeakRefused {
             credential,
             surface,
@@ -1322,6 +1367,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
         SessionEvent::AdapterRestartAbandoned { .. } => "error",
         SessionEvent::InboundSenderRefused { .. } => "warn",
         SessionEvent::McpCredentialRefreshDiscarded { .. } => "warn",
+        SessionEvent::CredentialDestinationRefused { .. } => "error",
         SessionEvent::OperatorCommandRefused { .. } => "warn",
         SessionEvent::McpServerExited {
             stopped_by_proxy, ..

@@ -116,6 +116,16 @@ def every_keychain_probe_reads_the_passphrase_from_an_approved_supplier():
             "resolve_channel_overrides takes run's per-boot passphrase as a "
             "parameter; its supplier is prompt_vault_passphrase at the call site",
         ),
+        "commands/credential_binding.rs": (
+            1,
+            "a grant takes the passphrase typed at a terminal only, never "
+            "WIRKEN_VAULT_PASSPHRASE",
+        ),
+        "commands/vault.rs": (
+            1,
+            "the migration takes the passphrase typed at a terminal only, never "
+            "WIRKEN_VAULT_PASSPHRASE",
+        ),
     }
     root = ROOT / "crates/cli/src"
     seen_files = 0

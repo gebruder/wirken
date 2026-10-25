@@ -238,12 +238,34 @@ fn agent_configs(data_dir: &Path) -> (Vec<String>, Vec<(String, McpConfig)>) {
     (ids, configs)
 }
 
+/// Each MCP server name in the configs the proxy will load, with the
+/// digest of every entry under that name: `None` for an entry whose
+/// signature does not verify.
+pub fn server_entries(
+    data_dir: &Path,
+) -> std::collections::BTreeMap<String, BTreeSet<Option<String>>> {
+    let (_, configs) = agent_configs(data_dir);
+    let mut out: std::collections::BTreeMap<String, BTreeSet<Option<String>>> =
+        std::collections::BTreeMap::new();
+    for (_, config) in &configs {
+        for (name, server) in &config.servers {
+            out.entry(name.clone())
+                .or_default()
+                .insert(crate::mcp_signing::verified_entry_digest(name, server));
+        }
+    }
+    out
+}
+
 /// The vault names the proxy needs handed over, and which of them are
 /// OAuth credentials the gateway refreshes for it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ConfiguredCredentials {
     pub names: BTreeSet<String>,
     pub oauth: BTreeSet<String>,
+    /// Each server entry that reads a name: `(name, server, digest)`,
+    /// the digest present only for an entry whose signature verifies.
+    pub uses: BTreeSet<(String, String, Option<String>)>,
 }
 
 /// What the gateway must hand the proxy for `data_dir`: every name the
@@ -254,6 +276,12 @@ pub fn configured_credentials(data_dir: &Path) -> ConfiguredCredentials {
     let mut out = ConfiguredCredentials::default();
     for (_, config) in &configs {
         out.names.extend(vault_names(config));
+        for (server_name, server) in &config.servers {
+            let digest = crate::mcp_signing::verified_entry_digest(server_name, server);
+            for name in crate::mcp_registry::server_vault_names(server) {
+                out.uses.insert((name, server_name.clone(), digest.clone()));
+            }
+        }
         for server in config.servers.values() {
             if let McpServerConfig::Http {
                 auth: Some(McpAuth::Oauth2 { credential, .. }),

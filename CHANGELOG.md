@@ -32,6 +32,17 @@ Revisited when both move to p256/p384 0.14.
   `DecidedBy` column. **For wirken-siem:** read `approver_display` for the
   name, and add a `DecidedBy` string column to the `Custom-WirkenSession_CL`
   DCR stream and table.
+- Each vault entry carries the destinations it may be sent to, sealed into
+  its encryption: hosts for `http_request`, signed MCP server entries, model
+  providers by origin, channel adapters, and the plan endpoints. The gateway
+  checks them before every handoff and records refusals and handoffs on the
+  `gateway-credentials` lane. `wirken credentials grant` and `revoke` change
+  them, at a terminal only. **Operator action:** stop `wirken run`, run
+  `wirken vault migrate`, check the proposed destinations, type `yes`; a 2.x
+  binary cannot read the migrated vault, and `wirken update --rollback` to one
+  is refused. **For wirken-siem:** new kinds `credential_destination_refused`,
+  `credential_destination_granted`, `credential_destination_revoked`,
+  `credential_handed_out`, `vault_migrated`.
 - Skills load only under a registry root by default. The project root from
   `skills/REGISTRY-ROOT.pub` is compiled in; `wirken skills trust-root`
   replaces it. Install and load check the same root. Bundled preset skills

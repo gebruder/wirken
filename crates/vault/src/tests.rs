@@ -390,13 +390,18 @@ fn pre_migration_credential_reads_as_unbound() {
         )
         .unwrap();
     }
+    assert!(matches!(
+        CredentialStore::open_with_key(&db, VaultSecret::new(key.expose().to_string())),
+        Err(crate::VaultError::NeedsMigration)
+    ));
+    let mut store =
+        CredentialStore::open_with_key_any_format(&db, VaultSecret::new(key.expose().to_string()))
+            .unwrap();
+    store.migrate_to_bound(&Default::default()).unwrap();
     let store = CredentialStore::open_with_key(&db, key).unwrap();
     let (secret, meta) = store.retrieve("legacy").unwrap();
     assert_eq!(secret.expose(), "legacy-token");
-    assert!(
-        meta.allowed_hosts.is_empty(),
-        "pre-migration row must read as unbound"
-    );
+    assert!(meta.binding.is_empty(), "migrated with no binding");
     assert!(!meta.permits_host("anything.example"));
 }
 
@@ -952,7 +957,7 @@ fn the_kind_migration_marks_the_builtin_identifiers_and_nothing_else() {
             .unwrap();
         }
     }
-    let store = CredentialStore::open_with_key(&db, key).unwrap();
+    let store = CredentialStore::open_with_key_any_format(&db, key).unwrap();
     for meta in store.list().unwrap() {
         let expected = if BUILTIN_IDENTIFIERS.contains(&meta.name.as_str()) {
             CredentialKind::Identifier
@@ -1244,7 +1249,7 @@ fn a_plan_row_does_not_decrypt_under_its_name_alone() {
         .unwrap();
     assert_eq!(column, "plan_sign_in");
 
-    // Every other row is sealed as it always was: its name alone.
+    // No row opens under its name alone: the binding is sealed in too.
     store
         .store(
             "openai-api-key",
@@ -1255,10 +1260,7 @@ fn a_plan_row_does_not_decrypt_under_its_name_alone() {
         )
         .unwrap();
     let plain = store.export_encrypted("openai-api-key").unwrap();
-    assert_eq!(
-        decrypt("openai-api-key", &plain, &key).unwrap().expose(),
-        "sk-key"
-    );
+    assert!(decrypt("openai-api-key", &plain, &key).is_err());
 }
 
 /// In this build a plan row is never handed out as a key, reads for
@@ -1328,4 +1330,252 @@ fn a_plan_row_is_read_only_through_peek_and_keeps_its_binding() {
             .expose()
             .contains("0002")
     );
+}
+
+mod destination_binding {
+    use super::*;
+    use crate::binding::{Binding, Destination, McpServerGrant};
+    use crate::{VaultError, backup_vault, restore_vault};
+
+    fn v(s: &str) -> VaultSecret {
+        VaultSecret::new(s.into())
+    }
+
+    fn mcp(name: &str, entry: &str) -> Destination {
+        Destination::McpServer(McpServerGrant {
+            name: name.into(),
+            entry: entry.into(),
+        })
+    }
+
+    #[test]
+    fn a_value_goes_only_where_its_binding_allows() {
+        let tmp = TempDir::new().unwrap();
+        let store = test_store(&tmp);
+        let mut binding = Binding::default();
+        binding.grant(mcp("linear", "sha256:aa"));
+        store
+            .store_bound(
+                "linear-token",
+                "mcp",
+                &v("tok-123456"),
+                None,
+                None,
+                &binding,
+                crate::CredentialKind::Secret,
+            )
+            .unwrap();
+        assert!(
+            store
+                .retrieve_for("linear-token", &mcp("linear", "sha256:aa"))
+                .is_ok()
+        );
+        for other in [
+            mcp("linear", "sha256:bb"),
+            mcp("evil", "sha256:aa"),
+            Destination::Host("api.linear.app".into()),
+            Destination::Adapter("slack".into()),
+        ] {
+            assert!(matches!(
+                store.retrieve_for("linear-token", &other),
+                Err(VaultError::NotPermitted { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_edited_binding_column_does_not_decrypt() {
+        let tmp = TempDir::new().unwrap();
+        let key = generate_key();
+        let db = tmp.path().join("vault.db");
+        let store = CredentialStore::open_with_key(&db, VaultSecret::new(key.expose().to_string()))
+            .unwrap();
+        store
+            .store_with_hosts(
+                "gh",
+                "",
+                &v("ghp-123456"),
+                None,
+                None,
+                &["api.github.com".into()],
+            )
+            .unwrap();
+        store
+            .store("other", "", &v("other-123456"), None, None)
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let widened = Binding::hosts(&["api.github.com".into(), "evil.example".into()]);
+        conn.execute(
+            "UPDATE credentials SET binding = ?1, allowed_hosts = ?2 WHERE name = 'gh'",
+            rusqlite::params![widened.canonical(), r#"["api.github.com","evil.example"]"#],
+        )
+        .unwrap();
+        assert!(
+            store
+                .retrieve_for("gh", &Destination::Host("evil.example".into()))
+                .is_err()
+        );
+        assert!(store.peek("gh").is_err());
+
+        // A ciphertext moved onto another row does not decrypt either.
+        let (enc, binding): (Vec<u8>, String) = conn
+            .query_row(
+                "SELECT encrypted_value, binding FROM credentials WHERE name = 'other'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE credentials SET encrypted_value = ?1, binding = ?2 WHERE name = 'gh'",
+            rusqlite::params![enc, binding],
+        )
+        .unwrap();
+        assert!(store.peek("gh").is_err());
+    }
+
+    #[test]
+    fn a_grant_reseals_and_rotation_and_refresh_keep_the_binding() {
+        let tmp = TempDir::new().unwrap();
+        let store = test_store(&tmp);
+        store
+            .store("key", "", &v("value-123456"), None, None)
+            .unwrap();
+        let wait = std::time::Duration::from_secs(1);
+
+        let now = store
+            .update_binding_exclusive("key", wait, |b| {
+                let mut b = b.clone();
+                b.grant(Destination::Host("api.example.com".into()));
+                Some(b)
+            })
+            .unwrap();
+        assert!(now.permits(&Destination::Host("api.example.com".into())));
+
+        store.rotate("key", &v("value-654321"), None).unwrap();
+        store
+            .update_exclusive("key", wait, |_| (Some(v("value-999999")), ()))
+            .unwrap()
+            .written
+            .unwrap();
+        let (secret, meta) = store
+            .retrieve_for("key", &Destination::Host("api.example.com".into()))
+            .unwrap();
+        assert_eq!(secret.expose(), "value-999999");
+        assert_eq!(meta.binding.hosts, vec!["api.example.com".to_string()]);
+
+        let unchanged = store
+            .update_binding_exclusive("key", wait, |_| None)
+            .unwrap();
+        assert_eq!(unchanged, meta.binding);
+    }
+
+    #[test]
+    fn an_adapters_own_credentials_are_bound_to_it() {
+        let tmp = TempDir::new().unwrap();
+        let store = test_store(&tmp);
+        store
+            .store("slack-token", "slack", &v("xoxb-123456"), None, None)
+            .unwrap();
+        store
+            .store("openai-api-key", "openai", &v("sk-123456"), None, None)
+            .unwrap();
+        assert!(
+            store
+                .retrieve_for("slack-token", &Destination::Adapter("slack".into()))
+                .is_ok()
+        );
+        assert!(
+            store
+                .retrieve_for("slack-token", &Destination::Adapter("discord".into()))
+                .is_err()
+        );
+        assert!(store.peek("openai-api-key").unwrap().1.binding.is_empty());
+    }
+
+    /// A format 1 vault: rows sealed under their name.
+    fn format_1_vault(db: &std::path::Path, key: &VaultSecret, rows: &[(&str, &str)]) {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE credentials (
+                 name TEXT PRIMARY KEY, channel TEXT NOT NULL,
+                 encrypted_value BLOB NOT NULL, created_at TEXT NOT NULL,
+                 expires_at TEXT, last_used_at TEXT, rotation_due_at TEXT,
+                 allowed_hosts TEXT, kind TEXT
+             );",
+        )
+        .unwrap();
+        for (name, value) in rows {
+            let enc = encrypt(name, &VaultSecret::new((*value).into()), key).unwrap();
+            conn.execute(
+                "INSERT INTO credentials (name, channel, encrypted_value, created_at, kind)
+                 VALUES (?1, '', ?2, ?3, 'secret')",
+                rusqlite::params![name, enc, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_migration_reseals_every_row_under_its_binding_and_verifies() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("vault.db");
+        let key = generate_key();
+        format_1_vault(&db, &key, &[("a", "alpha-123456"), ("b", "beta-1234567")]);
+        assert_eq!(CredentialStore::format_at(&db).unwrap(), Some(1));
+
+        let backup = tmp.path().join("vault.db.bak");
+        assert_eq!(backup_vault(&db, &backup).unwrap(), 2);
+
+        let mut store = CredentialStore::open_with_key_any_format(
+            &db,
+            VaultSecret::new(key.expose().to_string()),
+        )
+        .unwrap();
+        let mut bindings = std::collections::BTreeMap::new();
+        bindings.insert("a".to_string(), Binding::hosts(&["api.example.com".into()]));
+        let migration = store.migrate_to_bound(&bindings).unwrap();
+        assert!(matches!(
+            store.migrate_to_bound(&bindings),
+            Err(VaultError::AlreadyMigrated)
+        ));
+
+        let reopened =
+            CredentialStore::open_with_key(&db, VaultSecret::new(key.expose().to_string()))
+                .unwrap();
+        assert_eq!(reopened.plaintext_digests().unwrap(), migration.digests);
+        assert_eq!(CredentialStore::format_at(&db).unwrap(), Some(2));
+        assert!(
+            reopened
+                .retrieve_for("a", &Destination::Host("api.example.com".into()))
+                .is_ok()
+        );
+        assert!(reopened.peek("b").unwrap().1.binding.is_empty());
+
+        // Restoring the backup puts the format 1 vault back.
+        drop((store, reopened));
+        restore_vault(&backup, &db).unwrap();
+        assert_eq!(CredentialStore::format_at(&db).unwrap(), Some(1));
+        assert_eq!(
+            CredentialStore::open_with_key_any_format(&db, key)
+                .unwrap()
+                .count()
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_migration_that_cannot_decrypt_a_row_changes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("vault.db");
+        let key = generate_key();
+        format_1_vault(&db, &key, &[("a", "alpha-123456")]);
+        let mut store = CredentialStore::open_with_key_any_format(&db, generate_key()).unwrap();
+        assert!(store.migrate_to_bound(&Default::default()).is_err());
+        assert_eq!(CredentialStore::format_at(&db).unwrap(), Some(1));
+        drop(store);
+        let store = CredentialStore::open_with_key_any_format(&db, key).unwrap();
+        assert_eq!(store.format(), 1);
+    }
 }

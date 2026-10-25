@@ -99,9 +99,15 @@ pub async fn add(args: AddArgs) -> Result<()> {
 
         let secret = VaultSecret::new(key.secret);
         let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
-        store
-            .store(&cred_name, &provider, &secret, None, Some(rotation_due))
-            .context("Failed to store API key")?;
+        super::destinations::store_provider_key(
+            &store,
+            &cred_name,
+            &provider,
+            &base_url,
+            &secret,
+            Some(rotation_due),
+        )
+        .context("Failed to store API key")?;
 
         println!("  API key encrypted as '{cred_name}'.");
         cred_name
@@ -262,9 +268,15 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
                 .context("Failed to open credential store")?;
             let secret = VaultSecret::new(api_key);
             let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
-            store
-                .store(&cred_name, &provider, &secret, None, Some(rotation_due))
-                .context("Failed to store API key")?;
+            super::destinations::store_provider_key(
+                &store,
+                &cred_name,
+                &provider,
+                &base_url,
+                &secret,
+                Some(rotation_due),
+            )
+            .context("Failed to store API key")?;
             println!("  API key encrypted as '{cred_name}'.");
             cred_name
         }
@@ -640,7 +652,11 @@ pub async fn set(
                     });
                 super::plan_sign_in::pick_plan_model(models)?
             } else if m == "list" {
-                let key = resolve_api_key(&cfg, &existing.api_key_credential);
+                let key = resolve_api_key(
+                    &cfg,
+                    &existing.api_key_credential,
+                    &super::destinations::provider(&updated.provider, &updated.base_url),
+                );
                 let models = super::provider_pick::list_models(
                     &updated.provider,
                     &updated.base_url,
@@ -679,15 +695,16 @@ pub async fn set(
             .context("Failed to open credential store")?;
         let secret = VaultSecret::new(api_key);
         let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
-        vault
-            .store(
-                &cred_name,
-                &existing.provider,
-                &secret,
-                None,
-                Some(rotation_due),
-            )
-            .context("Failed to store API key")?;
+        let current = store.get(id).context("Failed to re-read agent")?;
+        super::destinations::store_provider_key(
+            &vault,
+            &cred_name,
+            &current.provider,
+            &current.base_url,
+            &secret,
+            Some(rotation_due),
+        )
+        .context("Failed to store API key")?;
         if existing.api_key_credential != cred_name {
             let mut updated = store.get(id).context("Failed to re-read agent")?;
             updated.api_key_credential = cred_name.clone();
@@ -739,6 +756,7 @@ pub async fn set(
 fn resolve_api_key(
     cfg: &wirken_gateway::config::GatewayConfig,
     credential: &str,
+    destination: &wirken_vault::Destination,
 ) -> Option<String> {
     if credential.is_empty() {
         return None;
@@ -749,7 +767,7 @@ fn resolve_api_key(
     let pp = super::vault_passphrase_source().unwrap_or_default();
     let keychain = probe_keychain(&cfg.data_dir, move || pp);
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok()?;
-    let (secret, _) = store.retrieve(credential).ok()?;
+    let (secret, _) = store.retrieve_for(credential, destination).ok()?;
     Some(secret.expose().to_string())
 }
 

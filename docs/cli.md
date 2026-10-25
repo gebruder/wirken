@@ -455,7 +455,9 @@ unique to one row. Which keys are storable, and the grant window:
 
 ```bash
 wirken credentials list
-wirken credentials add <NAME> [--channel C] [--stdin | --value-file FILE] [--host HOST]...
+wirken credentials add <NAME> [--channel C] [--stdin | --value-file FILE] [DESTINATIONS]
+wirken credentials grant <NAME> DESTINATIONS
+wirken credentials revoke <NAME> DESTINATIONS
 wirken credentials rotate <NAME> [--stdin | --value-file FILE]
 wirken credentials show <NAME>
 wirken credentials remove <NAME>
@@ -474,19 +476,26 @@ in again. See [credentials.md](credentials.md#plan-sign-in-openai).
 
 Every verb takes the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` when set
 and prompts only when it is not, so `add` and `rotate` complete with no
-terminal. `--host` binds a credential to hosts `http_request` may send it to;
-see [egress.md](egress.md#credential-host-binding). Scopes and redaction:
-[credentials.md](credentials.md).
+terminal, except `grant` and `revoke`, which take it at a terminal only.
+DESTINATIONS are `--host HOST`, `--mcp-server NAME`, `--provider P --base-url
+URL`, `--adapter ID` and `--plan`; `--host`, `--mcp-server` and `--adapter`
+repeat. See
+[credentials.md](credentials.md#where-a-credential-may-go). Scopes and
+redaction: [credentials.md](credentials.md).
 
 ## wirken vault
 
 ```bash
 wirken vault reset
+wirken vault migrate [--edit FILE]
 ```
 
-Destroys the device key and all stored credentials. Used after a forgotten
-passphrase, where the vault refuses to overwrite a keychain it cannot unwrap.
-Requires typing `reset`.
+`reset` destroys the device key and all stored credentials. Used after a
+forgotten passphrase, where the vault refuses to overwrite a keychain it cannot
+unwrap. Requires typing `reset`.
+
+`migrate` re-seals a vault from before destination binding, after a backup and
+your `yes`; see [credentials.md](credentials.md#migrating-a-vault-from-2x).
 
 ## wirken zirkel
 

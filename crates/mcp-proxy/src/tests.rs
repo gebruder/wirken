@@ -513,7 +513,14 @@ mod http_transport_test {
             )]),
             None,
         ));
-        let auth = BearerAuth::new("linear-token".into(), credentials);
+        let auth = BearerAuth::new(
+            crate::credentials::ServerPin {
+                server: "test".into(),
+                entry: "sha256:test".into(),
+            },
+            "linear-token".into(),
+            credentials,
+        );
         let mut transport = HttpTransport::new(url, Box::new(auth)).unwrap();
 
         let resp = transport

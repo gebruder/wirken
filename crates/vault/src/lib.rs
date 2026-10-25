@@ -2,6 +2,7 @@
 // stays carries an allow naming why its offsets are boundaries.
 #![cfg_attr(not(test), deny(clippy::string_slice))]
 
+mod binding;
 mod crypto;
 mod error;
 mod keychain;
@@ -9,6 +10,7 @@ mod kind;
 mod secret;
 mod store;
 
+pub use binding::{Binding, Destination, McpServerGrant, ProviderGrant, origin_of};
 pub use crypto::{decrypt, encrypt};
 pub use error::VaultError;
 pub use keychain::{
@@ -21,7 +23,8 @@ pub use kind::{
 };
 pub use secret::VaultSecret;
 pub use store::{
-    CredentialMetadata, CredentialStore, ExclusiveUpdate, ResetPlan, reset, reset_plan,
+    ADAPTERS, BOUND_FORMAT, CredentialMetadata, CredentialStore, ExclusiveUpdate, Migration,
+    MigrationRow, ResetPlan, backup_vault, default_binding, reset, reset_plan, restore_vault,
 };
 
 #[cfg(test)]

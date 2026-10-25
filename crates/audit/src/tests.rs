@@ -3882,6 +3882,35 @@ fn every_session_event() -> Vec<SessionEvent> {
             invocation: String::new(),
             reason: String::new(),
         },
+        SessionEvent::CredentialDestinationRefused {
+            credential: String::new(),
+            destination_kind: String::new(),
+            destination: String::new(),
+            named_by: String::new(),
+        },
+        SessionEvent::CredentialDestinationGranted {
+            credential: String::new(),
+            destination_kind: String::new(),
+            destination: String::new(),
+            granted_by: String::new(),
+        },
+        SessionEvent::CredentialDestinationRevoked {
+            credential: String::new(),
+            destination_kind: String::new(),
+            destination: String::new(),
+            revoked_by: String::new(),
+        },
+        SessionEvent::CredentialHandedOut {
+            credential: String::new(),
+            destination_kind: String::new(),
+            destination: String::new(),
+        },
+        SessionEvent::VaultMigrated {
+            rows: 0,
+            from_format: 1,
+            to_format: 2,
+            backup: String::new(),
+        },
     ]
 }
 
@@ -3948,6 +3977,11 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::ApprovalChatSet { .. } => "ApprovalChatSet",
         SessionEvent::McpCredentialRefreshDiscarded { .. } => "McpCredentialRefreshDiscarded",
         SessionEvent::OperatorCommandRefused { .. } => "OperatorCommandRefused",
+        SessionEvent::CredentialDestinationRefused { .. } => "CredentialDestinationRefused",
+        SessionEvent::CredentialDestinationGranted { .. } => "CredentialDestinationGranted",
+        SessionEvent::CredentialDestinationRevoked { .. } => "CredentialDestinationRevoked",
+        SessionEvent::CredentialHandedOut { .. } => "CredentialHandedOut",
+        SessionEvent::VaultMigrated { .. } => "VaultMigrated",
         SessionEvent::HookDispatched { .. } => "HookDispatched",
         SessionEvent::EgressHookDispatched { .. } => "EgressHookDispatched",
         SessionEvent::ToolOutputRedacted { .. } => "ToolOutputRedacted",
@@ -3974,7 +4008,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 78;
+const SESSION_EVENT_VARIANTS: usize = 83;
 
 /// The list covers the enum.
 #[test]

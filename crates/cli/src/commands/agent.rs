@@ -142,10 +142,15 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
         let cred_name = format!("{provider}-api-key");
-        match store.retrieve(&cred_name) {
+        let destination = super::destinations::provider(provider, base_url);
+        match store.retrieve_for(&cred_name, &destination) {
             Ok((secret, _)) => {
                 api_key_credential = Some(cred_name.clone());
                 Some(secret.expose().to_string())
+            }
+            Err(wirken_vault::VaultError::NotPermitted { .. }) => {
+                super::destinations::refused(None, &cred_name, &destination, "provider.json");
+                None
             }
             Err(e) => {
                 tracing::warn!("Failed to retrieve API key '{cred_name}': {e}");
@@ -277,8 +282,18 @@ async fn send_with_agent_config(
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
-        match store.retrieve(&agent_cfg.api_key_credential) {
+        let destination = super::destinations::provider(&agent_cfg.provider, &agent_cfg.base_url);
+        match store.retrieve_for(&agent_cfg.api_key_credential, &destination) {
             Ok((secret, _)) => Some(secret.expose().to_string()),
+            Err(wirken_vault::VaultError::NotPermitted { .. }) => {
+                super::destinations::refused(
+                    None,
+                    &agent_cfg.api_key_credential,
+                    &destination,
+                    &format!("agent {}", agent_cfg.id),
+                );
+                None
+            }
             Err(_) => None,
         }
     } else {

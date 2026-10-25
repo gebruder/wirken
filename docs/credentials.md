@@ -28,6 +28,75 @@ stored, and an operator marks others with `wirken credentials add NAME
 --identifier`. `wirken credentials list` and `show` print the kind. A secret
 under 8 bytes is not matched, and the gateway names it in a warning at start.
 
+## Where a credential may go
+
+Each entry carries the destinations its value may be sent to, sealed into
+its encryption: changing them takes the vault key, so a process that can
+write the data directory but does not hold the passphrase cannot point a
+credential somewhere new.
+
+| Destination | Checked where | Allowed by |
+|---|---|---|
+| A host `http_request` sends to | the request's host | `--host api.example.com` |
+| An MCP server | the server's name and the digest of its signed `mcp.json` entry | `--mcp-server linear` |
+| A model provider | the provider and the origin of its base URL | `--provider openai --base-url https://api.openai.com/v1` |
+| A channel adapter | the adapter id | `--adapter slack` |
+| A plan sign-in | the plan endpoints | `--plan` |
+
+```bash
+wirken credentials grant <NAME> --host api.linear.app
+wirken credentials grant <NAME> --mcp-server linear
+wirken credentials revoke <NAME> --mcp-server linear
+wirken credentials show <NAME>
+```
+
+`grant` and `revoke` take the vault passphrase at a terminal, never from
+`WIRKEN_VAULT_PASSPHRASE`, and refuse inside a Wirken `exec`. Each change is a
+`credential_destination_granted` or `credential_destination_revoked` row on the
+`gateway-credentials` lane; a grant whose row cannot be written is undone.
+`--mcp-server` pins the entry as signed now, and an unsigned entry cannot be
+granted; after `wirken mcp sign` changes an entry, the credentials pinned to it
+go nowhere until moved, which `mcp sign` offers to do. A revoke takes effect at
+the next start of `wirken run`.
+
+New entries get their destinations as they are stored: an adapter's own
+credentials (`<adapter>-...`) go to that adapter, a provider key stored by
+`wirken setup` or `wirken agents` goes to that provider, a plan sign-in to the
+plan endpoints, and `wirken mcp authorize <server>` allows the server's signed
+entry. `wirken credentials add` takes the same flags as `grant`. Anything else
+goes nowhere until granted.
+
+A credential is not handed to a destination it does not allow: `http_request`
+is refused, an MCP server starts without it, an agent starts with no key, and
+an adapter is not started. Each refusal is a `credential_destination_refused`
+row naming the configuration that asked, and the gateway logs the `grant`
+command that would allow it. Each handoff at start or respawn is a
+`credential_handed_out` row.
+
+### Migrating a vault from 2.x
+
+A vault from before destination binding is refused until it is migrated:
+
+```bash
+wirken vault migrate
+wirken vault migrate --edit proposal.json   # write the proposal to trim, then run again
+```
+
+Stop `wirken run` first. The command copies `vault.db` to
+`vault.db.pre-binding-<UTC time>.bak` and checks the copy, proposes
+destinations from the configuration as it stands (`allowed_hosts`, signed
+`mcp.json` entries, provider keys in `provider.json` and the agent store,
+adapter credentials, plan sign-ins), and asks for `yes`. Because that
+configuration is what a same-UID writer could have changed, read the list
+before confirming. It then re-seals every entry in one transaction and decrypts
+each one again to check it; if that check fails it restores the backup. The
+backup is never deleted. A `vault_migrated` row records the migration and one
+`credential_destination_granted` row per destination.
+
+A 2.x binary cannot read a migrated vault. `wirken update --rollback` to such
+a binary is refused and names the backup to restore by hand, which loses
+credentials added or changed since.
+
 ## Which processes read the vault
 
 - **The gateway** (`wirken run`) opens the vault. It resolves provider
@@ -37,7 +106,8 @@ under 8 bytes is not matched, and the gateway names it in a warning at start.
   channel's credentials, which the gateway writes to its stdin, and
   gets no vault passphrase.
 - **The MCP proxy** never opens the vault. At spawn the gateway
-  writes to its stdin the names its `mcp.json` configs reference: the
+  writes to its stdin the names its `mcp.json` configs reference, each
+  only for the signed entries its destinations allow: the
   `vault:` env values of stdio servers and the `credential` of HTTP
   servers' bearer and OAuth auth, each OAuth credential without its
   refresh token. When an access token nears expiry the proxy asks the

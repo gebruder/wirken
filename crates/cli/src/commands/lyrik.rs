@@ -946,7 +946,10 @@ async fn dispatch_via_agent_runtime(
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("open credential store")?;
         let cred_name = format!("{}-api-key", pin.provider);
-        match store.retrieve(&cred_name) {
+        match store.retrieve_for(
+            &cred_name,
+            &super::destinations::provider(&pin.provider, &pin.base_url),
+        ) {
             Ok((secret, _)) => {
                 api_key_credential = Some(cred_name.clone());
                 Some(secret.expose().to_string())

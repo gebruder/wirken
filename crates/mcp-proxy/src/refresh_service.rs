@@ -548,6 +548,10 @@ mod tests {
 
     fn auth(credentials: Arc<ProxyCredentials>) -> OAuth2Auth {
         OAuth2Auth::new(
+            crate::credentials::ServerPin {
+                server: "test".into(),
+                entry: "sha256:test".into(),
+            },
             "linear-oauth".into(),
             "linear".into(),
             credentials,

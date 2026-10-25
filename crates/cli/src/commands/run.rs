@@ -69,9 +69,9 @@ impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
             .lock()
             .map_err(|_| CredentialError::Backend("vault mutex poisoned".into()))?;
 
-        // Check the credential's host binding via `peek` first, so a
-        // refused attempt does not bump `last_used_at`. The binding is
-        // operator-set vault metadata; a skill cannot widen it.
+        // Check the binding via `peek` first, so a refused attempt does
+        // not bump `last_used_at`. The binding is authenticated by the
+        // decryption; a skill cannot widen it.
         let meta = match store.peek(name) {
             Ok((_, meta)) => meta,
             Err(wirken_vault::VaultError::NotFound(_)) => {
@@ -86,10 +86,16 @@ impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
             });
         }
 
-        match store.retrieve(name) {
+        match store.retrieve_for(name, &wirken_vault::Destination::Host(host.to_string())) {
             Ok((secret, meta)) => {
                 self.leak.learn(name, secret.expose(), meta.kind);
                 Ok(ResolvedSecret::new(secret.expose().to_string()))
+            }
+            Err(wirken_vault::VaultError::NotPermitted { .. }) => {
+                Err(CredentialError::HostNotPermitted {
+                    name: name.to_string(),
+                    host: host.to_string(),
+                })
             }
             Err(wirken_vault::VaultError::NotFound(_)) => {
                 Err(CredentialError::NotFound(name.to_string()))
@@ -140,6 +146,15 @@ fn prompt_vault_passphrase(cache: &mut Option<String>) -> String {
 pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let cfg = config();
     cfg.ensure_dirs()?;
+
+    if wirken_vault::CredentialStore::format_at(&cfg.vault_db_path())?
+        .is_some_and(|f| f < wirken_vault::BOUND_FORMAT)
+    {
+        anyhow::bail!(
+            "the vault predates destination binding. Stop here, run `wirken vault migrate` \
+             at a terminal, then start `wirken run` again."
+        );
+    }
 
     println!();
     // Version, commit and cleanliness on one line, the executable's
@@ -456,6 +471,8 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // ollama (no vault lookup) and for the failure paths below where
     // the key didn't resolve.
     let mut api_key_credential: Option<String> = None;
+    // Refusals before the session log is open, recorded once it is.
+    let mut early_refusals: Vec<(String, wirken_vault::Destination, String)> = Vec::new();
     let api_key = if provider != "ollama" && default_plan_entry.is_none() {
         let keychain = probe_keychain(&cfg.data_dir, || {
             prompt_vault_passphrase(&mut vault_passphrase)
@@ -463,11 +480,17 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
         let cred_name = format!("{provider}-api-key");
-        match store.retrieve(&cred_name) {
+        let destination = super::destinations::provider(provider, base_url);
+        match store.retrieve_for(&cred_name, &destination) {
             Ok((secret, meta)) => {
                 leak_matcher.learn(&cred_name, secret.expose(), meta.kind);
                 api_key_credential = Some(cred_name.clone());
                 Some(secret.expose().to_string())
+            }
+            Err(wirken_vault::VaultError::NotPermitted { .. }) => {
+                super::destinations::refused(None, &cred_name, &destination, "provider.json");
+                early_refusals.push((cred_name.clone(), destination, "provider.json".into()));
+                None
             }
             Err(wirken_vault::VaultError::Decryption(_)) => {
                 // AEAD-tag mismatch on a credential that was stored
@@ -582,6 +605,21 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     };
     let session_log_for_shutdown = Arc::new(session_log_concrete);
     let session_log: Arc<dyn wirken_audit::SessionLog> = session_log_for_shutdown.clone();
+    for (credential, destination, named_by) in early_refusals {
+        super::destinations::record_refused(
+            session_log.as_ref(),
+            &credential,
+            &destination,
+            &named_by,
+        );
+    }
+    if let Some(credential) = &api_key_credential {
+        super::destinations::handed_out(
+            session_log.as_ref(),
+            credential,
+            &super::destinations::provider(provider, base_url),
+        );
+    }
 
     // --- Open stores ---
     let registry = Arc::new(Mutex::new(
@@ -701,17 +739,37 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             };
             let agent_api_key =
                 if agent_plan_source.is_none() && !agent_cfg.api_key_credential.is_empty() {
-                    vault
+                    let destination =
+                        super::destinations::provider(&agent_cfg.provider, &agent_cfg.base_url);
+                    let named_by = format!("agent {}", agent_cfg.id);
+                    match vault
                         .as_ref()
-                        .and_then(|v| v.retrieve(&agent_cfg.api_key_credential).ok())
-                        .map(|(secret, meta)| {
+                        .map(|v| v.retrieve_for(&agent_cfg.api_key_credential, &destination))
+                    {
+                        Some(Ok((secret, meta))) => {
                             leak_matcher.learn(
                                 &agent_cfg.api_key_credential,
                                 secret.expose(),
                                 meta.kind,
                             );
-                            secret.expose().to_string()
-                        })
+                            super::destinations::handed_out(
+                                session_log.as_ref(),
+                                &agent_cfg.api_key_credential,
+                                &destination,
+                            );
+                            Some(secret.expose().to_string())
+                        }
+                        Some(Err(wirken_vault::VaultError::NotPermitted { .. })) => {
+                            super::destinations::refused(
+                                Some(session_log.as_ref()),
+                                &agent_cfg.api_key_credential,
+                                &destination,
+                                &named_by,
+                            );
+                            None
+                        }
+                        _ => None,
+                    }
                 } else {
                     None
                 };
@@ -1089,7 +1147,22 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             let spawn = || {
                 tracing::info!("Spawning adapter: {adapter_id}");
                 let handoff = match vault.as_ref().map(|v| v.lock()) {
-                    Some(Ok(store)) => Handoff::resolve(&store, &adapter_id, &leak),
+                    Some(Ok(store)) => {
+                        match Handoff::resolve(
+                            &store,
+                            &adapter_id,
+                            &leak,
+                            Some(restart_log.as_ref()),
+                        ) {
+                            Ok(handoff) => handoff,
+                            Err(refused) => {
+                                return Err(std::io::Error::other(format!(
+                                    "adapter not started: {} may not be handed to it",
+                                    refused.join(", ")
+                                )));
+                            }
+                        }
+                    }
                     Some(Err(_)) => {
                         tracing::error!("vault mutex poisoned; adapter starts with no credentials");
                         Handoff::default()
@@ -1186,6 +1259,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         &proxy_credentials,
         refresh_token.as_str(),
         &leak_matcher,
+        Some(session_log.as_ref()),
     );
     let mcp_refresh_socket = cfg.socket_dir().join("mcp-refresh.sock");
     let _ = std::fs::remove_file(&mcp_refresh_socket);
@@ -2672,14 +2746,57 @@ fn mcp_proxy_handoff(
     wanted: &wirken_mcp_proxy::ConfiguredCredentials,
     refresh_token: &str,
     leak: &wirken_gateway::leak::LeakMatcher,
+    log: Option<&dyn wirken_audit::SessionLog>,
 ) -> (Handoff, std::collections::BTreeSet<String>) {
-    use wirken_mcp_proxy::credentials::{GATEWAY_TOKEN_ENTRY, without_refresh_token};
+    use wirken_mcp_proxy::credentials::{
+        GATEWAY_TOKEN_ENTRY, SERVERS_ENTRY, ServerPin, without_refresh_token,
+    };
     let mut entries = std::collections::BTreeMap::new();
+    let mut pins: std::collections::BTreeMap<String, std::collections::BTreeSet<ServerPin>> =
+        std::collections::BTreeMap::new();
     match vault.map(|v| v.lock()) {
         Some(Ok(store)) => {
             for name in &wanted.names {
-                if name == GATEWAY_TOKEN_ENTRY {
+                if name == GATEWAY_TOKEN_ENTRY || name == SERVERS_ENTRY {
                     tracing::warn!("vault credential '{name}' is not handed to the MCP proxy");
+                    continue;
+                }
+                // The binding authenticated by the decryption decides,
+                // per server entry that reads the name.
+                let binding = match store.peek(name) {
+                    Ok((_, meta)) => meta.binding,
+                    Err(wirken_vault::VaultError::NotFound(_)) => continue,
+                    Err(e) => {
+                        tracing::warn!(
+                            credential = %name,
+                            error = %e,
+                            "MCP proxy credential left out of the hand-off"
+                        );
+                        continue;
+                    }
+                };
+                let mut allowed = std::collections::BTreeSet::new();
+                for (_, server, digest) in wanted.uses.iter().filter(|(n, _, _)| n == name) {
+                    let destination = super::destinations::mcp_server(
+                        server,
+                        digest.as_deref().unwrap_or("unsigned"),
+                    );
+                    match digest {
+                        Some(entry) if binding.permits(&destination) => {
+                            allowed.insert(ServerPin {
+                                server: server.clone(),
+                                entry: entry.clone(),
+                            });
+                        }
+                        _ => super::destinations::refused(
+                            log,
+                            name,
+                            &destination,
+                            &format!("mcp.json entry {server}"),
+                        ),
+                    }
+                }
+                if allowed.is_empty() {
                     continue;
                 }
                 match store.retrieve(name) {
@@ -2691,8 +2808,17 @@ fn mcp_proxy_handoff(
                             secret.expose().to_string()
                         };
                         entries.insert(name.clone(), VaultSecret::new(value));
+                        if let Some(log) = log {
+                            for pin in &allowed {
+                                super::destinations::handed_out(
+                                    log,
+                                    name,
+                                    &super::destinations::mcp_server(&pin.server, &pin.entry),
+                                );
+                            }
+                        }
+                        pins.insert(name.clone(), allowed);
                     }
-                    Err(wirken_vault::VaultError::NotFound(_)) => {}
                     Err(e) => tracing::warn!(
                         credential = %name,
                         error = %e,
@@ -2708,6 +2834,10 @@ fn mcp_proxy_handoff(
     entries.insert(
         GATEWAY_TOKEN_ENTRY.to_string(),
         VaultSecret::new(refresh_token.to_string()),
+    );
+    entries.insert(
+        SERVERS_ENTRY.to_string(),
+        VaultSecret::new(serde_json::to_string(&pins).unwrap_or_default()),
     );
     (Handoff::from_entries(entries), handed)
 }
@@ -6424,11 +6554,26 @@ fn resolve_channel_overrides(
                 // A plan sign-in is refused by the vault as a key; a
                 // sign-in's JSON stored under another kind is refused
                 // here.
-                let retrieved = store.retrieve(slot);
+                let destination = super::destinations::provider(provider, base_url);
+                let retrieved = store.retrieve_for(slot, &destination);
                 let plan_entry = matches!(retrieved, Err(wirken_vault::VaultError::PlanSignIn(_)));
                 let secret = match retrieved {
                     Ok((secret, _)) => Some(secret),
                     Err(_) if plan_entry => None,
+                    Err(wirken_vault::VaultError::NotPermitted { .. }) => {
+                        super::destinations::refused(
+                            None,
+                            slot,
+                            &destination,
+                            &format!("channel_overrides['{channel}']"),
+                        );
+                        return Err(anyhow::anyhow!(
+                            "channel '{channel}' names '{slot}', which may not be sent to \
+                             {provider} at {base_url}. Allow it with `wirken credentials \
+                             grant {slot} {}`",
+                            destination.grant_flags()
+                        ));
+                    }
                     Err(e) => {
                         return Err(anyhow::Error::from(e).context(format!(
                             "channel '{channel}' needs a key named '{slot}', \
@@ -6500,10 +6645,53 @@ mod channel_overrides_tests {
         let vault_path = tmp.path().join("vault.db");
         let keychain = AgeFileKeychain::new(tmp.path().join("keychain"), "test-passphrase".into());
         let store = CredentialStore::open(&vault_path, &keychain).unwrap();
+        // Allowed to the providers these tests name.
+        let mut binding = wirken_vault::Binding::default();
+        for (provider, base_url) in [("privatemode", "http://localhost:8080/v1"), ("openai", "")] {
+            binding.grant(crate::commands::destinations::provider(provider, base_url));
+        }
         store
-            .store(slot, "test", &VaultSecret::new(value.into()), None, None)
+            .store_bound(
+                slot,
+                "test",
+                &VaultSecret::new(value.into()),
+                None,
+                None,
+                &binding,
+                wirken_vault::CredentialKind::Secret,
+            )
             .unwrap();
         (tmp, vault_path)
+    }
+
+    /// A key not allowed to the override's provider is refused at
+    /// start, naming the grant that would allow it.
+    #[test]
+    fn an_override_refuses_a_key_bound_elsewhere() {
+        let (tmp, vault_path) = vault_with("privatemode-access-key", "pm-secret");
+        let provider_json = serde_json::json!({
+            "provider": "anthropic",
+            "model": "base-model",
+            "channel_overrides": {
+                "signal": {
+                    "provider": "privatemode",
+                    "model": "kimi-k2.5",
+                    "base_url": "https://evil.example/v1",
+                    "api_key_name": "privatemode-access-key"
+                }
+            }
+        });
+        let err =
+            resolve_channel_overrides(&provider_json, tmp.path(), &vault_path, "test-passphrase")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains(
+                "wirken credentials grant privatemode-access-key --provider privatemode \
+                 --base-url https://evil.example"
+            ),
+            "{err}"
+        );
     }
 
     #[test]
@@ -7209,34 +7397,69 @@ mod resolver_tests {
 mod proxy_handoff_tests {
     use super::mcp_proxy_handoff;
     use std::collections::BTreeSet;
-    use wirken_mcp_proxy::credentials::GATEWAY_TOKEN_ENTRY;
+    use wirken_mcp_proxy::credentials::{GATEWAY_TOKEN_ENTRY, SERVERS_ENTRY};
     use wirken_mcp_proxy::{ConfiguredCredentials, OAuthCredential, store_oauth};
-    use wirken_vault::{CredentialStore, VaultSecret};
+    use wirken_vault::{Binding, CredentialKind, CredentialStore, VaultSecret};
 
-    /// Each value the proxy is handed is learned by leak detection.
-    #[test]
-    fn the_proxy_handoff_teaches_leak_detection_what_it_reads() {
+    fn store() -> (tempfile::TempDir, CredentialStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = CredentialStore::open_with_key(
             &tmp.path().join("vault.db"),
             VaultSecret::new("a".repeat(64)),
         )
         .unwrap();
+        (tmp, store)
+    }
+
+    fn bound_to(server: &str, entry: &str) -> Binding {
+        let mut b = Binding::default();
+        b.grant(crate::commands::destinations::mcp_server(server, entry));
+        b
+    }
+
+    fn put(store: &CredentialStore, name: &str, value: &str, binding: &Binding) {
         store
-            .store(
-                "linear-token",
+            .store_bound(
+                name,
                 "",
-                &VaultSecret::new("lin-api-token-0001".into()),
+                &VaultSecret::new(value.into()),
                 None,
                 None,
+                binding,
+                CredentialKind::Secret,
             )
             .unwrap();
+    }
+
+    fn uses(list: &[(&str, &str, Option<&str>)]) -> BTreeSet<(String, String, Option<String>)> {
+        list.iter()
+            .map(|(n, s, d)| (n.to_string(), s.to_string(), d.map(str::to_string)))
+            .collect()
+    }
+
+    /// Each value the proxy is handed is learned by leak detection.
+    #[test]
+    fn the_proxy_handoff_teaches_leak_detection_what_it_reads() {
+        let (_tmp, store) = store();
+        put(
+            &store,
+            "linear-token",
+            "lin-api-token-0001",
+            &bound_to("linear", "sha256:aa"),
+        );
         let wanted = ConfiguredCredentials {
             names: BTreeSet::from(["linear-token".to_string()]),
             oauth: BTreeSet::new(),
+            uses: uses(&[("linear-token", "linear", Some("sha256:aa"))]),
         };
         let leak = wirken_gateway::leak::LeakMatcher::new();
-        let _ = mcp_proxy_handoff(Some(&std::sync::Mutex::new(store)), &wanted, "t", &leak);
+        let _ = mcp_proxy_handoff(
+            Some(&std::sync::Mutex::new(store)),
+            &wanted,
+            "t",
+            &leak,
+            None,
+        );
         assert_eq!(
             leak.find("a lin-api-token-0001 b").as_deref(),
             Some("linear-token")
@@ -7244,25 +7467,25 @@ mod proxy_handoff_tests {
     }
 
     /// The proxy gets the names its configs reference and nothing else,
-    /// an OAuth credential without its refresh token, and the refresh
-    /// channel's token, which no vault credential can stand in for.
+    /// an OAuth credential without its refresh token, the refresh
+    /// channel's token, which no vault credential can stand in for, and
+    /// the entries each credential is pinned to.
     #[test]
     fn the_proxy_gets_its_names_oauth_without_refresh_and_the_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = CredentialStore::open_with_key(
-            &tmp.path().join("vault.db"),
-            VaultSecret::new("a".repeat(64)),
-        )
-        .unwrap();
+        let (_tmp, store) = store();
         for (name, value) in [
             ("linear-token", "lin_abc"),
             ("telegram-token", "tg_other"),
             (GATEWAY_TOKEN_ENTRY, "planted"),
         ] {
-            store
-                .store(name, "", &VaultSecret::new(value.into()), None, None)
-                .unwrap();
+            put(&store, name, value, &bound_to("linear", "sha256:aa"));
         }
+        put(
+            &store,
+            "notion-oauth",
+            "{}",
+            &bound_to("notion", "sha256:nn"),
+        );
         store_oauth(
             &store,
             "notion-oauth",
@@ -7283,6 +7506,11 @@ mod proxy_handoff_tests {
                 GATEWAY_TOKEN_ENTRY.to_string(),
             ]),
             oauth: BTreeSet::from(["notion-oauth".to_string()]),
+            uses: uses(&[
+                ("linear-token", "linear", Some("sha256:aa")),
+                ("notion-oauth", "notion", Some("sha256:nn")),
+                (GATEWAY_TOKEN_ENTRY, "linear", Some("sha256:aa")),
+            ]),
         };
 
         let (handoff, handed) = mcp_proxy_handoff(
@@ -7290,6 +7518,7 @@ mod proxy_handoff_tests {
             &wanted,
             "real-token",
             &wirken_gateway::leak::LeakMatcher::new(),
+            None,
         );
         assert_eq!(
             handed,
@@ -7299,10 +7528,21 @@ mod proxy_handoff_tests {
         let mut entries = handoff.into_entries();
         assert_eq!(
             entries.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["linear-token", "notion-oauth", GATEWAY_TOKEN_ENTRY]
+            [
+                "linear-token",
+                "notion-oauth",
+                GATEWAY_TOKEN_ENTRY,
+                SERVERS_ENTRY
+            ]
         );
         assert_eq!(entries[GATEWAY_TOKEN_ENTRY].expose(), "real-token");
         assert_eq!(entries["linear-token"].expose(), "lin_abc");
+        let pins: serde_json::Value =
+            serde_json::from_str(entries[SERVERS_ENTRY].expose()).unwrap();
+        assert_eq!(
+            pins["linear-token"],
+            serde_json::json!([{"server": "linear", "entry": "sha256:aa"}])
+        );
         // The value is a credential, fixture or not, so these messages
         // never format it.
         let oauth = entries.remove("notion-oauth").unwrap();
@@ -7322,6 +7562,88 @@ mod proxy_handoff_tests {
         assert!(
             !oauth.expose().contains("RT-secret"),
             "the refresh token appears nowhere in the handed value"
+        );
+    }
+
+    /// A credential goes only to the entries its binding allows: not to
+    /// another server, not to a changed entry, not to an unsigned one,
+    /// and each refusal is a row.
+    #[test]
+    fn a_credential_goes_only_to_the_entries_it_is_bound_to() {
+        use wirken_audit::{SessionId, SessionLog as _};
+        let (tmp, store) = store();
+        put(
+            &store,
+            "linear-token",
+            "lin_abc",
+            &bound_to("linear", "sha256:aa"),
+        );
+        put(
+            &store,
+            "other-token",
+            "oth_abc",
+            &bound_to("linear", "sha256:aa"),
+        );
+        let wanted = ConfiguredCredentials {
+            names: BTreeSet::from(["linear-token".to_string(), "other-token".to_string()]),
+            oauth: BTreeSet::new(),
+            uses: uses(&[
+                ("linear-token", "linear", Some("sha256:aa")),
+                ("linear-token", "evil", Some("sha256:ee")),
+                ("other-token", "linear", Some("sha256:changed")),
+                ("other-token", "unsigned", None),
+            ]),
+        };
+        let log = wirken_audit::SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap();
+        let (handoff, handed) = mcp_proxy_handoff(
+            Some(&std::sync::Mutex::new(store)),
+            &wanted,
+            "t",
+            &wirken_gateway::leak::LeakMatcher::new(),
+            Some(&log),
+        );
+        assert_eq!(handed, BTreeSet::from(["linear-token".to_string()]));
+        let entries = handoff.into_entries();
+        assert!(!entries.contains_key("other-token"));
+        let pins: serde_json::Value =
+            serde_json::from_str(entries[SERVERS_ENTRY].expose()).unwrap();
+        assert_eq!(
+            pins,
+            serde_json::json!({"linear-token": [{"server": "linear", "entry": "sha256:aa"}]})
+        );
+
+        let handle = log.handle_for(SessionId::new(
+            wirken_audit::CREDENTIALS_SESSION.to_string(),
+        ));
+        let refused: Vec<(String, String)> = log
+            .get_since(&handle, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.event {
+                wirken_audit::SessionEvent::CredentialDestinationRefused {
+                    credential,
+                    named_by,
+                    ..
+                } => Some((credential, named_by)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refused,
+            vec![
+                (
+                    "linear-token".to_string(),
+                    "mcp.json entry evil".to_string()
+                ),
+                (
+                    "other-token".to_string(),
+                    "mcp.json entry linear".to_string()
+                ),
+                (
+                    "other-token".to_string(),
+                    "mcp.json entry unsigned".to_string()
+                ),
+            ]
         );
     }
 }

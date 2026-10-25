@@ -14,7 +14,7 @@
 //! life: when that closes, the gateway is gone, however it went, and the
 //! proxy stops its servers and exits.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,6 +32,17 @@ use crate::oauth::OAuthCredential;
 /// under this name, so the proxy can take it as the token.
 pub const GATEWAY_TOKEN_ENTRY: &str = "wirken:mcp-refresh-token";
 
+/// The hand-off entry holding, as JSON, the server entries each
+/// credential may be resolved for: `{name: [{server, entry}]}`.
+pub const SERVERS_ENTRY: &str = "wirken:mcp-servers";
+
+/// An MCP server entry: its name and [`crate::mcp_signing::entry_digest`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ServerPin {
+    pub server: String,
+    pub entry: String,
+}
+
 /// Environment variable naming the gateway's refresh socket.
 pub const GATEWAY_SOCKET_ENV: &str = "WIRKEN_MCP_GATEWAY_SOCKET";
 
@@ -43,6 +54,9 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct ProxyCredentials {
     values: Mutex<HashMap<String, VaultSecret>>,
     gateway: Option<GatewayLink>,
+    /// The entries each credential may be resolved for. `None` admits
+    /// every entry.
+    pins: Option<HashMap<String, BTreeSet<ServerPin>>>,
 }
 
 /// Shared by every auth provider and the stdio start path.
@@ -53,7 +67,41 @@ impl ProxyCredentials {
         Self {
             values: Mutex::new(values),
             gateway,
+            pins: None,
         }
+    }
+
+    /// Resolve each credential only for the entries in `pins`.
+    pub fn with_pins(mut self, pins: HashMap<String, BTreeSet<ServerPin>>) -> Self {
+        self.pins = Some(pins);
+        self
+    }
+
+    /// `name`'s value for the server entry `pin`, if the gateway handed
+    /// it over for that entry.
+    pub fn get_for(&self, pin: &ServerPin, name: &str) -> Option<VaultSecret> {
+        if let Some(pins) = &self.pins
+            && !pins.get(name).is_some_and(|p| p.contains(pin))
+        {
+            tracing::warn!(
+                credential = name,
+                server = %pin.server,
+                "credential not handed over for this server entry"
+            );
+            return None;
+        }
+        self.get(name)
+    }
+
+    /// [`Self::oauth`] for the server entry `pin`.
+    pub fn oauth_for(&self, pin: &ServerPin, name: &str) -> Result<OAuthCredential, ProxyError> {
+        if self.get_for(pin, name).is_none() {
+            return Err(ProxyError::Vault(format!(
+                "oauth credential '{name}' was not handed to the proxy for server '{}'",
+                pin.server
+            )));
+        }
+        self.oauth(name)
     }
 
     /// No credentials and no gateway, for callers that use none.
@@ -381,5 +429,51 @@ mod tests {
         assert_eq!(parsed.refresh_token, "");
         assert_eq!(parsed.expires_at, 10);
         assert_eq!(without_refresh_token("not json"), "not json");
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn a_credential_resolves_only_for_the_entries_it_was_handed_for() {
+        let pin = |server: &str, entry: &str| ServerPin {
+            server: server.into(),
+            entry: entry.into(),
+        };
+        let credentials = ProxyCredentials::new(
+            HashMap::from([("linear-token".to_string(), VaultSecret::new("lin".into()))]),
+            None,
+        )
+        .with_pins(HashMap::from([(
+            "linear-token".to_string(),
+            BTreeSet::from([pin("linear", "sha256:aa")]),
+        )]));
+        assert!(
+            credentials
+                .get_for(&pin("linear", "sha256:aa"), "linear-token")
+                .is_some()
+        );
+        assert!(
+            credentials
+                .get_for(&pin("linear", "sha256:bb"), "linear-token")
+                .is_none()
+        );
+        assert!(
+            credentials
+                .get_for(&pin("evil", "sha256:aa"), "linear-token")
+                .is_none()
+        );
+
+        let none = ProxyCredentials::new(
+            HashMap::from([("linear-token".to_string(), VaultSecret::new("lin".into()))]),
+            None,
+        )
+        .with_pins(HashMap::new());
+        assert!(
+            none.get_for(&pin("linear", "sha256:aa"), "linear-token")
+                .is_none()
+        );
     }
 }

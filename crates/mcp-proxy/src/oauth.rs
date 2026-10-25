@@ -495,8 +495,21 @@ pub fn store_oauth(
     let json = serde_json::to_string(cred)
         .map_err(|e| ProxyError::Vault(format!("serialize oauth credential: {e}")))?;
     let secret = wirken_vault::VaultSecret::new(json);
+    // A sign-in again keeps where the entry may go; it never widens it.
+    let binding = store
+        .peek(name)
+        .map(|(_, meta)| meta.binding)
+        .unwrap_or_default();
     store
-        .store(name, "oauth", &secret, None, None)
+        .store_bound(
+            name,
+            "oauth",
+            &secret,
+            None,
+            None,
+            &binding,
+            wirken_vault::default_kind(name),
+        )
         .map_err(|e| ProxyError::Vault(format!("store oauth credential '{name}': {e}")))?;
     Ok(())
 }

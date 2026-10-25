@@ -290,6 +290,42 @@ fn write_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
 /// 64-byte Ed25519 signature; the caller pairs it with the signer's
 /// public key (hex-encoded 32-byte) on the entry's `signer_key` field
 /// to produce a verifiable record.
+/// The entry's identity for a credential grant: `sha256:` and the hex
+/// of [`hash_mcp_entry`], the hash `wirken mcp sign` signs.
+pub fn entry_digest(name: &str, config: &McpServerConfig) -> String {
+    format!("sha256:{}", hex_encode(&hash_mcp_entry(name, config)))
+}
+
+/// [`entry_digest`] for an entry whose signature verifies, `None` for
+/// any other. Only a verified entry can be granted a credential.
+pub fn verified_entry_digest(name: &str, config: &McpServerConfig) -> Option<String> {
+    let (sig, key, delegation) = match config {
+        McpServerConfig::Stdio {
+            signature,
+            signer_key,
+            signer_key_delegation,
+            ..
+        }
+        | McpServerConfig::Http {
+            signature,
+            signer_key,
+            signer_key_delegation,
+            ..
+        } => (signature, signer_key, signer_key_delegation),
+    };
+    match verify_mcp_entry(
+        name,
+        config,
+        sig.as_deref(),
+        key.as_deref(),
+        delegation.as_deref(),
+        bundled_mcp_pubkey().as_ref(),
+    ) {
+        McpVerifyResult::Valid { .. } => Some(entry_digest(name, config)),
+        _ => None,
+    }
+}
+
 pub fn sign_mcp_entry(name: &str, config: &McpServerConfig, signing_key: &SigningKey) -> String {
     let hash = hash_mcp_entry(name, config);
     let sig = signing_key.sign(&hash);
