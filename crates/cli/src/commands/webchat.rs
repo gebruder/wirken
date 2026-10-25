@@ -6581,6 +6581,7 @@ mod tests {
                     expires_at: Some(stamp("2026-10-20T00:00:00Z")),
                     exec_location: None,
                     approver_display: None,
+                    channel: None,
                 },
             ),
             (
@@ -6594,6 +6595,7 @@ mod tests {
                     approved_via: Some(ApprovalSource::Sse),
                     adapter_id: Some("webchat".into()),
                     sender_id: None,
+                    channel: None,
                 },
             ),
             (
@@ -6607,6 +6609,7 @@ mod tests {
                     detected_by: GrantExpiryDetection::ToolCall,
                     adapter_id: Some("webchat".into()),
                     sender_id: None,
+                    channel: None,
                 },
             ),
             (
@@ -6615,6 +6618,7 @@ mod tests {
                     action_key: "shell:rm".into(),
                     agent_id: agent(),
                     expires_at: stamp("2026-09-19T00:00:00Z"),
+                    channel: None,
                 },
             ),
             (
@@ -7777,6 +7781,7 @@ mod tests {
                     pattern: "ls".into(),
                 },
                 "default",
+                "test",
                 "operator",
             )
             .expect("grant persists");

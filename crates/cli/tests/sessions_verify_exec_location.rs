@@ -44,6 +44,7 @@ fn write_session(data: &Path, ran: (SandboxModeLabel, SandboxRuntimeLabel)) {
                 text: TOLD.into(),
             }),
             approver_display: None,
+            channel: None,
         },
     )
     .unwrap();

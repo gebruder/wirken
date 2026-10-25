@@ -1790,6 +1790,7 @@ mod identity_tests {
             tier: None,
             expires_at: None,
             exec_location: None,
+            channel: None,
         };
         let refused = SessionEvent::PermissionApprovalRefused {
             request_id: "req-1".into(),
@@ -1870,6 +1871,7 @@ mod identity_tests {
                 revoked_by: LABEL.into(),
                 tier: None,
                 expires_at: None,
+                channel: None,
             },
             // `approved_by` on a grant and on its renewal.
             SessionEvent::PermissionApproved {
@@ -1885,6 +1887,7 @@ mod identity_tests {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
             SessionEvent::PermissionRenewed {
                 action_key: "shell:ls".into(),
@@ -1895,6 +1898,7 @@ mod identity_tests {
                 approved_via: None,
                 adapter_id: Some("slack".into()),
                 sender_id: Some("U123".into()),
+                channel: None,
             },
             // `denied_via` and `trigger` on a denial, neither of them
             // an identity either.
@@ -2124,6 +2128,7 @@ mod identity_tests {
                     expires_at: None,
                     exec_location: None,
                     approver_display: None,
+                    channel: None,
                 },
                 Some("slack"),
                 Some("U123"),
@@ -2148,6 +2153,7 @@ mod identity_tests {
                     revoked_by: "operator".into(),
                     tier: None,
                     expires_at: None,
+                    channel: None,
                 },
                 None,
                 None,
@@ -2163,6 +2169,7 @@ mod identity_tests {
                     approved_via: None,
                     adapter_id: adapter(),
                     sender_id: sender(),
+                    channel: None,
                 },
                 Some("slack"),
                 Some("U123"),
@@ -2178,6 +2185,7 @@ mod identity_tests {
                     detected_by: GrantExpiryDetection::ToolCall,
                     adapter_id: adapter(),
                     sender_id: sender(),
+                    channel: None,
                 },
                 Some("slack"),
                 Some("U123"),
@@ -2188,6 +2196,7 @@ mod identity_tests {
                     action_key: "shell:ls".into(),
                     agent_id: agent(),
                     expires_at: stamp("2026-09-19T00:00:00Z"),
+                    channel: None,
                 },
                 None,
                 None,

@@ -417,6 +417,9 @@ pub fn is_storable_approval_key(action_key: &str) -> bool {
 pub struct Approval {
     pub action_key: String,
     pub agent_id: String,
+    /// Channel the grant applies on.
+    #[serde(default)]
+    pub channel: String,
     pub approved_at: DateTime<Utc>,
     pub approved_by: String,
     pub expires_at: DateTime<Utc>,
@@ -463,11 +466,23 @@ fn canonical_agent_id(agent_id: &str) -> &str {
     agent_id.split('/').next().unwrap_or(agent_id)
 }
 
+/// The channel of a `{agent}/{channel}/{conversation}` session id.
+/// `None` for any other id, which then has no persisted grants.
+pub fn channel_of_session(session_id: &str) -> Option<&str> {
+    let mut parts = session_id.splitn(3, '/');
+    parts.next()?;
+    let channel = parts.next()?;
+    parts.next()?;
+    (!channel.is_empty()).then_some(channel)
+}
+
 /// One row the open-time sweep removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleGrant {
     pub action_key: String,
     pub agent_id: String,
+    /// Empty for a row written before grants were keyed per channel.
+    pub channel: String,
     /// The window the row carried. In the past for a lapsed grant;
     /// possibly in the future for a not-storable one, which is part
     /// of why it read as live.
@@ -487,15 +502,17 @@ pub struct SweepReport {
     pub not_storable: Vec<StaleGrant>,
     /// Storable keys whose window closed with nothing calling them.
     pub lapsed: Vec<StaleGrant>,
+    /// Rows written before grants were keyed per channel.
+    pub unscoped: Vec<StaleGrant>,
 }
 
 impl SweepReport {
     pub fn is_empty(&self) -> bool {
-        self.not_storable.is_empty() && self.lapsed.is_empty()
+        self.not_storable.is_empty() && self.lapsed.is_empty() && self.unscoped.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.not_storable.len() + self.lapsed.len()
+        self.not_storable.len() + self.lapsed.len() + self.unscoped.len()
     }
 }
 
@@ -591,16 +608,18 @@ impl PermissionStore {
                     .to_string(),
             ));
         }
-        let conn = Connection::open(db_path)?;
+        let mut conn = Connection::open(db_path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        let unscoped = drop_unscoped_grants(&mut conn)?;
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             CREATE TABLE IF NOT EXISTS approvals (
+            "CREATE TABLE IF NOT EXISTS approvals (
                  action_key TEXT NOT NULL,
                  agent_id TEXT NOT NULL,
+                 channel TEXT NOT NULL,
                  approved_at TEXT NOT NULL,
                  approved_by TEXT NOT NULL,
                  expires_at TEXT NOT NULL,
-                 PRIMARY KEY (action_key, agent_id)
+                 PRIMARY KEY (action_key, agent_id, channel)
              );",
         )?;
 
@@ -612,6 +631,7 @@ impl PermissionStore {
             last_sweep: SweepReport::default(),
         };
         store.last_sweep = store.sweep_stale_grants()?;
+        store.last_sweep.unscoped = unscoped;
         Ok(store)
     }
 
@@ -684,16 +704,17 @@ impl PermissionStore {
         {
             let mut select = self
                 .conn
-                .prepare("SELECT action_key, agent_id, expires_at FROM approvals")?;
+                .prepare("SELECT action_key, agent_id, channel, expires_at FROM approvals")?;
             let rows = select.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })?;
             for row in rows {
-                let (action_key, agent_id, expires_raw) = row?;
+                let (action_key, agent_id, channel, expires_raw) = row?;
                 let expires_at = parse_dt(&expires_raw);
                 // Storability first. A row that is both unreadable
                 // and lapsed is reported as unreadable, because that
@@ -703,12 +724,14 @@ impl PermissionStore {
                     report.not_storable.push(StaleGrant {
                         action_key,
                         agent_id,
+                        channel,
                         expires_at,
                     });
                 } else if now > expires_at {
                     report.lapsed.push(StaleGrant {
                         action_key,
                         agent_id,
+                        channel,
                         expires_at,
                     });
                 }
@@ -721,10 +744,11 @@ impl PermissionStore {
 
         let tx = self.conn.transaction()?;
         {
-            let mut delete =
-                tx.prepare("DELETE FROM approvals WHERE action_key = ?1 AND agent_id = ?2")?;
+            let mut delete = tx.prepare(
+                "DELETE FROM approvals WHERE action_key = ?1 AND agent_id = ?2 AND channel = ?3",
+            )?;
             for grant in report.not_storable.iter().chain(report.lapsed.iter()) {
-                delete.execute(params![grant.action_key, grant.agent_id])?;
+                delete.execute(params![grant.action_key, grant.agent_id, grant.channel])?;
             }
         }
         tx.commit()?;
@@ -829,11 +853,22 @@ impl PermissionStore {
             });
         };
 
+        // Persisted grants are keyed on the session's channel.
+        let Some(channel) = channel_of_session(session_id) else {
+            return Ok(match tier {
+                PermissionTier::Tier1 => PermissionCheck::Allowed,
+                tier => PermissionCheck::NeedsApproval {
+                    tier,
+                    lapsed_at: None,
+                },
+            });
+        };
+
         match tier {
             PermissionTier::Tier1 => Ok(PermissionCheck::Allowed),
             PermissionTier::Tier2 => {
                 let key = action.approval_key();
-                match self.get_approval(&key, agent_id)? {
+                match self.get_approval(&key, agent_id, channel)? {
                     Some(approval) => {
                         if Utc::now() > approval.expires_at {
                             // Expired, so re-approval is needed. The
@@ -843,7 +878,7 @@ impl PermissionStore {
                             // that knows the window existed. The
                             // caller has the session handle and emits
                             // `PermissionGrantExpired`.
-                            self.revoke(&key, agent_id)?;
+                            self.revoke(&key, agent_id, channel)?;
                             Ok(PermissionCheck::NeedsApproval {
                                 tier: PermissionTier::Tier2,
                                 lapsed_at: Some(approval.expires_at),
@@ -885,9 +920,16 @@ impl PermissionStore {
         &self,
         action: &Action,
         agent_id: &str,
+        channel: &str,
         approved_by: &str,
     ) -> Result<Approval, GatewayError> {
-        self.approve_with_scope(action, agent_id, approved_by, ApprovalScope::Persisted)
+        self.approve_with_scope(
+            action,
+            agent_id,
+            channel,
+            approved_by,
+            ApprovalScope::Persisted,
+        )
     }
 
     /// Record an approval with an explicit scope. Persisted grants go
@@ -909,10 +951,17 @@ impl PermissionStore {
         &self,
         action: &Action,
         agent_id: &str,
+        channel: &str,
         approved_by: &str,
         scope: ApprovalScope,
     ) -> Result<Approval, GatewayError> {
-        self.approve_with_scope_by_key(&action.approval_key(), agent_id, approved_by, scope)
+        self.approve_with_scope_by_key(
+            &action.approval_key(),
+            agent_id,
+            channel,
+            approved_by,
+            scope,
+        )
     }
 
     /// Key-driven counterpart to [`Self::approve_with_scope`]. CLI
@@ -927,11 +976,19 @@ impl PermissionStore {
         &self,
         action_key: &str,
         agent_id: &str,
+        channel: &str,
         approved_by: &str,
         scope: ApprovalScope,
     ) -> Result<Approval, GatewayError> {
         Ok(self
-            .approve_with_scope_by_key_with_expiry(action_key, agent_id, approved_by, scope, None)?
+            .approve_with_scope_by_key_with_expiry(
+                action_key,
+                agent_id,
+                channel,
+                approved_by,
+                scope,
+                None,
+            )?
             .approval)
     }
 
@@ -948,14 +1005,19 @@ impl PermissionStore {
         &self,
         action_key: &str,
         agent_id: &str,
+        channel: &str,
         approved_by: &str,
         scope: ApprovalScope,
         expires_in_days: Option<u32>,
     ) -> Result<GrantOutcome, GatewayError> {
         match scope {
-            ApprovalScope::Persisted => {
-                self.approve_by_key_with_expiry(action_key, agent_id, approved_by, expires_in_days)
-            }
+            ApprovalScope::Persisted => self.approve_by_key_with_expiry(
+                action_key,
+                agent_id,
+                channel,
+                approved_by,
+                expires_in_days,
+            ),
             ApprovalScope::Session { session_id } => Ok(GrantOutcome {
                 approval: self.approve_session_scoped_by_key(
                     action_key,
@@ -1001,6 +1063,9 @@ impl PermissionStore {
         let approval = Approval {
             action_key: action_key.to_string(),
             agent_id: agent_id.to_string(),
+            channel: channel_of_session(&session_id)
+                .unwrap_or_default()
+                .to_string(),
             approved_at: now,
             approved_by: approved_by.to_string(),
             expires_at: DateTime::<Utc>::MAX_UTC,
@@ -1054,6 +1119,9 @@ impl PermissionStore {
         let approval = Approval {
             action_key: action_key.clone(),
             agent_id,
+            channel: channel_of_session(&session_id)
+                .unwrap_or_default()
+                .to_string(),
             approved_at,
             approved_by,
             expires_at: DateTime::<Utc>::MAX_UTC,
@@ -1083,10 +1151,11 @@ impl PermissionStore {
         &self,
         action_key: &str,
         agent_id: &str,
+        channel: &str,
         approved_by: &str,
     ) -> Result<Approval, GatewayError> {
         Ok(self
-            .approve_by_key_with_expiry(action_key, agent_id, approved_by, None)?
+            .approve_by_key_with_expiry(action_key, agent_id, channel, approved_by, None)?
             .approval)
     }
 
@@ -1113,9 +1182,16 @@ impl PermissionStore {
         &self,
         action_key: &str,
         agent_id: &str,
+        channel: &str,
         approved_by: &str,
         expires_in_days: Option<u32>,
     ) -> Result<GrantOutcome, GatewayError> {
+        if channel.is_empty() || channel.contains('/') {
+            return Err(GatewayError::Config(format!(
+                "refusing to store approval for '{action_key}': a grant needs the channel it \
+                 applies on, such as telegram, slack or terminal."
+            )));
+        }
         if !is_storable_approval_key(action_key) {
             return Err(GatewayError::Config(format!(
                 "refusing to store approval for '{action_key}': only Tier 2 action keys can be \
@@ -1142,19 +1218,28 @@ impl PermissionStore {
         // overwriting it. Same call, same `&self`, so no caller can
         // observe or interleave the two halves.
         let renewed_from = self
-            .get_approval(action_key, agent_id)?
+            .get_approval(action_key, agent_id, channel)?
             .map(|prior| prior.expires_at);
 
         self.conn.execute(
-            "INSERT OR REPLACE INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![action_key, agent_id, now.to_rfc3339(), approved_by, expires.to_rfc3339()],
+            "INSERT OR REPLACE INTO approvals
+                 (action_key, agent_id, channel, approved_at, approved_by, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                action_key,
+                agent_id,
+                channel,
+                now.to_rfc3339(),
+                approved_by,
+                expires.to_rfc3339()
+            ],
         )?;
 
         Ok(GrantOutcome {
             approval: Approval {
                 action_key: action_key.to_string(),
                 agent_id: agent_id.to_string(),
+                channel: channel.to_string(),
                 approved_at: now,
                 approved_by: approved_by.to_string(),
                 expires_at: expires,
@@ -1167,13 +1252,21 @@ impl PermissionStore {
     /// Check whether a specific `action_key` has a current (non-expired)
     /// approval for `agent_id`. Used by `list-pending` to exclude
     /// already-approved denials.
-    pub fn has_approval(&self, action_key: &str, agent_id: &str) -> Result<bool, GatewayError> {
+    pub fn has_approval(
+        &self,
+        action_key: &str,
+        agent_id: &str,
+        channel: &str,
+    ) -> Result<bool, GatewayError> {
         let agent_id = canonical_agent_id(agent_id);
-        let mut stmt = self
-            .conn
-            .prepare("SELECT expires_at FROM approvals WHERE action_key = ?1 AND agent_id = ?2")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT expires_at FROM approvals
+             WHERE action_key = ?1 AND agent_id = ?2 AND channel = ?3",
+        )?;
         let row = stmt
-            .query_row(params![action_key, agent_id], |row| row.get::<_, String>(0))
+            .query_row(params![action_key, agent_id, channel], |row| {
+                row.get::<_, String>(0)
+            })
             .optional()?;
         match row {
             None => Ok(false),
@@ -1185,8 +1278,14 @@ impl PermissionStore {
     }
 
     /// Revoke an approval.
-    pub fn revoke(&self, action_key: &str, agent_id: &str) -> Result<(), GatewayError> {
-        self.revoke_reporting(action_key, agent_id).map(|_| ())
+    pub fn revoke(
+        &self,
+        action_key: &str,
+        agent_id: &str,
+        channel: &str,
+    ) -> Result<(), GatewayError> {
+        self.revoke_reporting(action_key, agent_id, channel)
+            .map(|_| ())
     }
 
     /// [`Self::revoke`], returning the window the removed row
@@ -1200,21 +1299,23 @@ impl PermissionStore {
         &self,
         action_key: &str,
         agent_id: &str,
+        channel: &str,
     ) -> Result<Option<DateTime<Utc>>, GatewayError> {
         let agent_id = canonical_agent_id(agent_id);
         let removed: Option<DateTime<Utc>> = self
             .conn
             .query_row(
-                "SELECT expires_at FROM approvals WHERE action_key = ?1 AND agent_id = ?2",
-                params![action_key, agent_id],
+                "SELECT expires_at FROM approvals
+                 WHERE action_key = ?1 AND agent_id = ?2 AND channel = ?3",
+                params![action_key, agent_id, channel],
                 |row| row.get::<_, String>(0),
             )
             .ok()
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|d| d.with_timezone(&Utc));
         self.conn.execute(
-            "DELETE FROM approvals WHERE action_key = ?1 AND agent_id = ?2",
-            params![action_key, agent_id],
+            "DELETE FROM approvals WHERE action_key = ?1 AND agent_id = ?2 AND channel = ?3",
+            params![action_key, agent_id, channel],
         )?;
         Ok(removed)
     }
@@ -1223,7 +1324,7 @@ impl PermissionStore {
     pub fn list(&self, agent_id: &str) -> Result<Vec<Approval>, GatewayError> {
         let agent_id = canonical_agent_id(agent_id);
         let mut stmt = self.conn.prepare(
-            "SELECT action_key, agent_id, approved_at, approved_by, expires_at
+            "SELECT action_key, agent_id, channel, approved_at, approved_by, expires_at
              FROM approvals WHERE agent_id = ?1 ORDER BY approved_at DESC",
         )?;
 
@@ -1231,9 +1332,10 @@ impl PermissionStore {
             Ok(Approval {
                 action_key: row.get(0)?,
                 agent_id: row.get(1)?,
-                approved_at: parse_dt(&row.get::<_, String>(2)?),
-                approved_by: row.get(3)?,
-                expires_at: parse_dt(&row.get::<_, String>(4)?),
+                channel: row.get(2)?,
+                approved_at: parse_dt(&row.get::<_, String>(3)?),
+                approved_by: row.get(4)?,
+                expires_at: parse_dt(&row.get::<_, String>(5)?),
                 scope: ApprovalScope::Persisted,
             })
         })?;
@@ -1249,18 +1351,20 @@ impl PermissionStore {
         &self,
         action_key: &str,
         agent_id: &str,
+        channel: &str,
     ) -> Result<Option<Approval>, GatewayError> {
         let result = self.conn.query_row(
-            "SELECT action_key, agent_id, approved_at, approved_by, expires_at
-             FROM approvals WHERE action_key = ?1 AND agent_id = ?2",
-            params![action_key, agent_id],
+            "SELECT action_key, agent_id, channel, approved_at, approved_by, expires_at
+             FROM approvals WHERE action_key = ?1 AND agent_id = ?2 AND channel = ?3",
+            params![action_key, agent_id, channel],
             |row| {
                 Ok(Approval {
                     action_key: row.get(0)?,
                     agent_id: row.get(1)?,
-                    approved_at: parse_dt(&row.get::<_, String>(2)?),
-                    approved_by: row.get(3)?,
-                    expires_at: parse_dt(&row.get::<_, String>(4)?),
+                    channel: row.get(2)?,
+                    approved_at: parse_dt(&row.get::<_, String>(3)?),
+                    approved_by: row.get(4)?,
+                    expires_at: parse_dt(&row.get::<_, String>(5)?),
                     scope: ApprovalScope::Persisted,
                 })
             },
@@ -1504,6 +1608,7 @@ pub fn approve_and_log(
     store: &PermissionStore,
     action: &Action,
     agent_id: &str,
+    channel: &str,
     approved_by: &str,
     scope: ApprovalScope,
     log: &dyn wirken_audit::SessionLog,
@@ -1515,6 +1620,7 @@ pub fn approve_and_log(
         store,
         &action.approval_key(),
         agent_id,
+        channel,
         approved_by,
         scope,
         log,
@@ -1535,6 +1641,7 @@ pub fn approve_and_log_by_key(
     store: &PermissionStore,
     action_key: &str,
     agent_id: &str,
+    channel: &str,
     approved_by: &str,
     scope: ApprovalScope,
     log: &dyn wirken_audit::SessionLog,
@@ -1546,6 +1653,7 @@ pub fn approve_and_log_by_key(
         store,
         action_key,
         agent_id,
+        channel,
         approved_by,
         scope,
         log,
@@ -1568,6 +1676,7 @@ pub fn approve_and_log_by_key_with_expiry(
     store: &PermissionStore,
     action_key: &str,
     agent_id: &str,
+    channel: &str,
     approved_by: &str,
     scope: ApprovalScope,
     log: &dyn wirken_audit::SessionLog,
@@ -1579,6 +1688,7 @@ pub fn approve_and_log_by_key_with_expiry(
     let outcome = store.approve_with_scope_by_key_with_expiry(
         action_key,
         agent_id,
+        channel,
         approved_by,
         scope,
         expires_in_days,
@@ -1589,6 +1699,7 @@ pub fn approve_and_log_by_key_with_expiry(
         Some(previous_expires_at) => wirken_audit::SessionEvent::PermissionRenewed {
             action_key: approval.action_key.clone(),
             agent_id: approval.agent_id.clone(),
+            channel: Some(approval.channel.clone()),
             approved_by: approval.approved_by.clone(),
             previous_expires_at,
             expires_at: approval.expires_at,
@@ -1600,6 +1711,7 @@ pub fn approve_and_log_by_key_with_expiry(
         None => wirken_audit::SessionEvent::PermissionApproved {
             action_key: approval.action_key.clone(),
             agent_id: approval.agent_id.clone(),
+            channel: (!approval.channel.is_empty()).then(|| approval.channel.clone()),
             approved_by: approval.approved_by.clone(),
             scope: scope_kind,
             session_id,
@@ -1685,6 +1797,7 @@ pub fn emit_operator_approval(
             expires_at: None,
             exec_location: exec_location.cloned(),
             approver_display: approver_display.map(str::to_string),
+            channel: None,
         },
     )?;
     Ok(())
@@ -1747,6 +1860,7 @@ pub fn emit_permission_revoked(
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
     action_key: &str,
     agent_id: &str,
+    channel: &str,
     revoked_by: &str,
     removed_expires_at: Option<DateTime<Utc>>,
 ) -> Result<(), GatewayError> {
@@ -1756,6 +1870,7 @@ pub fn emit_permission_revoked(
         wirken_audit::SessionEvent::PermissionRevoked {
             action_key: action_key.to_string(),
             agent_id: canonical_agent_id(agent_id).to_string(),
+            channel: Some(channel.to_string()),
             revoked_by: revoked_by.to_string(),
             tier: tier_of_storable_key(action_key).map(|t| t.label().to_string()),
             expires_at: removed_expires_at,
@@ -1793,13 +1908,14 @@ pub fn emit_sweep_report(
     log: &dyn wirken_audit::SessionLog,
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
 ) -> Result<(), GatewayError> {
-    for grant in &report.not_storable {
+    for grant in report.not_storable.iter().chain(report.unscoped.iter()) {
         log.append(
             handle,
             wirken_audit::TrustLevel::System,
             wirken_audit::SessionEvent::PermissionGrantPruned {
                 action_key: grant.action_key.clone(),
                 agent_id: grant.agent_id.clone(),
+                channel: (!grant.channel.is_empty()).then(|| grant.channel.clone()),
                 expires_at: grant.expires_at,
             },
         )?;
@@ -1811,6 +1927,7 @@ pub fn emit_sweep_report(
             wirken_audit::SessionEvent::PermissionGrantExpired {
                 action_key: grant.action_key.clone(),
                 agent_id: grant.agent_id.clone(),
+                channel: (!grant.channel.is_empty()).then(|| grant.channel.clone()),
                 // No call, so no tool and no tier. The sweep reads a
                 // stored key, and recovering a typed action from one
                 // is lossy; guessing a tier to fill the field would
@@ -1825,6 +1942,37 @@ pub fn emit_sweep_report(
         )?;
     }
     Ok(())
+}
+
+/// Drop an `approvals` table from before grants were keyed per
+/// channel, returning its rows for the sweep report.
+fn drop_unscoped_grants(conn: &mut Connection) -> Result<Vec<StaleGrant>, GatewayError> {
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('approvals')")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    if columns.is_empty() || columns.iter().any(|c| c == "channel") {
+        return Ok(Vec::new());
+    }
+    let tx = conn.transaction()?;
+    let rows = tx
+        .prepare("SELECT action_key, agent_id, expires_at FROM approvals")?
+        .query_map([], |row| {
+            Ok(StaleGrant {
+                action_key: row.get(0)?,
+                agent_id: row.get(1)?,
+                channel: String::new(),
+                expires_at: parse_dt(&row.get::<_, String>(2)?),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    tx.execute_batch("DROP TABLE approvals;")?;
+    tx.commit()?;
+    tracing::info!(
+        removed = rows.len(),
+        "permissions: removed grants stored without a channel; grant them again per channel"
+    );
+    Ok(rows)
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
@@ -2024,14 +2172,14 @@ mod tier_tests {
         //    otherwise be a dead row).
         // 2. check() returns Tier 3 NeedsApproval on every call.
         let err = store
-            .approve(&shell("curl"), "default", "test-operator")
+            .approve(&shell("curl"), "default", "test", "test-operator")
             .expect_err("approve for Tier 3 shell verb must refuse");
         match err {
             GatewayError::Config(msg) => assert!(msg.contains("Tier 3"), "msg: {msg}"),
             other => panic!("expected Config error, got {other:?}"),
         }
         let result = store
-            .check(&shell("curl"), "default", Some("default"))
+            .check(&shell("curl"), "default/test/c", Some("default"))
             .unwrap();
         assert_eq!(
             result,
@@ -2055,10 +2203,11 @@ mod tier_tests {
                 "CREATE TABLE IF NOT EXISTS approvals (
                      action_key TEXT NOT NULL,
                      agent_id TEXT NOT NULL,
+                     channel TEXT NOT NULL,
                      approved_at TEXT NOT NULL,
                      approved_by TEXT NOT NULL,
                      expires_at TEXT NOT NULL,
-                     PRIMARY KEY (action_key, agent_id)
+                     PRIMARY KEY (action_key, agent_id, channel)
                  );",
             )
             .unwrap();
@@ -2070,14 +2219,14 @@ mod tier_tests {
                 "shell:cat",
             ] {
                 conn.execute(
-                    "INSERT INTO approvals VALUES (?1, 'default', '2026-01-01T00:00:00Z', 'seed', '2100-01-01T00:00:00Z')",
+                    "INSERT INTO approvals VALUES (?1, 'default', 'test', '2026-01-01T00:00:00Z', 'seed', '2100-01-01T00:00:00Z')",
                     rusqlite::params![key],
                 )
                 .unwrap();
             }
             // Also seed a non-shell approval that must survive.
             conn.execute(
-                "INSERT INTO approvals VALUES ('file:/tmp/*', 'default', '2026-01-01T00:00:00Z', 'seed', '2100-01-01T00:00:00Z')",
+                "INSERT INTO approvals VALUES ('file:/tmp/*', 'default', 'test', '2026-01-01T00:00:00Z', 'seed', '2100-01-01T00:00:00Z')",
                 [],
             )
             .unwrap();
@@ -2126,7 +2275,7 @@ mod tier_tests {
         let store = PermissionStore::open(tmp.path()).unwrap();
         // First call: no record, needs approval at Tier 2.
         let first = store
-            .check(&shell("ls"), "default", Some("default"))
+            .check(&shell("ls"), "default/test/c", Some("default"))
             .unwrap();
         assert_eq!(
             first,
@@ -2137,65 +2286,111 @@ mod tier_tests {
         );
         // Operator approves once.
         store
-            .approve(&shell("ls"), "default", "test-operator")
+            .approve(&shell("ls"), "default", "test", "test-operator")
             .unwrap();
         // Subsequent calls within the 30-day window: allowed
         // without prompting. We check two calls to mirror the user
         // behavior "prompts once then runs silently".
         assert_eq!(
             store
-                .check(&shell("ls"), "default", Some("default"))
+                .check(&shell("ls"), "default/test/c", Some("default"))
                 .unwrap(),
             PermissionCheck::Allowed
         );
         assert_eq!(
             store
-                .check(&shell("ls"), "default", Some("default"))
+                .check(&shell("ls"), "default/test/c", Some("default"))
                 .unwrap(),
             PermissionCheck::Allowed
         );
     }
 
     #[test]
-    fn approval_for_logical_agent_covers_session_scoped_check() {
-        // The agent runtime passes the full session-scoped id
-        // `{agent}/{channel}/{conversation}` into `check`. Approvals
-        // are stored per logical agent, so the check must normalize
-        // on the prefix before the first `/` or a webchat/Telegram
-        // caller would never see a stored Tier 2 approval.
+    fn a_grant_applies_on_its_own_channel_only() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
         store
-            .approve(&shell("ls"), "default", "test-operator")
+            .approve(&shell("ls"), "default", "webchat", "test-operator")
             .unwrap();
+        let check = |session: &str| store.check(&shell("ls"), session, Some("default")).unwrap();
 
-        assert_eq!(
-            store
-                .check(
-                    &shell("ls"),
-                    "default/webchat/webchat-default",
-                    Some("default")
-                )
-                .unwrap(),
-            PermissionCheck::Allowed,
-        );
-        assert_eq!(
-            store
-                .check(&shell("ls"), "default/telegram/chat-42", Some("default"))
-                .unwrap(),
-            PermissionCheck::Allowed,
-        );
-        // approve_by_key called with a session-scoped id must also
-        // normalize, so the stored row matches later checks.
-        store
-            .approve_by_key("shell:cat", "default/webchat/x", "test-operator")
+        assert_eq!(check("default/webchat/a"), PermissionCheck::Allowed);
+        assert_eq!(check("default/webchat/b"), PermissionCheck::Allowed);
+        for other in ["default/telegram/chat-42", "default/slack/C1", "default"] {
+            assert_eq!(
+                check(other),
+                PermissionCheck::NeedsApproval {
+                    tier: PermissionTier::Tier2,
+                    lapsed_at: None,
+                },
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_grant_without_a_channel_is_refused() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        for channel in ["", "slack/C1"] {
+            assert!(
+                store
+                    .approve(&shell("ls"), "default", channel, "test-operator")
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn grants_stored_without_a_channel_are_dropped_at_open_and_reported() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let conn = Connection::open(tmp.path()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE approvals (
+                     action_key TEXT NOT NULL,
+                     agent_id TEXT NOT NULL,
+                     approved_at TEXT NOT NULL,
+                     approved_by TEXT NOT NULL,
+                     expires_at TEXT NOT NULL,
+                     PRIMARY KEY (action_key, agent_id)
+                 );
+                 INSERT INTO approvals VALUES
+                     ('shell:ls', 'default', '2026-01-01T00:00:00Z', 'op', '2100-01-01T00:00:00Z');",
+            )
             .unwrap();
+        }
+        let mut store = PermissionStore::open(tmp.path()).unwrap();
+        let report = store.take_sweep_report();
+        assert_eq!(report.unscoped.len(), 1);
+        assert_eq!(report.unscoped[0].action_key, "shell:ls");
+        assert!(store.list("default").unwrap().is_empty());
         assert_eq!(
             store
-                .check(&shell("cat"), "default", Some("default"))
+                .check(&shell("ls"), "default/telegram/1", Some("default"))
                 .unwrap(),
-            PermissionCheck::Allowed,
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+                lapsed_at: None,
+            }
         );
+
+        use wirken_audit::{SessionEvent, SessionId, SessionLog as _};
+        let log_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = wirken_audit::SqliteSessionLog::open(log_tmp.path()).unwrap();
+        let handle = log.handle_for(SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()));
+        super::emit_sweep_report(&report, &log, &handle).unwrap();
+        let rows = log.get_since(&handle, 0).unwrap();
+        assert!(matches!(
+            &rows[0].event,
+            SessionEvent::PermissionGrantPruned { action_key, channel: None, .. }
+                if action_key == "shell:ls"
+        ));
+
+        // A second open finds the new table and reports nothing.
+        drop(store);
+        let mut store = PermissionStore::open(tmp.path()).unwrap();
+        assert!(store.take_sweep_report().is_empty());
     }
 
     // -----------------------------------------------------------------
@@ -2220,7 +2415,13 @@ mod tier_tests {
         // `curl` is off the Tier 2 inspection allowlist, so Tier 3.
         assert_eq!(shell("curl").tier(), PermissionTier::Tier3);
         let err = store
-            .approve_with_scope(&shell("curl"), "default", "operator", session_scope(sess))
+            .approve_with_scope(
+                &shell("curl"),
+                "default",
+                "test",
+                "operator",
+                session_scope(sess),
+            )
             .expect_err("a Tier 3 key must not be session-scopable");
         assert!(
             format!("{err}").contains("only Tier 2 action keys"),
@@ -2249,6 +2450,7 @@ mod tier_tests {
             .approve_with_scope_by_key(
                 "shell::pipeline:",
                 "default",
+                "test",
                 "operator",
                 session_scope("default/webchat/conv-1"),
             )
@@ -2280,6 +2482,7 @@ mod tier_tests {
                 Approval {
                     action_key: shell("curl").approval_key(),
                     agent_id: "default".into(),
+                    channel: "webchat".into(),
                     approved_at: Utc::now(),
                     approved_by: "planted".into(),
                     expires_at: DateTime::<Utc>::MAX_UTC,
@@ -2299,7 +2502,13 @@ mod tier_tests {
         // The Tier 2 path through the same cache still works, so the
         // gate narrowed rather than broke session scoping.
         store
-            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(sess))
+            .approve_with_scope(
+                &shell("ls"),
+                "default",
+                "test",
+                "operator",
+                session_scope(sess),
+            )
             .unwrap();
         assert_eq!(
             store.check(&shell("ls"), sess, Some("default")).unwrap(),
@@ -2314,7 +2523,13 @@ mod tier_tests {
         let session = "default/webchat/conv-1";
 
         let approval = store
-            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(session))
+            .approve_with_scope(
+                &shell("ls"),
+                "default",
+                "test",
+                "operator",
+                session_scope(session),
+            )
             .unwrap();
         // The returned Approval carries the session scope verbatim.
         assert!(approval.scope.is_session_scoped());
@@ -2347,7 +2562,13 @@ mod tier_tests {
         );
 
         store
-            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(session))
+            .approve_with_scope(
+                &shell("ls"),
+                "default",
+                "test",
+                "operator",
+                session_scope(session),
+            )
             .unwrap();
 
         // Same session id passed to check resolves to Allowed.
@@ -2370,7 +2591,13 @@ mod tier_tests {
         let other = "default/webchat/conv-2";
 
         store
-            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(granted))
+            .approve_with_scope(
+                &shell("ls"),
+                "default",
+                "test",
+                "operator",
+                session_scope(granted),
+            )
             .unwrap();
 
         // Different session id under the same logical agent: still
@@ -2388,7 +2615,7 @@ mod tier_tests {
         // fall through to the SQLite path, which is empty.
         assert_eq!(
             store
-                .check(&shell("ls"), "default", Some("default"))
+                .check(&shell("ls"), "default/test/c", Some("default"))
                 .unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
@@ -2404,16 +2631,29 @@ mod tier_tests {
         let session = "default/telegram/chat-7";
 
         store
-            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(session))
+            .approve_with_scope(
+                &shell("ls"),
+                "default",
+                "test",
+                "operator",
+                session_scope(session),
+            )
             .unwrap();
         store
-            .approve_with_scope(&shell("cat"), "default", "operator", session_scope(session))
+            .approve_with_scope(
+                &shell("cat"),
+                "default",
+                "test",
+                "operator",
+                session_scope(session),
+            )
             .unwrap();
         // Separate session must not be cleared by the targeted call.
         store
             .approve_with_scope(
                 &shell("head"),
                 "default",
+                "test",
                 "operator",
                 session_scope("default/webchat/other"),
             )
@@ -2464,17 +2704,19 @@ mod tier_tests {
         let store = PermissionStore::open(tmp.path()).unwrap();
         assert_eq!(
             store
-                .check(&shell("ls"), "default", Some("default"))
+                .check(&shell("ls"), "default/test/c", Some("default"))
                 .unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
             },
         );
-        store.approve(&shell("ls"), "default", "operator").unwrap();
+        store
+            .approve(&shell("ls"), "default", "test", "operator")
+            .unwrap();
         assert_eq!(
             store
-                .check(&shell("ls"), "default", Some("default"))
+                .check(&shell("ls"), "default/test/c", Some("default"))
                 .unwrap(),
             PermissionCheck::Allowed,
         );
@@ -2494,7 +2736,13 @@ mod tier_tests {
         let store = PermissionStore::open(tmp.path()).unwrap();
         let session = "default/webchat/conv-x";
         store
-            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(session))
+            .approve_with_scope(
+                &shell("ls"),
+                "default",
+                "test",
+                "operator",
+                session_scope(session),
+            )
             .unwrap();
 
         assert_eq!(
@@ -2523,6 +2771,7 @@ mod tier_tests {
             &store,
             &shell("ls"),
             "default",
+            "test",
             "operator",
             session_scope(session),
             &log,
@@ -2669,6 +2918,7 @@ mod tier_tests {
             &store,
             &shell("ls"),
             "default",
+            "test",
             "operator",
             ApprovalScope::Persisted,
             &log,
@@ -2718,6 +2968,7 @@ mod tier_tests {
             &store,
             "shell:ls",
             "default",
+            "test",
             "operator",
             session_scope(session),
             &log,
@@ -2832,6 +3083,7 @@ mod tier_tests {
                     expires_at: None,
                     exec_location: None,
                     approver_display: None,
+                    channel: None,
                 },
             )
             .unwrap();
@@ -2873,6 +3125,7 @@ mod tier_tests {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();
@@ -2910,6 +3163,7 @@ mod tier_tests {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();
@@ -2929,6 +3183,7 @@ mod tier_tests {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();
@@ -2951,6 +3206,7 @@ mod tier_tests {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();
@@ -2991,6 +3247,7 @@ mod tier_tests {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();
@@ -3122,7 +3379,7 @@ mod tier_tests {
         let store = PermissionStore::open_with_expiry(tmp.path(), 7).unwrap();
         let before = Utc::now();
         let approval = store
-            .approve_by_key("shell:ls", "agent-a", "operator")
+            .approve_by_key("shell:ls", "agent-a", "test", "operator")
             .unwrap();
         let window = approval.expires_at - before;
         assert!(
@@ -3140,7 +3397,7 @@ mod tier_tests {
         // Shorter than the default.
         let before = Utc::now();
         let short = store
-            .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", Some(1))
+            .approve_by_key_with_expiry("shell:ls", "agent-a", "test", "operator", Some(1))
             .unwrap();
         assert!(short.approval.expires_at - before < Duration::days(2));
 
@@ -3149,7 +3406,7 @@ mod tier_tests {
         // ask for.
         let before = Utc::now();
         let long = store
-            .approve_by_key_with_expiry("shell:cat", "agent-a", "operator", Some(90))
+            .approve_by_key_with_expiry("shell:cat", "agent-a", "test", "operator", Some(90))
             .unwrap();
         assert!(long.approval.expires_at - before > Duration::days(89));
     }
@@ -3165,7 +3422,7 @@ mod tier_tests {
         let store = PermissionStore::open(tmp.path()).unwrap();
         assert!(
             store
-                .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", Some(0))
+                .approve_by_key_with_expiry("shell:ls", "agent-a", "test", "operator", Some(0))
                 .is_err(),
             "a zero-day per-grant override has the same problem",
         );
@@ -3177,12 +3434,12 @@ mod tier_tests {
         let store = PermissionStore::open(tmp.path()).unwrap();
 
         let first = store
-            .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", Some(3))
+            .approve_by_key_with_expiry("shell:ls", "agent-a", "test", "operator", Some(3))
             .unwrap();
         assert!(first.renewed_from.is_none(), "nothing was there to replace",);
 
         let second = store
-            .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", Some(30))
+            .approve_by_key_with_expiry("shell:ls", "agent-a", "test", "operator", Some(30))
             .unwrap();
         assert_eq!(
             second.renewed_from,
@@ -3206,8 +3463,8 @@ mod tier_tests {
         store
             .conn
             .execute(
-                "INSERT INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO approvals (action_key, agent_id, channel, approved_at, approved_by, expires_at)
+                 VALUES (?1, ?2, \'test\', ?3, ?4, ?5)",
                 params![
                     "shell:ls",
                     "agent-a",
@@ -3219,7 +3476,7 @@ mod tier_tests {
             .unwrap();
 
         let outcome = store
-            .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", None)
+            .approve_by_key_with_expiry("shell:ls", "agent-a", "test", "operator", None)
             .unwrap();
         assert!(
             outcome.renewed_from.is_some(),
@@ -3238,8 +3495,8 @@ mod tier_tests {
         store
             .conn
             .execute(
-                "INSERT INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO approvals (action_key, agent_id, channel, approved_at, approved_by, expires_at)
+                 VALUES (?1, ?2, \'test\', ?3, ?4, ?5)",
                 params![
                     "shell:ls",
                     "agent-a",
@@ -3250,7 +3507,10 @@ mod tier_tests {
             )
             .unwrap();
 
-        match store.check(&action, "agent-a", Some("agent-a")).unwrap() {
+        match store
+            .check(&action, "agent-a/test/c", Some("agent-a"))
+            .unwrap()
+        {
             PermissionCheck::NeedsApproval {
                 tier,
                 lapsed_at: Some(at),
@@ -3266,7 +3526,9 @@ mod tier_tests {
         // rather than reporting the same lapse twice.
         assert!(
             matches!(
-                store.check(&action, "agent-a", Some("agent-a")).unwrap(),
+                store
+                    .check(&action, "agent-a/test/c", Some("agent-a"))
+                    .unwrap(),
                 PermissionCheck::NeedsApproval {
                     lapsed_at: None,
                     ..
@@ -3285,16 +3547,22 @@ mod tier_tests {
         };
 
         assert!(matches!(
-            store.check(&action, "agent-a", Some("agent-a")).unwrap(),
+            store
+                .check(&action, "agent-a/test/c", Some("agent-a"))
+                .unwrap(),
             PermissionCheck::NeedsApproval {
                 lapsed_at: None,
                 ..
             }
         ));
 
-        store.approve(&action, "agent-a", "operator").unwrap();
+        store
+            .approve(&action, "agent-a", "test", "operator")
+            .unwrap();
         assert_eq!(
-            store.check(&action, "agent-a", Some("agent-a")).unwrap(),
+            store
+                .check(&action, "agent-a/test/c", Some("agent-a"))
+                .unwrap(),
             PermissionCheck::Allowed,
         );
     }
@@ -3462,7 +3730,9 @@ mod tier_tests {
             assert_eq!(action.tier(), PermissionTier::Tier3, "{action} sanity");
             let key = action.approval_key();
             assert!(
-                store.approve_by_key(&key, "agent-a", "operator").is_err(),
+                store
+                    .approve_by_key(&key, "agent-a", "test", "operator")
+                    .is_err(),
                 "storing '{key}' would list a grant the gate never reads",
             );
         }
@@ -3489,6 +3759,7 @@ mod tier_tests {
             &store,
             "shell:ls",
             "agent-a",
+            "test",
             "operator",
             ApprovalScope::Persisted,
             &log,
@@ -3502,6 +3773,7 @@ mod tier_tests {
             &store,
             "shell:ls",
             "agent-a",
+            "test",
             "operator",
             ApprovalScope::Persisted,
             &log,
@@ -3558,6 +3830,7 @@ mod tier_tests {
                 &store,
                 "shell:ls",
                 "agent-a",
+                "test",
                 "operator",
                 scope.clone(),
                 &log,
@@ -3591,18 +3864,19 @@ mod tier_tests {
             "CREATE TABLE IF NOT EXISTS approvals (
                  action_key TEXT NOT NULL,
                  agent_id TEXT NOT NULL,
+                 channel TEXT NOT NULL,
                  approved_at TEXT NOT NULL,
                  approved_by TEXT NOT NULL,
                  expires_at TEXT NOT NULL,
-                 PRIMARY KEY (action_key, agent_id)
+                 PRIMARY KEY (action_key, agent_id, channel)
              );",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO approvals
-             (action_key, agent_id, approved_at, approved_by, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (action_key, agent_id, channel, approved_at, approved_by, expires_at)
+             VALUES (?1, ?2, 'test', ?3, ?4, ?5)",
             params![
                 key,
                 agent,
@@ -3750,7 +4024,9 @@ mod tier_tests {
                 action_key,
                 agent_id,
                 expires_at,
+                channel,
             } => {
+                assert_eq!(channel.as_deref(), Some("test"));
                 assert_eq!(action_key, "mcp:mcp_vendor_tool");
                 assert_eq!(agent_id, "agent-a");
                 assert!(
@@ -3801,7 +4077,9 @@ mod tier_tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
         // The parent holds a live Tier 2 shell grant.
-        store.approve(&shell("ls"), "parent", "operator").unwrap();
+        store
+            .approve(&shell("ls"), "parent", "slack", "operator")
+            .unwrap();
 
         let parent_session = "parent/slack/C1";
         let child_session = "parent/slack/C1#sub-0";
@@ -3833,7 +4111,9 @@ mod tier_tests {
     fn an_agent_with_no_id_of_its_own_gets_no_persisted_grants() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
-        store.approve(&shell("ls"), "parent", "operator").unwrap();
+        store
+            .approve(&shell("ls"), "parent", "slack", "operator")
+            .unwrap();
 
         assert_eq!(
             store
@@ -3858,7 +4138,9 @@ mod tier_tests {
     fn a_session_shaped_agent_id_finds_nothing_rather_than_reducing_to_a_prefix() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
-        store.approve(&shell("ls"), "parent", "operator").unwrap();
+        store
+            .approve(&shell("ls"), "parent", "slack", "operator")
+            .unwrap();
 
         // The read path does not reduce. A caller that passes a
         // session id where an agent id belongs gets no grants, which
@@ -3881,7 +4163,7 @@ mod tier_tests {
         let store = PermissionStore::open(tmp.path()).unwrap();
         // Only the child is granted.
         store
-            .approve(&shell("ls"), "researcher", "operator")
+            .approve(&shell("ls"), "researcher", "slack", "operator")
             .unwrap();
 
         assert_eq!(
@@ -3912,6 +4194,7 @@ mod tier_tests {
             .approve_with_scope(
                 &shell("ls"),
                 "parent",
+                "test",
                 "operator",
                 session_scope(parent_session),
             )

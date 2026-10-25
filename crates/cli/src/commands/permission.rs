@@ -308,12 +308,13 @@ pub async fn list(agent: &str) -> Result<()> {
     println!("  Permissions for agent '{agent}':");
     println!();
     println!(
-        "  {:30}  {:10}  {:12}  {:20}  EXPIRES AT / SESSION",
-        "ACTION", "SCOPE", "APPROVED BY", "APPROVED AT"
+        "  {:30}  {:12}  {:10}  {:12}  {:20}  EXPIRES AT / SESSION",
+        "ACTION", "CHANNEL", "SCOPE", "APPROVED BY", "APPROVED AT"
     );
     println!(
-        "  {}  {}  {}  {}  {}",
+        "  {}  {}  {}  {}  {}  {}",
         "─".repeat(30),
+        "─".repeat(12),
         "─".repeat(10),
         "─".repeat(12),
         "─".repeat(20),
@@ -322,8 +323,9 @@ pub async fn list(agent: &str) -> Result<()> {
 
     for approval in &persisted {
         println!(
-            "  {:30}  {:10}  {:12}  {:20}  {}",
+            "  {:30}  {:12}  {:10}  {:12}  {:20}  {}",
             approval.action_key,
+            approval.channel,
             "persisted",
             approval.approved_by,
             approval.approved_at.format("%Y-%m-%d %H:%M:%S"),
@@ -332,8 +334,9 @@ pub async fn list(agent: &str) -> Result<()> {
     }
     for grant in &session_scoped {
         println!(
-            "  {:30}  {:10}  {:12}  {:20}  {}",
+            "  {:30}  {:12}  {:10}  {:12}  {:20}  {}",
             grant.action_key,
+            wirken_gateway::permissions::channel_of_session(&grant.session_id).unwrap_or("-"),
             "session",
             grant.approved_by,
             grant.approved_at.format("%Y-%m-%d %H:%M:%S"),
@@ -350,14 +353,14 @@ pub async fn list(agent: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn revoke(key: &str, agent: &str) -> Result<()> {
+pub async fn revoke(key: &str, agent: &str, channel: &str) -> Result<()> {
     let cfg = config();
     let store = open_permission_store(&cfg)?;
 
     // Read the window before the DELETE: afterwards there is nothing
     // left to say how much of the grant was cut short.
     let removed = store
-        .revoke_reporting(key, agent)
+        .revoke_reporting(key, agent, channel)
         .context(format!("Failed to revoke permission '{key}'"))?;
 
     let log = open_signed_session_log(&cfg)?;
@@ -367,6 +370,7 @@ pub async fn revoke(key: &str, agent: &str) -> Result<()> {
         &handle,
         key,
         agent,
+        channel,
         &local_operator(),
         removed,
     )
@@ -375,12 +379,12 @@ pub async fn revoke(key: &str, agent: &str) -> Result<()> {
 
     match removed {
         Some(until) => println!(
-            "  Permission '{key}' revoked for agent '{agent}' (its window ran to {}).",
+            "  Permission '{key}' revoked for agent '{agent}' on {channel} (its window ran to {}).",
             until.format("%Y-%m-%d %H:%M:%S UTC")
         ),
-        None => {
-            println!("  Permission '{key}' was not granted for agent '{agent}'; nothing to revoke.")
-        }
+        None => println!(
+            "  Permission '{key}' was not granted for agent '{agent}' on {channel}; nothing to revoke."
+        ),
     }
     Ok(())
 }
@@ -408,9 +412,23 @@ pub async fn revoke(key: &str, agent: &str) -> Result<()> {
 pub async fn approve(
     key: &str,
     agent: &str,
+    channel: Option<&str>,
     session: Option<&str>,
     expires_in_days: Option<u32>,
 ) -> Result<()> {
+    let channel = match (channel, session) {
+        (Some(c), None) => c.to_string(),
+        (None, Some(s)) => wirken_gateway::permissions::channel_of_session(s)
+            .with_context(|| format!("'{s}' is not an {{agent}}/{{channel}}/{{conversation}} id"))?
+            .to_string(),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--channel and --session are exclusive: a session names its channel")
+        }
+        (None, None) => anyhow::bail!(
+            "a grant applies on one channel: pass --channel (for example telegram, slack \
+             or terminal), or --session for a single session"
+        ),
+    };
     let cfg = config();
     let store = open_permission_store(&cfg)?;
     let log = open_signed_session_log(&cfg)?;
@@ -423,6 +441,7 @@ pub async fn approve(
                 &store,
                 key,
                 agent,
+                &channel,
                 &operator,
                 ApprovalScope::Persisted,
                 log.as_ref(),
@@ -434,9 +453,10 @@ pub async fn approve(
             .context(format!("Failed to approve permission '{key}'"))?;
             seal_operator_lane(log.as_ref(), OPERATOR_PERMISSIONS_SESSION);
             println!(
-                "  Approved '{}' for agent '{}' until {}.",
+                "  Approved '{}' for agent '{}' on {} until {}.",
                 approval.action_key,
                 approval.agent_id,
+                approval.channel,
                 approval.expires_at.format("%Y-%m-%d %H:%M:%S UTC"),
             );
         }
@@ -456,6 +476,7 @@ pub async fn approve(
                 &store,
                 key,
                 agent,
+                &channel,
                 &operator,
                 scope,
                 log.as_ref(),
@@ -486,16 +507,22 @@ pub async fn list_pending(agent: &str) -> Result<()> {
 
     let denials = log.find_permission_denials(agent);
 
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
     let mut pending: Vec<_> = Vec::new();
     for rec in denials {
-        if !seen.insert(rec.action_key.clone()) {
+        let channel = wirken_gateway::permissions::channel_of_session(&rec.session_id)
+            .unwrap_or("-")
+            .to_string();
+        if !seen.insert((rec.action_key.clone(), channel.clone())) {
             continue;
         }
-        if perms.has_approval(&rec.action_key, agent).unwrap_or(false) {
+        if perms
+            .has_approval(&rec.action_key, agent, &channel)
+            .unwrap_or(false)
+        {
             continue;
         }
-        pending.push(rec);
+        pending.push((rec, channel));
     }
 
     if pending.is_empty() {
@@ -506,26 +533,30 @@ pub async fn list_pending(agent: &str) -> Result<()> {
     println!("  Pending approvals for agent '{agent}':");
     println!();
     println!(
-        "  {:30}  {:6}  {:20}  TOOL",
-        "ACTION KEY", "TIER", "LAST SEEN",
+        "  {:30}  {:12}  {:6}  {:20}  TOOL",
+        "ACTION KEY", "CHANNEL", "TIER", "LAST SEEN",
     );
     println!(
-        "  {}  {}  {}  {}",
+        "  {}  {}  {}  {}  {}",
         "─".repeat(30),
+        "─".repeat(12),
         "─".repeat(6),
         "─".repeat(20),
         "─".repeat(8),
     );
-    for rec in &pending {
+    for (rec, channel) in &pending {
         let ts_short = rec.ts.get(..19).unwrap_or(rec.ts.as_str());
         let tier_label = rec.tier.as_deref().unwrap_or("-");
         println!(
-            "  {:30}  {:6}  {:20}  {}",
-            rec.action_key, tier_label, ts_short, rec.tool,
+            "  {:30}  {:12}  {:6}  {:20}  {}",
+            rec.action_key, channel, tier_label, ts_short, rec.tool,
         );
     }
     println!();
-    println!("  Approve one with: wirken permissions approve <ACTION KEY> --agent {agent}");
+    println!(
+        "  Approve one with: wirken permissions approve <ACTION KEY> --agent {agent} \
+         --channel <CHANNEL>"
+    );
     Ok(())
 }
 

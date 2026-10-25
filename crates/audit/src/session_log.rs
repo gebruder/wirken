@@ -1025,6 +1025,10 @@ pub enum SessionEvent {
     PermissionApproved {
         action_key: String,
         agent_id: String,
+        /// Channel the grant is keyed on. `None` for a one-shot approval
+        /// and for rows written before 3.0.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         approved_by: String,
         /// Unverified display name of who approved.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1193,6 +1197,10 @@ pub enum SessionEvent {
     PermissionRevoked {
         action_key: String,
         agent_id: String,
+        /// Channel the grant is keyed on. `None` for a one-shot approval
+        /// and for rows written before 3.0.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         /// Who asked. The local operator for a CLI revoke.
         revoked_by: String,
         /// Tier the revoked action resolves to.
@@ -1225,6 +1233,10 @@ pub enum SessionEvent {
     PermissionRenewed {
         action_key: String,
         agent_id: String,
+        /// Channel the grant is keyed on. `None` for a one-shot approval
+        /// and for rows written before 3.0.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         approved_by: String,
         /// Expiry the replaced row carried. Serializes RFC3339.
         previous_expires_at: DateTime<Utc>,
@@ -1258,6 +1270,10 @@ pub enum SessionEvent {
     PermissionGrantExpired {
         action_key: String,
         agent_id: String,
+        /// Channel the grant is keyed on. `None` for a one-shot approval
+        /// and for rows written before 3.0.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         /// Tool whose call consulted the lapsed grant. `None` when
         /// the sweep found it, because no call was involved.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1301,6 +1317,10 @@ pub enum SessionEvent {
     PermissionGrantPruned {
         action_key: String,
         agent_id: String,
+        /// Channel the grant is keyed on. `None` for a one-shot approval
+        /// and for rows written before 3.0.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         /// Expiry the dropped row carried, past or future. Recorded
         /// because it is what the operator would have seen listed.
         expires_at: DateTime<Utc>,

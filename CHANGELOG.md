@@ -23,6 +23,12 @@ Revisited when both move to p256/p384 0.14.
   `DecidedBy` column. **For wirken-siem:** read `approver_display` for the
   name, and add a `DecidedBy` string column to the `Custom-WirkenSession_CL`
   DCR stream and table.
+- A persisted Tier 2 grant is keyed on agent and channel, and applies only on
+  that channel. `wirken permissions approve` takes `--channel` (or
+  `--session`), and `revoke` takes `--channel`. **Operator action:** grants
+  made before this release are removed at first start, each with a
+  `permission_grant_pruned` row; grant them again per channel. **For
+  wirken-siem:** permission rows gain an optional `channel`.
 
 ### Fixed
 

@@ -500,6 +500,10 @@ enum PermissionCommands {
         /// Agent ID
         #[arg(long, default_value = "default")]
         agent: String,
+        /// Channel the persisted grant applies on, such as telegram,
+        /// slack or terminal.
+        #[arg(long)]
+        channel: Option<String>,
         /// Scope the grant to a single agent session. Pass the
         /// full session id (`{agent}/{channel}/{conversation}`).
         /// Without this flag the approval is persisted.
@@ -518,6 +522,9 @@ enum PermissionCommands {
         /// Agent ID
         #[arg(long, default_value = "default")]
         agent: String,
+        /// Channel the grant applies on
+        #[arg(long)]
+        channel: String,
     },
     /// Show permission denials that have no current approval
     ListPending {
@@ -1525,15 +1532,24 @@ async fn main() -> Result<()> {
             PermissionCommands::Approve {
                 key,
                 agent,
+                channel,
                 session,
                 expires_in_days,
             } => {
-                commands::permission::approve(&key, &agent, session.as_deref(), expires_in_days)
-                    .await
+                commands::permission::approve(
+                    &key,
+                    &agent,
+                    channel.as_deref(),
+                    session.as_deref(),
+                    expires_in_days,
+                )
+                .await
             }
-            PermissionCommands::Revoke { key, agent } => {
-                commands::permission::revoke(&key, &agent).await
-            }
+            PermissionCommands::Revoke {
+                key,
+                agent,
+                channel,
+            } => commands::permission::revoke(&key, &agent, &channel).await,
             PermissionCommands::Pending(cmd) => match cmd {
                 PendingCommands::List => commands::permission::pending_list().await,
                 PendingCommands::Show { request_id } => {

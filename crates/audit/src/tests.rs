@@ -1458,6 +1458,7 @@ mod session {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();
@@ -3385,6 +3386,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             expires_at: None,
             exec_location: None,
             approver_display: None,
+            channel: None,
         },
         SessionEvent::PermissionRevoked {
             action_key: String::new(),
@@ -3392,6 +3394,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             revoked_by: String::new(),
             tier: None,
             expires_at: None,
+            channel: None,
         },
         SessionEvent::PermissionApprovalRefused {
             request_id: String::new(),
@@ -3438,6 +3441,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             approved_via: None,
             adapter_id: None,
             sender_id: None,
+            channel: None,
         },
         SessionEvent::PermissionGrantExpired {
             action_key: String::new(),
@@ -3448,11 +3452,13 @@ fn every_session_event() -> Vec<SessionEvent> {
             detected_by: GrantExpiryDetection::ToolCall,
             adapter_id: None,
             sender_id: None,
+            channel: None,
         },
         SessionEvent::PermissionGrantPruned {
             action_key: String::new(),
             agent_id: String::new(),
             expires_at: Utc::now(),
+            channel: None,
         },
         SessionEvent::SubagentSessionBound {
             agent_id: String::new(),
@@ -4317,6 +4323,7 @@ fn legacy_view_projects_native_session_payloads_into_detail() {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();

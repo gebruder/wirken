@@ -3111,6 +3111,7 @@ mod subagent {
                     pattern: "ls".into(),
                 },
                 "child",
+                "test",
                 "test-operator",
             )
             .unwrap();
@@ -3139,7 +3140,7 @@ mod subagent {
         let tmp = TempDir::new().unwrap();
         let log = make_log();
         let mut agent = Agent::new(
-            "lapsed".into(),
+            "lapsed/test/c".into(),
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
             None,
@@ -3164,8 +3165,8 @@ mod subagent {
         let expired_at = chrono::Utc::now() - chrono::Duration::hours(1);
         let conn = rusqlite::Connection::open(&perm_path).unwrap();
         conn.execute(
-            "INSERT INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO approvals (action_key, agent_id, channel, approved_at, approved_by, expires_at)
+             VALUES (?1, ?2, 'test', ?3, ?4, ?5)",
             params![
                 "shell:ls",
                 "lapsed",
@@ -3388,6 +3389,7 @@ mod subagent {
                     pattern: "ls".into(),
                 },
                 "parent",
+                "slack",
                 "test-operator",
             )
             .unwrap();
@@ -5422,7 +5424,7 @@ fn tool_to_action_pipeline_sentinel_cannot_be_pre_approved() {
         pattern: ":pipeline:".into(),
     };
     let err = store
-        .approve(&action, "default", "test-operator")
+        .approve(&action, "default", "test", "test-operator")
         .expect_err("approve for pipeline sentinel must refuse");
     assert!(
         format!("{err:?}").contains("Tier 3"),
@@ -13848,6 +13850,7 @@ mod exec_location_disagreements {
                 text: text.into(),
             }),
             approver_display: None,
+            channel: None,
         }
     }
 

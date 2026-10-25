@@ -67,6 +67,7 @@ fn an_operator_grant_lands_on_the_lane_and_verifies() {
         &f.store,
         "shell:ls",
         "default",
+        "test",
         "davi",
         ApprovalScope::Persisted,
         f.log.as_ref(),
@@ -127,12 +128,12 @@ fn an_operator_revoke_records_the_window_it_cut_short() {
     let handle = lane(f.log.as_ref());
     let approval = f
         .store
-        .approve_by_key("shell:cat", "default", "davi")
+        .approve_by_key("shell:cat", "default", "test", "davi")
         .expect("granted");
 
     let removed = f
         .store
-        .revoke_reporting("shell:cat", "default")
+        .revoke_reporting("shell:cat", "default", "test")
         .expect("revoke runs");
     assert_eq!(removed, Some(approval.expires_at), "the window is reported");
 
@@ -141,6 +142,7 @@ fn an_operator_revoke_records_the_window_it_cut_short() {
         &handle,
         "shell:cat",
         "default",
+        "test",
         "davi",
         removed,
     )
@@ -187,7 +189,7 @@ fn revoking_a_key_that_was_never_granted_is_still_recorded() {
 
     let removed = f
         .store
-        .revoke_reporting("shell:head", "default")
+        .revoke_reporting("shell:head", "default", "test")
         .expect("revoke runs");
     assert_eq!(removed, None, "there was no row to remove");
 
@@ -196,6 +198,7 @@ fn revoking_a_key_that_was_never_granted_is_still_recorded() {
         &handle,
         "shell:head",
         "default",
+        "test",
         "davi",
         removed,
     )

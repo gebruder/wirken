@@ -95,7 +95,7 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
 
     // Operator approves once for the agent.
     store
-        .approve(&ls, agent_id, "test-operator")
+        .approve(&ls, agent_id, "telegram", "test-operator")
         .expect("approve");
 
     // Sender B (different sender, same agent + channel + conv).
@@ -112,17 +112,23 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
          approval (Wirken's documented model)",
     );
 
-    // Cross-conversation check: the same agent on a different
-    // channel/conversation also sees the approval. This pins the
-    // canonicalization at permissions.rs:174.
+    // Another conversation on the same channel sees the grant;
+    // another channel does not.
+    assert_eq!(
+        store
+            .check(&ls, "default/telegram/chat-2", Some("default"))
+            .expect("check"),
+        PermissionCheck::Allowed,
+    );
     assert_eq!(
         store
             .check(&ls, "default/slack/C9", Some("default"))
             .expect("check"),
-        PermissionCheck::Allowed,
-        "approval for the logical agent applies across all sessions \
-         scoped to that agent (canonical_agent_id at \
-         crates/gateway/src/permissions.rs:174)",
+        PermissionCheck::NeedsApproval {
+            tier: PermissionTier::Tier2,
+            lapsed_at: None,
+        },
+        "a grant applies on its own channel only",
     );
 
     // Tier 3 actions never become 'Allowed', regardless of which
@@ -143,7 +149,7 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
     // And Tier 3 cannot be pre-approved
     // (`crates/gateway/src/permissions.rs:329-337`).
     let err = store
-        .approve(&curl, agent_id, "test-operator")
+        .approve(&curl, agent_id, "test", "test-operator")
         .expect_err("approve must refuse Tier 3");
     let msg = format!("{err}");
     assert!(
@@ -177,6 +183,7 @@ fn q1_concurrent_checks_serialize_through_store_mutex() {
                 pattern: "ls".into(),
             },
             "default",
+            "ch",
             "test-operator",
         )
         .expect("approve");

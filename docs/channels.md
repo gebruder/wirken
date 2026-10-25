@@ -422,10 +422,10 @@ echo "+15551234567,+15559876543,group-abc-xyz=" \
   authenticated and decrypted, and its text is placed into an LLM prompt. The
   transport is sound; the application layer above it is a classic
   prompt-injection surface.
-- **Pre-existing Tier 2 approvals apply.** An `exec` approval granted earlier
-  through Telegram or the CLI applies to an allowlisted Signal sender without
-  prompting. Review `wirken permissions list --agent <id>` before putting this
-  adapter in front of an agent.
+- **Tier 2 approvals on Signal apply to every Signal sender.** A grant on
+  the `signal` channel covers every allowlisted Signal sender on that agent.
+  Review `wirken permissions list --agent <id>` before putting this adapter in
+  front of an agent.
 - **Injection detection is monitoring, not prevention.** Inbound Signal
   messages are scanned and flagged on the audit row; they are not blocked.
 - **Messages are not replayed across a daemon restart.** signal-cli streams

@@ -1382,6 +1382,7 @@ mod replay_tests {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();
@@ -1501,6 +1502,7 @@ mod replay_tests {
                 expires_at: None,
                 exec_location: None,
                 approver_display: None,
+                channel: None,
             },
         )
         .unwrap();

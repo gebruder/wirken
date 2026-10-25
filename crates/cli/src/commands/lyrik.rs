@@ -588,6 +588,7 @@ fn record_signoff(chain: &RunChain, summary: &str, answer: &Signoff) -> Result<u
             expires_at: None,
             exec_location: None,
             approver_display: None,
+            channel: None,
         },
         Signoff::Declined(reason) => SessionEvent::PermissionDenied {
             tool: "lyrik".to_string(),

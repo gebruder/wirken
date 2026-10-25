@@ -36,11 +36,11 @@ Edge case not handled here: a bare shell binary as argv (`bash` alone, no metach
 
 ### Where approvals live
 
-Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` for a shell exec is the canonicalized prefix, so `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation until its window closes.
+Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id, channel)`. The gate reads the channel from the session (`{agent}/{channel}/{conversation}`), so a grant on Slack does not apply on Telegram or in the terminal. The `action_key` for a shell exec is the canonicalized prefix, so `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation until its window closes.
 
 On open, `PermissionStore::sweep_stale_grants` removes every row the gate cannot act on: keys that are not storable under the current tier model (including `shell:<prefix>` rows whose prefix is no longer Tier 2 eligible, such as `shell:git`, `shell:kubectl`, `shell:make`) and grants whose window has closed. Operators see a single log line at startup counting each kind. The gate would have ignored those rows anyway; the sweep keeps `wirken permissions list` honest. See "Rows an upgrade leaves behind" below.
 
-`wirken permissions list --agent work` prints all approvals for an agent. `wirken permissions revoke <key> --agent work` removes one.
+`wirken permissions list --agent work` prints all approvals for an agent, with their channels. `wirken permissions revoke <key> --agent work --channel slack` removes one.
 
 ### Every action keys under a namespace
 
@@ -95,7 +95,7 @@ The default window is 30 days. To change it, set `default_expiry_days` in `~/.wi
 An unreadable, unparseable, or absent file means 30 days, and an unrecognised key is named in a warning and ignored rather than failing startup. A single grant can override the default in either direction:
 
 ```
-wirken permissions approve shell:ls --agent work --expires-in-days 1
+wirken permissions approve shell:ls --agent work --channel terminal --expires-in-days 1
 ```
 
 The default is what an operator gets when they say nothing, not a ceiling on what they can ask for. Zero days is refused at both levels: it stores a grant that has already expired by the time the gate reads it, which reads as a live grant in `wirken permissions list` while prompting on every call. To stop granting an action, revoke it.
@@ -111,7 +111,9 @@ The Tier 2 rule above governs writes. It does nothing about rows already in `per
 
 Both printed in `wirken permissions list` as though they were grants, which is a false floor: the list overstated what was approved.
 
-`PermissionStore::open` sweeps both, so the table is honest from the moment it opens rather than from the first call that happens to touch each key. Each removal gets an audit row (`PermissionGrantPruned` or `PermissionGrantExpired`, see below), and the CLI prints a one-line summary when a sweep removed anything. The sweep is idempotent; a second open reports nothing.
+Grants written before grants were keyed per channel are removed too, each with a `PermissionGrantPruned` row with no channel. Grant them again on each channel they should apply on.
+
+`PermissionStore::open` sweeps them, so the table is honest from the moment it opens rather than from the first call that happens to touch each key. Each removal gets an audit row (`PermissionGrantPruned` or `PermissionGrantExpired`, see below), and the CLI prints a one-line summary when a sweep removed anything. The sweep is idempotent; a second open reports nothing.
 
 ### What the chain records about a grant
 
@@ -244,7 +246,7 @@ Before anything else, the gateway checks the sender id, and the conversation id,
 
 For an admitted message, the gateway writes this to the audit log as the `actor_id` of the `message.inbound` event, with `actor_kind: user` (`AuditEvent` in `crates/audit/src/event.rs`, written by `handle_action` in `crates/cli/src/commands/run.rs`). The full event carries actor kind and id, action, target, channel, conversation id (as session), and a detail payload.
 
-Past admission, the sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id)` only. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:cat` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, until that grant's window closes. Only Tier 2 keys are stored, so this covers the allowlisted inspection verbs, `file:<path>` and `cross-conversation`; a Tier 3 verb such as `terraform` prompts on every call whoever ran it first.
+Past admission, the sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id, channel)`. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:cat` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, until that grant's window closes. Only Tier 2 keys are stored, so this covers the allowlisted inspection verbs, `file:<path>` and `cross-conversation`; a Tier 3 verb such as `terraform` prompts on every call whoever ran it first.
 
 This is a real gap if the deployment uses one shared agent across a team. Workarounds today:
 

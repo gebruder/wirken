@@ -832,6 +832,7 @@ mod tests {
             expires_at: None,
             exec_location: Some(told),
             approver_display: None,
+            channel: None,
         };
         assert!(!should_forward(&approval, &cfg));
     }

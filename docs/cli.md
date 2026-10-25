@@ -436,8 +436,8 @@ What `verify` replays and what a `tools_hash` attests:
 
 ```bash
 wirken permissions list [--agent A]
-wirken permissions approve <KEY> [--agent A] [--session ID] [--expires-in-days N]
-wirken permissions revoke <KEY> [--agent A]
+wirken permissions approve <KEY> [--agent A] (--channel C | --session ID) [--expires-in-days N]
+wirken permissions revoke <KEY> [--agent A] --channel C
 wirken permissions list-pending [--agent A]
 wirken permissions pending list
 wirken permissions pending show <REQUEST_ID>

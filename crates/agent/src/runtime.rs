@@ -4010,6 +4010,8 @@ impl Agent {
                                 detected_by: wirken_audit::GrantExpiryDetection::ToolCall,
                                 adapter_id: self.current_inbound.adapter_id.clone(),
                                 sender_id: self.current_inbound.sender_id.clone(),
+                                channel: wirken_gateway::permissions::channel_of_session(&self.id)
+                                    .map(str::to_string),
                             },
                         )?;
                     }

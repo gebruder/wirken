@@ -91,6 +91,7 @@ fn a_grant_stops_working_when_its_session_closes() {
         .approve_with_scope(
             &ls(),
             AGENT,
+            "test",
             "davi",
             ApprovalScope::Session {
                 session_id: session.clone(),
@@ -142,6 +143,7 @@ fn the_dead_entry_is_dropped_on_the_first_miss() {
         .approve_with_scope(
             &ls(),
             AGENT,
+            "test",
             "davi",
             ApprovalScope::Session {
                 session_id: session.clone(),
@@ -174,6 +176,7 @@ fn a_live_session_still_answers_from_the_cache() {
         .approve_with_scope(
             &ls(),
             AGENT,
+            "test",
             "davi",
             ApprovalScope::Session {
                 session_id: session.clone(),
@@ -210,6 +213,7 @@ fn without_a_predicate_the_cache_answers_as_before() {
         .approve_with_scope(
             &ls(),
             AGENT,
+            "test",
             "davi",
             ApprovalScope::Session {
                 session_id: session.clone(),

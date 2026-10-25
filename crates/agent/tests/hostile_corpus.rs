@@ -440,7 +440,7 @@ fn hostile_corpus_replays_to_its_expected_outcome() {
         // approval key on purpose (`shell:ls` three times) and sharing
         // an agent would let the first approval satisfy the rest.
         let agent_id = format!("corpus-agent-{}", entry.lineno);
-        let session_id = format!("corpus-session-{}", entry.lineno);
+        let session_id = format!("{agent_id}/test/{}", entry.lineno);
 
         let first = store
             .check(&action, &session_id, Some(&agent_id))
@@ -468,7 +468,7 @@ fn hostile_corpus_replays_to_its_expected_outcome() {
             // The whole of Tier 2: a grant can be written and the next
             // call is answered from it.
             store
-                .approve(&action, &agent_id, "corpus")
+                .approve(&action, &agent_id, "test", "corpus")
                 .unwrap_or_else(|e| {
                     panic!(
                         "{}",
@@ -504,7 +504,8 @@ fn hostile_corpus_replays_to_its_expected_outcome() {
                     session_id: session_id.clone(),
                 },
             ] {
-                let written = store.approve_with_scope(&action, &agent_id, "corpus", scope.clone());
+                let written =
+                    store.approve_with_scope(&action, &agent_id, "test", "corpus", scope.clone());
                 if written.is_ok() {
                     panic!(
                         "{}",

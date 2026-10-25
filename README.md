@@ -247,8 +247,9 @@ compromise impossible. The honest edges:
   [docs/channels.md](docs/channels.md#imessage-bluebubbles).
 - **Agents share the gateway's address space.** Channel adapters are separate
   processes; agents are not.
-- **Permissions are per agent, not per user.** A Tier 2 approval granted by
-  one sender applies to every sender on that agent until it expires.
+- **Permissions are per agent and channel, not per user.** A Tier 2 approval
+  granted by one sender applies to every sender on that agent and channel
+  until it expires.
 - **Escape hatches exist.** A handful of environment flags relax defaults.
   Each is documented and warns when engaged; the full inventory is in
   [docs/security-properties.md](docs/security-properties.md#documented-escape-hatches).

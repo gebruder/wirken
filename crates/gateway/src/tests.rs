@@ -324,12 +324,16 @@ fn tier1_always_allowed() {
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
     let check = perms
-        .check(&Action::WorkspaceFileAccess, "agent-1", Some("agent-1"))
+        .check(
+            &Action::WorkspaceFileAccess,
+            "agent-1/test/c",
+            Some("agent-1"),
+        )
         .unwrap();
     assert_eq!(check, PermissionCheck::Allowed);
 
     let check = perms
-        .check(&Action::WebSearch, "agent-1", Some("agent-1"))
+        .check(&Action::WebSearch, "agent-1/test/c", Some("agent-1"))
         .unwrap();
     assert_eq!(check, PermissionCheck::Allowed);
 }
@@ -343,7 +347,9 @@ fn tier2_needs_approval_first_time() {
     let action = Action::ShellExec {
         pattern: "ls".into(),
     };
-    let check = perms.check(&action, "agent-1", Some("agent-1")).unwrap();
+    let check = perms
+        .check(&action, "agent-1/test/c", Some("agent-1"))
+        .unwrap();
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
@@ -361,9 +367,13 @@ fn tier2_allowed_after_approval() {
     let action = Action::ShellExec {
         pattern: "ls".into(),
     };
-    perms.approve(&action, "agent-1", "telegram").unwrap();
+    perms
+        .approve(&action, "agent-1", "test", "telegram")
+        .unwrap();
 
-    let check = perms.check(&action, "agent-1", Some("agent-1")).unwrap();
+    let check = perms
+        .check(&action, "agent-1/test/c", Some("agent-1"))
+        .unwrap();
     assert_eq!(check, PermissionCheck::Allowed);
 }
 
@@ -375,10 +385,14 @@ fn tier2_approval_scoped_to_agent() {
     let action = Action::ShellExec {
         pattern: "ls".into(),
     };
-    perms.approve(&action, "agent-1", "telegram").unwrap();
+    perms
+        .approve(&action, "agent-1", "test", "telegram")
+        .unwrap();
 
     // Different agent — not approved
-    let check = perms.check(&action, "agent-2", Some("agent-2")).unwrap();
+    let check = perms
+        .check(&action, "agent-2/test/c", Some("agent-2"))
+        .unwrap();
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
@@ -561,7 +575,7 @@ fn tier3_always_needs_approval() {
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
     let check = perms
-        .check(&Action::CredentialAccess, "agent-1", Some("agent-1"))
+        .check(&Action::CredentialAccess, "agent-1/test/c", Some("agent-1"))
         .unwrap();
     assert_eq!(
         check,
@@ -572,7 +586,11 @@ fn tier3_always_needs_approval() {
     );
 
     let check = perms
-        .check(&Action::DestructiveFileOp, "agent-1", Some("agent-1"))
+        .check(
+            &Action::DestructiveFileOp,
+            "agent-1/test/c",
+            Some("agent-1"),
+        )
         .unwrap();
     assert_eq!(
         check,
@@ -591,11 +609,15 @@ fn revoke_approval() {
     let action = Action::ShellExec {
         pattern: "cat".into(),
     };
-    perms.approve(&action, "agent-1", "slack").unwrap();
+    perms.approve(&action, "agent-1", "test", "slack").unwrap();
 
-    perms.revoke(&action.approval_key(), "agent-1").unwrap();
+    perms
+        .revoke(&action.approval_key(), "agent-1", "test")
+        .unwrap();
 
-    let check = perms.check(&action, "agent-1", Some("agent-1")).unwrap();
+    let check = perms
+        .check(&action, "agent-1/test/c", Some("agent-1"))
+        .unwrap();
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
@@ -616,6 +638,7 @@ fn list_approvals() {
                 pattern: "ls".into(),
             },
             "agent-1",
+            "test",
             "tg",
         )
         .unwrap();
@@ -625,6 +648,7 @@ fn list_approvals() {
                 pattern: "grep".into(),
             },
             "agent-1",
+            "test",
             "tg",
         )
         .unwrap();
@@ -634,6 +658,7 @@ fn list_approvals() {
                 path: "/tmp/*".into(),
             },
             "agent-1",
+            "test",
             "dc",
         )
         .unwrap();
