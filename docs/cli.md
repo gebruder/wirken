@@ -32,10 +32,8 @@ token is made fresh at every start and written, with the port, to
 `<data_dir>/webchat.json` at mode 0600; it is never logged and never put in a
 URL. Log in with `wirken webchat open` (below). The page itself, `GET /`, holds
 no data and is served to anyone; it shows how to log in when the API answers
-401. Every response, the page, every `/api` answer and a turn's event stream,
-carries `Content-Security-Policy: frame-ancestors 'none'` and
-`X-Frame-Options: DENY`, so no other page can frame webchat and steer a click
-onto an approval.
+401. Every response carries `Content-Security-Policy: frame-ancestors 'none'`
+and `X-Frame-Options: DENY`.
 
 Every route is bound to loopback and checks the `Host` header against the
 loopback names for the bound port, which is what closes DNS rebinding. The

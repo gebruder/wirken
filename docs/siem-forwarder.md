@@ -198,20 +198,11 @@ before the typed events, `adapter.connect`, `adapter.disconnect`,
 `adapter.restart` and `adapter.restart_abandoned`, fill `AdapterId` from
 their target, which is the adapter id.
 
-`DecidedBy` is the column for who decided an approval request, and it
-holds a verified identity only: `approved_by` on a `permission_approved`
-row and `denied_by` on a `permission_denied` row someone made, which is a
-channel approver's platform user id checked against the approver
-allowlist, `operator:<key id>` from the terminal or the permissions
-socket, `webchat:<label>` for a webchat login, or a surface label such as
-`stdin` when the surface names no one. It is null on every other row and
-on a denial no one made (a policy, tier or timeout denial). The display
-name a surface supplied beside the decider (`approver_display`,
-`denier_display`), a refused approval's `caller`, a revocation's
-`revoked_by` and an import's `actor` are not verified decisions and stay
-inside `Event`. Before 3.0.0 a channel approval's `approved_by` was the
-approver's display name; a Sentinel table that stores `DecidedBy` has to
-declare it in its DCR stream and table, as `Level` does.
+`DecidedBy` holds who decided an approval request: `approved_by` on a
+`permission_approved` row, `denied_by` on a `permission_denied` row. It is
+null on every other row and on a denial no one made. Display names and other
+operator labels stay inside `Event`. A Sentinel table that stores `DecidedBy`
+declares it in its DCR stream and table, as it does `Level`.
 
 ### What the typed summary carries
 

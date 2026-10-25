@@ -102,19 +102,14 @@ what was granted and for how long without a lookup against the store:
 {"kind":"permission_approved","action_key":"shell:ls","agent_id":"default","approved_by":"operator","scope":"persisted","approved_via":{"kind":"stdin"},"adapter_id":"slack","sender_id":"U04ABCD9","tier":"tier2","expires_at":"2026-10-21T09:00:00Z"}
 ```
 
-`approved_by` is the identity the deciding surface verified: a channel
-approver's platform user id, checked against the approver allowlist;
-`operator:<key id>` from the terminal or the permissions socket;
-`webchat:<label>` for a webchat login, `webchat:bearer` for a caller with
-the session token; the surface label (`stdin`, `cli`) when the surface
-names no one; and for a grant `wirken permissions approve` writes, the
-local OS user. The display name the surface supplied beside it, which
-nothing checks, is `approver_display`. A denial someone made carries
-`denied_by` and `denier_display` in the same terms; a policy, tier or
-timeout denial carries neither. Before 3.0.0 a channel approval's
-`approved_by` was the approver's display name and denials named no one;
-the `build` on a session's `session_start` chain head says which build
-wrote its rows.
+`approved_by` is the decider's verified identity: a channel approver's
+platform user id, `operator:<key id>` from the terminal or the permissions
+socket, `webchat:<label>` or `webchat:bearer`, the surface label (`stdin`,
+`cli`) when the surface names no one, or the local OS user for a grant
+`wirken permissions approve` writes. `approver_display` is the unverified
+display name. A denial someone made carries `denied_by` and
+`denier_display`. Rows written before 3.0.0 hold the display name in
+`approved_by`; the `session_start` chain head's `build` says which.
 
 ```json
 {"kind":"permission_approved","action_key":"shell::pipeline:","agent_id":"default","approved_by":"5f1c0a3e-...","approver_display":"davi","scope":"one_shot","approved_via":{"kind":"channel_adapter","channel":"signal"},"adapter_id":"signal","sender_id":"+15550001111"}

@@ -10,205 +10,68 @@ tagged.
 
 ## [Unreleased]
 
+RUSTSEC-2026-0387 (crypto-bigint 0.5.5) is ignored in `deny.toml`: it is
+reached only through ECDSA verification on public inputs in tinfoil and sev.
+Revisited when both move to p256/p384 0.14.
+
 ### Changed
 
-- **The meaning of `permission_approved.approved_by` changes.** It is now
-  the identity the deciding surface verified: a channel approver's platform
-  user id, checked against the approver allowlist; `operator:<key id>` from
-  the terminal or the permissions socket; `webchat:<label>` for a webchat
-  login. The display name the surface supplied beside it, which anyone can
-  set, moves to its own field, `approver_display`. Before, a channel
-  approval recorded the display name in `approved_by`, so an approver could
-  appear under any name they chose, and a terminal or permissions-socket
-  approval recorded `<name> (operator key <id>)`. A denial someone made now
-  records `denied_by` and `denier_display` in the same terms; before, no
-  denial named its decider. The Sentinel typed row gains a `DecidedBy`
-  column holding `approved_by` or `denied_by` and nothing else. This is why
-  the release is 3.0.0: the audit schema version is the workspace version,
-  and an existing field changes meaning. Rows written before it keep the old
-  meaning; the `build` on each session's `session_start` chain head says
-  which build wrote them. **For wirken-siem:** a detection or workbook that
-  reads `approved_by` as a display name reads an id now, and should read
-  `approver_display` for the name; the field index gains `approver_display`,
-  `denied_by` and `denier_display`; and the `Custom-WirkenSession_CL` DCR
-  stream and table need a `DecidedBy` string column to store the new one.
-
-RUSTSEC-2026-0387 (crypto-bigint 0.5.5, constant-time arithmetic that could
-branch on secret values) is deferred and ignored in `deny.toml`. It is
-reached only through tinfoil and sev, which use p256 and p384 for ECDSA
-verification on public inputs, for an agent whose provider is `tinfoil`.
-The fix needs p256/p384 0.14, which neither sev 8.0.0 nor tinfoil-rs v0.2.2
-takes yet; it is revisited when both do.
+- `permission_approved.approved_by` is the verified identity of whoever
+  decided: a channel approver's platform user id, `operator:<key id>`, or
+  `webchat:<label>`. The display name moves to `approver_display`. Denials
+  record `denied_by` and `denier_display`. Sentinel typed rows gain a
+  `DecidedBy` column. **For wirken-siem:** read `approver_display` for the
+  name, and add a `DecidedBy` string column to the `Custom-WirkenSession_CL`
+  DCR stream and table.
 
 ### Fixed
 
 - A Signal Note to Self is forwarded without
   `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS`. Other linked-device sends still
   need it; the first one dropped in a run is logged at `warn`.
-- The iMessage adapter registers its webhook at `/api/v1/webhook` and sends the
-  BlueBubbles password as the `password` query parameter on every API call.
-  Before, it registered at `/api/v1/server/webhooks`, a route BlueBubbles
-  Server does not serve, and sent the password in the JSON body, where its
-  authentication does not read it, so by BlueBubbles' source the
-  registration, and with it the adapter's start, and every send would be
-  refused. This is read from BlueBubbles Server's source and has not been
-  run against a BlueBubbles server.
-- `wirken approvers set-chat`, `add` and `remove`, and `wirken senders add`
-  and `remove`, take an id with a leading hyphen as it is, so a Telegram
-  group's negative chat id is accepted; before, it was read as an unknown
-  flag.
-- A turn that reaches a ChatGPT plan's usage limit replies, in `wirken chat`
-  and on every adapter channel, with "Usage limit reached. Review your plan
-  or this app's limit in ChatGPT settings. Manage usage:
-  https://chatgpt.com/settings/usage". It used to get the generic
-  internal-error apology. The HTTP status, error code and request id stay in
-  the gateway log and the failed call's `llm_request_failed` row. Found by
-  Tanmay Maka (@maka-tanmay).
+- The iMessage adapter registers its webhook at `/api/v1/webhook` and sends
+  the BlueBubbles password as a query parameter. Not yet run against a
+  BlueBubbles server.
+- `wirken approvers` and `wirken senders` accept an id with a leading hyphen,
+  such as a Telegram group's chat id.
+- A turn that hits a ChatGPT plan's usage limit replies with the limit notice
+  and the Manage usage link. Found by Tanmay Maka (@maka-tanmay).
 
 ### Security
 
-- A channel approver's decision is taken only for a request raised on that
-  adapter's channel, and only from the conversation the request's prompt was
-  posted in (`adapter_decision_misplaced`,
-  `crates/cli/src/commands/run.rs`). Otherwise a `permission_approval_refused`
-  row with `wrong_channel` or `wrong_conversation` is written and the request
-  stays open, as webchat and the terminal already held. `ApprovalDecision`
-  gains `conversationId`, which every adapter fills with the chat, channel,
-  room, space or DM the press or command came from, and each pending request
-  records where its prompt was posted. Before, an approver on one adapter who
-  learned another channel's request id could resolve it, and an approver
-  could answer a Telegram or Signal prompt from any chat.
-- The gateway writes a refreshed MCP OAuth credential only if the vault
-  entry still holds the refresh token the refresh started from, checked and
-  written under the vault's write lock (`RefreshService::refresh`,
-  `crates/mcp-proxy/src/refresh_service.rs`, through
-  `CredentialStore::update_exclusive`). Otherwise the result is discarded and
-  an `mcp_credential_refresh_discarded` row says why: an entry removed during
-  the refresh stays removed, and one signed in again keeps the new sign-in,
-  which is what the proxy is answered with. Before, the write was an
-  unconditional replace, so a removal or a new sign-in made while the
-  provider call was in flight was undone, and the write reset the entry's
-  channel and host binding.
+- Inbound sender allowlist. The gateway admits a channel adapter's message
+  only if its sender, or with `--group` its conversation, is listed for that
+  channel; anything else is dropped before it reaches a session, with a
+  rate-limited `inbound_sender_refused` row. Managed with `wirken senders
+  add|remove|list|refused`; changes apply without a restart.
+  **Operator action:** every channel drops all messages until it has an
+  entry. Message the bot, find your id with `wirken senders refused
+  <channel>`, and add it with `wirken senders add <channel> <id>`.
+- Webchat requires a login. Every `/api` route takes the login cookie or the
+  session token from `webchat.json` as a bearer. `wirken webchat open
+  [--browser]` prints a one-time login link, valid for 60 seconds.
+  **Operator action:** log in with `wirken webchat open --browser` after each
+  start of `wirken run`.
 - Every webchat response carries `Content-Security-Policy: frame-ancestors
-  'none'` and `X-Frame-Options: DENY`: the page, every `/api` answer, the
-  login, a miss, and the head of a turn's event stream. Before, nothing
-  stopped another page from framing webchat and overlaying it to steer a
-  click onto an approval.
-- Every webchat `/api` route takes a credential before it does anything:
-  the cookie a login sets, or the gateway's session token as
-  `Authorization: Bearer <token>` for a non-browser caller
-  (`crates/cli/src/commands/webchat_auth.rs`). The session token, 256 bits,
-  is made at every start and written with the port to `webchat.json` at mode
-  0600; it is never logged and never put in a URL. `wirken webchat open
-  [--browser]` asks the gateway, with that token, for a one-time login token
-  and prints a login URL carrying only it; `GET /login` exchanges it once, within
-  60 seconds, for an `HttpOnly; SameSite=Strict` cookie and redirects to the
-  page. The `Host` and `Origin` checks stay, and
-  `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN` relaxes `Origin` only. A webchat decision
-  is recorded with the actor `webchat:<label>`, the login's public label, or
-  `webchat:bearer`. Before, the routes checked `Origin` and `Host` only, which
-  a non-browser client sets itself, so any local process of any user could
-  drive the default agent, approve its own tool calls, and read every
-  channel's transcripts and the imported archives.
-  **Operator action, for webchat users:** the page asks you to log in; run
-  `wirken webchat open --browser` on the gateway host, again after each
-  restart of `wirken run`. A script calling the API sends the token from
-  `webchat.json` as a bearer.
-- Every iMessage webhook must present a per-install secret
-  (`webhook_access`, `crates/adapter-imessage/src/adapter.rs`). BlueBubbles
-  posts webhooks with no authentication of its own, so the adapter registers
-  its webhook URL with a `secret` query parameter, an HMAC-SHA256 keyed by the
-  BlueBubbles server password and the same on every start, and answers 403,
-  without reading the body, to a POST without it. Before, any local process
-  could post a message as any sender into any chat.
-  **Operator action, for iMessage users:** delete the webhook an earlier
-  version registered, `http://localhost:3981/webhook` with no secret, in the
-  BlueBubbles server's webhook settings, if it is there; it is refused on
-  every message until then.
-- The gateway reads the approver allowlist and each adapter's approval
-  conversation on every decision (`ApproverRegistry`,
-  `crates/gateway/src/approver_registry.rs`), so `wirken approvers` changes
-  apply to the next one without a restart, and an approver removed while
-  `wirken run` is up is refused on the next decision with a
-  `permission_approval_refused` row. Before, the gateway read both once at
-  startup, and a removed approver could go on approving until the next
-  restart. Each `wirken approvers add`, `remove` and `set-chat` is an
-  `approver_added`, `approver_removed` or `approval_chat_set` row on the
-  signed `gateway-approvers` lane, sealed by a chain head and forwarded by
-  default; `approval_chat_set` names the previous and the new conversation
-  id. An add or a set-chat whose row cannot be written is undone. Every `wirken approvers` subcommand refuses inside a Wirken `exec`
-  and records an `operator_command_refused` row on that lane.
-- The gateway admits an inbound message from a channel adapter only when its
-  sender, or the group it arrived in, is on the sender allowlist for that
-  channel (`InboundGate::check`, `crates/gateway/src/sender_registry.rs`).
-  The check runs on every adapter's messages, after the channel match and
-  before the injection scan, the `message.inbound` row, the session and the
-  route, so a message from anyone else reaches none of them and no agent. A
-  channel with no entries admits nobody. The allowlist lives in
-  `senders.db` and is read on every message: `wirken senders add|remove`
-  applies to the next message with no restart. A sender entry matches the
-  platform sender id exactly; a `--group` entry matches the conversation id
-  and admits every member of it; an entry applies on its own channel only.
-  Before, the gateway routed every message on a bound channel to the agent,
-  so anyone who could reach the bot on Telegram, WhatsApp or iMessage, and
-  any member of the workspace, tenant, guild, room or space on the others,
-  drove it with the operator's Tier 1 tools, the agent's shared workspace and
-  channel memory, and any Tier 2 grants stored for it. Signal's adapter-side
-  allowlist stays, and a Signal message now passes both. The terminal and
-  webchat are not channels the allowlist applies to.
-  **Operator action, for every channel adapter:** after the upgrade every
-  channel drops all inbound messages until it has an entry, and `wirken run`
-  warns at startup for each bound channel without one. Send the bot a
-  message, read the ids it was dropped with in `wirken senders refused
-  <channel>`, and admit them with `wirken senders add <channel> <sender-id>`,
-  or `--group` with the conversation id. A Signal deployment does the same:
-  its adapter-side `signal-allowed-senders` is unchanged and not copied.
-  Each drop is an `inbound_sender_refused` row on the `gateway-inbound` lane
-  carrying the channel, adapter, sender and conversation ids and never the
-  text, forwarded by default at `warn`; rows are limited to one per sender
-  per minute and thirty per minute across all senders, and each row counts
-  the drops written without one since the previous. Each allowlist change is
-  an `inbound_sender_added` or `inbound_sender_removed` row on the signed
-  `gateway-senders` lane, sealed by a chain head; an add whose row cannot be
-  written is undone. `wirken senders` refuses inside a Wirken `exec`, every
-  subcommand alike, and each refusal is an `operator_command_refused` row on
-  `gateway-senders`, sealed and forwarded by default.
-  `tests/hostile/corpus.jsonl` gains inbound lines replayed through the
-  check: an unknown sender beside an allowed one, a sender id equal to an
-  allowed group, a conversation id equal to an allowed sender, an allowed id
-  on another channel, and a case variant of an allowed id.
-- Every host-side child process starts from one minimal environment. A
-  process Wirken starts outside a container, an adapter, the MCP proxy, a
-  stdio MCP server with its sandbox off, a host `exec` under `mode: off`,
-  and the `git`, `semgrep`, `curl`, `crontab`, `systemctl` and `launchctl`
-  invocations the CLI makes, now begins with its environment cleared and
-  `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TERM` and `TMPDIR`
-  put back (`child_env::minimal`, `crates/sandbox/src/child_env.rs`; the
-  Windows list is the system locations a shell needs), and is given, by
-  name at its spawn, only what it reads: an adapter its data directory,
-  socket, log filter, the proxy and CA variables an HTTP client honours,
-  and the per-channel port and Signal settings; the MCP proxy the same plus
-  its signing bypass, sidecar override, runtime directory and the Docker
-  connection variables; `git` three `GIT_*` settings that keep it off the
-  network; `semgrep` its two metrics settings; `curl` the proxy and CA
-  variables; `systemctl` the session-bus pair. Before, `wirken lyrik`
-  spawned `git` with only `GIT_*` removed and `semgrep` with the whole
-  environment, so both inherited `WIRKEN_VAULT_PASSPHRASE` when the
-  operator had exported it, and adapters and the proxy inherited every
-  other variable the gateway was started with. A test per spawn site shows
-  that a passphrase, a `WIRKEN_*` setting and a sentinel secret set on the
-  parent side do not reach the child.
-- `wirken update --check` refuses inside a Wirken `exec`. The `WIRKEN_EXEC`
-  marker that an install and `--rollback` refused on is now read first for
-  every form of the command (`refuse_inside_exec`,
-  `crates/cli/src/commands/update/mod.rs`), so a model cannot fetch a
-  manifest or advance the freeze record in `update/manifest-state.json`
-  through an approved command. Each refusal writes an `update_refused` row
-  on the `gateway-install` lane, naming the form asked for (`check`,
-  `install`, `rollback`) and the reason `inside_exec`, sealed with a chain
-  head and forwarded by default; before, no refusal was recorded. Outside
-  an `exec`, `--check` still records a manifest issued later than the one
-  on file and otherwise leaves the file byte for byte as it was.
+  'none'` and `X-Frame-Options: DENY`.
+- iMessage webhooks must carry a per-install secret in the registered URL.
+  **Operator action:** delete any old `http://localhost:3981/webhook`
+  registration in BlueBubbles' webhook settings.
+- A channel approver's decision counts only for a request on that channel,
+  from the conversation the prompt was posted in. `ApprovalDecision` gains
+  `conversationId`.
+- The approver allowlist is read on every decision, so `wirken approvers`
+  changes apply without a restart. `add`, `remove` and `set-chat` write signed
+  rows on the `gateway-approvers` lane.
+- `wirken senders` and `wirken approvers` refuse inside a Wirken `exec` and
+  record the refusal.
+- A refreshed MCP OAuth credential is written only if the vault entry still
+  holds the token the refresh started from; otherwise it is discarded with an
+  `mcp_credential_refresh_discarded` row.
+- Every host-side child process starts from a minimal environment and gets
+  only the variables it reads, by name.
+- `wirken update --check` refuses inside a Wirken `exec`, like an install and
+  `--rollback`, and records an `update_refused` row.
 
 ## [2.5.1] - 2026-10-23
 
