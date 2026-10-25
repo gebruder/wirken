@@ -77,6 +77,12 @@ fetcher injects them into the `X-Api-Key` header at request time. Keys never
 cross the agent or LLM boundary; only the parsed `FetchedItem` flows
 downstream.
 
+A key is stored allowed to the endpoint hosts of the sources that use it.
+A run whose `sources.toml` sends a key to any other host is refused, with a
+`credential_destination_refused` row and the `wirken credentials grant
+... --host` command that would allow it
+([credentials.md](credentials.md#where-a-credential-may-go)).
+
 A scheduled run has nobody to prompt, so it reads the vault passphrase from
 `WIRKEN_VAULT_PASSPHRASE` and never asks. Credential names are readable
 without the passphrase, which is how the run tells two cases apart: a source

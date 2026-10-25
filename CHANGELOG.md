@@ -43,6 +43,8 @@ Revisited when both move to p256/p384 0.14.
   is refused. **For wirken-siem:** new kinds `credential_destination_refused`,
   `credential_destination_granted`, `credential_destination_revoked`,
   `credential_handed_out`, `vault_migrated`.
+- A Zirkel source key is stored allowed to the hosts of the sources that use
+  it; a run whose `sources.toml` sends it elsewhere is refused.
 - Skills load only under a registry root by default. The project root from
   `skills/REGISTRY-ROOT.pub` is compiled in; `wirken skills trust-root`
   replaces it. Install and load check the same root. Bundled preset skills

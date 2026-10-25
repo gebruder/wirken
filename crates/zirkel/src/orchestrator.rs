@@ -265,6 +265,48 @@ struct SourceEntry {
     method: String,
 }
 
+/// The keyed sources: the source name its key is stored under, and the
+/// fetch method that sends it.
+pub const KEYED_SOURCES: &[(&str, &str)] = &[
+    ("congress-gov", crate::fetcher_congress::METHOD),
+    ("govinfo-gov", crate::fetcher_govinfo::METHOD),
+];
+
+/// For each keyed source, the endpoint hosts in `<preset_dir>/sources.toml`
+/// its key is sent to: every source using its fetch method.
+pub fn keyed_source_hosts(
+    preset_dir: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>, OrchestratorError>
+{
+    let sources_path = preset_dir.join("sources.toml");
+    let raw =
+        std::fs::read_to_string(&sources_path).map_err(|e| OrchestratorError::ReadSources {
+            path: sources_path.clone(),
+            source: e,
+        })?;
+    let manifest: SourcesManifest =
+        toml::from_str(&raw).map_err(|e| OrchestratorError::ParseSources {
+            path: sources_path.clone(),
+            message: e.to_string(),
+        })?;
+    let mut out = std::collections::BTreeMap::new();
+    for (name, method) in KEYED_SOURCES {
+        let hosts = manifest
+            .sources
+            .iter()
+            .filter(|s| s.method == *method)
+            .filter_map(|s| {
+                url::Url::parse(&s.endpoint)
+                    .ok()?
+                    .host_str()
+                    .map(str::to_ascii_lowercase)
+            })
+            .collect();
+        out.insert((*name).to_string(), hosts);
+    }
+    Ok(out)
+}
+
 /// Adapter so [`FetchedItem`] can be passed to [`screen`].
 impl Item for FetchedItem {
     fn haystack(&self) -> String {
@@ -1194,6 +1236,41 @@ async fn build_perspective_passes(
 
 #[cfg(test)]
 mod tests {
+
+    /// Each keyed source's key goes to the endpoint hosts of every
+    /// source using its fetch method.
+    #[test]
+    fn keyed_source_hosts_follow_the_sources_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../preset/zirkel/sources.toml"
+            ),
+            dir.path().join("sources.toml"),
+        )
+        .unwrap();
+        let hosts = super::keyed_source_hosts(dir.path()).unwrap();
+        assert_eq!(
+            hosts["congress-gov"],
+            std::collections::BTreeSet::from(["api.congress.gov".to_string()])
+        );
+        assert_eq!(
+            hosts["govinfo-gov"],
+            std::collections::BTreeSet::from(["api.govinfo.gov".to_string()])
+        );
+
+        let mut raw = std::fs::read_to_string(dir.path().join("sources.toml")).unwrap();
+        raw.push_str(
+            "\n[[source]]\nname = \"copy\"\nmethod = \"json-congress-bill\"\n\
+             endpoint = \"https://evil.example/v3/bill\"\n",
+        );
+        std::fs::write(dir.path().join("sources.toml"), raw).unwrap();
+        assert!(
+            super::keyed_source_hosts(dir.path()).unwrap()["congress-gov"].contains("evil.example")
+        );
+    }
+
     use super::*;
     use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

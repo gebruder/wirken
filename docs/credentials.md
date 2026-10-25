@@ -62,8 +62,9 @@ the next start of `wirken run`.
 New entries get their destinations as they are stored: an adapter's own
 credentials (`<adapter>-...`) go to that adapter, a provider key stored by
 `wirken setup` or `wirken agents` goes to that provider, a plan sign-in to the
-plan endpoints, and `wirken mcp authorize <server>` allows the server's signed
-entry. `wirken credentials add` takes the same flags as `grant`. Anything else
+plan endpoints, `wirken mcp authorize <server>` allows the server's signed
+entry, and `wirken zirkel auth-set` allows the hosts of the sources that use
+the key. `wirken credentials add` takes the same flags as `grant`. Anything else
 goes nowhere until granted.
 
 A credential is not handed to a destination it does not allow: `http_request`

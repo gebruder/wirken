@@ -110,6 +110,16 @@ pub(crate) fn propose_bindings(
         }
     }
 
+    if let Ok(keyed) =
+        wirken_zirkel::orchestrator::keyed_source_hosts(&data_dir.join("presets").join("zirkel"))
+    {
+        for (source, hosts) in keyed {
+            for host in hosts {
+                add(&format!("zirkel-{source}-api-key"), Destination::Host(host));
+            }
+        }
+    }
+
     let agents_db = data_dir.join("agent_config.db");
     if agents_db.exists()
         && let Ok(store) = wirken_gateway::agent_config::AgentConfigStore::open(&agents_db)

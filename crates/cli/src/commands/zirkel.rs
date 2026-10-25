@@ -379,17 +379,31 @@ pub async fn auth_set(source: &str) -> Result<()> {
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .map_err(|e| anyhow!("open credential store: {e}"))?;
     let vault_key_name = format!("zirkel-{source}-api-key");
+    // Allowed to the hosts the preset's sources send it to.
+    let mut hosts = wirken_zirkel::orchestrator::keyed_source_hosts(
+        &cfg.data_dir.join("presets").join("zirkel"),
+    )
+    .ok()
+    .and_then(|h| h.get(source).cloned())
+    .unwrap_or_default();
+    hosts.insert(validator.host().to_string());
+    let hosts: Vec<String> = hosts.into_iter().collect();
     store
-        .store(
+        .store_bound(
             &vault_key_name,
             "zirkel",
             &wirken_vault::VaultSecret::new(key),
             None,
             None,
+            &wirken_vault::Binding::hosts(&hosts),
+            wirken_vault::default_kind(&vault_key_name),
         )
         .map_err(|e| anyhow!("store '{vault_key_name}': {e}"))?;
 
-    println!("  Stored as '{vault_key_name}' in the wirken vault.");
+    println!(
+        "  Stored as '{vault_key_name}' in the wirken vault, allowed to {}.",
+        hosts.join(", ")
+    );
     Ok(())
 }
 
@@ -562,6 +576,9 @@ enum KeyedSource {
     /// with why. A run that proceeded would report itself complete
     /// while missing something the operator configured.
     Unreadable(String),
+    /// A key is stored and may not be sent to a host `sources.toml`
+    /// sends it to, with the grant that would allow it.
+    NotPermitted(String),
 }
 
 /// Resolve every keyed source against the vault, for a run with no
@@ -609,10 +626,42 @@ fn keyed_source_posture(data_dir: &std::path::Path) -> Vec<(&'static str, KeyedS
     let pp = super::vault_passphrase_source().unwrap_or_default();
     let keychain = probe_keychain(data_dir, move || pp);
     let store = CredentialStore::open(&vault_db, keychain.as_ref());
+    // Where each key goes: every endpoint host whose source uses its
+    // fetch method.
+    let hosts =
+        wirken_zirkel::orchestrator::keyed_source_hosts(&data_dir.join("presets").join("zirkel"))
+            .unwrap_or_default();
+    let log = wirken_audit::SqliteSessionLog::open(&data_dir.join("audit.db")).ok();
     for (src, slot) in configured {
         let state = match &store {
-            Ok(store) => match store.retrieve(slot) {
-                Ok((secret, _)) => KeyedSource::Resolved(secret.expose().to_string()),
+            Ok(store) => match store.peek(slot) {
+                Ok((secret, meta)) => {
+                    let refused: Vec<String> = hosts
+                        .get(*src)
+                        .into_iter()
+                        .flatten()
+                        .filter(|h| !meta.permits_host(h))
+                        .cloned()
+                        .collect();
+                    for host in &refused {
+                        super::destinations::refused(
+                            log.as_ref().map(|l| l as &dyn wirken_audit::SessionLog),
+                            slot,
+                            &wirken_vault::Destination::Host(host.clone()),
+                            &format!("zirkel sources.toml {src}"),
+                        );
+                    }
+                    if refused.is_empty() {
+                        KeyedSource::Resolved(secret.expose().to_string())
+                    } else {
+                        KeyedSource::NotPermitted(format!(
+                            "{slot} may not be sent to {}; allow it with `wirken credentials \
+                             grant {slot} --host {}`",
+                            refused.join(", "),
+                            refused.join(" --host ")
+                        ))
+                    }
+                }
                 Err(e) => {
                     KeyedSource::Unreadable(format!("stored as {slot} but not readable: {e}"))
                 }
@@ -639,7 +688,9 @@ fn key_decision(
     let unreadable: Vec<String> = posture
         .iter()
         .filter_map(|(src, state)| match state {
-            KeyedSource::Unreadable(why) => Some(format!("{src}: {why}")),
+            KeyedSource::Unreadable(why) | KeyedSource::NotPermitted(why) => {
+                Some(format!("{src}: {why}"))
+            }
             _ => None,
         })
         .collect();
@@ -672,7 +723,7 @@ fn resolve_zirkel_source_api_keys(
                 tracing::warn!("zirkel: configured keyed source not resolved: {line}");
             }
             Err(anyhow!(
-                "refusing to run: {} configured keyed source(s) could not be read, so a run \
+                "refusing to run: {} configured keyed source(s) could not be used, so a run \
                  would report complete while missing them. {}. For a scheduled run, put the \
                  vault passphrase in WIRKEN_VAULT_PASSPHRASE in the cron environment.",
                 unreadable.len(),
@@ -880,6 +931,21 @@ mod key_posture_tests {
             ("govinfo-gov", KeyedSource::Unreadable("b".into())),
         ];
         assert_eq!(key_decision(&p).unwrap_err().len(), 2);
+    }
+
+    #[test]
+    fn a_key_not_allowed_to_a_source_host_refuses_the_run() {
+        let p = vec![
+            ("congress-gov", KeyedSource::Resolved("abc".into())),
+            (
+                "govinfo-gov",
+                KeyedSource::NotPermitted("may not be sent to evil.example".into()),
+            ),
+        ];
+        assert_eq!(
+            key_decision(&p).unwrap_err(),
+            vec!["govinfo-gov: may not be sent to evil.example".to_string()]
+        );
     }
 }
 
