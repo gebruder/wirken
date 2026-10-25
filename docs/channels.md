@@ -151,6 +151,24 @@ adapter checks `msg.author.id == bot_id` before forwarding, so it does not
 echo-loop on its own DMs. CommonMark passes through unchanged; horizontal
 rules collapse to a blank line.
 
+### Approvals
+
+Tool calls that need approval on a Discord session post a card with Approve
+and Deny buttons in the approval channel:
+
+```bash
+wirken approvers set-chat discord <channel_id>              # where cards post
+wirken approvers add discord <user_id> --display "Name"     # who may decide
+```
+
+Both take Discord's numeric ids (Developer Mode, then Copy ID). With no
+approval channel set, or the adapter not connected, the call is refused. A
+request nobody decides within `WIRKEN_DISCORD_APPROVAL_TIMEOUT_S` (300 seconds
+by default) is refused. Every presser gets the same reply; the gateway drops a
+press from anyone not on the approver list, or from any channel other than the
+one the card was posted in, and records it. The approval row's `approved_by` is
+the presser's Discord user id.
+
 ## Slack
 
 Socket Mode. No public URL, no webhook.

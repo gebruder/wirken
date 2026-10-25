@@ -9,6 +9,7 @@ pub mod bundled_skills;
 pub mod cli_approval_gate;
 pub mod context;
 pub mod conversation;
+pub mod discord_approval_gate;
 pub mod egress;
 pub mod error;
 pub mod exec_location;

@@ -14,6 +14,15 @@ RUSTSEC-2026-0387 (crypto-bigint 0.5.5) is ignored in `deny.toml`: it is
 reached only through ECDSA verification on public inputs in tinfoil and sev.
 Revisited when both move to p256/p384 0.14.
 
+### Added
+
+- Discord sessions ask for approval in Discord: a card with Approve and Deny
+  buttons in the channel set with `wirken approvers set-chat discord`, decided
+  by the users added with `wirken approvers add discord`. Refused when no
+  channel is set or the adapter is down, and after
+  `WIRKEN_DISCORD_APPROVAL_TIMEOUT_S` (300 seconds). Reported, with a first
+  implementation, by @olive-mm (#305).
+
 ### Changed
 
 - `permission_approved.approved_by` is the verified identity of whoever

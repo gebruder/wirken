@@ -80,6 +80,29 @@ fn s(v: &str) -> Option<String> {
     Some(v.to_string())
 }
 
+#[test]
+fn discord_takes_an_approval_channel_and_approvers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path();
+    for args in [
+        &["set-chat", "discord", "11223344556677889"][..],
+        &["add", "discord", "42424242424242424", "--display", "Ada"],
+    ] {
+        let (ok, _, err) = run(data, args, false);
+        assert!(ok, "{args:?}: {err}");
+    }
+    let (ok, out, _) = run(data, &["show-chat", "discord"], false);
+    assert!(ok && out.contains("'11223344556677889'"), "{out}");
+    let registry =
+        wirken_gateway::approver_registry::ApproverRegistry::open(&data.join("approvers.db"))
+            .unwrap();
+    assert!(registry.verify("discord", "42424242424242424"));
+    assert_eq!(
+        registry.approval_conversation("discord").as_deref(),
+        Some("11223344556677889")
+    );
+}
+
 #[cfg(not(windows))]
 #[test]
 fn add_and_remove_leave_sealed_rows_and_need_no_restart() {

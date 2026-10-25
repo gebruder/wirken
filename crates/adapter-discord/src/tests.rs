@@ -578,3 +578,9 @@ fn the_approval_message_is_the_shared_card() {
     assert!(!text.contains("runs:"), "{text}");
     assert!(!text.contains("runtime:"), "{text}");
 }
+
+#[test]
+fn every_presser_gets_the_same_acknowledgement() {
+    assert_eq!(crate::adapter::acknowledgement(true), "Approved");
+    assert_eq!(crate::adapter::acknowledgement(false), "Denied");
+}

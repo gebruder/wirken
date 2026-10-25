@@ -1844,6 +1844,13 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             dispatcher.clone(),
         ),
     ));
+    factory.attach_discord_approval_gate(Arc::new(
+        wirken_agent::discord_approval_gate::DiscordApprovalGate::new(
+            pending_approval_queue.clone(),
+            approver_registry.clone(),
+            dispatcher.clone(),
+        ),
+    ));
 
     // Terminal sessions (`wirken chat`) route through
     // `TerminalApprovalGate`, which asks on the connection whose
@@ -7702,6 +7709,7 @@ mod approver_removed_mid_run_tests {
 
     struct Harness {
         _tmp: tempfile::TempDir,
+        channel: &'static str,
         reader: IpcFrameReader,
         writer: IpcFrameWriter,
         connection: tokio::task::JoinHandle<Result<()>>,
@@ -7713,8 +7721,19 @@ mod approver_removed_mid_run_tests {
     }
 
     impl Harness {
-        /// A gateway whose model answers each message with `replies`.
+        /// A gateway whose model answers each message with `replies`,
+        /// with one Signal adapter connected.
         async fn start(replies: Vec<String>) -> Self {
+            Self::start_on("signal", "group-1", replies).await
+        }
+
+        /// The same on `channel`, its approval prompts posted in
+        /// `approval_chat`.
+        async fn start_on(
+            channel: &'static str,
+            approval_chat: &str,
+            replies: Vec<String>,
+        ) -> Self {
             let tmp = tempfile::TempDir::new().unwrap();
             let model = super::scripted_model::serve(replies).await;
             let workspace = tmp.path().join("workspace");
@@ -7735,29 +7754,40 @@ mod approver_removed_mid_run_tests {
                     .unwrap(),
                 )),
             );
-            let identity = AdapterIdentity::generate("signal");
+            let identity = AdapterIdentity::generate(channel);
             let registry = AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap();
             registry
-                .register("signal", &identity.public_key_bytes(), "signal")
+                .register(channel, &identity.public_key_bytes(), channel)
                 .unwrap();
             let approvers_db = tmp.path().join("approvers.db");
             let approvers = Arc::new(
                 wirken_gateway::approver_registry::ApproverRegistry::open(&approvers_db).unwrap(),
             );
             approvers
-                .set_approval_conversation("signal", "group-1")
+                .set_approval_conversation(channel, approval_chat)
                 .unwrap();
-            approvers.register("signal", "U1", "davi").unwrap();
+            approvers.register(channel, "U1", "davi").unwrap();
             let queue = Arc::new(wirken_gateway::pending_approvals::PendingApprovalQueue::new());
             let dispatcher = Arc::new(OutboundDispatcher::new());
-            factory.attach_signal_approval_gate(Arc::new(
-                wirken_agent::signal_approval_gate::SignalApprovalGate::with_timeout(
-                    queue.clone(),
-                    approvers.clone(),
-                    dispatcher.clone(),
-                    GATE_TIMEOUT,
-                ),
-            ));
+            match channel {
+                "signal" => factory.attach_signal_approval_gate(Arc::new(
+                    wirken_agent::signal_approval_gate::SignalApprovalGate::with_timeout(
+                        queue.clone(),
+                        approvers.clone(),
+                        dispatcher.clone(),
+                        GATE_TIMEOUT,
+                    ),
+                )),
+                "discord" => factory.attach_discord_approval_gate(Arc::new(
+                    wirken_agent::discord_approval_gate::DiscordApprovalGate::with_timeout(
+                        queue.clone(),
+                        approvers.clone(),
+                        dispatcher.clone(),
+                        GATE_TIMEOUT,
+                    ),
+                )),
+                other => panic!("no approval gate for {other}"),
+            }
             let (audit, audit_task) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
             let audit = Arc::new(audit);
             let (gateway_end, adapter_end) = test_pair().unwrap();
@@ -7774,7 +7804,7 @@ mod approver_removed_mid_run_tests {
                 dispatcher,
                 queue.clone(),
                 approvers,
-                Arc::new(test_inbound_gate(tmp.path(), &[("signal", "U1")])),
+                Arc::new(test_inbound_gate(tmp.path(), &[(channel, "U1")])),
                 Arc::new(HashMap::new()),
                 super::super::connection_tasks::AdapterIdSlot::default(),
                 log.clone(),
@@ -7791,6 +7821,7 @@ mod approver_removed_mid_run_tests {
                 .unwrap();
             Self {
                 _tmp: tmp,
+                channel,
                 reader,
                 writer,
                 connection,
@@ -7811,7 +7842,7 @@ mod approver_removed_mid_run_tests {
                 m.set_id(id);
                 m.set_sender_id("U1");
                 m.set_sender_name("davi");
-                m.set_channel("signal");
+                m.set_channel(self.channel);
                 m.set_conversation_id("dm-1");
                 m.set_text("list the files");
                 m.set_metadata("{}");
@@ -8088,6 +8119,93 @@ mod approver_removed_mid_run_tests {
             vec![(s("U1"), s("wrong_conversation"))]
         );
         assert!(h.queue.show(&id).is_some());
+        h.finish().await;
+    }
+
+    const DISCORD_APPROVALS: &str = "11223344556677889";
+
+    /// A Discord approval records the presser's verified user id, and
+    /// the display name beside it.
+    #[tokio::test]
+    async fn a_discord_approval_records_the_verified_id() {
+        let mut h = Harness::start_on("discord", DISCORD_APPROVALS, exec_then("Done.")).await;
+        let pressed = Answer {
+            user: "U1",
+            display: "Ada (admin)",
+            allow: true,
+        };
+        assert_eq!(h.turn("m-1", &pressed).await, "Done.");
+        assert_eq!(
+            h.rows(&["approved_by", "approver_display"]),
+            vec![vec![s("permission_approved"), s("U1"), s("Ada (admin)")]]
+        );
+        h.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_discord_deny_records_its_actor() {
+        let mut h = Harness::start_on("discord", DISCORD_APPROVALS, exec_then("Not run.")).await;
+        let pressed = Answer {
+            user: "U1",
+            display: "Ada",
+            allow: false,
+        };
+        assert_eq!(h.turn("m-1", &pressed).await, "Not run.");
+        assert_eq!(
+            h.rows(&["denied_by", "denier_display"]),
+            vec![vec![s("permission_denied"), s("U1"), s("Ada")]]
+        );
+        h.finish().await;
+    }
+
+    /// A press relayed from any channel other than the one the card was
+    /// posted in is refused with a row; one from that channel decides.
+    #[tokio::test]
+    async fn a_discord_press_from_another_channel_is_refused() {
+        let mut h = Harness::start_on("discord", DISCORD_APPROVALS, Vec::new()).await;
+        let (id, rx) = h.queue.register(pending(
+            "default/discord/44556677889900112",
+            Some(DISCORD_APPROVALS),
+        ));
+        h.decide(&id, "99887766554433221").await;
+        assert_eq!(
+            h.refusals(1).await,
+            vec![(s("U1"), s("wrong_conversation"))]
+        );
+        assert!(h.queue.show(&id).is_some());
+        h.decide(&id, DISCORD_APPROVALS).await;
+        assert!(matches!(
+            tokio::time::timeout(TURN_DEADLINE, rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            wirken_gateway::pending_approvals::PendingDecision::Allow { .. }
+        ));
+        h.finish().await;
+    }
+
+    /// Someone not on the allowlist presses Approve: the gateway drops
+    /// it with a row, and the call does not run.
+    #[tokio::test]
+    async fn a_discord_press_by_a_non_approver_is_refused() {
+        let mut h = Harness::start_on("discord", DISCORD_APPROVALS, exec_then("Not run.")).await;
+        let pressed = Answer {
+            user: "U2",
+            display: "Mallory",
+            allow: true,
+        };
+        assert_eq!(h.turn("m-1", &pressed).await, "Not run.");
+        assert_eq!(
+            h.rows(&["caller", "reason"]),
+            vec![
+                vec![
+                    s("permission_approval_refused"),
+                    s("U2"),
+                    s("unauthorized_actor")
+                ],
+                vec![s("permission_denied"), None, None],
+            ]
+        );
         h.finish().await;
     }
 

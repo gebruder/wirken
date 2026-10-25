@@ -242,8 +242,8 @@ Who holds what, so a precondition can be compared with an impact:
 
 - **The operator** is the OS user. They hold the vault passphrase, write the
   configuration files in the data dir, answer approval prompts on the CLI, and
-  may name approvers for Telegram and Signal, keyed by `(adapter_id, user_id)`
-  in the approver registry. A decision from anyone not on that allowlist is
+  may name approvers for Telegram, Signal and Discord, keyed by
+  `(adapter_id, user_id)` in the approver registry. A decision from anyone not on that allowlist is
   dropped. The operator is the approver: an operator approving a prompt that
   described the call accurately is not a finding.
 - **Another OS user** holds nothing. The sockets are mode 0600 and every
@@ -256,7 +256,7 @@ Who holds what, so a precondition can be compared with an impact:
   not on the sender: a Tier 2 grant one user's prompt earned applies to every
   user of that agent on that channel until it expires
   ([permissions-and-identity.md](permissions-and-identity.md)). Approvals on
-  Slack, Discord, Teams, WhatsApp, Google Chat, Matrix and iMessage sessions
+  Slack, Teams, WhatsApp, Google Chat, Matrix and iMessage sessions
   prompt on the operator's CLI, not in the channel.
 - **The model** holds nothing. Every tool call is classified and gated: Tier 1
   runs, Tier 2 prompts once and may be stored for thirty days under a Tier 2

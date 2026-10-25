@@ -206,7 +206,7 @@ impl EventHandler for Handler {
             }
         }
 
-        let ack_text = if is_allow { "Approved" } else { "Denied" };
+        let ack_text = acknowledgement(is_allow);
         let _ = component
             .create_response(
                 &ctx.http,
@@ -218,6 +218,12 @@ impl EventHandler for Handler {
             )
             .await;
     }
+}
+
+/// The reply a presser sees. It depends on the button only, so it says
+/// nothing about whether the presser is an approver.
+pub(crate) fn acknowledgement(is_allow: bool) -> &'static str {
+    if is_allow { "Approved" } else { "Denied" }
 }
 
 /// Handle outbound messages from gateway and send via Discord.
