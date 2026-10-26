@@ -12,6 +12,10 @@ tagged.
 
 ## [3.1.0] - 2026-10-26
 
+Thanks to @olive-mm for #305, the Discord approval gate, now merged as
+d142802a to record the contribution. The shipped implementation is b43890d3,
+released in 3.0.0.
+
 ### Security
 
 - A change made while `wirken run` is running takes effect within seconds,
