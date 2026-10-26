@@ -83,8 +83,9 @@ A run whose `sources.toml` sends a key to any other host is refused, with a
 ... --host` command that would allow it
 ([credentials.md](credentials.md#where-a-credential-may-go)).
 
-A scheduled run has nobody to prompt, so it reads the vault passphrase from
-`WIRKEN_VAULT_PASSPHRASE` and never asks. Credential names are readable
+A run reads the vault passphrase from `WIRKEN_VAULT_PASSPHRASE`, or asks for
+it at a terminal. A scheduled run has no terminal and never asks. Credential
+names are readable
 without the passphrase, which is how the run tells two cases apart: a source
 with no key stored is reported unsupported in the summary and the run stands;
 a source whose key is stored but cannot be read is named at warn level and the

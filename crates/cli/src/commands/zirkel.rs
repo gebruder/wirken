@@ -581,12 +581,24 @@ enum KeyedSource {
     NotPermitted(String),
 }
 
-/// Resolve every keyed source against the vault, for a run with no
-/// operator at a terminal.
+/// The vault passphrase for a run: WIRKEN_VAULT_PASSPHRASE, or a prompt
+/// when stdin is a terminal. Cron has none and is never asked.
+fn zirkel_run_passphrase() -> std::result::Result<String, String> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        return super::cached_vault_passphrase()
+            .map_err(|e| format!("the passphrase prompt failed: {e}"));
+    }
+    super::vault_passphrase_source().ok_or_else(|| {
+        "WIRKEN_VAULT_PASSPHRASE is not set and there is no terminal to ask at".to_string()
+    })
+}
+
+/// Resolve every keyed source against the vault.
 ///
-/// `wirken zirkel run` is what cron calls, so there is nobody to
-/// prompt: the passphrase comes from WIRKEN_VAULT_PASSPHRASE or it does
-/// not come at all. The names in the vault are readable without it,
+/// The passphrase comes from WIRKEN_VAULT_PASSPHRASE, or from a prompt
+/// when stdin is a terminal. Cron has none, so a scheduled run never
+/// prompts. The names in the vault are readable without it,
 /// which is what lets this tell a configured key it cannot unlock apart
 /// from a key that was never stored. If nothing keyed is configured the
 /// vault is not opened, and there is nothing to report.
@@ -621,9 +633,18 @@ fn keyed_source_posture(data_dir: &std::path::Path) -> Vec<(&'static str, KeyedS
     if configured.is_empty() {
         return out;
     }
-    // Never prompts: the environment supplies the passphrase, or an
-    // earlier prompt in this process did, or nothing does.
-    let pp = super::vault_passphrase_source().unwrap_or_default();
+    let pp = match zirkel_run_passphrase() {
+        Ok(p) => p,
+        Err(why) => {
+            out.extend(configured.iter().map(|(src, slot)| {
+                (
+                    *src,
+                    KeyedSource::Unreadable(format!("stored as {slot} but {why}")),
+                )
+            }));
+            return out;
+        }
+    };
     let keychain = probe_keychain(data_dir, move || pp);
     let store = CredentialStore::open(&vault_db, keychain.as_ref());
     // Where each key goes: every endpoint host whose source uses its

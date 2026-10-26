@@ -52,6 +52,9 @@ Revisited when both move to p256/p384 0.14.
   it at the next start.
 - A Zirkel source key is stored allowed to the hosts of the sources that use
   it; a run whose `sources.toml` sends it elsewhere is refused.
+- `wirken zirkel run` asks for the vault passphrase at a terminal when
+  `WIRKEN_VAULT_PASSPHRASE` is not set. Without a terminal it never asks,
+  and with neither it refuses, naming the variable.
 - Skills load only under a registry root by default. The project root from
   `skills/REGISTRY-ROOT.pub` is compiled in; `wirken skills trust-root`
   replaces it. Install and load check the same root. Bundled preset skills

@@ -126,6 +126,11 @@ def every_keychain_probe_reads_the_passphrase_from_an_approved_supplier():
             "the migration takes the passphrase typed at a terminal only, never "
             "WIRKEN_VAULT_PASSPHRASE",
         ),
+        "commands/zirkel.rs": (
+            1,
+            "a run takes zirkel_run_passphrase, which reads it through "
+            "vault_passphrase_source and cached_vault_passphrase",
+        ),
     }
     root = ROOT / "crates/cli/src"
     seen_files = 0
