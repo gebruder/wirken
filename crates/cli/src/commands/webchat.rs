@@ -4600,6 +4600,9 @@ pub fn session_events(
             // gateway's own lane, not a conversation's.
             SessionEvent::McpCredentialRefetched { .. } => None,
             SessionEvent::McpCredentialRefreshDiscarded { .. } => None,
+            // What the session has read, for the http_request gate; the
+            // tool calls that read it are on the page already.
+            SessionEvent::ReadSensitivityObserved { .. } => None,
             SessionEvent::CredentialDestinationRefused { .. }
             | SessionEvent::CredentialDestinationGranted { .. }
             | SessionEvent::CredentialDestinationRevoked { .. }

@@ -64,6 +64,8 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 /// - `PermissionDenied`, `SkillPermissionDenied`: gate-denial alerts.
 /// - `SubagentSpawned`, `SubagentResult`: child-process fork
 ///   correlation.
+/// - `ReadSensitivityObserved`: a session reading something that
+///   escalates its later `http_request` calls.
 /// - `ChainHead`: per-session signed-head feed.
 /// - `McpEntryVerified`, `McpEntryRefused`: MCP load-time signature
 ///   and sandbox posture on the `gateway-mcp` sentinel session.
@@ -137,6 +139,7 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         // Something other than the operator tried to.
         SessionEvent::UpdateRefused { .. } => true,
         SessionEvent::SubagentResult { .. } => true,
+        SessionEvent::ReadSensitivityObserved { .. } => true,
         SessionEvent::ChainHead { .. } => true,
         SessionEvent::McpEntryVerified { .. } => true,
         SessionEvent::McpEntryRefused { .. } => true,
@@ -318,6 +321,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::SubagentSpawned { .. } => "subagent_spawned",
         SessionEvent::SubagentSessionBound { .. } => "subagent_session_bound",
         SessionEvent::SubagentResult { .. } => "subagent_result",
+        SessionEvent::ReadSensitivityObserved { .. } => "read_sensitivity_observed",
         SessionEvent::DeliveryConfirmed { .. } => "delivery_confirmed",
         SessionEvent::DeliveryFailed { .. } => "delivery_failed",
         SessionEvent::AuditLegacy { .. } => "audit_legacy",

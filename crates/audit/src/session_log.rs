@@ -1760,6 +1760,12 @@ pub enum SessionEvent {
         output: String,
         status: SubagentStatus,
     },
+    /// The session read something of this confidentiality label for
+    /// the first time: `sensitivity` is the label, `tool` the call that
+    /// read it, or `spawn_subagent` for a child's labels. A woken
+    /// session takes its labels back from these rows, so an
+    /// `http_request` after a restart is escalated as before it.
+    ReadSensitivityObserved { sensitivity: String, tool: String },
     /// An adapter reported that it delivered an outbound message,
     /// carrying the id the platform assigned to it.
     ///

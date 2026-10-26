@@ -62,7 +62,7 @@ activity.
 Default forward: `AssistantToolCalls`, `ToolResult`, `HttpFetch`,
 `PermissionDenied`, `PermissionGrantExpired`, `PermissionGrantPruned`,
 `SkillPermissionDenied`, `SubagentSpawned`, `SubagentSessionBound`,
-`SubagentResult`, `ChainHead`, `McpEntryVerified`, `McpEntryRefused`,
+`SubagentResult`, `ReadSensitivityObserved`, `ChainHead`, `McpEntryVerified`, `McpEntryRefused`,
 `McpServerSandboxed`, `McpServerUnsandboxed`, `McpServerExited`,
 `McpServerRestart`, `McpServerRestartAbandoned`, `McpCredentialRefetched`,
 `LeakRefused`,

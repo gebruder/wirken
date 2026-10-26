@@ -1747,6 +1747,12 @@ pub enum ReadSensitivity {
     ImportedArchive,
     /// The operator's workspace files.
     Workspace,
+    /// What an `exec` command printed: whatever it could read.
+    ExecOutput,
+    /// What an MCP server's tool returned.
+    McpOutput,
+    /// A response to an `http_request` that carried a credential.
+    CredentialedResponse,
 }
 
 impl ReadSensitivity {
@@ -1765,6 +1771,25 @@ impl ReadSensitivity {
             Self::CrossChannelMemory => "cross_channel_memory",
             Self::ImportedArchive => "imported_archive",
             Self::Workspace => "workspace",
+            Self::ExecOutput => "exec_output",
+            Self::McpOutput => "mcp_output",
+            Self::CredentialedResponse => "credentialed_response",
+        }
+    }
+
+    /// The label [`Self::as_str`] wrote. An unknown label reads as
+    /// `Workspace`, the most restricting, so a row this build cannot
+    /// place never leaves a session looking clean.
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "aggregated_external" => Self::AggregatedExternal,
+            "channel_memory" => Self::ChannelMemory,
+            "cross_channel_memory" => Self::CrossChannelMemory,
+            "imported_archive" => Self::ImportedArchive,
+            "exec_output" => Self::ExecOutput,
+            "mcp_output" => Self::McpOutput,
+            "credentialed_response" => Self::CredentialedResponse,
+            _ => Self::Workspace,
         }
     }
 }
@@ -1781,19 +1806,35 @@ impl ReadSensitivity {
 /// `sqlite_query` is `AggregatedExternal` because it can only reach
 /// the zirkel corpus: see [`KNOWN_ZIRKEL_QUERIES`], whose closed set
 /// this classification depends on.
-pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
+///
+/// `exec` and MCP tools are marked by what they can return, since their
+/// output is not inspected. An `http_request` is marked only when it
+/// names a credential: an unauthenticated fetch is public content.
+/// `spawn_subagent` is not marked here; the parent takes the child's
+/// labels when the child returns.
+pub fn tool_to_read_sensitivity(
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<ReadSensitivity> {
     match tool_name {
         "read_file" | "list_files" => Some(ReadSensitivity::Workspace),
         "sqlite_query" => Some(ReadSensitivity::AggregatedExternal),
         "memory_read" => Some(ReadSensitivity::ChannelMemory),
         "memory_read_channel" => Some(ReadSensitivity::CrossChannelMemory),
         "read_imported_chat" | "search_imported_chats" => Some(ReadSensitivity::ImportedArchive),
-        // Everything else is not a read of stored data. `web_search`
-        // and `http_request` fetch from the public network, which is
-        // the same confidentiality position as AggregatedExternal and
-        // needs no marking; `exec` output is not classified here
-        // because the classifier reads tool names and arguments, never
-        // tool output.
+        "exec" => Some(ReadSensitivity::ExecOutput),
+        "http_request"
+            if args
+                .get("credential")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| !c.is_empty()) =>
+        {
+            Some(ReadSensitivity::CredentialedResponse)
+        }
+        name if name.starts_with("mcp_") => Some(ReadSensitivity::McpOutput),
+        // `web_search` and an unauthenticated `http_request` fetch from
+        // the public network, the same confidentiality position as
+        // AggregatedExternal, and need no marking.
         _ => None,
     }
 }

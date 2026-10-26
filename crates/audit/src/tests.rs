@@ -3911,6 +3911,10 @@ fn every_session_event() -> Vec<SessionEvent> {
             to_format: 2,
             backup: String::new(),
         },
+        SessionEvent::ReadSensitivityObserved {
+            sensitivity: String::new(),
+            tool: String::new(),
+        },
     ]
 }
 
@@ -3961,6 +3965,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::Rewind { .. } => "Rewind",
         SessionEvent::SubagentSpawned { .. } => "SubagentSpawned",
         SessionEvent::SubagentResult { .. } => "SubagentResult",
+        SessionEvent::ReadSensitivityObserved { .. } => "ReadSensitivityObserved",
         SessionEvent::DeliveryConfirmed { .. } => "DeliveryConfirmed",
         SessionEvent::DeliveryFailed { .. } => "DeliveryFailed",
         SessionEvent::AuditLegacy { .. } => "AuditLegacy",
@@ -4008,7 +4013,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 83;
+const SESSION_EVENT_VARIANTS: usize = 84;
 
 /// The list covers the enum.
 #[test]

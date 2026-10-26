@@ -47,7 +47,9 @@ host allowset above applies on top.
 
 Once the session has read something restricting, which is every read label but
 `aggregated_external` (workspace files, either channel's memory, an imported
-archive), a request whose host clears the allowset goes to the operator first,
+archive, `exec` output, MCP tool output, the response to an `http_request` that
+carried a credential, or anything a sub-agent it spawned read), a request whose
+host clears the allowset goes to the operator first,
 as sandboxed `exec` egress does. The operator is asked about the destination
 at Tier 3 (`NetworkRequest`, keyed by host), the answer is recorded as
 `PermissionApproved` or `PermissionDenied`, and an approval covers that one
@@ -55,6 +57,12 @@ call. With no operator reachable, cron or a headless sub-agent, the request is
 refused. With no skills attached there is no
 allowset, and `http_request` refuses every host; only an explicit
 `egress.domains: ["*"]` admits a host no skill named.
+
+Each label is recorded the first time the session reads it, as a
+`read_sensitivity_observed` row naming the label and the tool. A session woken
+after a restart or after leaving the session cache takes its labels back from
+those rows and from the tool calls on its chain, so the escalation outlives the
+process that saw the read.
 
 ### Credential-host binding
 

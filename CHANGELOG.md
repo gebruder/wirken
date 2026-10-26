@@ -10,6 +10,16 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- A session that has read something restricting keeps sending `http_request`
+  calls to the operator after a gateway restart or after leaving the session
+  cache: each read label is recorded once as `read_sensitivity_observed` and
+  restored when the session wakes. `exec` output, MCP tool output, the
+  response to an `http_request` that carried a credential, and whatever a
+  spawned sub-agent read now count as restricting reads. **For wirken-siem:**
+  new kind `read_sensitivity_observed`, forwarded by default.
+
 ## [3.0.0] - 2026-10-26
 
 RUSTSEC-2026-0387 (crypto-bigint 0.5.5) is ignored in `deny.toml`: it is

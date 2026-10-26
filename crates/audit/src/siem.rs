@@ -858,6 +858,7 @@ fn extract_identity_for_sentinel(
         SessionEvent::SubagentSpawned { .. } => (None, None, None),
         // The child's id and status; the same.
         SessionEvent::SubagentResult { .. } => (None, None, None),
+        SessionEvent::ReadSensitivityObserved { .. } => (None, None, None),
         // An actor and a channel in the legacy shape, not the three,
         // except on an adapter's lifecycle rows, whose target is the
         // adapter id.
@@ -1019,6 +1020,9 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             format!("subagent_spawned child={child_agent_id}")
         }
         SessionEvent::SubagentResult { status, .. } => format!("subagent_result status={status:?}"),
+        SessionEvent::ReadSensitivityObserved { sensitivity, tool } => {
+            format!("read_sensitivity_observed sensitivity={sensitivity} tool={tool}")
+        }
         SessionEvent::ChainHead { reason, .. } => format!("chain_head reason={reason:?}"),
         SessionEvent::ExternalToolOutput {
             tool,

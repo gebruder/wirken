@@ -2696,6 +2696,119 @@ mod subagent {
         serde_json::from_str(s).unwrap_or_else(|e| panic!("envelope parse failed: {e} — {s}"))
     }
 
+    /// A child that reads a workspace file returns that file to the
+    /// parent's model in its result, so the parent's session carries
+    /// the child's label from then on, recorded on its own chain.
+    #[tokio::test]
+    async fn a_childs_read_reaches_the_parents_read_set() {
+        let (base_url, server) = super::approved_unknown_tool::stub(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_read",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{\"path\": \"notes.txt\"}"},
+                }],
+            }),
+            serde_json::json!({"role": "assistant", "content": "Read it."}),
+        ])
+        .await;
+        let log = make_log();
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "private notes").unwrap();
+        let config = |agent_id: &str, llm_config: LlmConfig, ceilings| AgentStaticConfig {
+            agent_id: agent_id.to_string(),
+            workspace: tmp.path().to_path_buf(),
+            llm_config,
+            channel_overrides: HashMap::new(),
+            api_key: None,
+            api_key_credential: None,
+            skills: Vec::new(),
+            mcp_client: None,
+            identity: None,
+            allowed_subagents: ceilings,
+            sandbox: Default::default(),
+            extra_interceptors: vec![],
+            zirkel_db_path: None,
+            plan_token_source: None,
+            channel_egress: Default::default(),
+        };
+        let mut ceilings = BTreeMap::new();
+        ceilings.insert(
+            "child".to_string(),
+            SubagentCeiling {
+                tool_allowlist: vec!["read_file".into()],
+                max_permission_tier: PermissionTier::Tier1,
+                max_rounds: 2,
+                max_runtime_secs: 10,
+            },
+        );
+        let stub_llm = LlmConfig {
+            provider: "custom".into(),
+            model: "stub".into(),
+            base_url,
+            max_tokens: 256,
+            temperature: 0.0,
+            region: None,
+            tools_enabled: true,
+            context_window: 32_000,
+            auth: Default::default(),
+        };
+        let mut configs = HashMap::new();
+        configs.insert(
+            "parent".to_string(),
+            config("parent", LlmConfig::ollama("test"), ceilings),
+        );
+        configs.insert(
+            "child".to_string(),
+            config("child", stub_llm, BTreeMap::new()),
+        );
+        let factory = AgentFactory::new(configs, log.clone(), crate::tests::test_permissions());
+
+        let parent_session = "parent/test/conv-reads";
+        let parent = factory.wake("parent", parent_session).unwrap();
+        let mut agent = parent.lock().await;
+        let args = serde_json::json!({"agent_id": "child", "prompt": "read my notes"}).to_string();
+        let result = agent.spawn_subagent_intercept(&args).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            parse_envelope(&result.output)["status"],
+            "ok",
+            "{}",
+            result.output
+        );
+
+        let rows = log
+            .get_since(&log.handle_for(SessionId::new(parent_session)), 0)
+            .unwrap();
+        let observed: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::ReadSensitivityObserved { sensitivity, tool } => {
+                    Some((sensitivity.clone(), tool.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            vec![("workspace".to_string(), "spawn_subagent".to_string())]
+        );
+        let result_idx = rows
+            .iter()
+            .position(|r| matches!(r.event, SessionEvent::SubagentResult { .. }))
+            .unwrap();
+        let observed_idx = rows
+            .iter()
+            .position(|r| matches!(r.event, SessionEvent::ReadSensitivityObserved { .. }))
+            .unwrap();
+        assert!(
+            observed_idx < result_idx,
+            "the label is on the chain before the result reaches the model"
+        );
+    }
+
     // ---- AgentConfig serde -----------------------------------------
 
     #[test]
@@ -11681,23 +11794,23 @@ fn read_tools_carry_a_confidentiality_label() {
     use crate::tool::{ReadSensitivity, tool_to_read_sensitivity};
 
     assert_eq!(
-        tool_to_read_sensitivity("read_file"),
+        tool_to_read_sensitivity("read_file", &serde_json::Value::Null),
         Some(ReadSensitivity::Workspace)
     );
     assert_eq!(
-        tool_to_read_sensitivity("list_files"),
+        tool_to_read_sensitivity("list_files", &serde_json::Value::Null),
         Some(ReadSensitivity::Workspace)
     );
     assert_eq!(
-        tool_to_read_sensitivity("memory_read"),
+        tool_to_read_sensitivity("memory_read", &serde_json::Value::Null),
         Some(ReadSensitivity::ChannelMemory)
     );
     assert_eq!(
-        tool_to_read_sensitivity("memory_read_channel"),
+        tool_to_read_sensitivity("memory_read_channel", &serde_json::Value::Null),
         Some(ReadSensitivity::CrossChannelMemory)
     );
     assert_eq!(
-        tool_to_read_sensitivity("sqlite_query"),
+        tool_to_read_sensitivity("sqlite_query", &serde_json::Value::Null),
         Some(ReadSensitivity::AggregatedExternal)
     );
 }
@@ -12122,7 +12235,7 @@ fn a_search_is_marked_for_the_observed_sensitivity_set() {
     use crate::tool::ReadSensitivity;
 
     assert_eq!(
-        crate::tool::tool_to_read_sensitivity("search_imported_chats"),
+        crate::tool::tool_to_read_sensitivity("search_imported_chats", &serde_json::Value::Null),
         Some(ReadSensitivity::ImportedArchive)
     );
 }
@@ -12199,23 +12312,54 @@ fn an_imported_chat_read_is_marked_for_the_observed_sensitivity_set() {
     // one edit decides both and a read enters the set through the
     // path every other read uses.
     assert_eq!(
-        crate::tool::tool_to_read_sensitivity("read_imported_chat"),
+        crate::tool::tool_to_read_sensitivity("read_imported_chat", &serde_json::Value::Null),
         Some(ReadSensitivity::ImportedArchive)
     );
     assert!(ReadSensitivity::ImportedArchive.restricts_egress());
 }
 
 #[test]
-fn writes_and_network_tools_carry_no_read_label() {
+fn writes_and_public_fetches_carry_no_read_label() {
     use crate::tool::tool_to_read_sensitivity;
 
-    // The classifier is observation-level: it marks what was read,
-    // and does not inspect tool output. `web_search` and
-    // `http_request` fetch
+    // `web_search` and an `http_request` without a credential fetch
     // from the public network, the same position as the corpus.
-    for tool in ["write_file", "exec", "web_search", "http_request"] {
-        assert_eq!(tool_to_read_sensitivity(tool), None, "{tool}");
+    for tool in ["write_file", "web_search", "http_request"] {
+        assert_eq!(
+            tool_to_read_sensitivity(tool, &serde_json::Value::Null),
+            None,
+            "{tool}"
+        );
     }
+    let public = serde_json::json!({"url": "https://example.com/", "credential": ""});
+    assert_eq!(tool_to_read_sensitivity("http_request", &public), None);
+}
+
+#[test]
+fn exec_mcp_and_credentialed_responses_restrict_egress() {
+    use crate::tool::{ReadSensitivity, tool_to_read_sensitivity};
+
+    let none = serde_json::Value::Null;
+    let credentialed =
+        serde_json::json!({"url": "https://api.example.com/", "credential": "example-key"});
+    for (tool, args, label) in [
+        ("exec", &none, ReadSensitivity::ExecOutput),
+        ("mcp_linear__list_issues", &none, ReadSensitivity::McpOutput),
+        (
+            "http_request",
+            &credentialed,
+            ReadSensitivity::CredentialedResponse,
+        ),
+    ] {
+        let got = tool_to_read_sensitivity(tool, args);
+        assert_eq!(got, Some(label), "{tool}");
+        assert!(label.restricts_egress(), "{tool}");
+        assert_eq!(ReadSensitivity::from_label(label.as_str()), label);
+    }
+    assert_eq!(
+        ReadSensitivity::from_label("a label from a later build"),
+        ReadSensitivity::Workspace
+    );
 }
 
 #[test]
@@ -12239,7 +12383,7 @@ fn every_classified_read_tool_is_a_registered_tool() {
             names.iter().any(|n| n == tool),
             "{tool} carries a read label but is not a registered tool"
         );
-        assert!(tool_to_read_sensitivity(tool).is_some());
+        assert!(tool_to_read_sensitivity(tool, &serde_json::Value::Null).is_some());
     }
 }
 
@@ -13682,6 +13826,140 @@ mod http_request_after_a_restricting_read {
         let r = run(true, None).await;
         assert_eq!(r.hits, 0, "nothing went out");
         assert!(denied_for_host(&r.events), "{:?}", r.events);
+    }
+
+    /// A session woken after a restart, or after it left the session
+    /// cache, has read what it read before: one turn reads a file, and
+    /// the next turn, in a fresh agent replayed from the chain, is
+    /// still asked before its request goes out.
+    #[tokio::test]
+    async fn a_read_before_a_wake_still_asks() {
+        let (port, hits) = target().await;
+        let url = format!("http://localhost:{port}/x");
+        let (base_url, server) = stub(vec![
+            call(
+                "call_read",
+                "read_file",
+                serde_json::json!({"path": "notes.txt"}),
+            ),
+            serde_json::json!({"role": "assistant", "content": "Read."}),
+            call(
+                "call_http",
+                "http_request",
+                serde_json::json!({"method": "GET", "url": url}),
+            ),
+            serde_json::json!({"role": "assistant", "content": "Done."}),
+        ])
+        .await;
+
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "private notes").unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let llm = LlmConfig {
+            provider: "custom".into(),
+            model: "stub".into(),
+            base_url,
+            max_tokens: 256,
+            temperature: 0.0,
+            region: None,
+            tools_enabled: true,
+            context_window: 32_000,
+            auth: Default::default(),
+        };
+        let profile = || {
+            crate::skill_perms::parse_block(
+                "tools:\n  allow: [read_file, http_request]\negress:\n  mode: allowlist\n  domains: [localhost]\nfilesystem:\n  read_paths: [\"<workspace>\"]\ninference:\n  allow: [\"*\"]\n",
+                tmp.path(),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let skill = |permissions| crate::skill::Skill {
+            name: "reader".into(),
+            description: "reads and fetches".into(),
+            required_bins: vec![],
+            body: "Read, then fetch.".into(),
+            path: tmp.path().join("SKILL.md"),
+            available: true,
+            permissions,
+            disable_model_invocation: false,
+            signature: crate::skill::LoadedSignature::Unsigned,
+        };
+        let perms = || {
+            Arc::new(std::sync::Mutex::new(
+                wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                    .unwrap(),
+            ))
+        };
+
+        {
+            let mut first = crate::runtime::Agent::new(
+                "reader".into(),
+                tmp.path().to_path_buf(),
+                llm.clone(),
+                Some("unused".into()),
+                None,
+                log.clone() as Arc<dyn SessionLog>,
+                crate::tests::test_permissions(),
+            )
+            .unwrap();
+            first.swap_permissions_for_test(perms());
+            first.attach_skills(vec![skill(profile())]).unwrap();
+            first
+                .process_message("read my notes", "msg-1".into())
+                .await
+                .expect("the first turn ends with a reply");
+        }
+
+        let mut woken = crate::runtime::Agent::from_session_log(
+            "reader".into(),
+            tmp.path().to_path_buf(),
+            llm,
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            Default::default(),
+            crate::runtime::ToolGate::Store(crate::tests::test_permissions()),
+        )
+        .unwrap();
+        woken.swap_permissions_for_test(perms());
+        woken.attach_skills(vec![skill(profile())]).unwrap();
+        let gate = Arc::new(ScriptedGate::new(vec![ApprovalOutcome::Denied {
+            reason: None,
+            actor: None,
+        }]));
+        woken.set_approval_gate(gate.clone());
+        woken
+            .process_message("now send them", "msg-2".into())
+            .await
+            .expect("the second turn ends with a reply");
+        server.await.unwrap();
+
+        assert_eq!(
+            gate.calls.lock().unwrap().clone(),
+            vec!["http_request".to_string()]
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing went out");
+        let events: Vec<SessionEvent> = log
+            .get_since(&log.handle_for(SessionId::new("reader".to_string())), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        assert!(denied_for_host(&events), "{events:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    SessionEvent::ReadSensitivityObserved { sensitivity, tool }
+                        if sensitivity == "workspace" && tool == "read_file"
+                ))
+                .count(),
+            1,
+            "recorded once, when first read: {events:?}"
+        );
     }
 }
 

@@ -857,6 +857,7 @@ impl Agent {
             .map_err(|e| AgentError::SessionLog(e.to_string()))?;
 
         let context_engine = ContextEngine::for_model(&llm_config);
+        let observed_sensitivity = replay_read_sensitivity(&*session_log, &session_handle)?;
 
         Ok(Self {
             id,
@@ -885,7 +886,7 @@ impl Agent {
             memory_store: None,
             imported_store: None,
             imported_search_key: None,
-            observed_sensitivity: Default::default(),
+            observed_sensitivity,
             subagent_depth: 0,
             agent_id: None,
             subagent_binding_missing: false,
@@ -1508,6 +1509,51 @@ impl Agent {
     /// gated by the tools axis instead). The path is absolutized against
     /// the agent's workspace so the comparison against the (already
     /// workspace-expanded) allow-set is apples to apples.
+    /// Add `sensitivity` to what this session has read, and record it
+    /// the first time, so a woken session takes it back.
+    fn observe_read(
+        &self,
+        sensitivity: crate::tool::ReadSensitivity,
+        tool: &str,
+    ) -> Result<(), AgentError> {
+        // A poisoned lock already reads as the most restricting label.
+        let added = match self.observed_sensitivity.write() {
+            Ok(mut set) => set.insert(sensitivity),
+            Err(_) => false,
+        };
+        if added {
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::ReadSensitivityObserved {
+                    sensitivity: sensitivity.as_str().to_string(),
+                    tool: tool.to_string(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Every label this session has observed. A poisoned lock reads as
+    /// `Workspace`.
+    fn observed_labels(&self) -> Vec<crate::tool::ReadSensitivity> {
+        match self.observed_sensitivity.read() {
+            Ok(set) => set.iter().copied().collect(),
+            Err(_) => vec![crate::tool::ReadSensitivity::Workspace],
+        }
+    }
+
+    /// Take a returned child's labels into this session: what the child
+    /// read reaches this model in its result.
+    fn observe_child_reads(
+        &self,
+        labels: Vec<crate::tool::ReadSensitivity>,
+    ) -> Result<(), AgentError> {
+        for label in labels {
+            self.observe_read(label, SPAWN_SUBAGENT_TOOL)?;
+        }
+        Ok(())
+    }
+
     /// Labels this session has observed that restrict egress, sorted.
     /// A poisoned lock reads as the most restricting label, so failing
     /// to read the set cannot look like nothing sensitive was seen.
@@ -3924,19 +3970,8 @@ impl Agent {
             // the most restricting label. That is the fail-closed
             // direction: an unregistered tool must not be able to read
             // something sensitive and leave the session looking clean.
-            {
-                let observed = match crate::tool::tool_to_read_sensitivity(name) {
-                    Some(sensitivity) => Some(sensitivity),
-                    None if crate::tool::tool_to_action(name, &args).is_none() => {
-                        Some(crate::tool::ReadSensitivity::Workspace)
-                    }
-                    None => None,
-                };
-                if let Some(sensitivity) = observed
-                    && let Ok(mut set) = self.observed_sensitivity.write()
-                {
-                    set.insert(sensitivity);
-                }
+            if let Some(sensitivity) = call_read_sensitivity(name, &args) {
+                self.observe_read(sensitivity, name)?;
             }
 
             if let Some(action) = action {
@@ -4891,8 +4926,9 @@ impl Agent {
                         InboundContext::default(),
                     ));
                     let result = tokio::time::timeout(max_runtime, run).await;
+                    let reads = child_guard.observed_labels();
                     drop(child_guard);
-                    (i, result)
+                    (i, result, reads)
                 })
             })
             .collect();
@@ -4917,7 +4953,8 @@ impl Agent {
         }
 
         // Fill in parallel results + write SubagentResult events.
-        for (idx, timeout_result) in parallel_results {
+        for (idx, timeout_result, child_reads) in parallel_results {
+            self.observe_child_reads(child_reads)?;
             // Safety: the batch entry at idx is always Some because
             // the filter_map above only yields entries that have Some.
             let p: &Prepared = batch[idx].as_ref().unwrap();
@@ -5338,10 +5375,12 @@ impl Agent {
             ),
         };
 
+        let child_reads = child.observed_labels();
         // Drop the child lock before writing back to the parent's
         // session log so the parent never holds two AsyncMutex
         // guards across an await point.
         drop(child);
+        self.observe_child_reads(child_reads)?;
 
         let envelope = self.refuse_leaked_subagent(envelope, &child_session_id);
         let status = envelope_status(&envelope.output);
@@ -5855,6 +5894,59 @@ impl Agent {
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }
+}
+
+/// The confidentiality label a call reads, decided from its name and
+/// arguments. A name the classifier cannot place at all reads as
+/// `Workspace`, the most restricting: an unregistered tool must not be
+/// able to read something sensitive and leave the session looking
+/// clean. `spawn_subagent` has none of its own; the parent takes the
+/// child's labels when it returns.
+fn call_read_sensitivity(
+    name: &str,
+    args: &serde_json::Value,
+) -> Option<crate::tool::ReadSensitivity> {
+    if name == SPAWN_SUBAGENT_TOOL {
+        return None;
+    }
+    match crate::tool::tool_to_read_sensitivity(name, args) {
+        Some(sensitivity) => Some(sensitivity),
+        None if crate::tool::tool_to_action(name, args).is_none() => {
+            Some(crate::tool::ReadSensitivity::Workspace)
+        }
+        None => None,
+    }
+}
+
+/// What a session had read before it was woken: the labels its
+/// `ReadSensitivityObserved` rows recorded, and those of every call it
+/// made, which covers a session from before those rows were written.
+fn replay_read_sensitivity(
+    session_log: &dyn SessionLog,
+    handle: &SessionHandle<OwnSession>,
+) -> Result<crate::sandbox_egress::ObservedSensitivity, AgentError> {
+    let rows = session_log
+        .get_since(handle, 0)
+        .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+    let mut seen = std::collections::HashSet::new();
+    for row in &rows {
+        match &row.event {
+            SessionEvent::ReadSensitivityObserved { sensitivity, .. } => {
+                seen.insert(crate::tool::ReadSensitivity::from_label(sensitivity));
+            }
+            SessionEvent::AssistantToolCalls { calls, .. } => {
+                for call in calls {
+                    let args: serde_json::Value =
+                        serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+                    if let Some(sensitivity) = call_read_sensitivity(&call.name, &args) {
+                        seen.insert(sensitivity);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Arc::new(std::sync::RwLock::new(seen)))
 }
 
 /// JSON schema for the built-in `spawn_subagent` tool. Exposed to
