@@ -64,6 +64,17 @@ tagged.
   contained one without its `NAME_FILE` and secret file. It used to get the
   literal `vault:NAME` string, or an empty file.
 
+### Known limits
+
+- A credential that was not handed to the MCP proxy when `wirken run`
+  started, because it was absent or not allowed to any of its servers then,
+  does not reach the proxy until the next start, even once it is stored or
+  granted.
+- A veto or egress hook registered after `wirken run` started is not waited
+  for until the next start. One unregistered stops being waited for at once.
+- A session from before 3.1.0 that spawned sub-agents does not take back what
+  they read when it wakes. Its own reads are restored from its tool calls.
+
 ## [3.0.0] - 2026-10-26
 
 RUSTSEC-2026-0387 (crypto-bigint 0.5.5) is ignored in `deny.toml`: it is
