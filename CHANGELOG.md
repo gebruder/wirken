@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-10-26
+
 ### Security
 
 - A change made while `wirken run` is running takes effect within seconds,
