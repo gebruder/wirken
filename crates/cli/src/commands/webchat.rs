@@ -4605,6 +4605,7 @@ pub fn session_events(
             // What the session has read, for the http_request gate; the
             // tool calls that read it are on the page already.
             SessionEvent::ReadSensitivityObserved { .. } => None,
+            SessionEvent::ReadSensitivityExempted { .. } => None,
             SessionEvent::CredentialDestinationRefused { .. }
             | SessionEvent::CredentialDestinationGranted { .. }
             | SessionEvent::CredentialDestinationRevoked { .. }

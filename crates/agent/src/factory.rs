@@ -325,6 +325,9 @@ pub struct AgentFactory {
     /// and channel override (`None` for the agent's own key). An agent
     /// with no entry uses the key in its static config.
     provider_keys: ProviderKeys,
+    /// Agents whose `exec` and MCP tool output does not count toward the
+    /// `http_request` escalation.
+    exempt_exec_mcp_output: std::sync::RwLock<std::collections::HashSet<String>>,
     /// The stored secrets every waked Agent refuses to let model-authored
     /// content carry. Empty (the default) refuses nothing; the CLI
     /// attaches one seeded from the vault.
@@ -490,6 +493,7 @@ impl AgentFactory {
             imported_search_key: std::sync::RwLock::new(None),
             credential_resolver: std::sync::RwLock::new(None),
             provider_keys: Default::default(),
+            exempt_exec_mcp_output: Default::default(),
             leak_matcher: std::sync::RwLock::new(
                 Arc::new(wirken_gateway::leak::LeakMatcher::new()),
             ),
@@ -671,6 +675,15 @@ impl AgentFactory {
             .write()
             .unwrap()
             .insert((agent_id.to_string(), channel.map(str::to_string)), source);
+    }
+
+    /// Leave `exec` and MCP tool output out of `agent_id`'s
+    /// `http_request` escalation.
+    pub fn exempt_exec_mcp_output(&self, agent_id: &str) {
+        self.exempt_exec_mcp_output
+            .write()
+            .unwrap()
+            .insert(agent_id.to_string());
     }
 
     pub fn attach_credential_resolver(
@@ -916,6 +929,14 @@ impl AgentFactory {
             && let Some(source) = &cfg.plan_token_source
         {
             agent.set_plan_token_source(source.clone());
+        }
+        if self
+            .exempt_exec_mcp_output
+            .read()
+            .unwrap()
+            .contains(agent_id)
+        {
+            agent.set_exempt_exec_mcp_output(true);
         }
         let key_channel = override_for_channel
             .and(channel_from_session_id(session_id))

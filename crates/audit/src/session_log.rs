@@ -1766,6 +1766,14 @@ pub enum SessionEvent {
     /// session takes its labels back from these rows, so an
     /// `http_request` after a restart is escalated as before it.
     ReadSensitivityObserved { sensitivity: String, tool: String },
+    /// The agent's `exempt_exec_mcp_output` setting left `exempted`
+    /// labels out of an `http_request` escalation decision. Once per
+    /// turn where it does. `still_escalated` is whether other labels
+    /// sent the call to the operator anyway.
+    ReadSensitivityExempted {
+        exempted: Vec<String>,
+        still_escalated: bool,
+    },
     /// An adapter reported that it delivered an outbound message,
     /// carrying the id the platform assigned to it.
     ///

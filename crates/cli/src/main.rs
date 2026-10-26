@@ -672,6 +672,12 @@ enum AgentCommands {
         /// shell history or the process table.
         #[arg(long)]
         api_key: bool,
+        /// true: `exec` output and MCP tool output stop counting as
+        /// restricting reads, so they no longer send this agent's
+        /// `http_request` to the operator. false (the default) restores
+        /// it. Takes effect at the next start of `wirken run`.
+        #[arg(long, value_name = "BOOL")]
+        exempt_exec_mcp_output: Option<bool>,
     },
     /// Grant or revoke sandbox egress for one of an agent's channels
     SetEgress {
@@ -1965,6 +1971,7 @@ async fn main() -> Result<()> {
                 model,
                 base_url,
                 api_key,
+                exempt_exec_mcp_output,
             } => {
                 commands::agents::set(
                     &id,
@@ -1972,6 +1979,7 @@ async fn main() -> Result<()> {
                     model.as_deref(),
                     base_url.as_deref(),
                     api_key,
+                    exempt_exec_mcp_output,
                 )
                 .await
             }

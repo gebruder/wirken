@@ -3927,6 +3927,10 @@ fn every_session_event() -> Vec<SessionEvent> {
             sensitivity: String::new(),
             tool: String::new(),
         },
+        SessionEvent::ReadSensitivityExempted {
+            exempted: Vec::new(),
+            still_escalated: false,
+        },
     ]
 }
 
@@ -3978,6 +3982,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::SubagentSpawned { .. } => "SubagentSpawned",
         SessionEvent::SubagentResult { .. } => "SubagentResult",
         SessionEvent::ReadSensitivityObserved { .. } => "ReadSensitivityObserved",
+        SessionEvent::ReadSensitivityExempted { .. } => "ReadSensitivityExempted",
         SessionEvent::DeliveryConfirmed { .. } => "DeliveryConfirmed",
         SessionEvent::DeliveryFailed { .. } => "DeliveryFailed",
         SessionEvent::AuditLegacy { .. } => "AuditLegacy",
@@ -4027,7 +4032,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 86;
+const SESSION_EVENT_VARIANTS: usize = 87;
 
 /// The list covers the enum.
 #[test]

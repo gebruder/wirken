@@ -528,6 +528,7 @@ impl OtelProjector {
             // The child's own run closes the child's own span.
             SessionEvent::SubagentResult { .. } => Vec::new(),
             SessionEvent::ReadSensitivityObserved { .. } => Vec::new(),
+            SessionEvent::ReadSensitivityExempted { .. } => Vec::new(),
             // Adapter delivery, after the run closed.
             SessionEvent::DeliveryConfirmed { .. } => Vec::new(),
             // The same, failing.

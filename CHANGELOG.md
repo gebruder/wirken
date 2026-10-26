@@ -36,8 +36,16 @@ tagged.
   cache: each read label is recorded once as `read_sensitivity_observed` and
   restored when the session wakes. `exec` output, MCP tool output, the
   response to an `http_request` that carried a credential, and whatever a
-  spawned sub-agent read now count as restricting reads. **For wirken-siem:**
-  new kind `read_sensitivity_observed`, forwarded by default.
+  spawned sub-agent read now count as restricting reads. **Operator action:**
+  an agent that runs `exec` or an MCP tool and then calls `http_request` now
+  asks the operator first, and with nobody to ask, in a cron job or a headless
+  sub-agent, the request is refused. To keep such an agent fetching, run
+  `wirken agents set <id> --exempt-exec-mcp-output true` and restart `wirken
+  run`: `exec` and MCP output then no longer count for that agent, every turn
+  where that applies is a `read_sensitivity_exempted` row, and other reads
+  still escalate. Off by default; the implicit `default` agent has no such
+  setting. **For wirken-siem:** new kinds `read_sensitivity_observed` and
+  `read_sensitivity_exempted`, forwarded by default.
 - The commands that change what the gateway trusts or runs write an
   `operator_command` row on the `gateway-operator` lane, sealed by a chain
   head: `credentials`, `channel add` and `remove`, `hooks`, `agents`,

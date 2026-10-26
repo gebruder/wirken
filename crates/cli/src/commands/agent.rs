@@ -323,6 +323,12 @@ async fn send_with_agent_config(
     // another agent's grants is the failure this whole argument split
     // exists to prevent.
     agent.set_agent_id(agent_cfg.id.clone());
+    if AgentConfigStore::open(&cfg.agent_config_db_path())
+        .and_then(|store| store.exempt_exec_mcp_output(&agent_cfg.id))
+        .unwrap_or(false)
+    {
+        agent.set_exempt_exec_mcp_output(true);
+    }
 
     if super::oauth_scope::stdin_is_tty() {
         agent.set_approval_gate(std::sync::Arc::new(

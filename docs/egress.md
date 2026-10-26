@@ -64,6 +64,16 @@ after a restart or after leaving the session cache takes its labels back from
 those rows and from the tool calls on its chain, so the escalation outlives the
 process that saw the read.
 
+An agent that runs `exec` or an MCP tool and then fetches, with nobody to ask,
+such as a cron job, is refused. `wirken agents set <id>
+--exempt-exec-mcp-output true` leaves `exec_output` and `mcp_output` out of
+that agent's decision; every other label still escalates. It is off by
+default, the change is an `operator_command` row, and it takes effect at the
+next start of `wirken run`. Each turn where it leaves a label out is one
+`read_sensitivity_exempted` row naming the labels and whether the call went
+to the operator anyway. The implicit `default` agent has no setting of its
+own; register an agent to use it.
+
 ### Credential-host binding
 
 A credential is bound to permitted hosts in the vault, by the operator:

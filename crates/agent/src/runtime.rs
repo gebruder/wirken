@@ -343,6 +343,11 @@ pub struct Agent {
     /// Shared with the egress context rather than copied, so the
     /// proxy sees reads that happen after the context is installed.
     observed_sensitivity: crate::sandbox_egress::ObservedSensitivity,
+    /// Leave `exec` and MCP tool output out of the `http_request`
+    /// escalation. Off unless the agent's config sets it.
+    exempt_exec_mcp_output: bool,
+    /// Whether this turn has recorded the exemption taking effect.
+    exemption_recorded: bool,
     /// Cross-channel memory store. `None` leaves the memory
     /// tools unconfigured, which is the posture for any agent the
     /// gateway has not wired a store into.
@@ -785,6 +790,8 @@ impl Agent {
             imported_store: None,
             imported_search_key: None,
             observed_sensitivity: Default::default(),
+            exempt_exec_mcp_output: false,
+            exemption_recorded: false,
             subagent_depth: 0,
             agent_id: None,
             subagent_binding_missing: false,
@@ -894,6 +901,8 @@ impl Agent {
             imported_store: None,
             imported_search_key: None,
             observed_sensitivity,
+            exempt_exec_mcp_output: false,
+            exemption_recorded: false,
             subagent_depth: 0,
             agent_id: None,
             subagent_binding_missing: false,
@@ -1402,6 +1411,7 @@ impl Agent {
     /// third turn path from repeating it: there is no way to record
     /// this turn's inbound context without installing from it.
     pub(crate) fn begin_turn(&mut self, inbound: &InboundContext) {
+        self.exemption_recorded = false;
         // Held for the duration of the turn so tool-call emits
         // (`AssistantToolCalls`, `ToolResult`) carry the same
         // `adapter_id` / `sender_id` as the sibling `UserMessage` row.
@@ -1538,6 +1548,13 @@ impl Agent {
             )?;
         }
         Ok(())
+    }
+
+    /// Leave `exec` and MCP tool output out of this agent's
+    /// `http_request` escalation; each turn where that changes the basis
+    /// is recorded.
+    pub fn set_exempt_exec_mcp_output(&mut self, exempt: bool) {
+        self.exempt_exec_mcp_output = exempt;
     }
 
     /// Every label this session has observed. A poisoned lock reads as
@@ -3813,7 +3830,29 @@ impl Agent {
         // answer and retries the call once with a bypass for exactly
         // this host. No operator reachable means refused.
         if name == "http_request" {
-            let basis = self.restricting_basis();
+            let mut basis = self.restricting_basis();
+            if self.exempt_exec_mcp_output {
+                let exempt = [
+                    crate::tool::ReadSensitivity::ExecOutput.as_str(),
+                    crate::tool::ReadSensitivity::McpOutput.as_str(),
+                ];
+                let exempted: Vec<String> = basis
+                    .iter()
+                    .filter(|l| exempt.contains(&l.as_str()))
+                    .cloned()
+                    .collect();
+                basis.retain(|l| !exempt.contains(&l.as_str()));
+                if !exempted.is_empty() && !self.exemption_recorded {
+                    self.exemption_recorded = true;
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::ReadSensitivityExempted {
+                            exempted,
+                            still_escalated: !basis.is_empty(),
+                        },
+                    )?;
+                }
+            }
             let url = serde_json::from_str::<serde_json::Value>(arguments)
                 .ok()
                 .and_then(|a| a.get("url").and_then(|u| u.as_str()).map(str::to_string));

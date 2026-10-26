@@ -618,6 +618,7 @@ pub async fn set(
     model: Option<&str>,
     base_url: Option<&str>,
     replace_api_key: bool,
+    exempt_exec_mcp_output: Option<bool>,
 ) -> Result<()> {
     let cfg = config();
     let store = AgentConfigStore::open(&cfg.agent_config_db_path())
@@ -762,10 +763,30 @@ pub async fn set(
         changed = true;
     }
 
+    if let Some(exempt) = exempt_exec_mcp_output {
+        store
+            .set_exempt_exec_mcp_output(id, exempt)
+            .context("Failed to update exempt_exec_mcp_output")?;
+        if exempt {
+            println!(
+                "  Agent '{id}': exec and MCP tool output no longer send its http_request to \
+                 the operator. Each turn where that applies is recorded."
+            );
+        } else {
+            println!(
+                "  Agent '{id}': exec and MCP tool output send its http_request to the \
+                 operator again."
+            );
+        }
+        println!("  Takes effect at the next start of `wirken run`.");
+        details.push(format!("exempt_exec_mcp_output {exempt}"));
+        changed = true;
+    }
+
     if !changed {
         println!(
             "  No settings to change. Use --model, --base-url, --api-key, \
-             or --tools-enabled <true|false|auto>."
+             --tools-enabled <true|false|auto> or --exempt-exec-mcp-output <true|false>."
         );
     } else {
         super::note_operator_command("agents set", id, &details.join("; "));

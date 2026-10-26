@@ -66,6 +66,8 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   correlation.
 /// - `ReadSensitivityObserved`: a session reading something that
 ///   escalates its later `http_request` calls.
+/// - `ReadSensitivityExempted`: an agent's setting leaving exec and
+///   MCP output out of that escalation.
 /// - `ChainHead`: per-session signed-head feed.
 /// - `McpEntryVerified`, `McpEntryRefused`: MCP load-time signature
 ///   and sandbox posture on the `gateway-mcp` sentinel session.
@@ -140,6 +142,7 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::UpdateRefused { .. } => true,
         SessionEvent::SubagentResult { .. } => true,
         SessionEvent::ReadSensitivityObserved { .. } => true,
+        SessionEvent::ReadSensitivityExempted { .. } => true,
         SessionEvent::ChainHead { .. } => true,
         SessionEvent::McpEntryVerified { .. } => true,
         SessionEvent::McpEntryRefused { .. } => true,
@@ -326,6 +329,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::SubagentSessionBound { .. } => "subagent_session_bound",
         SessionEvent::SubagentResult { .. } => "subagent_result",
         SessionEvent::ReadSensitivityObserved { .. } => "read_sensitivity_observed",
+        SessionEvent::ReadSensitivityExempted { .. } => "read_sensitivity_exempted",
         SessionEvent::DeliveryConfirmed { .. } => "delivery_confirmed",
         SessionEvent::DeliveryFailed { .. } => "delivery_failed",
         SessionEvent::AuditLegacy { .. } => "audit_legacy",

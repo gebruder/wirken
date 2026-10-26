@@ -239,6 +239,16 @@ impl AgentConfigStore {
             return Err(e.into());
         }
 
+        // Whether exec and MCP tool output stop counting as restricting
+        // reads for this agent's http_request. Default 0: they count.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE agents ADD COLUMN exempt_exec_mcp_output INTEGER NOT NULL DEFAULT 0",
+            [],
+        ) && !e.to_string().contains("duplicate column")
+        {
+            return Err(e.into());
+        }
+
         Ok(Self { conn })
     }
 
@@ -429,6 +439,35 @@ impl AgentConfigStore {
         }
 
         Ok(agents)
+    }
+
+    /// Whether `exec` output and MCP tool output stop counting as
+    /// restricting reads for this agent's `http_request`. Off unless set.
+    pub fn exempt_exec_mcp_output(&self, agent_id: &str) -> Result<bool, GatewayError> {
+        let value: i64 = self.conn.query_row(
+            "SELECT exempt_exec_mcp_output FROM agents WHERE id = ?1",
+            params![agent_id],
+            |row| row.get(0),
+        )?;
+        Ok(value != 0)
+    }
+
+    /// Set [`Self::exempt_exec_mcp_output`] for an existing agent.
+    pub fn set_exempt_exec_mcp_output(
+        &self,
+        agent_id: &str,
+        exempt: bool,
+    ) -> Result<(), GatewayError> {
+        let changes = self.conn.execute(
+            "UPDATE agents SET exempt_exec_mcp_output = ?1 WHERE id = ?2",
+            params![i64::from(exempt), agent_id],
+        )?;
+        if changes == 0 {
+            return Err(GatewayError::Config(format!(
+                "agent '{agent_id}' not found"
+            )));
+        }
+        Ok(())
     }
 
     /// Replace the per-channel egress policy for an existing agent.
@@ -655,6 +694,38 @@ mod tests {
         assert_eq!(got.name, "Work Agent");
         assert_eq!(got.model, "gpt-4o");
         assert_eq!(got.channels, vec!["slack", "teams"]);
+    }
+
+    /// The exec and MCP output exemption is off for a new agent, sticks
+    /// once set, survives an update of the rest of the row, and is
+    /// refused for an agent that does not exist.
+    #[test]
+    fn the_exec_mcp_output_exemption_is_off_until_set() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        let config = AgentConfig {
+            id: "ops".into(),
+            name: "Ops".into(),
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_credential: String::new(),
+            channels: vec![],
+            allowed_subagents: Default::default(),
+            tools_enabled: None,
+            preset: None,
+            channel_egress: Default::default(),
+            auth: Default::default(),
+        };
+        store.register(&config).unwrap();
+        assert!(!store.exempt_exec_mcp_output("ops").unwrap());
+        store.set_exempt_exec_mcp_output("ops", true).unwrap();
+        assert!(store.exempt_exec_mcp_output("ops").unwrap());
+        store.update(&config).unwrap();
+        assert!(store.exempt_exec_mcp_output("ops").unwrap());
+        store.set_exempt_exec_mcp_output("ops", false).unwrap();
+        assert!(!store.exempt_exec_mcp_output("ops").unwrap());
+        assert!(store.set_exempt_exec_mcp_output("nobody", true).is_err());
     }
 
     /// Changing an agent's model keeps everything else about it.

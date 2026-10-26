@@ -40,6 +40,7 @@ state in its detail.
 | `skill_permission_denied` | `agent_id` | A per-skill profile denied an axis. |
 | `sandbox_egress_verdict` / `sandbox_egress_unsupported` | `agent_id`, `channel`, `adapter_id`, `sender_id`, `mcp_server` | One row per sandbox egress request, allowed or not, from an `exec` or a contained MCP server. See [egress](egress.md#audit). |
 | `subagent_spawned` / `subagent_session_bound` / `subagent_result` | `agent_id`, `child_agent_id` | Sub-agent lifecycle under capability-attenuated ceilings. |
+| `read_sensitivity_exempted` | none | The agent's `exempt_exec_mcp_output` setting left `exempted` labels (`exec_output`, `mcp_output`) out of an `http_request` escalation decision, once per turn where it did. `still_escalated` is whether other labels sent the call to the operator anyway. See [egress](egress.md#the-http_request-gate). |
 | `read_sensitivity_observed` | none | The session read something of confidentiality label `sensitivity` for the first time, through `tool` (`spawn_subagent` for a child's labels). Every label but `aggregated_external` escalates the session's later `http_request` calls; a woken session takes its labels back from these rows. See [egress](egress.md#the-http_request-gate). |
 | `phase_entered` / `phase_exited` | `skill_id` | Skill-declared phase overlays. See [skills](skills.md#phase-boundaries). |
 | `hook_dispatched` / `egress_hook_dispatched` / `tool_output_redacted` | `hook_id`, `agent_id` | Operator hook outcomes. See [enforcement model](enforcement-model.md#veto-and-egress-hooks). |

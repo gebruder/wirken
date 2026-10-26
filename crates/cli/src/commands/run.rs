@@ -758,6 +758,8 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // into every waked Agent.
     let router = Arc::new(Router::new());
     let mut static_configs: HashMap<String, AgentStaticConfig> = HashMap::new();
+    // Agents whose exec and MCP output does not escalate http_request.
+    let mut exempt_agents: Vec<String> = Vec::new();
     // One token source per plan sign-in entry, shared by every agent on
     // it, so this process has one refresher per entry.
     let mut plan_sources: HashMap<String, Arc<wirken_agent::plan_auth::PlanTokenSource>> =
@@ -780,6 +782,16 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok();
 
         for agent_cfg in agent_store.list()? {
+            if agent_store
+                .exempt_exec_mcp_output(&agent_cfg.id)
+                .unwrap_or(false)
+            {
+                tracing::warn!(
+                    agent = %agent_cfg.id,
+                    "exec and MCP tool output do not escalate this agent's http_request"
+                );
+                exempt_agents.push(agent_cfg.id.clone());
+            }
             // Resolve API key from vault. Track the vault slot name so
             // it can land on every `LlmRequest` / `LlmResponse` for
             // SIEM correlation. `None` when the agent config doesn't
@@ -1539,6 +1551,10 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         cache_mode,
         cache_capacity,
     );
+
+    for agent_id in &exempt_agents {
+        factory.exempt_exec_mcp_output(agent_id);
+    }
 
     // Every model key named by a vault entry is read from the vault on
     // each call, so a rotation or a removal takes effect at the next one.

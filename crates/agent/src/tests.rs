@@ -13830,6 +13830,154 @@ mod http_request_after_a_restricting_read {
         assert!(denied_for_host(&r.events), "{:?}", r.events);
     }
 
+    /// A woken session that had read `labels`, with the agent's exec and
+    /// MCP output exemption set to `exempt`, sends one `http_request`.
+    async fn woken_fetch(labels: &[&str], exempt: bool) -> Run {
+        let (port, hits) = target().await;
+        let url = format!("http://localhost:{port}/x");
+        let (base_url, server) = stub(vec![
+            call(
+                "call_http",
+                "http_request",
+                serde_json::json!({"method": "GET", "url": url}),
+            ),
+            serde_json::json!({"role": "assistant", "content": "Done."}),
+        ])
+        .await;
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let lane = log.handle_for(SessionId::new("reader".to_string()));
+        for label in labels {
+            log.append(
+                &lane,
+                wirken_audit::TrustLevel::System,
+                SessionEvent::ReadSensitivityObserved {
+                    sensitivity: label.to_string(),
+                    tool: "earlier".into(),
+                },
+            )
+            .unwrap();
+        }
+        let mut agent = crate::runtime::Agent::from_session_log(
+            "reader".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            Default::default(),
+            crate::runtime::ToolGate::Store(crate::tests::test_permissions()),
+        )
+        .unwrap();
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+        let profile = crate::skill_perms::parse_block(
+            "tools:\n  allow: [http_request]\negress:\n  mode: allowlist\n  domains: [localhost]\ninference:\n  allow: [\"*\"]\n",
+            tmp.path(),
+            None,
+            None,
+        )
+        .unwrap();
+        agent
+            .attach_skills(vec![crate::skill::Skill {
+                name: "fetcher".into(),
+                description: "fetches".into(),
+                required_bins: vec![],
+                body: "Fetch.".into(),
+                path: tmp.path().join("SKILL.md"),
+                available: true,
+                permissions: profile,
+                disable_model_invocation: false,
+                signature: crate::skill::LoadedSignature::Unsigned,
+            }])
+            .unwrap();
+        agent.set_exempt_exec_mcp_output(exempt);
+        let gate = Arc::new(ScriptedGate::new(vec![ApprovalOutcome::Denied {
+            reason: None,
+            actor: None,
+        }]));
+        agent.set_approval_gate(gate.clone());
+        agent
+            .process_message("fetch it", "msg-1".into())
+            .await
+            .expect("the turn ends with a reply");
+        server.await.unwrap();
+        let events = log
+            .get_since(&lane, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        Run {
+            hits: hits.load(Ordering::SeqCst),
+            gate_calls: gate.calls.lock().unwrap().clone(),
+            events,
+        }
+    }
+
+    fn exemptions(events: &[SessionEvent]) -> Vec<(Vec<String>, bool)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::ReadSensitivityExempted {
+                    exempted,
+                    still_escalated,
+                } => Some((exempted.clone(), *still_escalated)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// With the exemption set, exec and MCP output alone do not send the
+    /// request to the operator, and the turn where that applied is on
+    /// the chain once.
+    #[tokio::test]
+    async fn exempted_exec_and_mcp_output_do_not_escalate_and_the_turn_is_recorded() {
+        let r = woken_fetch(&["exec_output", "mcp_output"], true).await;
+        assert!(r.gate_calls.is_empty(), "{:?}", r.gate_calls);
+        assert_eq!(
+            exemptions(&r.events),
+            vec![(
+                vec!["exec_output".to_string(), "mcp_output".to_string()],
+                false
+            )]
+        );
+    }
+
+    /// The exemption covers exec and MCP output only: a workspace read
+    /// still escalates, and the row says the call went to the operator.
+    #[tokio::test]
+    async fn the_exemption_leaves_other_reads_escalating() {
+        let r = woken_fetch(&["exec_output", "workspace"], true).await;
+        assert_eq!(r.gate_calls, vec!["http_request".to_string()]);
+        assert_eq!(r.hits, 0, "nothing went out");
+        assert_eq!(
+            exemptions(&r.events),
+            vec![(vec!["exec_output".to_string()], true)]
+        );
+    }
+
+    /// Off, the default: exec output escalates and nothing is exempted.
+    #[tokio::test]
+    async fn without_the_exemption_exec_output_escalates() {
+        let r = woken_fetch(&["exec_output"], false).await;
+        assert_eq!(r.gate_calls, vec!["http_request".to_string()]);
+        assert_eq!(r.hits, 0);
+        assert!(exemptions(&r.events).is_empty());
+    }
+
     /// A session woken after a restart, or after it left the session
     /// cache, has read what it read before: one turn reads a file, and
     /// the next turn, in a fresh agent replayed from the chain, is
