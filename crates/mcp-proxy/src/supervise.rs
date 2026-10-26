@@ -106,6 +106,33 @@ pub(crate) struct Pending {
 pub struct Supervisors {
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
+    restarts: Restarts,
+}
+
+/// Each supervised server's vault names and the signal that restarts it.
+#[derive(Clone, Default)]
+pub struct Restarts(Arc<Vec<(SupervisedServer, Arc<tokio::sync::Notify>)>>);
+
+#[derive(Clone)]
+struct SupervisedServer {
+    agent_id: String,
+    server: String,
+    vault_names: std::collections::BTreeSet<String>,
+}
+
+impl Restarts {
+    /// Restart every supervised server started with `name`. Returns
+    /// them as `agent/server`.
+    pub fn restart_using(&self, name: &str) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|(s, _)| s.vault_names.contains(name))
+            .map(|(s, signal)| {
+                signal.notify_one();
+                format!("{}/{}", s.agent_id, s.server)
+            })
+            .collect()
+    }
 }
 
 impl Supervisors {
@@ -126,9 +153,24 @@ impl Supervisors {
     ) -> Self {
         let (stop, stopped) = watch::channel(false);
         let pending = registry.lock().await.take_pending();
+        let mut restarts = Vec::new();
         let tasks = pending
             .into_iter()
             .map(|p| {
+                let restart = Arc::new(tokio::sync::Notify::new());
+                restarts.push((
+                    SupervisedServer {
+                        agent_id: p.agent_id.clone(),
+                        server: p.server.clone(),
+                        vault_names: p
+                            .env
+                            .values()
+                            .filter_map(|v| v.strip_prefix("vault:"))
+                            .map(str::to_string)
+                            .collect(),
+                    },
+                    restart.clone(),
+                ));
                 let first = p.first.clone();
                 let mut life = ContainerLife {
                     registry: registry.clone(),
@@ -149,12 +191,23 @@ impl Supervisors {
                         audit.as_ref(),
                         backoff,
                         stopped,
+                        &restart,
                     )
                     .await;
                 })
             })
             .collect();
-        Self { stop, tasks }
+        Self {
+            stop,
+            tasks,
+            restarts: Restarts(Arc::new(restarts)),
+        }
+    }
+
+    /// The signals that restart supervised servers, for the proxy's
+    /// vault watch.
+    pub fn restarts(&self) -> Restarts {
+        self.restarts.clone()
     }
 
     /// Stop supervising. A start under way gets five seconds to finish
@@ -172,7 +225,9 @@ impl Supervisors {
 
 /// Keep one server running until `stopped` turns true or the server is
 /// given up on. `current` is the run under way: its container id, or
-/// why it did not start.
+/// why it did not start. `restart` stops the run and starts it again at
+/// once, for a vault value it was started with that changed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn supervise(
     life: &mut dyn ServerLife,
     agent_id: &str,
@@ -181,6 +236,7 @@ pub(crate) async fn supervise(
     audit: Option<&Arc<dyn SessionLog>>,
     backoff: RestartBackoff,
     mut stopped: watch::Receiver<bool>,
+    restart: &tokio::sync::Notify,
 ) {
     let mut delay = backoff.first;
     let mut attempt: u64 = 0;
@@ -192,6 +248,38 @@ pub(crate) async fn supervise(
                 let exit_code = tokio::select! {
                     code = life.exited(&container_id) => code,
                     _ = stopped.changed() => return,
+                    () = restart.notified() => {
+                        let output = life.retire().await;
+                        if let Some(output) = &output {
+                            tracing::debug!(agent_id, server, "stderr before restart:\n{output}");
+                        }
+                        attempt += 1;
+                        tracing::info!(
+                            agent_id,
+                            server,
+                            "MCP server '{server}' restarted for a changed credential"
+                        );
+                        record(
+                            audit,
+                            SessionEvent::McpServerRestart {
+                                server_name: server.to_string(),
+                                agent_id: agent_id.to_string(),
+                                attempt,
+                                cause: McpServerRestartCause::CredentialChanged,
+                                detail: "a vault value it is started with changed".to_string(),
+                                delay_ms: 0,
+                                ran_for_ms: Some(
+                                    u64::try_from(started.elapsed().as_millis())
+                                        .unwrap_or(u64::MAX),
+                                ),
+                            },
+                        );
+                        current = life.start().await;
+                        if *stopped.borrow() {
+                            return;
+                        }
+                        continue;
+                    }
                 };
                 if *stopped.borrow() {
                     // The proxy stopped the container; that is not an
@@ -289,6 +377,8 @@ pub(crate) async fn supervise(
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
             _ = stopped.changed() => return,
+            // A changed credential may be what it was failing on.
+            () = restart.notified() => {}
         }
         delay = (delay * 2).min(backoff.cap);
         current = life.start().await;
@@ -483,6 +573,7 @@ mod tests {
             Some(&log),
             FAST,
             stopped,
+            &tokio::sync::Notify::new(),
         )
         .await;
 
@@ -531,6 +622,7 @@ mod tests {
                 Some(&log2),
                 FAST,
                 stopped,
+                &tokio::sync::Notify::new(),
             )
             .await;
             life
@@ -603,6 +695,7 @@ mod tests {
                 Some(&log2),
                 FAST,
                 stopped,
+                &tokio::sync::Notify::new(),
             )
             .await;
             life
@@ -612,6 +705,54 @@ mod tests {
         let life = task.await.unwrap();
         assert!(rows(&log).is_empty());
         assert_eq!((life.started, life.retired), (0, 0));
+    }
+
+    /// A vault value the server was started with changed: the running
+    /// server is retired and started again at once, recorded as such,
+    /// and supervision goes on.
+    #[cfg_attr(miri, ignore = "calls into C (SQLite); miri cannot")]
+    #[tokio::test]
+    async fn a_restart_signal_retires_the_server_and_starts_it_again() {
+        let log = log();
+        let mut life = Scripted::new(vec![Ok(Run::StaysUp)]);
+        life.current = Some(Run::StaysUp);
+        let (stop, stopped) = watch::channel(false);
+        let restart = Arc::new(tokio::sync::Notify::new());
+        let (log2, restart2) = (log.clone(), restart.clone());
+        let task = tokio::spawn(async move {
+            supervise(
+                &mut life,
+                "agent-1",
+                "srv",
+                Ok("c0".into()),
+                Some(&log2),
+                FAST,
+                stopped,
+                &restart2,
+            )
+            .await;
+            life
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        restart.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "supervision goes on");
+        let _ = stop.send(true);
+        let life = task.await.unwrap();
+        assert_eq!((life.started, life.retired), (1, 1));
+        let rows = rows(&log);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            matches!(
+                &rows[0],
+                SessionEvent::McpServerRestart {
+                    cause: McpServerRestartCause::CredentialChanged,
+                    delay_ms: 0,
+                    ..
+                }
+            ),
+            "{rows:?}"
+        );
     }
 
     /// Live: a contained server whose container exits after it answered

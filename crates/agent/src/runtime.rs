@@ -269,6 +269,9 @@ pub struct Agent {
     /// `provider.json`, env-var override, tests). Never the secret
     /// itself.
     api_key_credential: Option<String>,
+    /// Read for the model key on each call when set; `api_key` is then
+    /// `None`.
+    api_key_source: Option<Arc<dyn crate::llm::ProviderKeySource>>,
     /// What every dispatched tool call passes. There is no ungated
     /// shape: see [`ToolGate`].
     permissions: ToolGate,
@@ -741,6 +744,7 @@ impl Agent {
             api_key: api_key.clone(),
             provider: Some(llm_config.provider.clone()),
             base_url: Some(llm_config.base_url.clone()),
+            api_key_source: None,
             sandbox,
         };
         let tools = ToolRegistry::new(workspace, tool_config)?;
@@ -763,6 +767,7 @@ impl Agent {
             system_prompt,
             api_key,
             api_key_credential,
+            api_key_source: None,
             permissions: ToolGate::Store(permissions),
             org_permissions: None,
             current_trigger: None,
@@ -845,6 +850,7 @@ impl Agent {
             api_key: api_key.clone(),
             provider: Some(llm_config.provider.clone()),
             base_url: Some(llm_config.base_url.clone()),
+            api_key_source: None,
             sandbox,
         };
         let tools = ToolRegistry::new(workspace, tool_config)?;
@@ -870,6 +876,7 @@ impl Agent {
             system_prompt,
             api_key,
             api_key_credential,
+            api_key_source: None,
             permissions,
             org_permissions: None,
             current_trigger: None,
@@ -2080,6 +2087,29 @@ impl Agent {
         self.budget_name = Some(name.into());
     }
 
+    /// Read the model key from `source` on each call, and stamp its
+    /// entry on the call rows as the credential.
+    pub fn set_api_key_source(&mut self, source: Arc<dyn crate::llm::ProviderKeySource>) {
+        self.api_key = None;
+        self.api_key_credential = Some(source.credential().to_string());
+        self.tools.set_api_key_source(source.clone());
+        self.api_key_source = Some(source);
+    }
+
+    /// The model key for this call: read from the source when there is
+    /// one, else the key the agent was built with.
+    fn provider_key(&self) -> Result<Option<String>, AgentError> {
+        match &self.api_key_source {
+            Some(source) => source.key().map(Some).map_err(|why| {
+                AgentError::Llm(format!(
+                    "the model key '{}' cannot be used: {why}",
+                    source.credential()
+                ))
+            }),
+            None => Ok(self.api_key.clone()),
+        }
+    }
+
     /// Take the bearer for every model call from `source`, the plan
     /// entry's token source, and stamp the entry on the call rows as
     /// the credential.
@@ -2395,10 +2425,10 @@ impl Agent {
             ),
         )?;
         let started = std::time::Instant::now();
-        let result = self
-            .llm
-            .complete(&messages, &[], self.api_key.as_deref())
-            .await;
+        let result = match self.provider_key() {
+            Ok(key) => self.llm.complete(&messages, &[], key.as_deref()).await,
+            Err(e) => Err(e),
+        };
         let result = match result {
             Ok((response, usage)) => {
                 let (row, total_cost_usd_micros) = side_call_response(
@@ -3089,12 +3119,15 @@ impl Agent {
 
             self.check_inference_or_deny()?;
             let started = std::time::Instant::now();
+            let provider_key = self
+                .provider_key()
+                .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let (response, usage) = self
                 .llm
                 .complete(
                     self.conversation.messages(),
                     &tool_defs,
-                    self.api_key.as_deref(),
+                    provider_key.as_deref(),
                 )
                 .await
                 .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
@@ -3444,11 +3477,14 @@ impl Agent {
             self.check_inference_or_deny()?;
             // Spawn streaming in background, forward text deltas to caller
             let started = std::time::Instant::now();
+            let provider_key = self
+                .provider_key()
+                .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let (response, usage) = {
                 let stream_future = self.llm.complete_stream(
                     self.conversation.messages(),
                     &tool_defs,
-                    self.api_key.as_deref(),
+                    provider_key.as_deref(),
                     round_tx,
                 );
 

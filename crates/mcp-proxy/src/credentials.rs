@@ -43,6 +43,19 @@ pub struct ServerPin {
     pub entry: String,
 }
 
+/// What the gateway sends on a watch connection after `Watching`, one
+/// line each.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WatchNotice {
+    /// A credential the proxy was handed changed in the vault: rotated,
+    /// removed, or given other destinations.
+    Changed { credential: String },
+}
+
+/// Cap on one watch notice line.
+const MAX_NOTICE_BYTES: u64 = 4 * 1024;
+
 /// Environment variable naming the gateway's refresh socket.
 pub const GATEWAY_SOCKET_ENV: &str = "WIRKEN_MCP_GATEWAY_SOCKET";
 
@@ -55,8 +68,9 @@ pub struct ProxyCredentials {
     values: Mutex<HashMap<String, VaultSecret>>,
     gateway: Option<GatewayLink>,
     /// The entries each credential may be resolved for. `None` admits
-    /// every entry.
-    pins: Option<HashMap<String, BTreeSet<ServerPin>>>,
+    /// every entry. The gateway narrows a credential's set when its
+    /// destinations change.
+    pins: Mutex<Option<HashMap<String, BTreeSet<ServerPin>>>>,
 }
 
 /// Shared by every auth provider and the stdio start path.
@@ -67,20 +81,20 @@ impl ProxyCredentials {
         Self {
             values: Mutex::new(values),
             gateway,
-            pins: None,
+            pins: Mutex::new(None),
         }
     }
 
     /// Resolve each credential only for the entries in `pins`.
-    pub fn with_pins(mut self, pins: HashMap<String, BTreeSet<ServerPin>>) -> Self {
-        self.pins = Some(pins);
+    pub fn with_pins(self, pins: HashMap<String, BTreeSet<ServerPin>>) -> Self {
+        *self.pins.lock().expect("pins mutex") = Some(pins);
         self
     }
 
     /// `name`'s value for the server entry `pin`, if the gateway handed
     /// it over for that entry.
     pub fn get_for(&self, pin: &ServerPin, name: &str) -> Option<VaultSecret> {
-        if let Some(pins) = &self.pins
+        if let Some(pins) = &*self.pins.lock().expect("pins mutex")
             && !pins.get(name).is_some_and(|p| p.contains(pin))
         {
             tracing::warn!(
@@ -167,13 +181,21 @@ impl ProxyCredentials {
     }
 
     /// Have the gateway send the vault's current value of `name`, after
-    /// a server refused the one held here, and keep it in its place.
+    /// a server refused the one held here or the vault entry changed,
+    /// and keep it in its place. A refusal drops the value held here.
     pub async fn refetch(&self, name: &str) -> Result<(), ProxyError> {
         let gateway = self.gateway.as_ref().ok_or_else(|| {
             ProxyError::Vault(format!("no gateway to fetch credential '{name}' from"))
         })?;
         let value = match gateway.ask(name, RequestKind::Current).await? {
-            RefreshReply::Current { value } => VaultSecret::new(value),
+            RefreshReply::Current { value, servers } => {
+                if let (Some(servers), Some(pins)) =
+                    (servers, &mut *self.pins.lock().expect("pins mutex"))
+                {
+                    pins.insert(name.to_string(), servers.into_iter().collect());
+                }
+                VaultSecret::new(value)
+            }
             RefreshReply::Refreshed(_) => {
                 return Err(ProxyError::Vault(format!(
                     "the gateway answered the fetch of '{name}' with a refresh"
@@ -185,6 +207,9 @@ impl ProxyCredentials {
                 )));
             }
             RefreshReply::Refused { reason } => {
+                // Removed from the vault, or no longer allowed here: what
+                // this proxy holds is not sent again.
+                self.values.lock().expect("credentials mutex").remove(name);
                 return Err(ProxyError::Vault(format!(
                     "the gateway did not send '{name}': {reason}"
                 )));
@@ -203,11 +228,13 @@ impl ProxyCredentials {
     /// Never resolves when there is no gateway to watch or the watch
     /// could not be set up; the proxy then runs until it is signalled,
     /// and the next proxy's start removes what it leaves behind.
-    pub async fn gateway_gone(&self) {
+    /// Each credential the gateway reports changed in the vault while it
+    /// runs is sent on `changed`.
+    pub async fn gateway_gone(&self, changed: tokio::sync::mpsc::UnboundedSender<String>) {
         let Some(gateway) = &self.gateway else {
             return std::future::pending().await;
         };
-        if let Err(e) = gateway.watch().await {
+        if let Err(e) = gateway.watch(changed).await {
             tracing::warn!("{e}; this proxy will not notice the gateway exiting");
             std::future::pending::<()>().await;
         }
@@ -225,10 +252,14 @@ impl GatewayLink {
         Self { socket, token }
     }
 
-    /// Ask the gateway to hold this connection open, then wait for it
-    /// to close. An error means the watch was never set up; once it is,
-    /// any end of the connection is the gateway gone.
-    async fn watch(&self) -> Result<(), ProxyError> {
+    /// Ask the gateway to hold this connection open, then pass on each
+    /// change it reports until it closes. An error means the watch was
+    /// never set up; once it is, any end of the connection is the
+    /// gateway gone.
+    async fn watch(
+        &self,
+        changed: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<(), ProxyError> {
         let stream = tokio::time::timeout(REFRESH_TIMEOUT, async {
             let stream = wirken_ipc::connect(&self.socket).await.map_err(|e| {
                 ProxyError::Vault(format!(
@@ -268,14 +299,14 @@ impl GatewayLink {
         })
         .await
         .map_err(|_| ProxyError::Vault("the gateway did not answer the watch".to_string()))??;
-        // Nothing more is sent either way; the read ends when the
-        // gateway's end closes.
-        let (mut reader, _wr) = stream;
-        let mut rest = [0u8; 64];
-        while let Ok(n) = reader.read(&mut rest).await {
-            if n == 0 {
-                break;
+        // One notice per line until the gateway's end closes.
+        let (reader, _wr) = stream;
+        let mut lines = reader.take(MAX_NOTICE_BYTES).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(WatchNotice::Changed { credential }) = serde_json::from_str(&line) {
+                let _ = changed.send(credential);
             }
+            lines.get_mut().set_limit(MAX_NOTICE_BYTES);
         }
         Ok(())
     }
@@ -353,9 +384,11 @@ pub(crate) enum RequestKind {
 pub(crate) enum RefreshReply {
     Refreshed(HandedOAuth),
     /// The vault's current value; an OAuth credential without its
-    /// refresh token.
+    /// refresh token. `servers` are the entries it may still go to.
     Current {
         value: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        servers: Option<Vec<ServerPin>>,
     },
     Refused {
         reason: String,

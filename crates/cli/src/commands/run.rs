@@ -106,6 +106,83 @@ impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
     }
 }
 
+/// A model key read from the vault on every call, for the provider it
+/// is bound to: a rotation reaches the next call, and a removal or a
+/// revoke fails it.
+struct VaultProviderKey {
+    store: Arc<std::sync::Mutex<CredentialStore>>,
+    name: String,
+    destination: wirken_vault::Destination,
+    leak: Arc<wirken_gateway::leak::LeakMatcher>,
+}
+
+impl std::fmt::Debug for VaultProviderKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultProviderKey")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl wirken_agent::llm::ProviderKeySource for VaultProviderKey {
+    fn credential(&self) -> &str {
+        &self.name
+    }
+
+    fn key(&self) -> Result<String, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "vault mutex poisoned".to_string())?;
+        match store.retrieve_for(&self.name, &self.destination) {
+            Ok((secret, meta)) => {
+                self.leak.learn(&self.name, secret.expose(), meta.kind);
+                Ok(secret.expose().to_string())
+            }
+            Err(wirken_vault::VaultError::NotFound(_)) => {
+                Err("it is no longer in the vault".to_string())
+            }
+            Err(wirken_vault::VaultError::NotPermitted { .. }) => Err(format!(
+                "it may no longer be sent to {}",
+                self.destination.describe()
+            )),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Every model key a static config names by vault entry: (agent id,
+/// channel override, entry, the provider it is sent to). A plan agent
+/// has none.
+fn provider_key_slots(
+    configs: &HashMap<String, AgentStaticConfig>,
+) -> Vec<(String, Option<String>, String, wirken_vault::Destination)> {
+    let mut out = Vec::new();
+    for (agent_id, cfg) in configs {
+        if cfg.plan_token_source.is_none()
+            && let Some(name) = &cfg.api_key_credential
+        {
+            out.push((
+                agent_id.clone(),
+                None,
+                name.clone(),
+                super::destinations::provider(&cfg.llm_config.provider, &cfg.llm_config.base_url),
+            ));
+        }
+        for (channel, ov) in &cfg.channel_overrides {
+            if let Some(name) = &ov.api_key_credential {
+                out.push((
+                    agent_id.clone(),
+                    Some(channel.clone()),
+                    name.clone(),
+                    super::destinations::provider(&ov.llm_config.provider, &ov.llm_config.base_url),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Prompt once for the vault passphrase, caching it for the rest of
 /// this boot.
 ///
@@ -1122,6 +1199,9 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             }
         }
     };
+    // Tells a live adapter or hook connection the registry no longer
+    // admits it.
+    let revocations = Arc::new(super::live_reload::Revocations::default());
     let lifelines: Lifelines = Arc::new(
         adapters
             .iter()
@@ -1263,20 +1343,23 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     );
     let mcp_refresh_socket = cfg.socket_dir().join("mcp-refresh.sock");
     let _ = std::fs::remove_file(&mcp_refresh_socket);
+    let mut mcp_refresh_service = None;
     let mcp_refresh_handle =
         match wirken_mcp_proxy::refresh_service::RefreshListener::bind(&mcp_refresh_socket) {
             Ok(listener) => {
                 let service = Arc::new(
                     wirken_mcp_proxy::refresh_service::RefreshService::new(
                         proxy_vault.clone(),
-                        proxy_handed,
+                        proxy_handed.keys().cloned().collect(),
                         proxy_credentials.oauth.clone(),
                         refresh_token,
                         mcp_proxy_pid.clone(),
                         Some(session_log.clone()),
                     )
-                    .with_leak_matcher(leak_matcher.clone()),
+                    .with_leak_matcher(leak_matcher.clone())
+                    .with_pins(proxy_handed.into_iter().collect()),
                 );
+                mcp_refresh_service = Some(service.clone());
                 Some(tokio::spawn(service.serve(listener)))
             }
             Err(e) => {
@@ -1447,6 +1530,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         }
     }
 
+    let provider_keys = provider_key_slots(&static_configs);
     let factory = AgentFactory::with_options(
         static_configs,
         session_log.clone(),
@@ -1455,6 +1539,45 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         cache_mode,
         cache_capacity,
     );
+
+    // Every model key named by a vault entry is read from the vault on
+    // each call, so a rotation or a removal takes effect at the next one.
+    // What each entry feeds, for the live reload's rows.
+    let mut provider_key_users: HashMap<String, Vec<String>> = HashMap::new();
+    if !provider_keys.is_empty() {
+        let keychain = probe_keychain(&cfg.data_dir, || {
+            prompt_vault_passphrase(&mut vault_passphrase)
+        });
+        match CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()) {
+            Ok(store) => {
+                let store = Arc::new(std::sync::Mutex::new(store));
+                for (agent_id, channel, name, destination) in provider_keys {
+                    provider_key_users
+                        .entry(name.clone())
+                        .or_default()
+                        .push(match &channel {
+                            Some(channel) => format!("model key of agent {agent_id} on {channel}"),
+                            None => format!("model key of agent {agent_id}"),
+                        });
+                    factory.attach_provider_key(
+                        &agent_id,
+                        channel.as_deref(),
+                        Arc::new(VaultProviderKey {
+                            store: store.clone(),
+                            name,
+                            destination,
+                            leak: leak_matcher.clone(),
+                        }),
+                    );
+                }
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                "vault unavailable; model keys are the ones read at start and are not \
+                 read again"
+            ),
+        }
+    }
 
     // --- Hook registry + dispatcher ---
     //
@@ -1497,6 +1620,27 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         hook_dispatcher.expect(veto).await;
         egress_dispatcher.expect(egress).await;
     }
+
+    // --- Live reload ---
+    //
+    // A credential rotated or removed, an adapter removed or a hook
+    // unregistered by another process takes effect here within seconds,
+    // each with an `authority_reloaded` row.
+    let live_reload_handle = tokio::spawn(
+        super::live_reload::LiveReload {
+            vault_db: cfg.vault_db_path(),
+            adapters: registry.clone(),
+            hooks: hook_registry.clone(),
+            veto: hook_dispatcher.clone(),
+            egress: egress_dispatcher.clone(),
+            lifelines: lifelines.clone(),
+            revocations: revocations.clone(),
+            mcp: mcp_refresh_service.clone(),
+            provider_keys: provider_key_users,
+            log: session_log.clone(),
+        }
+        .run(),
+    );
 
     // --- cross-channel memory ---
     // Opening the store is what makes the memory tools available at
@@ -1964,6 +2108,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let accept_approvers = approver_registry.clone();
     let accept_inbound_gate = inbound_gate.clone();
     let accept_lifelines = lifelines.clone();
+    let accept_revocations = revocations.clone();
     let accept_session_log = session_log.clone();
     let accept_terminal = TerminalSetup {
         sessions: terminal_sessions.clone(),
@@ -2049,6 +2194,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     let apprv = accept_approvers.clone();
                     let gate = accept_inbound_gate.clone();
                     let lines = accept_lifelines.clone();
+                    let revs = accept_revocations.clone();
                     let lane_log = accept_session_log.clone();
                     let terms = accept_terminal.clone();
                     let adapter_id = super::connection_tasks::AdapterIdSlot::default();
@@ -2068,6 +2214,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                             apprv,
                             gate,
                             lines,
+                            revs,
                             slot,
                             lane_log,
                             accept_operator_key,
@@ -2100,80 +2247,82 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     #[cfg_attr(not(unix), allow(unused_variables))]
     let hooks_accept_audit = audit.clone();
     let hooks_accept_session_log = session_log.clone();
+    let hooks_accept_revocations = revocations.clone();
     let hooks_connection_tasks = connection_tasks.clone();
-    let hooks_accept_handle = tokio::spawn(async move {
-        loop {
-            match hooks_listener.accept().await {
-                Ok(stream) => {
-                    #[cfg(unix)]
-                    match stream.peer_principal() {
-                        Ok(actual) if actual == hooks_expected_principal => {}
-                        Ok(actual) => {
-                            tracing::warn!(
-                                "hooks gateway: refusing peer {} (expected {})",
-                                actual,
-                                hooks_expected_principal
-                            );
-                            let _ = hooks_accept_audit
-                                .log(
-                                    AuditEvent::new(
-                                        ActorKind::Service,
-                                        "gateway",
-                                        "hooks.peer.refused",
-                                        "gateway-hooks-socket",
-                                    )
-                                    .with_detail(
-                                        serde_json::json!({
-                                            "reason": "principal_mismatch",
-                                            "expected": hooks_expected_principal.to_string(),
-                                            "actual": actual.to_string(),
-                                        }),
-                                    ),
-                                )
-                                .await;
-                            continue;
+    let hooks_accept_handle =
+        tokio::spawn(async move {
+            loop {
+                match hooks_listener.accept().await {
+                    Ok(stream) => {
+                        #[cfg(unix)]
+                        match stream.peer_principal() {
+                            Ok(actual) if actual == hooks_expected_principal => {}
+                            Ok(actual) => {
+                                tracing::warn!(
+                                    "hooks gateway: refusing peer {} (expected {})",
+                                    actual,
+                                    hooks_expected_principal
+                                );
+                                let _ =
+                                    hooks_accept_audit
+                                        .log(
+                                            AuditEvent::new(
+                                                ActorKind::Service,
+                                                "gateway",
+                                                "hooks.peer.refused",
+                                                "gateway-hooks-socket",
+                                            )
+                                            .with_detail(serde_json::json!({
+                                                "reason": "principal_mismatch",
+                                                "expected": hooks_expected_principal.to_string(),
+                                                "actual": actual.to_string(),
+                                            })),
+                                        )
+                                        .await;
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "hooks gateway: peer_principal unavailable, refusing: {e}"
+                                );
+                                let _ =
+                                    hooks_accept_audit
+                                        .log(
+                                            AuditEvent::new(
+                                                ActorKind::Service,
+                                                "gateway",
+                                                "hooks.peer.refused",
+                                                "gateway-hooks-socket",
+                                            )
+                                            .with_detail(serde_json::json!({
+                                                "reason": "peer_principal_unavailable",
+                                                "error": e.to_string(),
+                                            })),
+                                        )
+                                        .await;
+                                continue;
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                "hooks gateway: peer_principal unavailable, refusing: {e}"
-                            );
-                            let _ = hooks_accept_audit
-                                .log(
-                                    AuditEvent::new(
-                                        ActorKind::Service,
-                                        "gateway",
-                                        "hooks.peer.refused",
-                                        "gateway-hooks-socket",
-                                    )
-                                    .with_detail(
-                                        serde_json::json!({
-                                            "reason": "peer_principal_unavailable",
-                                            "error": e.to_string(),
-                                        }),
-                                    ),
-                                )
-                                .await;
-                            continue;
-                        }
-                    }
 
-                    let reg = hooks_accept_registry.clone();
-                    let disp = hooks_accept_dispatcher.clone();
-                    let edisp = hooks_accept_egress_dispatcher.clone();
-                    let slog = hooks_accept_session_log.clone();
-                    hooks_connection_tasks.spawn("hooks", async move {
-                        if let Err(e) = handle_hook_connection(stream, reg, disp, edisp, slog).await
-                        {
-                            tracing::error!("Hook connection error: {e}");
-                        }
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("Hooks accept error: {e}");
+                        let reg = hooks_accept_registry.clone();
+                        let disp = hooks_accept_dispatcher.clone();
+                        let edisp = hooks_accept_egress_dispatcher.clone();
+                        let slog = hooks_accept_session_log.clone();
+                        let revs = hooks_accept_revocations.clone();
+                        hooks_connection_tasks.spawn("hooks", async move {
+                            if let Err(e) =
+                                handle_hook_connection(stream, reg, disp, edisp, slog, revs).await
+                            {
+                                tracing::error!("Hook connection error: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Hooks accept error: {e}");
+                    }
                 }
             }
-        }
-    });
+        });
 
     // --- Orchestrator-push listener (Zirkel C-Signal) ---
     //
@@ -2394,6 +2543,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
 
     // Abort adapter processes before emitting SessionEnd ChainHeads
     // so no concurrent appends race the shutdown signature.
+    live_reload_handle.abort();
     for handle in adapter_handles {
         handle.abort();
     }
@@ -2627,7 +2777,7 @@ where
 /// What an adapter's restart loop hears from that adapter's gateway
 /// connection.
 #[derive(Default)]
-struct AdapterLifeline {
+pub(crate) struct AdapterLifeline {
     /// Notified by [`ConnectionTeardown`] when the connection ends.
     ended: tokio::sync::Notify,
     /// Set with that notification when the connection ended in a panic.
@@ -2636,6 +2786,36 @@ struct AdapterLifeline {
     /// takes it to decide whether the connection lasted long enough to
     /// reset the backoff.
     connected_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// What the live reload asked of the restart loop, taken with the
+    /// next `ended` notification.
+    order: std::sync::Mutex<Option<LifelineOrder>>,
+}
+
+/// What the live reload can ask of an adapter's restart loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifelineOrder {
+    /// A credential handed to it changed: kill it and start it again now,
+    /// with the vault's current values.
+    Respawn,
+    /// It was removed from the registry: kill it and stop.
+    Stop,
+}
+
+impl AdapterLifeline {
+    /// Ask the restart loop for `order`. A stop is not replaced by a
+    /// respawn asked for after it.
+    pub(crate) fn order(&self, order: LifelineOrder) {
+        let mut pending = self.order.lock().unwrap();
+        if *pending != Some(LifelineOrder::Stop) {
+            *pending = Some(order);
+        }
+        drop(pending);
+        self.ended.notify_one();
+    }
+
+    fn take_order(&self) -> Option<LifelineOrder> {
+        self.order.lock().unwrap().take()
+    }
 }
 
 /// One lifeline per adapter registered at start, by adapter id.
@@ -2740,14 +2920,21 @@ impl StopSignal {
 /// vault holds, OAuth credentials without their refresh token, and the
 /// token that admits it to the refresh socket. A vault credential that
 /// happens to carry the token's entry name is left out. Also returns
-/// the credential names handed, the ones the proxy may ask for again.
+/// the credentials handed, the ones the proxy may ask for again, each
+/// with the server entries it was handed for.
 fn mcp_proxy_handoff(
     vault: Option<&std::sync::Mutex<CredentialStore>>,
     wanted: &wirken_mcp_proxy::ConfiguredCredentials,
     refresh_token: &str,
     leak: &wirken_gateway::leak::LeakMatcher,
     log: Option<&dyn wirken_audit::SessionLog>,
-) -> (Handoff, std::collections::BTreeSet<String>) {
+) -> (
+    Handoff,
+    std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<wirken_mcp_proxy::credentials::ServerPin>,
+    >,
+) {
     use wirken_mcp_proxy::credentials::{
         GATEWAY_TOKEN_ENTRY, SERVERS_ENTRY, ServerPin, without_refresh_token,
     };
@@ -2830,7 +3017,6 @@ fn mcp_proxy_handoff(
         Some(Err(_)) => tracing::error!("vault mutex poisoned; the MCP proxy starts with none"),
         None => {}
     }
-    let handed = entries.keys().cloned().collect();
     entries.insert(
         GATEWAY_TOKEN_ENTRY.to_string(),
         VaultSecret::new(refresh_token.to_string()),
@@ -2839,7 +3025,7 @@ fn mcp_proxy_handoff(
         SERVERS_ENTRY.to_string(),
         VaultSecret::new(serde_json::to_string(&pins).unwrap_or_default()),
     );
-    (Handoff::from_entries(entries), handed)
+    (Handoff::from_entries(entries), pins)
 }
 
 /// How long the MCP proxy gets to stop its servers at shutdown.
@@ -2900,6 +3086,9 @@ async fn supervise_adapter<S>(
             _ = lifeline.ended.notified() => {}
             _ = std::future::ready(()) => {}
         }
+        if lifeline.take_order() == Some(LifelineOrder::Stop) {
+            return;
+        }
         *lifeline.connected_at.lock().unwrap() = None;
         lifeline
             .panicked
@@ -2920,8 +3109,14 @@ async fn supervise_adapter<S>(
                         let panicked = lifeline
                             .panicked
                             .swap(false, std::sync::atomic::Ordering::Acquire);
+                        let order = lifeline.take_order();
+                        if order == Some(LifelineOrder::Stop) {
+                            return;
+                        }
                         (
-                            if panicked {
+                            if order == Some(LifelineOrder::Respawn) {
+                                AdapterRestartCause::CredentialChanged
+                            } else if panicked {
                                 AdapterRestartCause::ConnectionPanicked
                             } else {
                                 AdapterRestartCause::ConnectionEnded
@@ -2940,6 +3135,25 @@ async fn supervise_adapter<S>(
             .unwrap()
             .take()
             .map(|t| t.elapsed());
+        if cause == AdapterRestartCause::CredentialChanged {
+            // Asked for, not a failure: started again at once, and not
+            // counted toward giving up.
+            tracing::info!("Adapter '{adapter_id}' restarted for a changed credential");
+            record_adapter_event(
+                session_log,
+                SessionEvent::AdapterRestart {
+                    adapter_id: adapter_id.to_string(),
+                    channel: channel.to_string(),
+                    attempt,
+                    cause,
+                    exit,
+                    delay_ms: 0,
+                    connected_for_ms: connected_for
+                        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                },
+            );
+            continue;
+        }
         if connected_for.is_some_and(|d| d >= backoff.reset_after) {
             delay = backoff.first;
             attempt = 0;
@@ -2987,7 +3201,19 @@ async fn supervise_adapter<S>(
                     .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             },
         );
-        tokio::time::sleep(delay).await;
+        // An order cuts the wait short: a stop ends the loop, a respawn
+        // starts the process now. A stale end notification does not.
+        let deadline = tokio::time::Instant::now() + delay;
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => break,
+                _ = lifeline.ended.notified() => match lifeline.take_order() {
+                    Some(LifelineOrder::Stop) => return,
+                    Some(LifelineOrder::Respawn) => break,
+                    None => {}
+                },
+            }
+        }
         delay = (delay * 2).min(backoff.cap);
     }
 }
@@ -3116,6 +3342,7 @@ async fn handle_adapter_connection(
     approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
     inbound_gate: Arc<wirken_gateway::sender_registry::InboundGate>,
     lifelines: Lifelines,
+    revocations: Arc<super::live_reload::Revocations>,
     adapter_id_slot: super::connection_tasks::AdapterIdSlot,
     session_log: Arc<dyn wirken_audit::SessionLog>,
     operator_key: Option<ed25519_dalek::VerifyingKey>,
@@ -3133,6 +3360,7 @@ async fn handle_adapter_connection(
             .collect()
     };
 
+    let mut revoked = None;
     let peer = gateway_handshake_audited(
         &mut reader,
         &mut writer,
@@ -3149,6 +3377,12 @@ async fn handle_adapter_connection(
             adapter_id,
             public_key,
         } => {
+            // Before the registry is read again, so a removal that lands
+            // after this check still reaches the connection.
+            revoked = Some(super::live_reload::until_revoked(
+                revocations.subscribe(),
+                super::live_reload::Revoked::Adapter(adapter_id.clone()),
+            ));
             // Resolve the authenticated channel from the registry. Every
             // inbound frame on this connection must claim the same channel
             // or a compromised adapter could send a frame with
@@ -3251,8 +3485,9 @@ async fn handle_adapter_connection(
     };
 
     // Message loop. `_teardown` drops as this returns, on the value
-    // path and on an unwind alike.
-    message_loop(
+    // path and on an unwind alike. An adapter removed from the registry
+    // while connected loses the connection here.
+    let served = message_loop(
         &adapter_id,
         &authenticated_channel,
         reader,
@@ -3267,8 +3502,19 @@ async fn handle_adapter_connection(
         inbound_gate,
         dispatcher.clone(),
         terminal,
-    )
-    .await
+    );
+    match revoked {
+        Some(revoked) => tokio::select! {
+            result = served => result,
+            () = revoked => {
+                tracing::warn!(
+                    "Adapter '{adapter_id}' is no longer in the registry; its connection is dropped"
+                );
+                Ok(())
+            }
+        },
+        None => served.await,
+    }
 }
 
 /// Handle one inbound hook connection. Snapshot-then-verify the
@@ -3295,11 +3541,15 @@ async fn handle_hook_connection(
     dispatcher: Arc<wirken_gateway::hook_dispatcher::HookDispatcher>,
     egress_dispatcher: Arc<wirken_gateway::egress_dispatcher::EgressDispatcher>,
     session_log: Arc<dyn wirken_audit::SessionLog>,
+    revocations: Arc<super::live_reload::Revocations>,
 ) -> Result<()> {
     use wirken_audit::{HookKind, HookSignatureStatus, SessionEvent, SessionId, TrustLevel};
     use wirken_ipc::{HookType, perform_gateway_hook_handshake};
 
     let (mut reader, mut writer) = split_stream(stream);
+    // Before the registry is read, so an unregister that lands after the
+    // handshake still reaches the connection.
+    let notices = revocations.subscribe();
 
     let allow_unregistered =
         wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNREGISTERED_HOOKS");
@@ -3380,10 +3630,32 @@ async fn handle_hook_connection(
         "Hook authenticated and routed",
     );
 
-    let crash_reason = match hook_type {
-        HookType::Observe => serve_observe_loop(reader, writer, &hook_id, &session_log).await,
-        HookType::Veto => serve_veto_loop(reader, writer, &hook_id, &dispatcher).await,
-        HookType::Egress => serve_egress_loop(reader, writer, &hook_id, &egress_dispatcher).await,
+    let serve = async {
+        match hook_type {
+            HookType::Observe => serve_observe_loop(reader, writer, &hook_id, &session_log).await,
+            HookType::Veto => serve_veto_loop(reader, writer, &hook_id, &dispatcher).await,
+            HookType::Egress => {
+                serve_egress_loop(reader, writer, &hook_id, &egress_dispatcher).await
+            }
+        }
+    };
+    let revoked = super::live_reload::until_revoked(
+        notices,
+        super::live_reload::Revoked::Hook(hook_id.clone()),
+    );
+    let crash_reason = tokio::select! {
+        reason = serve => reason,
+        () = revoked => {
+            // The serve loop is dropped mid-read; take it off the
+            // dispatcher here, which drops its pending decisions.
+            dispatcher.unregister(&hook_id).await;
+            egress_dispatcher.unregister(&hook_id).await;
+            tracing::warn!(
+                hook_id = %hook_id,
+                "hook is no longer registered as it connected; its connection is dropped"
+            );
+            "unregistered".to_string()
+        }
     };
 
     registry.lock().await.set_connected(&hook_id, false);
@@ -5792,6 +6064,62 @@ mod adapter_restart_tests {
             .expect("the restart loop is running")
     }
 
+    /// A credential changed in the vault: the process is killed and
+    /// started again at once, without a delay, and the row says why.
+    #[tokio::test]
+    async fn a_respawn_order_restarts_the_adapter_at_once() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(STAYS_UP, BACKOFF);
+        let first = next_pid(&mut pids).await;
+        gw.lifeline.order(super::LifelineOrder::Respawn);
+        let second = next_pid(&mut pids).await;
+        assert!(!alive(first), "the process with the old values is killed");
+        assert!(alive(second));
+        supervisor.abort();
+        let _ = supervisor.await;
+        let restarts = gw.rows("adapter_restart").await;
+        assert_eq!(restarts.len(), 1, "{restarts:?}");
+        assert_eq!(restarts[0]["cause"], "credential_changed");
+        assert_eq!(restarts[0]["delay_ms"], 0);
+    }
+
+    /// Removed from the registry: the process is killed and not started
+    /// again, and a respawn asked for afterwards does not undo it.
+    #[tokio::test]
+    async fn a_stop_order_ends_the_restart_loop() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(STAYS_UP, BACKOFF);
+        let first = next_pid(&mut pids).await;
+        gw.lifeline.order(super::LifelineOrder::Stop);
+        gw.lifeline.order(super::LifelineOrder::Respawn);
+        tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("the restart loop returns")
+            .unwrap();
+        assert!(!alive(first), "the removed adapter's process is killed");
+        assert!(pids.try_recv().is_err(), "nothing is started again");
+        assert!(gw.rows("adapter_restart").await.is_empty());
+    }
+
+    /// A stop that lands while the loop waits to restart a failing
+    /// process ends the wait.
+    #[tokio::test]
+    async fn a_stop_order_cuts_a_restart_delay_short() {
+        let gw = Gateway::new();
+        let slow = RestartBackoff {
+            first: Duration::from_secs(60),
+            ..BACKOFF
+        };
+        let (supervisor, mut pids) = gw.supervise(EXITS, slow);
+        next_pid(&mut pids).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        gw.lifeline.order(super::LifelineOrder::Stop);
+        tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("the wait ends at the stop")
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn a_panicked_connection_kills_and_respawns_its_adapter_with_a_doubling_delay() {
         let gw = Gateway::new();
@@ -7521,7 +7849,7 @@ mod proxy_handoff_tests {
             None,
         );
         assert_eq!(
-            handed,
+            handed.keys().cloned().collect::<BTreeSet<_>>(),
             BTreeSet::from(["linear-token".to_string(), "notion-oauth".to_string()]),
             "the names the proxy may ask for again: its credentials, not the token"
         );
@@ -7602,7 +7930,10 @@ mod proxy_handoff_tests {
             &wirken_gateway::leak::LeakMatcher::new(),
             Some(&log),
         );
-        assert_eq!(handed, BTreeSet::from(["linear-token".to_string()]));
+        assert_eq!(
+            handed.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["linear-token".to_string()])
+        );
         let entries = handoff.into_entries();
         assert!(!entries.contains_key("other-token"));
         let pins: serde_json::Value =
@@ -7907,6 +8238,7 @@ mod same_connection_approval_tests {
             approvers,
             Arc::new(test_inbound_gate(tmp.path(), &[("signal", "U1")])),
             Arc::new(HashMap::new()),
+            Arc::new(super::super::live_reload::Revocations::default()),
             super::super::connection_tasks::AdapterIdSlot::default(),
             log.clone(),
             None,
@@ -8128,6 +8460,7 @@ mod approver_removed_mid_run_tests {
                 approvers,
                 Arc::new(test_inbound_gate(tmp.path(), &[(channel, "U1")])),
                 Arc::new(HashMap::new()),
+                Arc::new(super::super::live_reload::Revocations::default()),
                 super::super::connection_tasks::AdapterIdSlot::default(),
                 log.clone(),
                 None,
@@ -8642,6 +8975,7 @@ mod inbound_sender_gate_tests {
                 ),
                 gate,
                 Arc::new(HashMap::new()),
+                Arc::new(super::super::live_reload::Revocations::default()),
                 super::super::connection_tasks::AdapterIdSlot::default(),
                 log.clone(),
                 None,
@@ -9003,6 +9337,7 @@ mod terminal_channel_tests {
                 // Empty: the terminal skips the allowlist.
                 Arc::new(test_inbound_gate(tmp.path(), &[])),
                 Arc::new(HashMap::new()),
+                Arc::new(super::super::live_reload::Revocations::default()),
                 super::super::connection_tasks::AdapterIdSlot::default(),
                 log.clone(),
                 Some(operator.verifying_key()),

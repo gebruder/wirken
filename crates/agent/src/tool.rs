@@ -58,6 +58,8 @@ pub struct ToolResult {
 #[derive(Debug, Clone, Default)]
 pub struct ToolConfig {
     pub api_key: Option<String>,
+    /// Read for the key on each call instead of `api_key`, when set.
+    pub api_key_source: Option<Arc<dyn crate::llm::ProviderKeySource>>,
     pub provider: Option<String>,
     pub base_url: Option<String>,
     pub sandbox: SandboxConfig,
@@ -568,6 +570,13 @@ impl ToolRegistry {
     /// names a zirkel-bound database. The tool itself enforces
     /// read-only access via `SQLITE_OPEN_READ_ONLY`; the path here
     /// is the only DB the tool will ever touch.
+    /// Read the provider key for each call from `source`, instead of the
+    /// key this registry was built with.
+    pub fn set_api_key_source(&mut self, source: Arc<dyn crate::llm::ProviderKeySource>) {
+        self.config.api_key = None;
+        self.config.api_key_source = Some(source);
+    }
+
     pub fn set_zirkel_db_path(&mut self, path: PathBuf) {
         self.zirkel_db_path = Some(path);
     }
@@ -1128,7 +1137,20 @@ impl ToolRegistry {
             });
         }
 
-        let api_key = match self.config.api_key.as_deref() {
+        let from_source = match &self.config.api_key_source {
+            Some(source) => match source.key() {
+                Ok(key) => Some(key),
+                Err(why) => {
+                    return Ok(ToolResult {
+                        output: format!("Image generation has no usable API key: {why}"),
+                        success: false,
+                        sandbox: None,
+                    });
+                }
+            },
+            None => None,
+        };
+        let api_key = match from_source.as_deref().or(self.config.api_key.as_deref()) {
             Some(k) => k,
             None => {
                 return Ok(ToolResult {

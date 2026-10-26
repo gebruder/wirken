@@ -4579,6 +4579,7 @@ pub fn session_events(
             SessionEvent::ApproverRemoved { .. } => None,
             SessionEvent::ApprovalChatSet { .. } => None,
             SessionEvent::OperatorCommand { .. } => None,
+            SessionEvent::AuthorityReloaded { .. } => None,
             SessionEvent::OperatorCommandRefused { .. } => None,
             // The hook's verdict is already the outcome on the tool row it
             // gated.

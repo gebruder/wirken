@@ -893,6 +893,7 @@ fn extract_identity_for_sentinel(
         SessionEvent::ApproverRemoved { .. } => (None, None, None),
         SessionEvent::ApprovalChatSet { .. } => (None, None, None),
         SessionEvent::OperatorCommand { .. } => (None, None, None),
+        SessionEvent::AuthorityReloaded { .. } => (None, None, None),
         SessionEvent::OperatorCommandRefused { .. } => (None, None, None),
         // A hook id and an error; none of the three.
         SessionEvent::HookCrashed { .. } => (None, None, None),
@@ -1202,6 +1203,15 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             invocation,
             reason,
         } => format!("{command} {invocation} refused: {reason}"),
+        SessionEvent::AuthorityReloaded {
+            subject_kind,
+            subject,
+            change,
+            reloaded,
+        } => format!(
+            "authority_reloaded {subject_kind}={subject} change={change} reloaded={}",
+            reloaded.join(",")
+        ),
         // A hook id, a tool and a decision.
         SessionEvent::HookDispatched { .. } => debug_summary(event),
         // A hook id and an error.
@@ -1377,7 +1387,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
             Reason::Panic => "error",
         },
         SessionEvent::AdapterRestart { cause, .. } => match cause {
-            Cause::ConnectionEnded => "info",
+            Cause::ConnectionEnded | Cause::CredentialChanged => "info",
             Cause::ProcessExited => "warn",
             Cause::ConnectionPanicked | Cause::SpawnFailed => "error",
         },
@@ -1396,6 +1406,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
             }
         }
         SessionEvent::McpServerRestart { cause, .. } => match cause {
+            McpCause::CredentialChanged => "info",
             McpCause::Exited => "warn",
             McpCause::StartFailed | McpCause::InitializeFailed => "error",
         },

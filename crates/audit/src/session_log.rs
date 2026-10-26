@@ -2157,6 +2157,18 @@ pub enum SessionEvent {
         destination_kind: String,
         destination: String,
     },
+    /// A change another process made took effect in the running gateway
+    /// without a restart. `subject_kind` is `credential`, `adapter` or
+    /// `hook`; `change` is `rotated`, `rebound`, `removed`, `added` or
+    /// `rekeyed`;
+    /// `reloaded` names what took it up, one entry each. On the
+    /// [`LIVE_RELOAD_SESSION`] lane.
+    AuthorityReloaded {
+        subject_kind: String,
+        subject: String,
+        change: String,
+        reloaded: Vec<String>,
+    },
     /// The vault was re-sealed with destination binding. `backup` is
     /// the backup's file name. On the [`CREDENTIALS_SESSION`] lane.
     VaultMigrated {
@@ -2529,6 +2541,9 @@ pub const INBOUND_SENDERS_SESSION: &str = "gateway-inbound";
 /// Lane for `wirken senders` changes.
 pub const OPERATOR_SENDERS_SESSION: &str = "gateway-senders";
 
+/// Lane for [`SessionEvent::AuthorityReloaded`].
+pub const LIVE_RELOAD_SESSION: &str = "gateway-reloads";
+
 /// Lane for [`SessionEvent::OperatorCommand`]: the other `wirken`
 /// commands that change what the gateway trusts or runs.
 pub const OPERATOR_COMMANDS_SESSION: &str = "gateway-operator";
@@ -2600,6 +2615,9 @@ pub enum McpServerRestartCause {
     /// The container started and the server did not answer
     /// `initialize` and `tools/list`.
     InitializeFailed,
+    /// A vault value the server is started with was rotated or removed;
+    /// the proxy stopped it to start it with the vault's current value.
+    CredentialChanged,
 }
 
 impl McpServerRestartCause {
@@ -2609,6 +2627,7 @@ impl McpServerRestartCause {
             Self::Exited => "exited",
             Self::StartFailed => "start_failed",
             Self::InitializeFailed => "initialize_failed",
+            Self::CredentialChanged => "credential_changed",
         }
     }
 }
@@ -2623,6 +2642,10 @@ pub enum AdapterRestartCause {
     ConnectionEnded,
     /// Its connection's message loop panicked; the process was killed.
     ConnectionPanicked,
+    /// A credential handed to it was rotated or removed in the vault;
+    /// the process was killed to start it with the vault's current
+    /// values.
+    CredentialChanged,
     /// The process could not be spawned.
     SpawnFailed,
 }
@@ -2635,6 +2658,7 @@ impl AdapterRestartCause {
             Self::ConnectionEnded => "connection_ended",
             Self::ConnectionPanicked => "connection_panicked",
             Self::SpawnFailed => "spawn_failed",
+            Self::CredentialChanged => "credential_changed",
         }
     }
 }

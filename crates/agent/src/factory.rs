@@ -276,6 +276,10 @@ pub enum FactoryPurpose {
     Verify,
 }
 
+/// Model key sources by (agent id, channel override).
+type ProviderKeys =
+    std::sync::RwLock<HashMap<(String, Option<String>), Arc<dyn crate::llm::ProviderKeySource>>>;
+
 pub struct AgentFactory {
     static_configs: HashMap<String, AgentStaticConfig>,
     session_log: Arc<dyn SessionLog>,
@@ -317,6 +321,10 @@ pub struct AgentFactory {
     /// refuses rather than proceeding. The CLI runs
     /// `attach_credential_resolver` after opening the vault.
     credential_resolver: std::sync::RwLock<Option<Arc<dyn crate::http_tool::CredentialResolver>>>,
+    /// Where each agent reads its model key on every call, by agent id
+    /// and channel override (`None` for the agent's own key). An agent
+    /// with no entry uses the key in its static config.
+    provider_keys: ProviderKeys,
     /// The stored secrets every waked Agent refuses to let model-authored
     /// content carry. Empty (the default) refuses nothing; the CLI
     /// attaches one seeded from the vault.
@@ -481,6 +489,7 @@ impl AgentFactory {
             imported_store: std::sync::RwLock::new(None),
             imported_search_key: std::sync::RwLock::new(None),
             credential_resolver: std::sync::RwLock::new(None),
+            provider_keys: Default::default(),
             leak_matcher: std::sync::RwLock::new(
                 Arc::new(wirken_gateway::leak::LeakMatcher::new()),
             ),
@@ -650,6 +659,20 @@ impl AgentFactory {
     /// Install the host-side credential resolver used by `http_request`.
     /// Applied to every subsequently-waked Agent. Same interior-mutable
     /// life cycle as [`Self::attach_egress_dispatcher`].
+    /// Read `agent_id`'s model key from `source` on every call: its own
+    /// key with `channel` `None`, or that channel override's.
+    pub fn attach_provider_key(
+        &self,
+        agent_id: &str,
+        channel: Option<&str>,
+        source: Arc<dyn crate::llm::ProviderKeySource>,
+    ) {
+        self.provider_keys
+            .write()
+            .unwrap()
+            .insert((agent_id.to_string(), channel.map(str::to_string)), source);
+    }
+
     pub fn attach_credential_resolver(
         &self,
         resolver: Arc<dyn crate::http_tool::CredentialResolver>,
@@ -893,6 +916,17 @@ impl AgentFactory {
             && let Some(source) = &cfg.plan_token_source
         {
             agent.set_plan_token_source(source.clone());
+        }
+        let key_channel = override_for_channel
+            .and(channel_from_session_id(session_id))
+            .map(str::to_string);
+        if let Some(source) = self
+            .provider_keys
+            .read()
+            .unwrap()
+            .get(&(agent_id.to_string(), key_channel))
+        {
+            agent.set_api_key_source(source.clone());
         }
         // Before the skills: a skill is checked against it as it loads.
         agent.set_leak_matcher(self.leak_matcher.read().unwrap().clone());

@@ -1341,8 +1341,8 @@ enum HookCommands {
     },
     /// List registered hooks.
     List,
-    /// Remove a hook from the registry. Does not signal an active
-    /// connection; the gateway notices on its next handshake.
+    /// Remove a hook from the registry. A running gateway drops its
+    /// connection within seconds and no longer waits for it.
     Unregister { hook_id: String },
 }
 

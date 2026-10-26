@@ -142,6 +142,15 @@ impl Row {
     }
 }
 
+/// What [`CredentialStore::fingerprints`] reports for one entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryFingerprint {
+    /// Digest of the sealed value.
+    pub value: [u8; 32],
+    /// Digest of the binding column.
+    pub binding: [u8; 32],
+}
+
 /// SQLite-backed credential store with encrypted values.
 pub struct CredentialStore {
     conn: Connection,
@@ -331,6 +340,47 @@ impl CredentialStore {
             names.push(row?);
         }
         Ok(names)
+    }
+
+    /// A digest of each stored entry's sealed value and of its binding,
+    /// read without the device key. A rotation, a grant or a revoke
+    /// changes it; a read does not. An absent file is an empty store.
+    pub fn fingerprints(db_path: &Path) -> Result<BTreeMap<String, EntryFingerprint>, VaultError> {
+        let mut out = BTreeMap::new();
+        if !db_path.exists() {
+            return Ok(out);
+        }
+        // A plain open, as `names` does. Only a SELECT follows.
+        let conn = Connection::open(db_path)?;
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'credentials'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)?;
+        if !has_table {
+            return Ok(out);
+        }
+        let mut stmt = conn.prepare("SELECT name, encrypted_value, binding FROM credentials")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (name, sealed, binding) = row?;
+            out.insert(
+                name,
+                EntryFingerprint {
+                    value: Sha256::digest(&sealed).into(),
+                    binding: Sha256::digest(binding.unwrap_or_default().as_bytes()).into(),
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// Store a credential. A name of the form `<adapter>-...` is bound

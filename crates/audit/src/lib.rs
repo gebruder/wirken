@@ -36,7 +36,7 @@ pub use session_log::{
     ChainHeadReason, ChildCheck, ChildCheckStatus, CrossCheckDisagreement, CrossCheckStatus,
     DenialSource, EgressDecision, ExecLocation, GrantExpiryDetection, HashHex, HexBytes,
     HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, INBOUND_SENDERS_SESSION,
-    ImportedSearchOutcome, InboundRefusalReason, LeakSurface, LlmCallPurpose,
+    ImportedSearchOutcome, InboundRefusalReason, LIVE_RELOAD_SESSION, LeakSurface, LlmCallPurpose,
     MCP_CREDENTIAL_SESSION, McpServerRestartCause, OPERATOR_APPROVERS_SESSION,
     OPERATOR_COMMANDS_SESSION, OPERATOR_SENDERS_SESSION, OwnSession, PermissionDenialRecord,
     PhaseDenyContent, PhaseExitReason, RedactionRecord, SandboxEgressDenyReason,

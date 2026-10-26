@@ -102,6 +102,21 @@ pub struct ProxyRegistry {
     supervised_agents: std::collections::HashSet<String>,
     /// Where shutdown records the containers it stopped.
     audit: Option<Arc<dyn SessionLog>>,
+    /// Stdio servers run without a container, kept to start one again
+    /// when a vault value it reads changes. Contained ones have a
+    /// supervisor for that.
+    host_servers: Vec<HostServer>,
+}
+
+/// A stdio server run on the host, as loaded.
+struct HostServer {
+    agent_id: String,
+    server: String,
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    pin: crate::credentials::ServerPin,
+    sandbox: Option<StdioSandbox>,
 }
 
 impl ProxyRegistry {
@@ -115,7 +130,91 @@ impl ProxyRegistry {
             pending: Vec::new(),
             supervised_agents: Default::default(),
             audit: None,
+            host_servers: Vec::new(),
         }
+    }
+
+    /// Stop and start again every host stdio server that reads `name`,
+    /// with the value the proxy holds now. Returns them as
+    /// `agent/server`.
+    pub(crate) async fn restart_host_using(
+        &mut self,
+        name: &str,
+        credentials: &crate::credentials::ProxyCredentials,
+    ) -> Vec<String> {
+        let mut restarted = Vec::new();
+        let specs: Vec<usize> = self
+            .host_servers
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| {
+                h.env
+                    .values()
+                    .any(|v| v.strip_prefix("vault:") == Some(name))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for i in specs {
+            let (agent_id, server) = (
+                self.host_servers[i].agent_id.clone(),
+                self.host_servers[i].server.clone(),
+            );
+            if let Some(mut old) = self.take(&agent_id, &server) {
+                old.shutdown().await;
+            }
+            let h = &self.host_servers[i];
+            let resolved = resolve_env(&h.env, credentials, &h.pin);
+            let entry = StdioEntry {
+                agent_id: &h.agent_id,
+                server: &h.server,
+                command: &h.command,
+                args: &h.args,
+                env: &h.env,
+                sandbox: h.sandbox.as_ref(),
+            };
+            let audit = self.audit.clone();
+            let detail = match start_stdio(&self.sandbox, entry, &resolved, audit.as_ref()).await {
+                Ok(stdio) => {
+                    let mut client =
+                        McpClient::new(server.clone(), Transport::Stdio(Box::new(stdio)));
+                    match init_and_list(&mut client, &agent_id).await {
+                        Ok(()) => {
+                            self.install(&agent_id, &server, client);
+                            "a vault value it is started with changed".to_string()
+                        }
+                        Err(e) => {
+                            client.shutdown().await;
+                            format!("a vault value it is started with changed; initialize: {e}")
+                        }
+                    }
+                }
+                Err(StartError::Refused { reason, why }) => {
+                    format!("a vault value it is started with changed; {reason}: {why}")
+                }
+                Err(StartError::Failed(e)) => {
+                    format!("a vault value it is started with changed; start: {e}")
+                }
+            };
+            tracing::info!(
+                agent_id,
+                server,
+                "MCP server '{server}' restarted for a changed credential"
+            );
+            record(
+                audit.as_ref(),
+                SessionEvent::McpServerRestart {
+                    server_name: server.clone(),
+                    agent_id: agent_id.clone(),
+                    attempt: 1,
+                    cause: McpServerRestartCause::CredentialChanged,
+                    detail,
+                    delay_ms: 0,
+                    ran_for_ms: None,
+                },
+            );
+            restarted.push(format!("{agent_id}/{server}"));
+        }
+        restarted
     }
 
     /// Use `host` to start contained stdio servers.
@@ -298,6 +397,17 @@ impl ProxyRegistry {
                             }))
                         }
                     };
+                    if contained.is_none() {
+                        self.host_servers.push(HostServer {
+                            agent_id: agent_id.to_string(),
+                            server: name.clone(),
+                            command: command.clone(),
+                            args: args.clone(),
+                            env: env.clone(),
+                            pin: pin.clone(),
+                            sandbox: sandbox.as_deref().cloned(),
+                        });
+                    }
                     if let (Some(sandbox), Some(first)) = (contained, first) {
                         self.supervised_agents.insert(agent_id.to_string());
                         self.pending.push(Pending {

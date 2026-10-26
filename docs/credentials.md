@@ -56,8 +56,9 @@ wirken credentials show <NAME>
 `gateway-credentials` lane; a grant whose row cannot be written is undone.
 `--mcp-server` pins the entry as signed now, and an unsigned entry cannot be
 granted; after `wirken mcp sign` changes an entry, the credentials pinned to it
-go nowhere until moved, which `mcp sign` offers to do. A revoke takes effect at
-the next start of `wirken run`.
+go nowhere until moved, which `mcp sign` offers to do. A running gateway takes
+up a grant or revoke within seconds
+([changes while the gateway runs](#changes-while-the-gateway-runs)).
 
 New entries get their destinations as they are stored: an adapter's own
 credentials (`<adapter>-...`) go to that adapter, a provider key stored by
@@ -124,11 +125,41 @@ credentials added or changed since.
   call carries it: a credential rotated in the vault reaches an HTTP
   server without a restart. Each value sent is an
   `mcp_credential_refetched` row naming the credential. A stdio server's
-  `vault:` values are fixed when it starts and change at the next
-  gateway start.
+  `vault:` values are fixed when it starts; a change to one starts it
+  again (below).
 - **`wirken` commands** that manage credentials (`credentials`,
   `channel add`, `setup`, `mcp authorize`) open the full vault in the
   operator's own process.
+
+## Changes while the gateway runs
+
+Every two seconds `wirken run` compares each vault entry's sealed value and
+destinations, the adapter registry and the hook registry with what it last
+saw. A change made by `wirken credentials`, `channel remove` or `hooks
+unregister` takes effect without a restart:
+
+- **A model key** is read from the vault for every call, so a rotated key is
+  used by the next call, and a removed or revoked one fails it.
+- **An adapter's credentials**: the adapter is killed and spawned again at
+  once with the vault's current values. A credential it may no longer be
+  handed stops it starting, as at any spawn.
+- **MCP credentials**: the gateway tells the proxy, which asks for the current
+  value and gets it only for the server entries the destinations still allow.
+  A stdio server that reads it is stopped and started again with the new
+  value, or without it. An HTTP server's bearer or OAuth token is read for
+  each request, so a removed one is no longer sent.
+- **`http_request` credentials** are read for each call, as before.
+- **A credential stored again** after a removal reaches the adapter and the
+  MCP proxy the same way, if it was handed to them when `wirken run` started.
+- **`wirken channel remove`**: the adapter's connection is dropped and its
+  process stopped.
+- **`wirken hooks unregister`**: the hook's connection is dropped, and a veto
+  or egress hook is no longer waited for.
+
+Each change is one `authority_reloaded` row on the `gateway-reloads` lane,
+naming what changed and what took it up. A restarted adapter or MCP server
+also has its `adapter_restart` or `mcp_server_restart` row, with cause
+`credential_changed`.
 
 This page covers OAuth-managed credentials specifically: the
 interactive scope picker, the non-interactive flags, and the

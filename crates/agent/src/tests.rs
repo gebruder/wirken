@@ -947,6 +947,7 @@ async fn generate_image_requires_api_key() {
     let tmp = TempDir::new().unwrap();
     let config = ToolConfig {
         api_key: None,
+        api_key_source: None,
         provider: Some("openai".into()),
         base_url: Some("https://api.openai.com/v1".into()),
         sandbox: Default::default(),
@@ -966,6 +967,7 @@ async fn generate_image_requires_openai_provider() {
     let tmp = TempDir::new().unwrap();
     let config = ToolConfig {
         api_key: Some("test-key".into()),
+        api_key_source: None,
         provider: Some("anthropic".into()),
         base_url: Some("https://api.anthropic.com/v1".into()),
         sandbox: Default::default(),
@@ -15526,5 +15528,158 @@ mod consecutive_asks {
         assert!(!is_ask_inbound(Some("ask-not-a-uuid")));
         assert!(!is_ask_inbound(Some("msg-1")));
         assert!(!is_ask_inbound(None));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The model key is read from its source on every call: a rotation
+// reaches the next call, and a removal fails it before anything is sent.
+// ---------------------------------------------------------------------------
+mod provider_key_per_call {
+    use std::sync::{Arc, Mutex};
+
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use crate::llm::{LlmConfig, ProviderKeySource};
+
+    #[derive(Debug)]
+    struct Swappable {
+        key: Mutex<Result<String, String>>,
+    }
+
+    impl ProviderKeySource for Swappable {
+        fn credential(&self) -> &str {
+            "custom-api-key"
+        }
+        fn key(&self) -> Result<String, String> {
+            self.key.lock().unwrap().clone()
+        }
+    }
+
+    /// A model that answers every call with a text reply and keeps the
+    /// Authorization header each one carried.
+    async fn model() -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let headers = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length || n == 0 {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).to_string();
+                let auth = text
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .starts_with("authorization:")
+                            .then(|| l["authorization:".len()..].trim().to_string())
+                    })
+                    .unwrap_or_default();
+                headers.lock().unwrap().push(auth);
+                let body = serde_json::json!({
+                    "id": "c", "object": "chat.completion", "created": 0, "model": "stub",
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (base_url, seen)
+    }
+
+    #[tokio::test]
+    async fn a_rotated_key_reaches_the_next_call_and_a_removed_one_fails_it() {
+        let (base_url, seen) = model().await;
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let mut agent = crate::runtime::Agent::new(
+            "keyed".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 64,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: false,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("start-time-key".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        let source = Arc::new(Swappable {
+            key: Mutex::new(Ok("key-one".into())),
+        });
+        agent.set_api_key_source(source.clone());
+
+        agent
+            .process_message("first", "msg-1".into())
+            .await
+            .expect("first turn");
+        *source.key.lock().unwrap() = Ok("key-two".into());
+        agent
+            .process_message("second", "msg-2".into())
+            .await
+            .expect("second turn");
+        *source.key.lock().unwrap() = Err("it is no longer in the vault".into());
+        let Err(err) = agent.process_message("third", "msg-3".into()).await else {
+            panic!("a removed key fails the call");
+        };
+        assert!(err.to_string().contains("custom-api-key"), "{err}");
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec!["Bearer key-one".to_string(), "Bearer key-two".to_string()],
+            "each call carried the key of its moment, and the third was not sent"
+        );
+        let events: Vec<SessionEvent> = log
+            .get_since(&log.handle_for(SessionId::new("keyed".to_string())), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::LlmRequestFailed { .. })),
+            "the refused call is closed on the chain: {events:?}"
+        );
+        assert!(
+            events.iter().all(|e| !matches!(e, SessionEvent::LlmRequest { credential_id, .. } if credential_id.as_deref() != Some("custom-api-key"))),
+            "every call names the vault entry"
+        );
     }
 }

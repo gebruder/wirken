@@ -50,51 +50,37 @@ impl HookRegistry {
              );",
         )?;
 
-        let mut cache = HashMap::new();
-        {
-            let mut stmt = conn.prepare("SELECT hook_id, public_key, hook_type FROM hooks")?;
-            let rows = stmt.query_map([], |row| {
-                let id: String = row.get(0)?;
-                let pk_blob: Vec<u8> = row.get(1)?;
-                let ty: String = row.get(2)?;
-                Ok((id, pk_blob, ty))
-            })?;
-            for row in rows {
-                let (id, pk_blob, ty_str) = row?;
-                if pk_blob.len() != 32 {
-                    return Err(GatewayError::Config(format!(
-                        "hook {id}: stored public key is not 32 bytes ({} bytes)",
-                        pk_blob.len()
-                    )));
-                }
-                let mut pk = [0u8; 32];
-                pk.copy_from_slice(&pk_blob);
-                let hook_type = match ty_str.as_str() {
-                    "observe" => HookType::Observe,
-                    "veto" => HookType::Veto,
-                    "egress" => HookType::Egress,
-                    other => {
-                        return Err(GatewayError::Config(format!(
-                            "hook {id}: unknown hook_type {other:?} in database"
-                        )));
-                    }
-                };
-                cache.insert(
-                    id.clone(),
-                    HookEntry {
-                        hook_id: id,
-                        public_key: pk,
-                        hook_type,
-                        connected: false,
-                    },
-                );
-            }
-        }
+        let cache = load(&conn)?;
 
         Ok(Self {
             conn,
             cache: Arc::new(RwLock::new(cache)),
         })
+    }
+
+    /// Read the table again, for a change another process made. Returns
+    /// the hooks that were removed or now carry another key or type: a
+    /// connection authenticated as one of them is no longer one the
+    /// registry admits.
+    pub fn reload(&self) -> Result<Vec<String>, GatewayError> {
+        let mut fresh = load(&self.conn)?;
+        let mut cache = self.cache.write().unwrap();
+        let revoked: Vec<String> = cache
+            .values()
+            .filter(|old| {
+                fresh.get(&old.hook_id).is_none_or(|new| {
+                    new.public_key != old.public_key || new.hook_type != old.hook_type
+                })
+            })
+            .map(|old| old.hook_id.clone())
+            .collect();
+        for entry in fresh.values_mut() {
+            entry.connected = cache
+                .get(&entry.hook_id)
+                .is_some_and(|old| old.connected && !revoked.contains(&entry.hook_id));
+        }
+        *cache = fresh;
+        Ok(revoked)
     }
 
     pub fn register(
@@ -184,6 +170,51 @@ impl HookRegistry {
     }
 }
 
+/// Every row of the table.
+fn load(conn: &Connection) -> Result<HashMap<String, HookEntry>, GatewayError> {
+    let mut cache = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT hook_id, public_key, hook_type FROM hooks")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let pk_blob: Vec<u8> = row.get(1)?;
+            let ty: String = row.get(2)?;
+            Ok((id, pk_blob, ty))
+        })?;
+        for row in rows {
+            let (id, pk_blob, ty_str) = row?;
+            if pk_blob.len() != 32 {
+                return Err(GatewayError::Config(format!(
+                    "hook {id}: stored public key is not 32 bytes ({} bytes)",
+                    pk_blob.len()
+                )));
+            }
+            let mut pk = [0u8; 32];
+            pk.copy_from_slice(&pk_blob);
+            let hook_type = match ty_str.as_str() {
+                "observe" => HookType::Observe,
+                "veto" => HookType::Veto,
+                "egress" => HookType::Egress,
+                other => {
+                    return Err(GatewayError::Config(format!(
+                        "hook {id}: unknown hook_type {other:?} in database"
+                    )));
+                }
+            };
+            cache.insert(
+                id.clone(),
+                HookEntry {
+                    hook_id: id,
+                    public_key: pk,
+                    hook_type,
+                    connected: false,
+                },
+            );
+        }
+    }
+    Ok(cache)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +225,36 @@ mod tests {
         let path = tmp.path().join("hooks.db");
         let reg = HookRegistry::open(&path).unwrap();
         (tmp, reg)
+    }
+
+    /// `wirken hooks unregister` runs in another process; the gateway's
+    /// reload sees it and reports the hook, as it does a re-key.
+    #[test]
+    fn reload_reports_hooks_unregistered_or_rekeyed_elsewhere() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("hooks.db");
+        let gateway = HookRegistry::open(&path).unwrap();
+        gateway
+            .register("watch", &[1u8; 32], HookType::Observe)
+            .unwrap();
+        gateway
+            .register("gate", &[2u8; 32], HookType::Veto)
+            .unwrap();
+        gateway
+            .register("keep", &[3u8; 32], HookType::Egress)
+            .unwrap();
+
+        let cli = HookRegistry::open(&path).unwrap();
+        cli.unregister("watch").unwrap();
+        cli.unregister("gate").unwrap();
+        cli.register("gate", &[2u8; 32], HookType::Observe).unwrap();
+
+        let mut revoked = gateway.reload().unwrap();
+        revoked.sort();
+        assert_eq!(revoked, vec!["gate".to_string(), "watch".to_string()]);
+        assert!(gateway.get("watch").is_none());
+        assert_eq!(gateway.get("gate").unwrap().hook_type, HookType::Observe);
+        assert!(gateway.get("keep").is_some());
     }
 
     #[test]

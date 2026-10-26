@@ -246,7 +246,7 @@ pub fn revoke(name: &str, wanted: &Destinations) -> Result<()> {
         );
     }
     print_binding(&after);
-    println!("  A running gateway hands it out as before until it restarts.");
+    println!("  A running gateway takes this up within seconds.");
     Ok(())
 }
 

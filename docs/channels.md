@@ -32,10 +32,11 @@ platform has no table primitive.
 
 **Limits that hold on every adapter.** One platform workspace, tenant or
 homeserver per adapter process; a second needs a second registered channel
-with a distinct name. Tokens are loaded once when the adapter process starts,
-so a rotated one takes effect at the next start: a restart of `wirken run`, or
-an automatic restart after the adapter's gateway connection ends. No command
-restarts one adapter on demand. Permissions are scoped per agent and channel,
+with a distinct name. Tokens are handed to the adapter process when it starts;
+one rotated or removed in the vault respawns that adapter within seconds, and
+`wirken channel remove` stops it and drops its connection
+([credentials](credentials.md#changes-while-the-gateway-runs)). Permissions are
+scoped per agent and channel,
 not per platform user: every admitted sender on a channel inherits every Tier 2
 approval that agent holds on that channel. See
 [permissions-and-identity.md](permissions-and-identity.md).

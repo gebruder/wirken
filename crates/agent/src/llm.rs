@@ -46,6 +46,16 @@ pub struct LlmConfig {
     pub auth: ProviderAuth,
 }
 
+/// Where an agent's model key comes from on each call, so a key rotated
+/// in the vault reaches the next call and one removed, or no longer
+/// allowed to the provider, fails it.
+pub trait ProviderKeySource: Send + Sync + std::fmt::Debug {
+    /// The vault entry the key is read from.
+    fn credential(&self) -> &str;
+    /// The key now, or why there is none.
+    fn key(&self) -> Result<String, String>;
+}
+
 /// The context window assumed for every model on a plan. No figure is
 /// documented for them, so this is a conservative fixed value: an
 /// understated window only compacts earlier than needed, an overstated

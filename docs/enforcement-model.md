@@ -244,7 +244,8 @@ can distinguish "hook timed out" from "hook ran clean".
 tool call is refused, or its output withheld, without invoking the other
 hooks, and each absent hook gets a row with decision `unavailable`.
 `WIRKEN_ALLOW_UNREGISTERED_HOOKS` does not change this. `wirken hooks
-unregister` takes effect at the next start.
+unregister` takes effect within seconds: the hook is no longer waited for, and
+its connection is dropped.
 
 ## Cross-channel memory
 

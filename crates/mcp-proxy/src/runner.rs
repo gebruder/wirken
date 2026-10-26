@@ -56,10 +56,12 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
     let credentials: SharedCredentials = Arc::new(credentials);
 
     // Watched from the start, so a gateway that dies while servers are
-    // still starting is noticed as well.
+    // still starting is noticed as well. The same connection reports
+    // each handed credential that changes in the vault.
+    let (changed_tx, mut changed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let mut gateway_gone = {
         let credentials = credentials.clone();
-        tokio::spawn(async move { credentials.gateway_gone().await })
+        tokio::spawn(async move { credentials.gateway_gone(changed_tx).await })
     };
 
     // Stdio servers with a `sandbox` block run in containers. Containers
@@ -150,6 +152,37 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
         crate::supervise::Supervisors::start(registry.clone(), credentials.clone(), audit.clone())
             .await;
 
+    // A credential changed in the vault: take its current value, or drop
+    // it when the gateway no longer sends it, then start again every
+    // stdio server it is passed to. HTTP servers read it per request.
+    let reloads = {
+        let (credentials, registry, restarts) = (
+            credentials.clone(),
+            registry.clone(),
+            supervisors.restarts(),
+        );
+        tokio::spawn(async move {
+            while let Some(name) = changed_rx.recv().await {
+                if let Err(e) = credentials.refetch(&name).await {
+                    tracing::warn!("credential '{name}' is no longer held: {e}");
+                }
+                let mut restarted = restarts.restart_using(&name);
+                restarted.extend(
+                    registry
+                        .lock()
+                        .await
+                        .restart_host_using(&name, &credentials)
+                        .await,
+                );
+                tracing::info!(
+                    credential = name,
+                    servers = ?restarted,
+                    "credential changed in the vault"
+                );
+            }
+        })
+    };
+
     // Serve until the socket fails, the proxy is told to stop or the
     // gateway that started it is gone, then stop every server: host
     // children are killed, containers stopped and removed. Supervision
@@ -167,6 +200,7 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
         }
     };
     gateway_gone.abort();
+    reloads.abort();
     supervisors.stop().await;
     registry.lock().await.shutdown().await;
     served

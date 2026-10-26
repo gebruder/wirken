@@ -23,8 +23,9 @@ pub use kind::{
 };
 pub use secret::VaultSecret;
 pub use store::{
-    ADAPTERS, BOUND_FORMAT, CredentialMetadata, CredentialStore, ExclusiveUpdate, Migration,
-    MigrationRow, ResetPlan, backup_vault, default_binding, reset, reset_plan, restore_vault,
+    ADAPTERS, BOUND_FORMAT, CredentialMetadata, CredentialStore, EntryFingerprint, ExclusiveUpdate,
+    Migration, MigrationRow, ResetPlan, backup_vault, default_binding, reset, reset_plan,
+    restore_vault,
 };
 
 #[cfg(test)]

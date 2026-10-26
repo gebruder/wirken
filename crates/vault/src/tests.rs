@@ -1579,3 +1579,62 @@ mod destination_binding {
         assert_eq!(store.format(), 1);
     }
 }
+
+/// A change to an entry shows in its fingerprint, read without the key:
+/// a rotation in the value, a grant in the binding, a removal as a
+/// missing name. Reading the entry leaves it as it was.
+#[test]
+fn fingerprints_change_with_a_rotation_a_grant_and_a_removal_only() {
+    let tmp = TempDir::new().unwrap();
+    let kc = AgeFileKeychain::new(tmp.path().join("keychain"), "test-passphrase".into());
+    let db = tmp.path().join("vault.db");
+    let store = CredentialStore::open(&db, &kc).unwrap();
+    store
+        .store_bound(
+            "records-api",
+            "",
+            &VaultSecret::new("v1".into()),
+            None,
+            None,
+            &crate::Binding::hosts(&["a.example.org".to_string()]),
+            crate::default_kind("records-api"),
+        )
+        .unwrap();
+    let first = CredentialStore::fingerprints(&db).unwrap()["records-api"];
+
+    store.retrieve("records-api").unwrap();
+    assert_eq!(
+        CredentialStore::fingerprints(&db).unwrap()["records-api"],
+        first,
+        "a read changes nothing"
+    );
+
+    store
+        .rotate("records-api", &VaultSecret::new("v2".into()), None)
+        .unwrap();
+    let rotated = CredentialStore::fingerprints(&db).unwrap()["records-api"];
+    assert_ne!(rotated.value, first.value);
+    assert_eq!(rotated.binding, first.binding);
+
+    store
+        .update_binding_exclusive("records-api", std::time::Duration::from_secs(5), |b| {
+            let mut b = b.clone();
+            b.grant(crate::Destination::Host("b.example.org".into()))
+                .then_some(b)
+        })
+        .unwrap();
+    let granted = CredentialStore::fingerprints(&db).unwrap()["records-api"];
+    assert_ne!(granted.binding, rotated.binding);
+
+    store.delete("records-api").unwrap();
+    assert!(
+        !CredentialStore::fingerprints(&db)
+            .unwrap()
+            .contains_key("records-api")
+    );
+    assert!(
+        CredentialStore::fingerprints(&tmp.path().join("absent.db"))
+            .unwrap()
+            .is_empty()
+    );
+}

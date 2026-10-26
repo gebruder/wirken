@@ -26,6 +26,38 @@ fn default_config_paths() {
 // Adapter Registry
 // ---------------------------------------------------------------------------
 
+/// A removal or re-key another process makes is seen at the next
+/// reload, and reported, so a connection it authenticated can be
+/// dropped; an untouched adapter keeps its connected flag.
+#[test]
+fn reload_reports_adapters_removed_or_rekeyed_elsewhere() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("adapters.db");
+    let gateway = AdapterRegistry::open(&path).unwrap();
+    gateway
+        .register("telegram", &[1u8; 32], "telegram")
+        .unwrap();
+    gateway.register("slack", &[2u8; 32], "slack").unwrap();
+    gateway.register("signal", &[3u8; 32], "signal").unwrap();
+    gateway.set_connected("signal", true);
+
+    let cli = AdapterRegistry::open(&path).unwrap();
+    cli.unregister("telegram").unwrap();
+    cli.unregister("slack").unwrap();
+    cli.register("slack", &[9u8; 32], "slack").unwrap();
+
+    let mut revoked = gateway.reload().unwrap();
+    revoked.sort();
+    assert_eq!(revoked, vec!["slack".to_string(), "telegram".to_string()]);
+    assert!(gateway.get("telegram").is_none());
+    assert_eq!(gateway.get("slack").unwrap().public_key, [9u8; 32]);
+    assert!(gateway.get("signal").unwrap().connected);
+    assert!(
+        gateway.reload().unwrap().is_empty(),
+        "nothing changed since"
+    );
+}
+
 #[test]
 fn register_and_lookup_adapter() {
     let tmp = TempDir::new().unwrap();

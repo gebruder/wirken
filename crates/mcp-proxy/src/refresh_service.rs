@@ -25,7 +25,8 @@ use wirken_vault::CredentialStore;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::credentials::{
-    HandedOAuth, RefreshReply, RefreshRequest, RequestKind, without_refresh_token,
+    HandedOAuth, RefreshReply, RefreshRequest, RequestKind, ServerPin, WatchNotice,
+    without_refresh_token,
 };
 use crate::error::ProxyError;
 use crate::oauth::{OAuthCredential, load_oauth, refresh_oauth_token};
@@ -93,6 +94,12 @@ pub struct RefreshService {
     leak: Option<Arc<wirken_gateway::leak::LeakMatcher>>,
     /// One refresh per credential at a time.
     locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The entries each handed credential was handed for. A current
+    /// value is sent only for entries its binding still allows. Empty
+    /// checks nothing.
+    pins: HashMap<String, BTreeSet<ServerPin>>,
+    /// Credentials changed in the vault, for the proxy's watch.
+    changes: tokio::sync::broadcast::Sender<String>,
 }
 
 impl RefreshService {
@@ -114,7 +121,26 @@ impl RefreshService {
             audit,
             leak: None,
             locks: Default::default(),
+            pins: HashMap::new(),
+            changes: tokio::sync::broadcast::channel(64).0,
         }
+    }
+
+    /// Send a current value only for the entries in `pins` its binding
+    /// still allows.
+    pub fn with_pins(mut self, pins: HashMap<String, BTreeSet<ServerPin>>) -> Self {
+        self.pins = pins;
+        self
+    }
+
+    /// Tell the proxy `name` changed in the vault, if it was handed.
+    /// Returns whether it was.
+    pub fn notify_changed(&self, name: &str) -> bool {
+        if !self.handed.contains(name) {
+            return false;
+        }
+        let _ = self.changes.send(name.to_string());
+        true
     }
 
     /// Have `leak` learn every value this service reads or refreshes.
@@ -169,13 +195,36 @@ impl RefreshService {
             Ok((_, RequestKind::Watch)) => {
                 // Held until the proxy closes it, or this process ends
                 // and the operating system closes it, which is how the
-                // proxy learns the gateway is gone.
+                // proxy learns the gateway is gone. Each vault change to
+                // a handed credential goes down it as a line.
+                let mut changes = self.changes.subscribe();
                 let mut out = serde_json::to_vec(&RefreshReply::Watching).unwrap_or_default();
                 out.push(b'\n');
                 wr.write_all(&out).await?;
                 let mut rest = [0u8; 64];
-                while reader.read(&mut rest).await? > 0 {}
-                return Ok(());
+                loop {
+                    tokio::select! {
+                        n = reader.read(&mut rest) => {
+                            if n? == 0 {
+                                return Ok(());
+                            }
+                        }
+                        changed = changes.recv() => match changed {
+                            Ok(credential) => {
+                                let mut out = serde_json::to_vec(
+                                    &WatchNotice::Changed { credential },
+                                )
+                                .unwrap_or_default();
+                                out.push(b'\n');
+                                wr.write_all(&out).await?;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                return Ok(());
+                            }
+                        },
+                    }
+                }
             }
             Ok((name, RequestKind::Refresh)) => match self.refresh(&name).await {
                 Ok(cred) => RefreshReply::Refreshed(HandedOAuth::from_credential(&cred)),
@@ -185,7 +234,7 @@ impl RefreshService {
                 }
             },
             Ok((name, RequestKind::Current)) => match self.current(&name) {
-                Ok(value) => RefreshReply::Current { value },
+                Ok((value, servers)) => RefreshReply::Current { value, servers },
                 Err(reason) => {
                     tracing::warn!("MCP proxy fetch of '{name}' failed: {reason}");
                     RefreshReply::Refused { reason }
@@ -193,7 +242,7 @@ impl RefreshService {
             },
         };
         let mut out = Zeroizing::new(serde_json::to_vec(&reply).unwrap_or_default());
-        if let RefreshReply::Current { value } = &mut reply {
+        if let RefreshReply::Current { value, .. } = &mut reply {
             value.zeroize();
         }
         out.push(b'\n');
@@ -236,7 +285,7 @@ impl RefreshService {
 
     /// The vault's current value of `name`, as the proxy may hold it,
     /// recorded as sent.
-    fn current(&self, name: &str) -> Result<String, String> {
+    fn current(&self, name: &str) -> Result<(String, Option<Vec<ServerPin>>), String> {
         let store = self
             .store
             .as_ref()
@@ -246,6 +295,31 @@ impl RefreshService {
             .map_err(|_| "vault mutex poisoned".to_string())?
             .retrieve(name)
             .map_err(|e| e.to_string())?;
+        // The entries it may still go to, checked against the binding the
+        // decryption just authenticated.
+        let servers = match self.pins.get(name) {
+            Some(pins) => {
+                let allowed: Vec<ServerPin> = pins
+                    .iter()
+                    .filter(|pin| {
+                        meta.binding.permits(&wirken_vault::Destination::McpServer(
+                            wirken_vault::McpServerGrant {
+                                name: pin.server.clone(),
+                                entry: pin.entry.clone(),
+                            },
+                        ))
+                    })
+                    .cloned()
+                    .collect();
+                if allowed.is_empty() {
+                    return Err(format!(
+                        "'{name}' may no longer go to any MCP server it was handed for"
+                    ));
+                }
+                Some(allowed)
+            }
+            None => None,
+        };
         if let Some(leak) = &self.leak {
             leak.learn(name, secret.expose(), meta.kind);
         }
@@ -264,7 +338,7 @@ impl RefreshService {
             }
         }
         tracing::info!("sent the MCP proxy the current value of credential '{name}'");
-        Ok(value)
+        Ok((value, servers))
     }
 
     /// Refresh `name` and write it to the vault, unless the vault already
@@ -443,6 +517,7 @@ mod tests {
         socket: std::path::PathBuf,
         audit: Arc<dyn SessionLog>,
         task: tokio::task::JoinHandle<()>,
+        service: Arc<RefreshService>,
     }
 
     impl Gateway {
@@ -470,6 +545,16 @@ mod tests {
     /// and the refresh service over it, admitting this process as the
     /// proxy, which was handed both.
     fn gateway(token: &str, proxy_pid: u32) -> Gateway {
+        gateway_pinned(token, proxy_pid, HashMap::new())
+    }
+
+    /// [`gateway`], sending current values only for the entries in
+    /// `pins` the binding allows.
+    fn gateway_pinned(
+        token: &str,
+        proxy_pid: u32,
+        pins: HashMap<String, BTreeSet<ServerPin>>,
+    ) -> Gateway {
         let dir = tempfile::tempdir().unwrap();
         let store = CredentialStore::open_with_key(
             &dir.path().join("vault.db"),
@@ -512,15 +597,17 @@ mod tests {
                 Arc::new(AtomicU32::new(proxy_pid)),
                 Some(audit.clone()),
             )
-            .with_refresher(Arc::new(FakeProvider)),
+            .with_refresher(Arc::new(FakeProvider))
+            .with_pins(pins),
         );
-        let task = tokio::spawn(service.serve(listener));
+        let task = tokio::spawn(service.clone().serve(listener));
         Gateway {
             _dir: dir,
             store,
             socket,
             audit,
             task,
+            service,
         }
     }
 
@@ -654,7 +741,11 @@ mod tests {
         let credentials = Arc::new(link("t0k3n"));
         let watching = tokio::spawn({
             let credentials = credentials.clone();
-            async move { credentials.gateway_gone().await }
+            async move {
+                credentials
+                    .gateway_gone(tokio::sync::mpsc::unbounded_channel().0)
+                    .await
+            }
         });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(
@@ -666,7 +757,7 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(300),
-                refused.gateway_gone()
+                refused.gateway_gone(tokio::sync::mpsc::unbounded_channel().0)
             )
             .await
             .is_err(),
@@ -810,6 +901,132 @@ mod tests {
         );
         let json = serde_json::to_string(&rows).unwrap();
         assert!(!json.contains("tok-"), "the row carries a value: {json}");
+    }
+
+    fn pin(server: &str) -> ServerPin {
+        ServerPin {
+            server: server.into(),
+            entry: format!("sha256:{server}"),
+        }
+    }
+
+    fn grant(pin: &ServerPin) -> wirken_vault::Destination {
+        wirken_vault::Destination::McpServer(wirken_vault::McpServerGrant {
+            name: pin.server.clone(),
+            entry: pin.entry.clone(),
+        })
+    }
+
+    /// A destination revoked in the vault reaches the proxy with the
+    /// value: the server it was revoked for no longer gets it, and once
+    /// none is left the proxy drops what it holds.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn a_revoked_server_stops_getting_the_value_and_the_last_one_withdraws_it() {
+        let (linear, notion) = (pin("linear"), pin("notion"));
+        let both = BTreeSet::from([linear.clone(), notion.clone()]);
+        let gateway = gateway_pinned(
+            "t0k3n",
+            std::process::id(),
+            HashMap::from([("linear-token".to_string(), both.clone())]),
+        );
+        let mut binding = wirken_vault::Binding::default();
+        binding.grant(grant(&linear));
+        binding.grant(grant(&notion));
+        gateway
+            .store
+            .lock()
+            .unwrap()
+            .store_bound(
+                "linear-token",
+                "mcp",
+                &VaultSecret::new("tok-1".into()),
+                None,
+                None,
+                &binding,
+                wirken_vault::default_kind("linear-token"),
+            )
+            .unwrap();
+        let credentials = Arc::new(
+            Arc::try_unwrap(proxy(&gateway, "t0k3n"))
+                .ok()
+                .unwrap()
+                .with_pins(HashMap::from([("linear-token".to_string(), both)])),
+        );
+        credentials.refetch("linear-token").await.unwrap();
+        assert!(credentials.get_for(&notion, "linear-token").is_some());
+
+        gateway
+            .store
+            .lock()
+            .unwrap()
+            .update_binding_exclusive("linear-token", std::time::Duration::from_secs(5), |b| {
+                let mut b = b.clone();
+                b.revoke(&grant(&notion)).then_some(b)
+            })
+            .unwrap();
+        credentials.refetch("linear-token").await.unwrap();
+        assert!(credentials.get_for(&linear, "linear-token").is_some());
+        assert!(
+            credentials.get_for(&notion, "linear-token").is_none(),
+            "the revoked server no longer gets it"
+        );
+
+        gateway
+            .store
+            .lock()
+            .unwrap()
+            .update_binding_exclusive("linear-token", std::time::Duration::from_secs(5), |b| {
+                let mut b = b.clone();
+                b.revoke(&grant(&linear)).then_some(b)
+            })
+            .unwrap();
+        assert!(credentials.refetch("linear-token").await.is_err());
+        assert!(
+            credentials.get("linear-token").is_none(),
+            "nothing is held once no server may have it"
+        );
+    }
+
+    /// A removed bearer is dropped when the gateway refuses it, so the
+    /// next request does not carry the old value.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn a_removed_credential_is_dropped_on_the_refusal() {
+        let gateway = gateway("t0k3n", std::process::id());
+        let credentials = proxy(&gateway, "t0k3n");
+        gateway
+            .store
+            .lock()
+            .unwrap()
+            .delete("linear-token")
+            .unwrap();
+        assert!(credentials.refetch("linear-token").await.is_err());
+        assert!(credentials.get("linear-token").is_none());
+    }
+
+    /// A change to a handed credential goes down the proxy's watch; a
+    /// credential it was not handed is not mentioned.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn a_vault_change_reaches_the_proxy_on_its_watch() {
+        let gateway = gateway("t0k3n", std::process::id());
+        let credentials = proxy(&gateway, "t0k3n");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let watching = tokio::spawn({
+            let credentials = credentials.clone();
+            async move { credentials.gateway_gone(tx).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!gateway.service.notify_changed("telegram-token"));
+        assert!(gateway.service.notify_changed("linear-token"));
+        let name = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the notice arrives")
+            .unwrap();
+        assert_eq!(name, "linear-token");
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        watching.abort();
     }
 
     /// An OAuth credential's current value comes without its refresh

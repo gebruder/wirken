@@ -12,6 +12,23 @@ tagged.
 
 ### Security
 
+- A change made while `wirken run` is running takes effect within seconds,
+  without a restart:
+  - A model key is read from the vault for every call: a rotated one is used
+    by the next call, a removed or revoked one fails it.
+  - A credential handed to an adapter respawns it with the vault's current
+    values.
+  - The MCP proxy is told, takes the current value only for the server entries
+    its destinations still allow, and starts again each stdio server that reads
+    it. A removed bearer is no longer sent.
+  - `wirken channel remove` drops the adapter's connection and stops it.
+  - `wirken hooks unregister` drops the hook's connection, and a veto or
+    egress hook is no longer waited for.
+
+  Each change is an `authority_reloaded` row on the `gateway-reloads` lane.
+  **For wirken-siem:** new kind `authority_reloaded`, forwarded by default;
+  `adapter_restart` and `mcp_server_restart` gain the cause
+  `credential_changed`, at `info`.
 - A session that has read something restricting keeps sending `http_request`
   calls to the operator after a gateway restart or after leaving the session
   cache: each read label is recorded once as `read_sensitivity_observed` and

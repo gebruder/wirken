@@ -115,10 +115,10 @@ HEC `event` object and on each webhook entry, and a `Level` column on
 Sentinel rows. The adapter variants take it from the variant and its reason
 or cause: `AdapterConnect` is `info`; `AdapterDisconnect` is `info`, or
 `error` for `reason: "panic"`; `AdapterRestart` is `info` for
-`connection_ended`, `warn` for `process_exited`, and `error` for
+`connection_ended` and `credential_changed`, `warn` for `process_exited`, and `error` for
 `connection_panicked` and `spawn_failed`; `AdapterRestartAbandoned` is
 `error`. `McpServerExited` is `info` when the proxy stopped the container and
-`warn` otherwise; `McpServerRestart` is `warn` after an exit and `error` after
+`warn` otherwise; `McpServerRestart` is `info` for `credential_changed`, `warn` after an exit and `error` after
 `start_failed` or `initialize_failed`; `McpServerRestartAbandoned` is `error`.
 `LeakRefused` is `error`. `LlmRequestFailed`, off the default set, is `warn`
 when an include list brings it. A legacy row an include list brings onto the

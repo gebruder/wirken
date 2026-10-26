@@ -38,38 +38,38 @@ impl AdapterRegistry {
              );",
         )?;
 
-        let mut cache = HashMap::new();
-        {
-            let mut stmt = conn.prepare("SELECT adapter_id, public_key, channel FROM adapters")?;
-            let rows = stmt.query_map([], |row| {
-                let id: String = row.get(0)?;
-                let pk_blob: Vec<u8> = row.get(1)?;
-                let channel: String = row.get(2)?;
-                Ok((id, pk_blob, channel))
-            })?;
-
-            for row in rows {
-                let (id, pk_blob, channel) = row?;
-                let mut pk = [0u8; 32];
-                if pk_blob.len() == 32 {
-                    pk.copy_from_slice(&pk_blob);
-                }
-                cache.insert(
-                    id.clone(),
-                    AdapterEntry {
-                        adapter_id: id,
-                        public_key: pk,
-                        channel,
-                        connected: false,
-                    },
-                );
-            }
-        }
+        let cache = load(&conn)?;
 
         Ok(Self {
             conn,
             cache: Arc::new(RwLock::new(cache)),
         })
+    }
+
+    /// Read the table again, for a change another process made. Returns
+    /// the adapters that were removed or now carry another key or
+    /// channel: a connection authenticated as one of them is no longer
+    /// one the registry admits.
+    pub fn reload(&self) -> Result<Vec<String>, GatewayError> {
+        let fresh = load(&self.conn)?;
+        let mut cache = self.cache.write().unwrap();
+        let revoked: Vec<String> = cache
+            .values()
+            .filter(|old| {
+                fresh.get(&old.adapter_id).is_none_or(|new| {
+                    new.public_key != old.public_key || new.channel != old.channel
+                })
+            })
+            .map(|old| old.adapter_id.clone())
+            .collect();
+        let mut fresh = fresh;
+        for entry in fresh.values_mut() {
+            entry.connected = cache
+                .get(&entry.adapter_id)
+                .is_some_and(|old| old.connected && !revoked.contains(&entry.adapter_id));
+        }
+        *cache = fresh;
+        Ok(revoked)
     }
 
     /// Register a new adapter.
@@ -159,4 +159,36 @@ impl AdapterRegistry {
     pub fn list(&self) -> Vec<AdapterEntry> {
         self.cache.read().unwrap().values().cloned().collect()
     }
+}
+
+/// Every row of the table.
+fn load(conn: &Connection) -> Result<HashMap<String, AdapterEntry>, GatewayError> {
+    let mut cache = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT adapter_id, public_key, channel FROM adapters")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let pk_blob: Vec<u8> = row.get(1)?;
+            let channel: String = row.get(2)?;
+            Ok((id, pk_blob, channel))
+        })?;
+
+        for row in rows {
+            let (id, pk_blob, channel) = row?;
+            let mut pk = [0u8; 32];
+            if pk_blob.len() == 32 {
+                pk.copy_from_slice(&pk_blob);
+            }
+            cache.insert(
+                id.clone(),
+                AdapterEntry {
+                    adapter_id: id,
+                    public_key: pk,
+                    channel,
+                    connected: false,
+                },
+            );
+        }
+    }
+    Ok(cache)
 }

@@ -17,6 +17,7 @@ pub mod doctor;
 pub mod hooks;
 pub mod import;
 pub mod inbound_scan;
+pub mod live_reload;
 pub mod lyrik;
 pub mod lyrik_brocards;
 pub mod lyrik_citation;
