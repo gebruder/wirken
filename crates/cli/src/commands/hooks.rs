@@ -54,6 +54,12 @@ pub fn register(hook_id: &str, pubkey_hex: &str, hook_type: &str) -> Result<()> 
         .register(hook_id, &pk, ty)
         .map_err(|e| anyhow::anyhow!("register hook {hook_id}: {e}"))?;
     println!("Registered hook {hook_id} ({}).", ty.as_wire());
+    let key: String = pk.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    super::note_operator_command(
+        "hooks register",
+        hook_id,
+        &format!("{}; key {key}", ty.as_wire()),
+    );
     Ok(())
 }
 
@@ -79,6 +85,7 @@ pub fn unregister(hook_id: &str) -> Result<()> {
         .unregister(hook_id)
         .map_err(|e| anyhow::anyhow!("unregister hook {hook_id}: {e}"))?;
     println!("Unregistered hook {hook_id}.");
+    super::note_operator_command("hooks unregister", hook_id, "");
     Ok(())
 }
 

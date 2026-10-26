@@ -251,6 +251,19 @@ pub fn revoke(name: &str, wanted: &Destinations) -> Result<()> {
 }
 
 /// Print where a credential may go.
+/// The destinations, one line for an audit row: `host x, adapter y`.
+pub fn binding_summary(binding: &wirken_vault::Binding) -> String {
+    let destinations = binding.destinations();
+    if destinations.is_empty() {
+        return "no destinations".to_string();
+    }
+    destinations
+        .iter()
+        .map(|d| format!("{} {}", d.kind(), d.describe()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn print_binding(binding: &wirken_vault::Binding) {
     let destinations = binding.destinations();
     if destinations.is_empty() {

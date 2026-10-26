@@ -26,6 +26,8 @@ pub use channel::{AuthenticatedChannel, Channel, ChannelMismatch, SessionHandle,
 pub use error::HandshakeError;
 pub use error::IpcError;
 pub use principal::{ParsePrincipalError, Principal};
+#[cfg(windows)]
+pub use stream::current_principal;
 pub use stream::{BoxStream, Listener, Stream, bind, connect};
 pub use transport::{FrameReader, FrameWriter, IpcFrameReader, IpcFrameWriter, split_stream};
 

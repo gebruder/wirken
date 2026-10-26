@@ -1952,6 +1952,22 @@ pub enum SessionEvent {
         conversation_id: String,
         set_by: String,
     },
+    /// A `wirken` command that changes what the gateway trusts or runs
+    /// completed, on the [`OPERATOR_COMMANDS_SESSION`] lane. Never a
+    /// secret value.
+    OperatorCommand {
+        /// The command, such as `credentials rotate`.
+        command: String,
+        /// What it changed: a credential, channel, hook, agent, MCP
+        /// server, registry root or cron job.
+        target: String,
+        /// What about it changed, when the command says more than its
+        /// name.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        detail: String,
+        /// The OS account that ran it, from the process's own uid.
+        run_by: String,
+    },
     /// `wirken senders` or `wirken approvers` refused inside a Wirken
     /// `exec`, on that command's lane.
     OperatorCommandRefused {
@@ -2308,8 +2324,8 @@ pub enum SessionEvent {
     /// Emitted by the operator's CLI, not by an agent turn, so there
     /// is no agent id to carry and none is invented. `actor` carries
     /// the operator label on the existing actor-vs-surface convention:
-    /// the CLI's `$USER`, falling back to the literal `"cli"`, the
-    /// same value `approved_by` records for a CLI approval.
+    /// the OS account the CLI ran as, `uid:1000 (name)` or
+    /// `sid:S-1-...`, as every CLI row records it.
     ///
     /// It is a required field rather than an option on purpose. An
     /// import row always has an actor, so a row that reaches a SIEM
@@ -2512,6 +2528,10 @@ pub const INBOUND_SENDERS_SESSION: &str = "gateway-inbound";
 
 /// Lane for `wirken senders` changes.
 pub const OPERATOR_SENDERS_SESSION: &str = "gateway-senders";
+
+/// Lane for [`SessionEvent::OperatorCommand`]: the other `wirken`
+/// commands that change what the gateway trusts or runs.
+pub const OPERATOR_COMMANDS_SESSION: &str = "gateway-operator";
 
 /// Lane for `wirken approvers` changes.
 pub const OPERATOR_APPROVERS_SESSION: &str = "gateway-approvers";

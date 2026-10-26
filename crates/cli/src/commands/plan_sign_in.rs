@@ -167,6 +167,7 @@ fn plan_store(store: &CredentialStore, entry: &str, cred: &OAuthCredential) -> R
 pub async fn authorize(entry: &str, port: Option<u16>, open_browser: bool) -> Result<()> {
     let cfg = config();
     sign_in(&cfg, entry, port, open_browser).await?;
+    super::note_operator_command("credentials authorize", entry, "plan sign-in");
     match models(&cfg, entry).await {
         Ok(models) if !models.is_empty() => {
             let slugs: Vec<&str> = models.iter().map(|m| m.slug.as_str()).collect();
@@ -213,6 +214,7 @@ pub async fn sign_out(entry: &str) -> Result<()> {
         .map_err(|e| anyhow!("{e}"))?;
     println!("  Signed out of '{entry}'. The registration is kept for the next sign-in.");
     report_revocation(entry, &revocation);
+    super::note_operator_command("credentials sign-out", entry, "");
     Ok(())
 }
 
@@ -330,6 +332,7 @@ pub async fn import(entry: &str, from: &Path) -> Result<()> {
     println!(
         "  Imported '{entry}'. This host keeps its own host id and owns refreshes from now on."
     );
+    super::note_operator_command("credentials import-plan", entry, "");
     println!("  Delete {}.", from.display());
     Ok(())
 }

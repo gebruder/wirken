@@ -62,7 +62,9 @@ pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
         "matrix" => add_matrix(&cfg, &data, flags).await,
         "imessage" => add_imessage(&cfg, &data, flags).await,
         _ => add_simple(channel, &cfg, &data, flags).await,
-    }
+    }?;
+    super::note_operator_command("channel add", channel, "");
+    Ok(())
 }
 
 /// Collect signal-cli socket path, account phone number, and sender
@@ -999,6 +1001,11 @@ pub async fn remove(channel: &str) -> Result<()> {
     } else {
         println!("  Channel '{channel}' removed.");
     }
+    super::note_operator_command(
+        "channel remove",
+        channel,
+        &format!("{removed} credentials cleared"),
+    );
     Ok(())
 }
 

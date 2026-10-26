@@ -251,6 +251,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::ApproverRemoved { .. } => true,
         // Where approval prompts go changed, by the operator's hand.
         SessionEvent::ApprovalChatSet { .. } => true,
+        // What the gateway trusts or runs changed, by the operator's hand.
+        SessionEvent::OperatorCommand { .. } => true,
         // Something other than the operator tried to.
         SessionEvent::OperatorCommandRefused { .. } => true,
         // The tool-call hook's verdict; EgressHookDispatched is the egress
@@ -336,6 +338,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::ApproverAdded { .. } => "approver_added",
         SessionEvent::ApproverRemoved { .. } => "approver_removed",
         SessionEvent::ApprovalChatSet { .. } => "approval_chat_set",
+        SessionEvent::OperatorCommand { .. } => "operator_command",
         SessionEvent::OperatorCommandRefused { .. } => "operator_command_refused",
         SessionEvent::HookDispatched { .. } => "hook_dispatched",
         SessionEvent::HookCrashed { .. } => "hook_crashed",

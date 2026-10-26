@@ -61,9 +61,14 @@ state in its detail.
 | `inbound_sender_added` / `inbound_sender_removed` | none | `wirken senders add` or `remove` changed the sender allowlist, on the `gateway-senders` lane, sealed by a chain head right after it. Carries `channel`, `id`, `group`, and `label` with `added_by`, or `removed_by`, the local operator. An add whose row cannot be written is undone; a remove stands. Forwarded by default. |
 | `approver_added` / `approver_removed` | none | `wirken approvers add` or `remove` changed the approver allowlist, on the `gateway-approvers` lane, sealed by a chain head right after it. Carries `adapter_id`, `user_id`, and `display_name` with `added_by`, or `removed_by`, the local operator. An add whose row cannot be written is undone; a remove stands. Forwarded by default. |
 | `approval_chat_set` | none | `wirken approvers set-chat` changed where an adapter's approval prompts are sent, on the `gateway-approvers` lane, sealed by a chain head right after it. Carries `adapter_id`, `conversation_id`, `previous_conversation_id` (absent when none was set) and `set_by`, the local operator. A change whose row cannot be written is put back. Forwarded by default. |
+| `operator_command` | none | A command that changes what the gateway trusts or runs completed, on the `gateway-operator` lane, sealed by a chain head right after it: `credentials add`, `rotate`, `remove`, `rescope`, `authorize`, `sign-out` and `import-plan`; `channel add` and `remove`; `hooks register` and `unregister`; `agents add`, `remove`, `bind`, `set`, `set-egress`, `allow-subagent` and `deny-subagent`; `persona create`, `edit` and `delete`; `mcp sign` and `authorize`; `skills trust-root`; `cron create`, `delete`, `pause` and `resume`. Carries `command`, `target`, `detail` (what changed, never a secret) and `run_by`. A change whose row cannot be written stands, and the command says so. Forwarded by default. `credentials grant` and `revoke` write `credential_destination_granted` and `credential_destination_revoked` instead. |
 | `operator_command_refused` | none | An allowlist command ran inside a Wirken `exec` and was refused before it opened anything, on its own lane (`gateway-senders` for `wirken senders`, `gateway-approvers` for `wirken approvers`), sealed by a chain head right after it. Carries `command`, `invocation` (the subcommand) and `reason` (`inside_exec`). Forwarded by default, at `warn`. |
 | `rewind` | `agent_id`, `reason` | Sentinel emitted before truncating the most recent N events. |
 | `audit_legacy` | `actor_kind`, `actor_id`, `action`, `target` | Gateway-emitted flat-tuple events. |
+
+Every row a CLI command writes names the OS account it ran as, read from the
+process's own credentials: `uid:1000 (name)` on Unix, `sid:S-1-...` on
+Windows. `$USER` is not read.
 
 Zirkel pipeline variants (`CandidateScored`, `CandidateLlmScored`,
 `CandidateKept`, `CandidateSkipped`, `ThemeNamed`, `InterestsEdited`,

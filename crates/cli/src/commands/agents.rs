@@ -185,6 +185,7 @@ pub async fn add(args: AddArgs) -> Result<()> {
         println!("  Channels: {}", display.join(", "));
     }
     println!();
+    super::note_operator_command("agents add", &id, "");
 
     Ok(())
 }
@@ -328,6 +329,7 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
     } else {
         println!("  Channels: {}", channels.join(", "));
     }
+    super::note_operator_command("agents add", &id, &format!("model {model}"));
 
     Ok(())
 }
@@ -402,6 +404,11 @@ async fn add_plan_noninteractive(
     } else {
         println!("  Channels: {}", channels.join(", "));
     }
+    super::note_operator_command(
+        "agents add",
+        &id,
+        &format!("model {model}; plan sign-in {entry}"),
+    );
     Ok(())
 }
 
@@ -489,6 +496,7 @@ pub async fn remove(id: &str) -> Result<()> {
         .context(format!("Failed to remove agent '{id}'"))?;
 
     println!("  Agent '{id}' removed.");
+    super::note_operator_command("agents remove", id, "");
     Ok(())
 }
 
@@ -507,6 +515,7 @@ pub async fn bind(agent_id: &str, channel: &str) -> Result<()> {
         .context(format!("Failed to bind '{channel}' to '{agent_id}'"))?;
 
     println!("  Channel '{channel}' bound to agent '{agent_id}'.");
+    super::note_operator_command("agents bind", agent_id, &format!("channel {channel}"));
     Ok(())
 }
 
@@ -568,6 +577,14 @@ pub async fn allow_subagent(
     println!("  Max tier: {max_tier}");
     println!("  Max rounds: {max_rounds}");
     println!("  Max runtime: {max_runtime}s");
+    super::note_operator_command(
+        "agents allow-subagent",
+        parent,
+        &format!(
+            "child {child}; tools {tools_display}; max tier {max_tier}; max rounds {max_rounds}; \
+             max runtime {max_runtime}s"
+        ),
+    );
     Ok(())
 }
 
@@ -591,6 +608,7 @@ pub async fn deny_subagent(parent: &str, child: &str) -> Result<()> {
         .context("Failed to update allowed_subagents")?;
 
     println!("  Removed '{child}' from '{parent}' allowed subagents.");
+    super::note_operator_command("agents deny-subagent", parent, &format!("child {child}"));
     Ok(())
 }
 
@@ -609,6 +627,7 @@ pub async fn set(
     let existing = store.get(id).context(format!("Agent '{id}' not found"))?;
 
     let mut changed = false;
+    let mut details: Vec<String> = Vec::new();
 
     // A plan agent has no key to replace and a fixed endpoint; a typed
     // key would overwrite its sign-in with a value it cannot use.
@@ -675,6 +694,10 @@ pub async fn set(
             "  Agent '{id}' now runs {}/{} at {}.",
             updated.provider, updated.model, updated.base_url
         );
+        details.push(format!(
+            "runs {}/{} at {}",
+            updated.provider, updated.model, updated.base_url
+        ));
         changed = true;
     }
 
@@ -713,6 +736,7 @@ pub async fn set(
                 .context("Failed to record the credential name")?;
         }
         println!("  Agent '{id}' API key replaced in '{cred_name}'.");
+        details.push(format!("API key replaced in {cred_name}"));
         changed = true;
     }
 
@@ -734,6 +758,7 @@ pub async fn set(
             None => "auto (provider default)",
         };
         println!("  Agent '{id}' tools_enabled set to {display}.");
+        details.push(format!("tools_enabled {val}"));
         changed = true;
     }
 
@@ -742,6 +767,8 @@ pub async fn set(
             "  No settings to change. Use --model, --base-url, --api-key, \
              or --tools-enabled <true|false|auto>."
         );
+    } else {
+        super::note_operator_command("agents set", id, &details.join("; "));
     }
 
     Ok(())
@@ -859,6 +886,12 @@ pub async fn set_egress(id: &str, channel: &str, mode: &str, domains: Option<&st
              rather than run unproxied."
         );
     }
+    let detail = if parsed.is_empty() {
+        format!("channel {channel}; {mode}")
+    } else {
+        format!("channel {channel}; {mode} [{}]", parsed.join(", "))
+    };
+    super::note_operator_command("agents set-egress", id, &detail);
 
     Ok(())
 }

@@ -107,6 +107,17 @@ pub async fn create(
     if !allow_subagent.is_empty() {
         println!("    subagents: {}", allow_subagent.join(", "));
     }
+    let mut detail = format!("provider {provider}/{model}");
+    if let Some(p) = preset {
+        detail.push_str(&format!("; preset {p}"));
+    }
+    if !channels.is_empty() {
+        detail.push_str(&format!("; channels {}", channels.join(", ")));
+    }
+    if !allow_subagent.is_empty() {
+        detail.push_str(&format!("; subagents {}", allow_subagent.join(", ")));
+    }
+    super::note_operator_command("persona create", name, &detail);
     Ok(())
 }
 
@@ -266,7 +277,7 @@ pub async fn edit(
         agent_config.api_key_credential = v.to_string();
     }
     if !channels.is_empty() {
-        agent_config.channels = channels;
+        agent_config.channels = channels.clone();
     }
     if let Some(v) = display_name {
         agent_config.name = v.to_string();
@@ -277,6 +288,32 @@ pub async fn edit(
         .with_context(|| format!("update persona '{name}'"))?;
 
     println!("  Persona '{name}' updated.");
+    let mut changed: Vec<String> = Vec::new();
+    if let Some(p) = preset {
+        changed.push(format!("preset {p}"));
+    }
+    if clear_preset {
+        changed.push("preset cleared".to_string());
+    }
+    if let Some(p) = provider {
+        changed.push(format!("provider {p}"));
+    }
+    if let Some(m) = model {
+        changed.push(format!("model {m}"));
+    }
+    if let Some(u) = base_url {
+        changed.push(format!("base url {u}"));
+    }
+    if let Some(c) = credential {
+        changed.push(format!("credential {c}"));
+    }
+    if !channels.is_empty() {
+        changed.push(format!("channels {}", channels.join(", ")));
+    }
+    if let Some(d) = display_name {
+        changed.push(format!("display name {d}"));
+    }
+    super::note_operator_command("persona edit", name, &changed.join("; "));
     Ok(())
 }
 
@@ -291,6 +328,7 @@ pub async fn delete(name: &str) -> Result<()> {
         .with_context(|| format!("persona '{name}' not found"))?;
 
     println!("  Persona '{name}' deleted.");
+    super::note_operator_command("persona delete", name, "");
     Ok(())
 }
 

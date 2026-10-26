@@ -227,6 +227,7 @@ pub async fn rescope(
         }
         drop(store);
         super::plan_sign_in::sign_in(&cfg, name, None, true).await?;
+        super::note_operator_command("credentials rescope", name, "plan sign-in");
         return Ok(());
     }
 
@@ -294,6 +295,17 @@ pub async fn rescope(
 
     println!();
     println!("  Credential '{name}' rescoped. New scopes stored in vault.");
+    let mut scopes: Vec<String> = provider_def
+        .default_scopes
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    scopes.extend(new_extra_scopes.iter().cloned());
+    super::note_operator_command(
+        "credentials rescope",
+        name,
+        &format!("scopes: {}", scopes.join(" ")),
+    );
     Ok(())
 }
 
@@ -443,6 +455,15 @@ pub async fn add(
 
     println!("  Credential '{name}' stored as {}.", kind.as_str());
     super::credential_binding::print_binding(&binding);
+    super::note_operator_command(
+        "credentials add",
+        name,
+        &format!(
+            "{}; {}",
+            kind.as_str(),
+            super::credential_binding::binding_summary(&binding)
+        ),
+    );
     Ok(())
 }
 
@@ -501,6 +522,7 @@ pub async fn remove(name: &str) -> Result<()> {
         .context(format!("Failed to remove '{name}'"))?;
 
     println!("  Credential '{name}' removed.");
+    super::note_operator_command("credentials remove", name, "");
     Ok(())
 }
 
@@ -526,6 +548,7 @@ pub async fn rotate(name: &str, source: ValueSource) -> Result<()> {
         .context(format!("Failed to rotate '{name}'"))?;
 
     println!("  Credential '{name}' rotated. Next rotation due in 90 days.");
+    super::note_operator_command("credentials rotate", name, "");
     Ok(())
 }
 

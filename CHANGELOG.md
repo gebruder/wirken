@@ -19,6 +19,16 @@ tagged.
   response to an `http_request` that carried a credential, and whatever a
   spawned sub-agent read now count as restricting reads. **For wirken-siem:**
   new kind `read_sensitivity_observed`, forwarded by default.
+- The commands that change what the gateway trusts or runs write an
+  `operator_command` row on the `gateway-operator` lane, sealed by a chain
+  head: `credentials`, `channel add` and `remove`, `hooks`, `agents`,
+  `persona`, `mcp sign` and `authorize`, `skills trust-root` and `cron`.
+- Every row a CLI command writes names the OS account from the process's own
+  uid, `uid:1000 (name)` or `sid:S-1-...` on Windows, instead of `$USER`.
+  **For wirken-siem:** new kind `operator_command`, forwarded by default;
+  `added_by`, `removed_by`, `granted_by`, `revoked_by`, `set_by`, a CLI
+  decision's `approved_by` and `denied_by`, and an import's `actor` take the
+  new form.
 
 ## [3.0.0] - 2026-10-26
 

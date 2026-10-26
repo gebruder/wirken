@@ -361,6 +361,7 @@ pub async fn trust_root(pubkey_hex: &str, yes: bool) -> Result<()> {
     println!("    wirken skills sign --root-key <offline-root-seed> <dir>");
     println!("  Under the project root, unmodified bundled skills need no re-signing:");
     println!("    wirken skills restore-bundled");
+    super::note_operator_command("skills trust-root", pubkey_hex.trim(), "");
     Ok(())
 }
 

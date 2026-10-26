@@ -62,6 +62,11 @@ pub async fn create(
         job.next_run_at.format("%Y-%m-%d %H:%M UTC")
     );
     println!("  Message: {}", job.message);
+    super::note_operator_command(
+        "cron create",
+        &job.id,
+        &format!("agent {}; schedule {}", job.agent_id, job.schedule),
+    );
     Ok(())
 }
 
@@ -71,6 +76,7 @@ pub async fn delete(id: &str) -> Result<()> {
 
     store.delete(id)?;
     println!("  Deleted cron job: {id}");
+    super::note_operator_command("cron delete", id, "");
     Ok(())
 }
 
@@ -80,6 +86,7 @@ pub async fn pause(id: &str) -> Result<()> {
 
     store.pause(id)?;
     println!("  Paused cron job: {id}");
+    super::note_operator_command("cron pause", id, "");
     Ok(())
 }
 
@@ -89,6 +96,7 @@ pub async fn resume(id: &str) -> Result<()> {
 
     store.resume(id)?;
     println!("  Resumed cron job: {id}");
+    super::note_operator_command("cron resume", id, "");
     Ok(())
 }
 

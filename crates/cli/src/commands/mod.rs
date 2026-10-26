@@ -404,16 +404,77 @@ pub fn seal_operator_lane(log: &wirken_audit::SqliteSessionLog, session_id: &str
 
 /// The local operator, for attributing a CLI action on the chain.
 ///
-/// The OS user is the only identity a CLI invocation has: there is no
-/// login, and the permission store is reachable by anyone who can
-/// read the data directory. Recording it names who was at the
-/// keyboard as far as the machine knows, which is weaker than an
-/// authenticated actor and stronger than the literal string
-/// "operator" every row used to carry.
+/// The OS account is the only identity a CLI invocation has: there is
+/// no login, and the permission store is reachable by anyone who can
+/// read the data directory. It is read from the process's own
+/// credentials, `uid:1000 (name)` on unix and `sid:S-1-...` on
+/// Windows, never from `$USER`, which any process can set.
 pub fn local_operator() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "operator".to_string())
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid(2) cannot fail and takes no arguments.
+        let uid = unsafe { libc::getuid() };
+        match account_name(uid) {
+            Some(name) => format!("uid:{uid} ({name})"),
+            None => format!("uid:{uid}"),
+        }
+    }
+    #[cfg(windows)]
+    {
+        wirken_ipc::current_principal()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|e| format!("sid:unknown ({e})"))
+    }
+}
+
+/// The passwd name for `uid`, if it has one.
+#[cfg(unix)]
+fn account_name(uid: libc::uid_t) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 4096];
+    // SAFETY: zeroed is a valid passwd; getpwuid_r fills it only from
+    // `buf`, which outlives every read of the result below.
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is valid for the length given.
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
+    if rc != 0 || result.is_null() || pwd.pw_name.is_null() {
+        return None;
+    }
+    // SAFETY: pw_name points into `buf`, NUL-terminated by getpwuid_r.
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
+    Some(name.to_string_lossy().into_owned())
+}
+
+/// Record an authority-changing command on the operator lane and seal
+/// it. Never a secret value.
+fn record_operator_command(command: &str, target: &str, detail: &str) -> anyhow::Result<()> {
+    use wirken_audit::SessionLog as _;
+    let log = open_signed_session_log(&config())?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(
+        wirken_audit::OPERATOR_COMMANDS_SESSION.to_string(),
+    ));
+    log.append(
+        &handle,
+        wirken_audit::TrustLevel::User,
+        wirken_audit::SessionEvent::OperatorCommand {
+            command: command.to_string(),
+            target: target.to_string(),
+            detail: detail.to_string(),
+            run_by: local_operator(),
+        },
+    )?;
+    seal_operator_lane(&log, wirken_audit::OPERATOR_COMMANDS_SESSION);
+    Ok(())
+}
+
+/// [`record_operator_command`] after a change that stands either way:
+/// a row that cannot be written is reported, and the command succeeds.
+pub fn note_operator_command(command: &str, target: &str, detail: &str) {
+    if let Err(e) = record_operator_command(command, target, detail) {
+        eprintln!(
+            "  `wirken {command}` changed {target}, but its audit row could not be written: {e:#}"
+        );
+    }
 }
 
 /// Open the permission store with the operator's configured default

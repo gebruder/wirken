@@ -466,13 +466,11 @@ fn first_account(reader: &mut Archive) -> Result<String> {
     })
 }
 
-/// The operator label for the audit rows.
-///
-/// The convention the CLI approval path already uses: the operator's
-/// `$USER`, falling back to the literal `cli` so the value is never
-/// empty. The surface is carried separately by the event's own name.
+/// The operator label for the audit rows: the OS account this runs
+/// as, as every CLI row records it. The surface is carried separately
+/// by the event's own name.
 fn operator_actor() -> String {
-    std::env::var("USER").unwrap_or_else(|_| "cli".to_string())
+    super::local_operator()
 }
 
 fn hash_file(path: &Path) -> Result<String> {

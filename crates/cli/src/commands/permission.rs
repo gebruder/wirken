@@ -224,12 +224,11 @@ fn render_pending_detail(d: &wirken_ipc::permissions::PendingDetail) -> String {
 }
 
 /// `wirken permissions pending approve <request_id>`: resolve the
-/// pending entry as `Allow`. `approved_by` carries the operator's
-/// `$USER` (falling back to the literal `"cli"`) so the audit
-/// row records who approved on the CLI surface.
+/// pending entry as `Allow`. `approved_by` carries the OS account this
+/// runs as, from [`super::local_operator`].
 pub async fn pending_approve(request_id: &str) -> Result<()> {
     let request_id = &resolved_request_id(request_id).await?;
-    let approved_by = std::env::var("USER").unwrap_or_else(|_| "cli".to_string());
+    let approved_by = super::local_operator();
     let resp = permissions_rpc(&PermissionsRequest::PendingApprove {
         request_id: request_id.to_string(),
         approved_by,
@@ -244,7 +243,7 @@ pub async fn pending_approve(request_id: &str) -> Result<()> {
 /// audit row's `denial_reason`.
 pub async fn pending_deny(request_id: &str, reason: Option<String>) -> Result<()> {
     let request_id = &resolved_request_id(request_id).await?;
-    let denied_by = std::env::var("USER").unwrap_or_else(|_| "cli".to_string());
+    let denied_by = super::local_operator();
     let resp = permissions_rpc(&PermissionsRequest::PendingDeny {
         request_id: request_id.to_string(),
         denied_by,

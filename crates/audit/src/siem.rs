@@ -892,6 +892,7 @@ fn extract_identity_for_sentinel(
         SessionEvent::ApproverAdded { .. } => (None, None, None),
         SessionEvent::ApproverRemoved { .. } => (None, None, None),
         SessionEvent::ApprovalChatSet { .. } => (None, None, None),
+        SessionEvent::OperatorCommand { .. } => (None, None, None),
         SessionEvent::OperatorCommandRefused { .. } => (None, None, None),
         // A hook id and an error; none of the three.
         SessionEvent::HookCrashed { .. } => (None, None, None),
@@ -1184,6 +1185,18 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             "approval_chat_set adapter={adapter_id} from={} to={conversation_id}",
             previous_conversation_id.as_deref().unwrap_or("none")
         ),
+        SessionEvent::OperatorCommand {
+            command,
+            target,
+            detail,
+            run_by,
+        } => {
+            if detail.is_empty() {
+                format!("{command} {target} by={run_by}")
+            } else {
+                format!("{command} {target} ({detail}) by={run_by}")
+            }
+        }
         SessionEvent::OperatorCommandRefused {
             command,
             invocation,

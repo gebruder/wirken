@@ -170,6 +170,11 @@ pub async fn authorize(
     println!();
     println!("  Authorized. Tokens stored in vault under '{credential_name}'.");
     println!("  The MCP proxy will refresh the access token automatically when it expires.");
+    super::note_operator_command(
+        "mcp authorize",
+        server,
+        &format!("provider {provider}; credential {credential_name}"),
+    );
     Ok(())
 }
 
@@ -248,6 +253,15 @@ pub fn sign(server: &str, agent: Option<&str>) -> Result<()> {
     let (head, tail) = (&signature[..16], &signature[signature.len() - 16..]);
     println!("  Signature: {head}...{tail}");
     println!("  Public key: {signer_pub}");
+    let digest = wirken_mcp_proxy::mcp_signing::entry_digest(server, entry);
+    super::note_operator_command(
+        "mcp sign",
+        server,
+        &format!(
+            "{}; entry {digest}; signer {signer_pub}",
+            agent.map_or("mcp.json".to_string(), |a| format!("agent {a}"))
+        ),
+    );
     Ok(())
 }
 

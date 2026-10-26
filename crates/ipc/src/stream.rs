@@ -130,8 +130,15 @@ mod win {
             if ok == 0 {
                 return Err(last_error_io("GetNamedPipe*ProcessId"));
             }
+            sid_of_process(pid)
+        }
+    }
 
-            // 2. Open the peer process with limited query rights.
+    /// The user SID of process `pid`'s token.
+    pub(super) fn sid_of_process(pid: u32) -> Result<Principal, IpcError> {
+        // SAFETY: as above; every handle opened here is an OwnedHandle.
+        unsafe {
+            // 2. Open the process with limited query rights.
             // PROCESS_QUERY_LIMITED_INFORMATION is the minimum
             // privilege needed to call OpenProcessToken on the
             // returned handle for token-info query.
@@ -202,6 +209,12 @@ mod win {
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         String::from_utf16_lossy(slice)
     }
+}
+
+/// The account this process runs as: its token's user SID.
+#[cfg(windows)]
+pub fn current_principal() -> Result<Principal, IpcError> {
+    win::sid_of_process(std::process::id())
 }
 
 /// Boxed [`Stream`] suitable for sending across tokio tasks.
