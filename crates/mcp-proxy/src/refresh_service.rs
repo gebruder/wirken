@@ -1003,6 +1003,16 @@ mod tests {
             .unwrap();
         assert!(credentials.refetch("linear-token").await.is_err());
         assert!(credentials.get("linear-token").is_none());
+        // A stdio server started again now has no variable for it.
+        let env = HashMap::from([
+            ("TOKEN".to_string(), "vault:linear-token".to_string()),
+            ("LOG".to_string(), "info".to_string()),
+        ]);
+        let started_with = crate::mcp_registry::resolve_env(&env, &credentials, &pin("test"));
+        assert_eq!(
+            started_with,
+            HashMap::from([("LOG".to_string(), "info".to_string())])
+        );
     }
 
     /// A change to a handed credential goes down the proxy's watch; a

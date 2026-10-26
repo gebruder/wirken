@@ -49,6 +49,13 @@ tagged.
   decision's `approved_by` and `denied_by`, and an import's `actor` take the
   new form.
 
+### Fixed
+
+- A stdio MCP server whose `vault:` value the proxy does not hold, never
+  handed over or removed from the vault, starts without that variable, and a
+  contained one without its `NAME_FILE` and secret file. It used to get the
+  literal `vault:NAME` string, or an empty file.
+
 ## [3.0.0] - 2026-10-26
 
 RUSTSEC-2026-0387 (crypto-bigint 0.5.5) is ignored in `deny.toml`: it is

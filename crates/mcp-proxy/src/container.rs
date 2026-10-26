@@ -539,7 +539,20 @@ impl ContainerPlan {
         secrets: &HashMap<String, String>,
         route: Option<&ServerRoute>,
     ) -> ContainerCreateBody {
-        let mut env = self.env.clone();
+        // A secret file the proxy holds no value for is not written, and
+        // its `NAME_FILE` variable is left out with it.
+        let missing_files: Vec<String> = self
+            .secret_file_names
+            .iter()
+            .filter(|n| !secrets.contains_key(*n))
+            .map(|n| format!("{n}_FILE="))
+            .collect();
+        let mut env: Vec<String> = self
+            .env
+            .iter()
+            .filter(|e| !missing_files.iter().any(|m| e.starts_with(m.as_str())))
+            .cloned()
+            .collect();
         for name in &self.env_secret_names {
             if let Some(value) = secrets.get(name) {
                 env.push(format!("{name}={value}"));
@@ -657,7 +670,7 @@ pub fn write_secret_files(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    for name in names {
+    for name in names.iter().filter(|n| resolved.contains_key(*n)) {
         let path = dir.join(name);
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
@@ -1192,6 +1205,30 @@ mod tests {
             body_env.iter().all(|e| !e.contains("resolved-token-value")),
             "{body_env:?}"
         );
+    }
+
+    /// A secret whose value was removed from the vault starts the server
+    /// without its variable: no `NAME_FILE`, no file, and never the
+    /// `vault:NAME` reference.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn a_secret_not_held_leaves_its_variable_and_file_out() {
+        let dirs = tempfile::tempdir().unwrap();
+        let plan = plan_with_env(&host(dirs.path()), &block(&dirs), &vault_env()).unwrap();
+        let without = HashMap::from([("LOG".to_string(), "info".to_string())]);
+        let body_env = plan.create_body(&without, None).env.unwrap();
+        assert!(
+            body_env.iter().all(|e| !e.starts_with("GITHUB_TOKEN")),
+            "{body_env:?}"
+        );
+        assert!(
+            body_env.iter().all(|e| !e.contains("vault:")),
+            "{body_env:?}"
+        );
+        assert!(body_env.contains(&"LOG=info".to_string()));
+        let dir = plan.secrets_dir.clone().unwrap();
+        write_secret_files(&dir, &plan.secret_file_names, &without).unwrap();
+        assert!(!dir.join("GITHUB_TOKEN").exists(), "no empty secret file");
     }
 
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]

@@ -861,29 +861,27 @@ fn pre_spawn_verify(
 }
 
 /// Resolve `vault:`-prefixed env values from the handed-over
-/// credentials. A name the gateway did not hand over is left as the
-/// literal `vault:NAME` and a warning is logged, so the server sees the
-/// reference rather than an empty value.
+/// credentials. A name the proxy does not hold, never handed over or
+/// removed from the vault since, leaves its variable out, and a warning
+/// is logged: the server starts without it.
 pub(crate) fn resolve_env(
     env: &HashMap<String, String>,
     credentials: &crate::credentials::ProxyCredentials,
     pin: &crate::credentials::ServerPin,
 ) -> HashMap<String, String> {
     env.iter()
-        .map(|(k, v)| {
-            let resolved = match v.strip_prefix("vault:") {
-                Some(vault_key) => match credentials.get_for(pin, vault_key) {
-                    Some(secret) => secret.expose().to_string(),
-                    None => {
-                        tracing::warn!(
-                            "credential '{vault_key}' for env '{k}' was not handed to the proxy"
-                        );
-                        v.clone()
-                    }
-                },
-                None => v.clone(),
-            };
-            (k.clone(), resolved)
+        .filter_map(|(k, v)| match v.strip_prefix("vault:") {
+            Some(vault_key) => match credentials.get_for(pin, vault_key) {
+                Some(secret) => Some((k.clone(), secret.expose().to_string())),
+                None => {
+                    tracing::warn!(
+                        "credential '{vault_key}' for env '{k}' is not held; the server starts \
+                         without '{k}'"
+                    );
+                    None
+                }
+            },
+            None => Some((k.clone(), v.clone())),
         })
         .collect()
 }
@@ -974,7 +972,12 @@ mod scope_tests {
         };
         let resolved = resolve_env(&env, &credentials, &pin);
         assert_eq!(resolved["OWN"], "stdio-key-value");
-        assert_eq!(resolved["OTHER"], "vault:telegram-token");
+        assert!(
+            !resolved.contains_key("OTHER"),
+            "a value not held leaves its variable out: {:?}",
+            resolved.keys()
+        );
+        assert!(resolved.values().all(|v| !v.starts_with("vault:")));
         assert_eq!(resolved["PLAIN"], "info");
     }
 }
