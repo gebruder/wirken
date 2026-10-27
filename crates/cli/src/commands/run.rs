@@ -2493,6 +2493,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let permissions_operator_key = operator_key;
     #[cfg(unix)]
     let permissions_session_log = session_log.clone();
+    #[cfg(unix)]
     let permissions_store_for_loop = permissions.clone();
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
