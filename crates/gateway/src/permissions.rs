@@ -188,7 +188,7 @@ impl std::fmt::Display for Action {
 /// `./ls`, and `LS` all reduce to `ls`.
 pub const TIER2_ALLOWLIST: &[&str] = &[
     // inspection (read/stat)
-    "ls", "cat", "head", "tail", "grep", "diff", "cmp", "stat", "file", "wc", "tree",
+    "ls", "cat", "head", "tail", "grep", "diff", "cmp", "stat", "wc",
     // pure path math
     "readlink", "realpath", "basename", "dirname", // identity / system info (read-only)
     "pwd", "whoami", "id", "uname", "hostname", "date", "echo", "printf", "which", "type",

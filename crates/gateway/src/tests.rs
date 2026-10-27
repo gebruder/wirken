@@ -488,9 +488,9 @@ fn shell_wrappers_are_tier3() {
 #[test]
 fn allowlisted_verbs_are_tier2() {
     for verb in [
-        "ls", "cat", "head", "tail", "grep", "diff", "cmp", "stat", "file", "wc", "tree",
-        "readlink", "realpath", "basename", "dirname", "pwd", "whoami", "id", "uname", "hostname",
-        "date", "echo", "printf", "which", "type",
+        "ls", "cat", "head", "tail", "grep", "diff", "cmp", "stat", "wc", "readlink", "realpath",
+        "basename", "dirname", "pwd", "whoami", "id", "uname", "hostname", "date", "echo",
+        "printf", "which", "type",
     ] {
         let action = Action::ShellExec {
             pattern: verb.into(),
@@ -537,6 +537,25 @@ fn exec_hatch_looking_tools_are_tier3() {
             PermissionTier::Tier3,
             "verb with known exec hatch {verb} must be Tier 3"
         );
+    }
+}
+
+#[test]
+fn file_writing_inspection_tools_are_tier3() {
+    // `tree -o` writes its listing to a path; `file -C -m` writes a
+    // compiled magic file. Each writes wherever its argument says.
+    for verb in ["tree", "file"] {
+        let action = Action::ShellExec {
+            pattern: verb.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "verb that writes files {verb} must be Tier 3"
+        );
+        assert!(!crate::permissions::is_storable_approval_key(&format!(
+            "shell:{verb}"
+        )));
     }
 }
 

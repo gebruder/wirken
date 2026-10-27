@@ -20,6 +20,9 @@ tagged.
   path: a session-scoped grant is not served, a phase egress overlay denies,
   `http_request` is refused rather than run without its audit row, and the
   leak matcher keeps matching and learning.
+- `tree` and `file` are Tier 3: `tree -o` and `file -C` write files. A stored
+  `shell:tree` or `shell:file` grant is removed when the permission store
+  opens, with the sweep's row.
 
 ## [3.1.0] - 2026-10-26
 
