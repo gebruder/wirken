@@ -55,6 +55,7 @@ tagged.
 - `wirken agents set` says that a running `wirken run` keeps the agent config
   it started with. Web chat's About panel shows the org tool policy the gate
   loaded at start rather than `tool_policy.json` as it is now on disk.
+- `wirken permissions pending list` shows each request's action key.
 
 ## [3.1.0] - 2026-10-26
 

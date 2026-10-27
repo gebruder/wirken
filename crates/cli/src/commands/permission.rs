@@ -82,20 +82,8 @@ pub async fn pending_list() -> Result<()> {
                 println!("No pending approvals.");
                 return Ok(());
             }
-            println!(
-                "{:<36}  {:<14}  {:<18}  {:<6}  AGE",
-                "REQUEST", "AGENT", "TOOL", "TIER"
-            );
-            for e in entries {
-                // The whole id. `show`, `approve` and `deny` match on
-                // it, and it appears nowhere else, so printing a
-                // truncation left the queue unreachable: the short
-                // form was refused and the long form had no surface
-                // that would show it.
-                println!(
-                    "{:<36}  {:<14}  {:<18}  {:<6}  {}s",
-                    e.request_id, e.agent_id, e.tool_name, e.requested_tier, e.age_seconds,
-                );
+            for line in pending_table(&entries) {
+                println!("{line}");
             }
             println!();
             println!("approve / deny / show take the id above, or any prefix unique to one row.");
@@ -104,6 +92,29 @@ pub async fn pending_list() -> Result<()> {
         PermissionsResponse::Error { message } => anyhow::bail!("gateway error: {message}"),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }
+}
+
+/// The `pending list` table: a header, then one row per request. The
+/// action key is last, since it can be as long as a file path.
+fn pending_table(entries: &[wirken_ipc::permissions::PendingSummary]) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{:<36}  {:<14}  {:<18}  {:<6}  {:<6}  ACTION",
+        "REQUEST", "AGENT", "TOOL", "TIER", "AGE"
+    )];
+    for e in entries {
+        // The whole id. `show`, `approve` and `deny` match on it, and
+        // it appears nowhere else.
+        lines.push(format!(
+            "{:<36}  {:<14}  {:<18}  {:<6}  {:<6}  {}",
+            e.request_id,
+            e.agent_id,
+            e.tool_name,
+            e.requested_tier,
+            format!("{}s", e.age_seconds),
+            e.action_key,
+        ));
+    }
+    lines
 }
 
 /// Outcome of matching an operator-supplied id against the queue.
@@ -561,7 +572,23 @@ pub async fn list_pending(agent: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IdMatch, resolve_request_id};
+    use super::{IdMatch, pending_table, resolve_request_id};
+
+    #[test]
+    fn the_pending_table_names_the_action_key() {
+        let entry = wirken_ipc::permissions::PendingSummary {
+            request_id: "5a6255fd-1111-4000-8000-000000000001".into(),
+            agent_id: "default".into(),
+            tool_name: "exec".into(),
+            action_key: "shell:ls".into(),
+            requested_tier: "tier2".into(),
+            requested_at: "2026-10-27T00:00:00Z".into(),
+            age_seconds: 12,
+        };
+        let lines = pending_table(&[entry]);
+        assert!(lines[0].ends_with("ACTION"), "{}", lines[0]);
+        assert!(lines[1].ends_with("12s     shell:ls"), "{}", lines[1]);
+    }
 
     const A: &str = "5a6255fd-1111-4000-8000-000000000001";
     const B: &str = "5a6255fd-2222-4000-8000-000000000002";
