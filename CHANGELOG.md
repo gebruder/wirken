@@ -25,7 +25,9 @@ tagged.
 - A lock poisoned by a panic no longer reads as permission on the dispatch
   path: a session-scoped grant is not served, a phase egress overlay denies,
   `http_request` is refused rather than run without its audit row, and the
-  leak matcher keeps matching and learning.
+  leak matcher keeps matching and learning. Web chat's approval registry
+  recovers a poisoned lock when a request's guard is dropped, rather than
+  panicking in `Drop`.
 - `tree` and `file` are Tier 3: `tree -o` and `file -C` write files. A stored
   `shell:tree` or `shell:file` grant is removed when the permission store
   opens, with the sweep's row.

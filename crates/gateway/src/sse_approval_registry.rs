@@ -149,11 +149,13 @@ impl SseApprovalRegistry {
     }
 
     /// Idempotent removal. A `register_guard` Drop calls this; a
-    /// double-unregister from a buggy call site is a no-op.
+    /// double-unregister from a buggy call site is a no-op. A poisoned
+    /// lock is recovered rather than panicked on, since a Drop can run
+    /// while a panic unwinds.
     pub fn unregister(&self, session_id: &SessionId) {
         self.senders
             .lock()
-            .expect("sse approval registry mutex")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(session_id);
     }
 
@@ -212,6 +214,28 @@ mod tests {
 
     fn sess(s: &str) -> SessionId {
         SessionId::new(s.to_string())
+    }
+
+    #[test]
+    fn a_guard_dropped_on_a_poisoned_lock_still_unregisters() {
+        let reg = Arc::new(SseApprovalRegistry::new());
+        let (tx, _rx) = mpsc::channel(1);
+        let guard = reg.register_guard(sess("s1"), tx);
+        let _ = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = reg.senders.lock().unwrap();
+                panic!("poison the registry lock");
+            })
+            .join()
+        });
+        assert!(reg.senders.is_poisoned());
+        drop(guard);
+        let left = reg
+            .senders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        assert_eq!(left, 0);
     }
 
     #[tokio::test]
