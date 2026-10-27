@@ -23,6 +23,10 @@ tagged.
 - `tree` and `file` are Tier 3: `tree -o` and `file -C` write files. A stored
   `shell:tree` or `shell:file` grant is removed when the permission store
   opens, with the sweep's row.
+- The subcommands of `wirken permissions`, `skills`, `mcp`, `credentials`,
+  `audit`, `agents` and `channel` that change authority refuse inside a
+  Wirken `exec`, each refusal an `operator_command_refused` row on the
+  `gateway-operator` lane. **For wirken-siem:** `command` takes these names.
 
 ## [3.1.0] - 2026-10-26
 

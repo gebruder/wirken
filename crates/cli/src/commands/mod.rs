@@ -475,6 +475,45 @@ fn record_operator_command(command: &str, target: &str, detail: &str) -> anyhow:
     Ok(())
 }
 
+/// Refuse `wirken <command> <invocation>` under the `exec` marker, and
+/// record the refusal on the operator lane; the row is best effort.
+pub fn refuse_inside_exec(command: &str, invocation: &str) -> anyhow::Result<()> {
+    if std::env::var_os(wirken_agent::tool::EXEC_MARKER_ENV).is_none() {
+        return Ok(());
+    }
+    if let Err(e) = record_operator_refusal(command, invocation) {
+        tracing::warn!(
+            error = %e,
+            "could not record the refusal on the {} lane",
+            wirken_audit::OPERATOR_COMMANDS_SESSION
+        );
+    }
+    anyhow::bail!(
+        "wirken {command} {invocation} refuses to run inside a Wirken exec ({} is set); \
+         run it yourself, from a terminal",
+        wirken_agent::tool::EXEC_MARKER_ENV
+    )
+}
+
+fn record_operator_refusal(command: &str, invocation: &str) -> anyhow::Result<()> {
+    use wirken_audit::SessionLog as _;
+    let log = open_signed_session_log(&config())?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(
+        wirken_audit::OPERATOR_COMMANDS_SESSION.to_string(),
+    ));
+    log.append(
+        &handle,
+        wirken_audit::TrustLevel::User,
+        wirken_audit::SessionEvent::OperatorCommandRefused {
+            command: command.to_string(),
+            invocation: invocation.to_string(),
+            reason: "inside_exec".to_string(),
+        },
+    )?;
+    seal_operator_lane(&log, wirken_audit::OPERATOR_COMMANDS_SESSION);
+    Ok(())
+}
+
 /// [`record_operator_command`] after a change that stands either way:
 /// a row that cannot be written is reported, and the command succeeds.
 pub fn note_operator_command(command: &str, target: &str, detail: &str) {

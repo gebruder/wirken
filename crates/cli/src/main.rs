@@ -1437,6 +1437,100 @@ fn build_env_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
     }
 }
 
+/// The `(command, subcommand)` an invocation names when it changes
+/// grants, skills, MCP entries, credentials, the audit halt, agents or
+/// channels; `None` for a read and for every other command. Each listed
+/// command is matched exhaustively, so a new subcommand is classified
+/// where it is added.
+fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> {
+    let change = match command {
+        Commands::Permissions(cmd) => (
+            "permissions",
+            match cmd {
+                PermissionCommands::Approve { .. } => "approve",
+                PermissionCommands::Revoke { .. } => "revoke",
+                PermissionCommands::Pending(PendingCommands::Approve { .. }) => "pending approve",
+                PermissionCommands::Pending(PendingCommands::Deny { .. }) => "pending deny",
+                PermissionCommands::Pending(
+                    PendingCommands::List | PendingCommands::Show { .. },
+                )
+                | PermissionCommands::List { .. }
+                | PermissionCommands::ListPending { .. } => return None,
+            },
+        ),
+        Commands::Skills(cmd) => (
+            "skills",
+            match cmd {
+                SkillCommands::Install { .. } => "install",
+                SkillCommands::Sign { .. } => "sign",
+                SkillCommands::SignIndex { .. } => "sign-index",
+                SkillCommands::TrustRoot { .. } => "trust-root",
+                SkillCommands::RestoreBundled => "restore-bundled",
+                SkillCommands::Migrate { .. } => "migrate",
+                SkillCommands::Search { .. }
+                | SkillCommands::List
+                | SkillCommands::Verify { .. } => return None,
+            },
+        ),
+        Commands::Mcp(cmd) => (
+            "mcp",
+            match cmd {
+                McpCommands::Authorize { .. } => "authorize",
+                McpCommands::Sign { .. } => "sign",
+                McpCommands::Verify { .. } => return None,
+            },
+        ),
+        Commands::Credentials(cmd) => (
+            "credentials",
+            match cmd {
+                CredentialCommands::Add { .. } => "add",
+                CredentialCommands::Rotate { .. } => "rotate",
+                CredentialCommands::Authorize { .. } => "authorize",
+                CredentialCommands::SignOut { .. } => "sign-out",
+                CredentialCommands::ExportPlan { .. } => "export-plan",
+                CredentialCommands::ImportPlan { .. } => "import-plan",
+                CredentialCommands::Remove { .. } => "remove",
+                CredentialCommands::Grant { .. } => "grant",
+                CredentialCommands::Revoke { .. } => "revoke",
+                CredentialCommands::Rescope { .. } => "rescope",
+                CredentialCommands::List | CredentialCommands::Show { .. } => return None,
+            },
+        ),
+        Commands::Audit(cmd) => (
+            "audit",
+            match cmd {
+                AuditCommands::Acknowledge { .. } => "acknowledge",
+                AuditCommands::Log { .. }
+                | AuditCommands::Verify { .. }
+                | AuditCommands::VerifyAttestations { .. } => return None,
+            },
+        ),
+        Commands::Agents(cmd) => (
+            "agents",
+            match cmd {
+                AgentCommands::Add { .. } => "add",
+                AgentCommands::Remove { .. } => "remove",
+                AgentCommands::Bind { .. } => "bind",
+                AgentCommands::AllowSubagent { .. } => "allow-subagent",
+                AgentCommands::DenySubagent { .. } => "deny-subagent",
+                AgentCommands::Set { .. } => "set",
+                AgentCommands::SetEgress { .. } => "set-egress",
+                AgentCommands::List => return None,
+            },
+        ),
+        Commands::Channel(cmd) => (
+            "channel",
+            match cmd {
+                ChannelCommands::Add { .. } => "add",
+                ChannelCommands::Remove { .. } => "remove",
+                ChannelCommands::List => return None,
+            },
+        ),
+        _ => return None,
+    };
+    Some(change)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -1474,6 +1568,10 @@ async fn main() -> Result<()> {
     }
     #[cfg(not(unix))]
     logs.init();
+
+    if let Some((command, invocation)) = authority_change(&cli.command) {
+        commands::refuse_inside_exec(command, invocation)?;
+    }
 
     match cli.command {
         Commands::Setup {

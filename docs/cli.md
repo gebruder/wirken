@@ -3,6 +3,14 @@
 Command surface only. Mechanisms live on their owning pages and are linked
 rather than restated.
 
+A subcommand that changes authority refuses to run inside a Wirken `exec`
+(`WIRKEN_EXEC` set) and records an `operator_command_refused` row on the
+`gateway-operator` lane: `permissions approve`, `revoke`, `pending approve`
+and `pending deny`; `skills install`, `sign`, `sign-index`, `trust-root`,
+`restore-bundled` and `migrate`; `mcp authorize` and `sign`; every
+`credentials` subcommand but `list` and `show`; `audit acknowledge`; every
+`agents` subcommand but `list`; `channel add` and `remove`. Reads run.
+
 ## wirken setup
 
 Interactive wizard: provider, channels, credentials, service, sandbox, audit.

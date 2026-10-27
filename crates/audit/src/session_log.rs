@@ -1976,10 +1976,11 @@ pub enum SessionEvent {
         /// The OS account that ran it, from the process's own uid.
         run_by: String,
     },
-    /// `wirken senders` or `wirken approvers` refused inside a Wirken
-    /// `exec`, on that command's lane.
+    /// An operator command refused inside a Wirken `exec`, on that
+    /// command's lane.
     OperatorCommandRefused {
-        /// `senders` or `approvers`.
+        /// `senders`, `approvers`, or an authority-changing command on
+        /// the operator lane, such as `permissions`.
         command: String,
         /// The subcommand.
         invocation: String,

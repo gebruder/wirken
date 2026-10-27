@@ -77,7 +77,8 @@ from an empty one plus the minimal host-child set (`PATH`, `HOME`, `USER`,
 locations a shell needs; `child_env::BASE` in
 [`crates/sandbox/src/child_env.rs`](../crates/sandbox/src/child_env.rs), the
 set every host-side child Wirken spawns begins with) and the `WIRKEN_EXEC`
-marker that `wirken update` refuses on ([update.md](update.md#inside-an-exec))
+marker that `wirken update` and the authority-changing commands refuse on
+([update.md](update.md#inside-an-exec), [cli.md](cli.md))
 (`host_exec_env`, [`crates/agent/src/tool.rs`](../crates/agent/src/tool.rs)),
 so a passphrase or key the gateway was started with is not passed on.
 Its stdin is `/dev/null`, not the operator's terminal. The command still runs
