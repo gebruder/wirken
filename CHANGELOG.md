@@ -10,6 +10,13 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- An `exec` container, its egress sidecar and its networks are removed when
+  the turn running it is aborted or the gateway stops mid-call. Each carries
+  `wirken.exec` labels naming the data directory and the creating process;
+  `wirken run` removes at start any whose process has ended.
+
 ## [3.1.0] - 2026-10-26
 
 Thanks to @olive-mm for #305, the Discord approval gate, now merged as

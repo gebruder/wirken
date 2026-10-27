@@ -1,13 +1,23 @@
 //! Docker/Podman sandbox for tool execution.
+//!
+//! Every container an `exec` creates, and its egress sidecar and
+//! networks, carry labels naming this data directory's instance and the
+//! process that started them. They are removed when the call returns,
+//! and from `Drop` when the call's future is dropped first, as when a
+//! turn is aborted. [`sweep_leftovers`] removes what a process that
+//! ended without either left behind.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::ContainerCreateBody;
 use bollard::models::HostConfig;
 use bollard::query_parameters::{
-    CreateContainerOptions, LogsOptions, RemoveContainerOptions, WaitContainerOptions,
+    CreateContainerOptions, ListContainersOptions, ListNetworksOptions, LogsOptions,
+    RemoveContainerOptions, WaitContainerOptions,
 };
 use futures_util::StreamExt;
 
@@ -19,6 +29,13 @@ use crate::sandbox_egress::SandboxEgressContext;
 use crate::tool::ToolResult;
 
 const DEFAULT_IMAGE: &str = "debian:bookworm-slim";
+
+/// Marks an `exec` container, its egress sidecar and its networks.
+pub const LABEL_ROLE: &str = "wirken.exec";
+/// The data directory's instance; see [`SandboxConfig::instance`].
+pub const LABEL_INSTANCE: &str = "wirken.exec.instance";
+/// The process that created the object. The sweep leaves a live one's alone.
+pub const LABEL_PID: &str = "wirken.exec.pid";
 /// Sandbox mode, shared with MCP server containers.
 pub use wirken_sandbox::SandboxMode;
 pub(crate) use wirken_sandbox::runtime_label;
@@ -204,6 +221,10 @@ pub struct SandboxConfig {
     /// sandbox image, so this override exists for those builds and
     /// for the live tests.
     pub sidecar_binary: Option<std::path::PathBuf>,
+    /// Names the data directory on container labels, as MCP server
+    /// containers carry it. Empty labels nothing with an instance, and
+    /// [`sweep_leftovers`] then removes nothing.
+    pub instance: String,
 }
 
 impl Default for SandboxConfig {
@@ -215,8 +236,226 @@ impl Default for SandboxConfig {
             network: false,
             shell: ShellMode::Auto,
             sidecar_binary: None,
+            instance: String::new(),
         }
     }
+}
+
+/// The labels every object one `exec` creates carries.
+fn exec_labels(instance: &str) -> HashMap<String, String> {
+    HashMap::from([
+        (LABEL_ROLE.to_string(), "1".to_string()),
+        (LABEL_INSTANCE.to_string(), instance.to_string()),
+        (LABEL_PID.to_string(), std::process::id().to_string()),
+    ])
+}
+
+/// What one `exec` has created on the daemon. [`Self::release`] removes
+/// it on every return path; `Drop` removes it when the future holding it
+/// is dropped first.
+struct ExecResources {
+    client: Docker,
+    /// The container's name, set before it is created, so a drop during
+    /// the create call still reaches it.
+    container: Option<String>,
+    #[cfg(unix)]
+    route: Option<EgressRoute>,
+}
+
+impl ExecResources {
+    fn new(client: Docker) -> Self {
+        Self {
+            client,
+            container: None,
+            #[cfg(unix)]
+            route: None,
+        }
+    }
+
+    async fn release(mut self) {
+        let client = self.client.clone();
+        let container = self.container.take();
+        #[cfg(unix)]
+        let route = self.route.take();
+        remove_container_by_id(&client, container).await;
+        #[cfg(unix)]
+        if let Some(route) = route {
+            route.teardown(&client).await;
+        }
+    }
+}
+
+impl Drop for ExecResources {
+    /// Must not panic: this can run while a panic unwinds.
+    fn drop(&mut self) {
+        let container = self.container.take();
+        #[cfg(unix)]
+        let route = self.route.take();
+        #[cfg(unix)]
+        let nothing = container.is_none() && route.is_none();
+        #[cfg(not(unix))]
+        let nothing = container.is_none();
+        if nothing {
+            return;
+        }
+        let client = self.client.clone();
+        spawn_cleanup(async move {
+            remove_container_by_id(&client, container).await;
+            #[cfg(unix)]
+            if let Some(route) = route {
+                route.teardown(&client).await;
+            }
+        });
+    }
+}
+
+async fn remove_container_by_id(client: &Docker, container: Option<String>) {
+    let Some(id) = container else {
+        return;
+    };
+    let _ = client.kill_container(&id, None).await;
+    let _ = client
+        .remove_container(
+            &id,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+}
+
+/// Removals started from `Drop`, held so [`drain_cleanups`] can wait
+/// for them before the runtime goes.
+static CLEANUPS: LazyLock<Mutex<tokio::task::JoinSet<()>>> =
+    LazyLock::new(|| Mutex::new(tokio::task::JoinSet::new()));
+
+/// Run `cleanup` on the current runtime, or on a thread of its own
+/// where there is none. Never panics.
+fn spawn_cleanup(cleanup: impl std::future::Future<Output = ()> + Send + 'static) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let mut set = CLEANUPS.lock().unwrap_or_else(PoisonError::into_inner);
+        while set.try_join_next().is_some() {}
+        set.spawn_on(cleanup, &handle);
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("wirken-exec-cleanup".into())
+        .spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(cleanup),
+                Err(e) => tracing::warn!("could not remove an exec container: {e}"),
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("could not remove an exec container: {e}");
+    }
+}
+
+/// Wait for every removal `Drop` started. Shutdown calls this after it
+/// has stopped the turns, so the runtime does not end with one pending.
+pub async fn drain_cleanups() {
+    loop {
+        let mut set = std::mem::take(&mut *CLEANUPS.lock().unwrap_or_else(PoisonError::into_inner));
+        if set.is_empty() {
+            return;
+        }
+        while set.join_next().await.is_some() {}
+    }
+}
+
+/// Whether `pid` names a running process. Assumed so where it cannot be
+/// asked, which leaves an object in place rather than removing a live
+/// one.
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return true;
+        };
+        // SAFETY: signal 0 performs only the existence and permission
+        // check; no signal is delivered.
+        let rc = unsafe { libc::kill(pid, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Whether an object with these labels was left by a process that has
+/// ended.
+fn left_behind(labels: Option<&HashMap<String, String>>) -> bool {
+    labels
+        .and_then(|l| l.get(LABEL_PID))
+        .and_then(|p| p.parse::<u32>().ok())
+        .is_some_and(|pid| !pid_alive(pid))
+}
+
+/// [`sweep_leftovers`] against the local daemon; 0 where none answers.
+pub async fn sweep_local_leftovers(instance: &str) -> usize {
+    match Docker::connect_with_local_defaults() {
+        Ok(docker) => sweep_leftovers(&docker, instance).await,
+        Err(_) => 0,
+    }
+}
+
+/// Remove the `exec` containers, sidecars and networks `instance` left
+/// behind: those whose creating process has ended, as after a kill or a
+/// crash. Returns how many containers. An empty `instance` removes
+/// nothing.
+pub async fn sweep_leftovers(docker: &Docker, instance: &str) -> usize {
+    if instance.is_empty() {
+        return 0;
+    }
+    let filters = || {
+        HashMap::from([(
+            "label".to_string(),
+            vec![format!("{LABEL_INSTANCE}={instance}")],
+        )])
+    };
+    let Ok(containers) = docker
+        .list_containers(Some(ListContainersOptions {
+            all: true,
+            filters: Some(filters()),
+            ..Default::default()
+        }))
+        .await
+    else {
+        return 0;
+    };
+    let mut removed = 0;
+    for c in containers {
+        if left_behind(c.labels.as_ref()) {
+            remove_container_by_id(docker, c.id).await;
+            removed += 1;
+        }
+    }
+    // Networks after containers: one with a container still attached
+    // cannot be removed.
+    if let Ok(networks) = docker
+        .list_networks(Some(ListNetworksOptions {
+            filters: Some(filters()),
+        }))
+        .await
+    {
+        for n in networks {
+            if !left_behind(n.labels.as_ref()) {
+                continue;
+            }
+            if let Some(name) = n.name
+                && let Err(e) = docker.remove_network(&name).await
+            {
+                tracing::warn!("could not remove exec egress network {name}: {e}");
+            }
+        }
+    }
+    removed
 }
 
 /// Docker sandbox executor.
@@ -253,15 +492,16 @@ impl DockerSandbox {
             .to_string_lossy()
             .to_string();
 
+        let mut resources = ExecResources::new(self.client.clone());
+
         // Provision the internal network and this exec's proxy
         // before the container exists, so the container is never
         // startable without the enforcement point already up. Both
         // are torn down on every exit path below.
         #[cfg(unix)]
-        let egress_setup = match egress.filter(|c| c.policy.mode.needs_proxy()) {
-            Some(ctx) => Some(self.provision_egress(ctx).await?),
-            None => None,
-        };
+        if let Some(ctx) = egress.filter(|c| c.policy.mode.needs_proxy()) {
+            resources.route = Some(self.provision_egress(ctx).await?);
+        }
         // Platforms without the broker transport refuse here. The
         // refusal is recorded before it is returned; see
         // `provision_egress`.
@@ -273,11 +513,10 @@ impl DockerSandbox {
         // the sidecar died between reporting ready and now, refuse
         // rather than start a sandbox whose only route is gone.
         #[cfg(unix)]
-        if let Some(setup) = egress_setup.as_ref()
-            && !setup.sidecar_running(&self.client).await
+        if let Some(route) = resources.route.as_ref()
+            && !route.sidecar_running(&self.client).await
         {
-            let setup = egress_setup.expect("checked above");
-            setup.teardown(&self.client).await;
+            resources.release().await;
             return Err(AgentError::Sandbox(
                 "egress sidecar is not running; refusing to exec rather than run \
                  without an egress proxy"
@@ -287,7 +526,10 @@ impl DockerSandbox {
         #[cfg(unix)]
         let decision = egress_decision(
             egress.is_some(),
-            egress_setup.as_ref().map(|s| s.internal_network.as_str()),
+            resources
+                .route
+                .as_ref()
+                .map(|s| s.internal_network.as_str()),
         );
         // No broker transport here, so a proxy-needing policy has
         // already refused above. A policy that needs no proxy still
@@ -295,7 +537,7 @@ impl DockerSandbox {
         #[cfg(not(unix))]
         let decision = egress_decision(egress.is_some(), None);
         #[cfg(unix)]
-        let env = egress_setup.as_ref().map(EgressRoute::proxy_env);
+        let env = resources.route.as_ref().map(EgressRoute::proxy_env);
         #[cfg(not(unix))]
         let env: Option<Vec<String>> = None;
 
@@ -306,29 +548,28 @@ impl DockerSandbox {
             user: Some("1000:1000".into()),
             env,
             host_config: Some(build_host_config(&self.config, &workspace_str, decision)),
+            labels: Some(exec_labels(&self.config.instance)),
             ..Default::default()
         };
 
-        let result = self.run_container(container_config).await;
+        let result = self.run_container(container_config, &mut resources).await;
 
         // Tear down unconditionally. The proxy dies with its handle;
         // the network needs an explicit removal, and leaking one per
         // exec would exhaust Docker's address pool.
-        #[cfg(unix)]
-        if let Some(setup) = egress_setup {
-            setup.teardown(&self.client).await;
-        }
+        resources.release().await;
         result
     }
 
-    /// Create, run, and reap one container. Split from [`Self::exec`]
-    /// so every early return there still passes through the egress
-    /// teardown.
+    /// Create, run, and read one container. The caller removes it
+    /// through `resources`, which holds its name from before the create.
     async fn run_container(
         &self,
         container_config: ContainerCreateBody,
+        resources: &mut ExecResources,
     ) -> Result<ToolResult, AgentError> {
         let container_name = format!("wirken-sandbox-{}", short_id());
+        resources.container = Some(container_name.clone());
 
         let create_opts = CreateContainerOptions {
             name: Some(container_name.clone()),
@@ -347,6 +588,7 @@ impl DockerSandbox {
             .create_container(Some(create_opts), container_config)
             .await
             .map_err(|e| AgentError::Sandbox(format!("create container: {e}")))?;
+        resources.container = Some(container.id.clone());
 
         // The id Docker returned for the container this command ran
         // in, not a name this process chose.
@@ -388,12 +630,8 @@ impl DockerSandbox {
 
         let exit_code = match wait_result {
             Ok(Ok(code)) => code,
-            Ok(Err(e)) => {
-                let _ = self.kill_and_remove(&container.id).await;
-                return Err(e);
-            }
+            Ok(Err(e)) => return Err(e),
             Err(_) => {
-                let _ = self.kill_and_remove(&container.id).await;
                 return Ok(ToolResult {
                     output: format!(
                         "Command timed out after {}s (sandbox)",
@@ -429,10 +667,6 @@ impl DockerSandbox {
                 _ => {}
             }
         }
-
-        // Cleanup — auto_remove is off so logs can be collected; we
-        // must remove the container explicitly here.
-        let _ = self.kill_and_remove(&container.id).await;
 
         let mut result = String::new();
         if !stdout.is_empty() {
@@ -507,12 +741,13 @@ impl DockerSandbox {
         let rootless = wirken_sandbox::RuntimeFacts::probe(&self.client)
             .await
             .is_ok_and(|f| f.rootless);
-        let spec = exec_sidecar_spec(
+        let mut spec = exec_sidecar_spec(
             short_id(),
             self.config.image.clone(),
             sidecar_binary,
             rootless,
         );
+        spec.labels = exec_labels(&self.config.instance);
         let route = wirken_sandbox::egress_net::provision(
             &self.client,
             spec,
@@ -554,20 +789,6 @@ impl DockerSandbox {
                 "cannot resolve own executable for the sidecar: {e}"
             ))
         })
-    }
-
-    async fn kill_and_remove(&self, id: &str) {
-        let _ = self.client.kill_container(id, None).await;
-        let _ = self
-            .client
-            .remove_container(
-                id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await;
     }
 
     /// Check if Docker is available.

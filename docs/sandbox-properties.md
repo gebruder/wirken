@@ -13,7 +13,7 @@ adapters (one OS process per channel) and IPC boundary properties live in
 
 `SandboxMode` is the operator-facing knob. Three values, one default
 ([`crates/sandbox/src/lib.rs:31-51`](../crates/sandbox/src/lib.rs), re-exported
-at [`crates/agent/src/sandbox.rs:23`](../crates/agent/src/sandbox.rs)):
+at [`crates/agent/src/sandbox.rs:40`](../crates/agent/src/sandbox.rs)):
 
 | Mode | Default | Runtime | Meaning |
 |---|---|---|---|
@@ -55,12 +55,14 @@ on the host. Operators who want host execution must opt in by writing
 A gated `exec` call does not leave work running after it returns.
 
 - **`ExecOnly` and `GVisor`.** The command runs in its own container, and the
-  container is killed and removed on every return path once it has started
-  (`kill_and_remove` in [`sandbox.rs`](../crates/agent/src/sandbox.rs); a
-  container Docker created but could not start has run nothing and is not
-  removed by that path). That ends every process
+  container, its egress sidecar and its networks are killed and removed on
+  every return path, and when the call is dropped before it returns, as when
+  a turn is aborted or the gateway stops (`ExecResources` in
+  [`sandbox.rs`](../crates/agent/src/sandbox.rs)). That ends every process
   in its PID namespace, including children detached with `&`, `nohup`,
-  `setsid`, or a double fork.
+  `setsid`, or a double fork. Each object is labelled with the data
+  directory's instance and the creating process, and `wirken run` removes at
+  start any whose process has ended, as after a kill.
 - **`Off` on Linux and macOS.** The shell leads its own process group, and
   the group is killed when the call returns or times out (`HostGroup` in
   [`tool.rs`](../crates/agent/src/tool.rs)). That ends children started with
@@ -110,7 +112,7 @@ anywhere. A call cut at the timeout still records where it ran.
 
 ## Container hardening (applies to ExecOnly and GVisor)
 
-[`crates/agent/src/sandbox.rs:655-689`](../crates/agent/src/sandbox.rs)
+[`crates/agent/src/sandbox.rs:876-910`](../crates/agent/src/sandbox.rs)
 (`build_host_config`) chooses the network, DNS, bind and runtime values for
 every sandboxed exec and hands them to `hardened_host_config`
 ([`crates/sandbox/src/lib.rs:148-174`](../crates/sandbox/src/lib.rs)), which
@@ -126,20 +128,20 @@ belongs to the egress sidecar container, not to the exec sandbox:
 | `security_opt` | `no-new-privileges:true` | `lib.rs:166-169` - `setuid`/`setgid` binaries cannot elevate. |
 | `readonly_rootfs` | `true` | `lib.rs:170` - container `/` is read-only. |
 | `tmpfs` | `/tmp` mounted at 64MB, mode `1777` | `lib.rs:149-150, 171` - the only writable filesystem outside `/workspace`. |
-| `network_mode` | `none` (configurable) | `sandbox.rs:667-672, 682` - default is `--network none`, loopback only; outbound DNS/HTTP fail. A channel configured for sandbox egress joins a policed internal network instead; see below. |
-| `dns` | unset, or `127.0.0.1` on the egress path | `sandbox.rs:675-678, 683` - pinned to an address with no resolver behind it when an egress network is in use, so names are resolved by the proxy rather than in the container. |
-| `binds` | `<workspace>:/workspace:rw` | `sandbox.rs:680` - only the agent workspace is mounted, RW. |
-| `memory` | 512 MB | `lib.rs:27`, applied at `sandbox.rs:684` - `MEMORY_LIMIT` constant. |
-| `pids_limit` | 256 | `lib.rs:29`, applied at `sandbox.rs:685` - `PIDS_LIMIT` constant; fork-bomb cap. |
-| `user` | `1000:1000` | `sandbox.rs:306` - non-root UID/GID inside the container. |
-| `auto_remove` | `false` | `lib.rs:162` - explicit `kill_and_remove` after log collection (`sandbox.rs:433-435`) so output is never lost to a teardown race. |
-| timeout | 300 s | `sandbox.rs:214`, applied at `:368-369`, kill at `:395-404` - wall-clock cap; container is killed and removed on timeout. |
+| `network_mode` | `none` (configurable) | `sandbox.rs:888-893, 903` - default is `--network none`, loopback only; outbound DNS/HTTP fail. A channel configured for sandbox egress joins a policed internal network instead; see below. |
+| `dns` | unset, or `127.0.0.1` on the egress path | `sandbox.rs:896-899, 904` - pinned to an address with no resolver behind it when an egress network is in use, so names are resolved by the proxy rather than in the container. |
+| `binds` | `<workspace>:/workspace:rw` | `sandbox.rs:901` - only the agent workspace is mounted, RW. |
+| `memory` | 512 MB | `lib.rs:27`, applied at `sandbox.rs:905` - `MEMORY_LIMIT` constant. |
+| `pids_limit` | 256 | `lib.rs:29`, applied at `sandbox.rs:906` - `PIDS_LIMIT` constant; fork-bomb cap. |
+| `user` | `1000:1000` | `sandbox.rs:548` - non-root UID/GID inside the container. |
+| `auto_remove` | `false` | `lib.rs:162` - removed explicitly after log collection (`ExecResources`, `sandbox.rs:560`) so output is never lost to a teardown race. |
+| timeout | 300 s | `sandbox.rs:235`, applied at `:610-611` - wall-clock cap; container is killed and removed on timeout. |
 
 ### Sandbox egress
 
 `network_mode: none` is the default and applies whenever the channel serving
 the turn has no egress policy and `sandbox.json` does not set `network: true`
-(`build_host_config`, `sandbox.rs:667-672`; a `none` policy sets it whatever
+(`build_host_config`, `sandbox.rs:888-893`; a `none` policy sets it whatever
 the flag says). A channel configured for `allowlist` or `open`
 joins a per-exec two-member internal network and reaches the outside only
 through a sidecar proxy container. The topology, the isolation invariant, the
@@ -231,7 +233,7 @@ Practical consequences:
 
 Wirken does not require gVisor; `ExecOnly` is the default. `GVisor` is the
 opt-in for operators who want kernel attack surface reduction. Detection
-(`detect_gvisor`, [`sandbox.rs:736-750`](../crates/agent/src/sandbox.rs)) is automatic;
+(`detect_gvisor`, [`sandbox.rs:957-971`](../crates/agent/src/sandbox.rs)) is automatic;
 the wizard refuses to enable `GVisor` mode if `runsc` is not registered as
 a Docker runtime.
 
@@ -256,7 +258,7 @@ Honest about the gaps:
 - **DNS rebinding from a network-enabled sandbox.** If the operator sets
   `network: true` in `sandbox.json` and no channel egress policy reaches the
   exec, the container joins Docker's default bridge network
-  (`build_host_config`, `sandbox.rs:670`) and resolves whatever that network's
+  (`build_host_config`, `sandbox.rs:891`) and resolves whatever that network's
   DNS can. Default is `network_mode: none`. This applies to the `network: true`
   flag only: on
   the sandbox-egress path the proxy resolves names itself and drops answers

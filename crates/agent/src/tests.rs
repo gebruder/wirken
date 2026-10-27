@@ -5112,7 +5112,7 @@ fn host_config_preserves_workspace_and_resource_caps() {
     assert_eq!(hc.memory, Some(512 * 1024 * 1024));
     assert_eq!(hc.pids_limit, Some(256));
     // auto_remove is off so post-wait log collection can still read
-    // the container; cleanup is explicit via kill_and_remove.
+    // the container; it is removed explicitly once the call returns.
     assert_eq!(hc.auto_remove, Some(false));
 }
 
@@ -5360,6 +5360,160 @@ async fn sandbox_blocks_setuid_via_no_new_privileges() {
         "setuid binary must fail to elevate under no-new-privileges, got: {}",
         r.output
     );
+}
+
+/// The container ids whose command line carries `marker`, running or not.
+async fn containers_running(docker: &bollard::Docker, marker: &str) -> Vec<String> {
+    docker
+        .list_containers(Some(bollard::query_parameters::ListContainersOptions {
+            all: true,
+            ..Default::default()
+        }))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.command.as_deref().is_some_and(|cmd| cmd.contains(marker)))
+        .filter_map(|c| c.id)
+        .collect()
+}
+
+/// A turn aborted while `exec` waits on its container takes the
+/// container with it: nothing is left running after the call's future
+/// is dropped.
+#[tokio::test]
+async fn an_aborted_exec_leaves_no_container_behind() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime};
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+        return;
+    }
+    let docker = bollard::Docker::connect_with_local_defaults().expect("docker");
+    let tmp = TempDir::new().unwrap();
+    let marker = format!("aborted-exec-{}", uuid::Uuid::new_v4().simple());
+    let command = format!("sleep 120; echo {marker}");
+    let task = tokio::spawn(async move {
+        let sb = DockerSandbox::new(SandboxConfig {
+            mode: SandboxMode::ExecOnly,
+            ..Default::default()
+        })
+        .expect("sandbox");
+        sb.exec(&command, tmp.path(), None).await
+    });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    while containers_running(&docker, &marker).await.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exec container never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    task.abort();
+    let _ = task.await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut left = containers_running(&docker, &marker).await;
+    while !left.is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        left = containers_running(&docker, &marker).await;
+    }
+    for id in &left {
+        let _ = docker
+            .remove_container(
+                id,
+                Some(bollard::query_parameters::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+    }
+    assert!(left.is_empty(), "left behind: {left:?}");
+}
+
+/// The startup sweep removes an instance's containers whose creating
+/// process has ended and leaves a live process's alone.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_sweep_removes_only_containers_a_dead_process_left() {
+    use crate::sandbox::{
+        LABEL_INSTANCE, LABEL_PID, LABEL_ROLE, detect_image, detect_runtime, sweep_leftovers,
+    };
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+        return;
+    }
+    let docker = bollard::Docker::connect_with_local_defaults().expect("docker");
+    let instance = format!("sweep-{}", uuid::Uuid::new_v4().simple());
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let dead = child.id();
+    child.wait().expect("wait");
+
+    let create = |pid: u32, marker: &'static str| {
+        let docker = docker.clone();
+        let instance = instance.clone();
+        async move {
+            docker
+                .create_container(
+                    None::<bollard::query_parameters::CreateContainerOptions>,
+                    bollard::models::ContainerCreateBody {
+                        image: Some("debian:bookworm-slim".into()),
+                        cmd: Some(vec!["sleep".into(), "60".into(), marker.into()]),
+                        labels: Some(std::collections::HashMap::from([
+                            (LABEL_ROLE.to_string(), "1".to_string()),
+                            (LABEL_INSTANCE.to_string(), instance),
+                            (LABEL_PID.to_string(), pid.to_string()),
+                        ])),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("create")
+                .id
+        }
+    };
+    let stale = create(dead, "stale").await;
+    let live = create(std::process::id(), "live").await;
+
+    let removed = sweep_leftovers(&docker, &instance).await;
+    let exists = |id: String| {
+        let docker = docker.clone();
+        async move {
+            docker
+                .inspect_container(
+                    &id,
+                    None::<bollard::query_parameters::InspectContainerOptions>,
+                )
+                .await
+                .is_ok()
+        }
+    };
+    let stale_left = exists(stale.clone()).await;
+    let live_left = exists(live.clone()).await;
+    for id in [&stale, &live] {
+        let _ = docker
+            .remove_container(
+                id,
+                Some(bollard::query_parameters::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+    }
+    assert_eq!(removed, 1);
+    assert!(!stale_left, "the dead process's container is removed");
+    assert!(live_left, "the live process's container stays");
 }
 
 // ---------------------------------------------------------------------------

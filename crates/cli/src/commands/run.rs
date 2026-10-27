@@ -666,6 +666,12 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         );
     }
 
+    // --- Exec containers an earlier run left behind ---
+    let swept = wirken_agent::sandbox::sweep_local_leftovers(&host_exec_sandbox.instance).await;
+    if swept > 0 {
+        tracing::info!("removed {swept} exec container(s) an earlier run left behind");
+    }
+
     // --- Open the session log alongside the audit log ---
     //
     // The audit DB is the home of session_events, so the durability
@@ -2581,6 +2587,9 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // flight would otherwise append after the SessionEnd heads below,
     // and hold the audit writer open past the flush.
     connection_tasks.shutdown().await;
+    // A turn stopped mid-`exec` started its container's removal from
+    // `Drop`; wait for it before the runtime ends.
+    wirken_agent::sandbox::drain_cleanups().await;
     // It holds a handle on the audit writer, and the flush below waits
     // for every handle to go. Kept to the end of this function, it kept
     // the gateway waiting there for ever after "Shutting down".

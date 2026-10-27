@@ -56,7 +56,7 @@ scorers into a consensus, and does not send findings to any delivery channel.
   [Writing the scoring guide](#writing-the-scoring-guide).
 - **Team-owned files locked.** A run's agents' `write_file` is confined to the
   run's own directory by the staged skill's `write_paths`; an approved `exec`
-  runs with the target mounted read-write (`crates/agent/src/sandbox.rs:680`),
+  runs with the target mounted read-write (`crates/agent/src/sandbox.rs:901`),
   so the hash check below is the control on that path. The runner never writes `.lyrik/rubric.md`,
   `.lyrik/context.md` or `.lyrik/config.json`. It hashes all three at run
   start and end; if one changed, it records `lyrik.locked_file.changed` with

@@ -195,6 +195,13 @@ fn skills_from_dir(dir: &std::path::Path) -> anyhow::Result<Vec<wirken_agent::sk
 }
 
 pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
+    SandboxConfig {
+        instance: wirken_mcp_proxy::container::instance_id(data_dir),
+        ..sandbox_json_config(data_dir)
+    }
+}
+
+fn sandbox_json_config(data_dir: &Path) -> SandboxConfig {
     let path = data_dir.join("sandbox.json");
     if !path.exists() {
         return SandboxConfig::default();
