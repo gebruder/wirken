@@ -38,6 +38,7 @@ pub mod skill;
 pub mod skill_perms;
 pub mod slash;
 pub mod sse_approval_gate;
+pub mod stop;
 pub mod telegram_approval_gate;
 pub mod terminal_approval_gate;
 pub mod tool;

@@ -3222,6 +3222,23 @@ async fn route_chat(req: &Request<'_>, shared: &Shared) -> Response {
         return Response::Complete(json_unavailable(r#"{"error":"audit writer halted"}"#));
     }
 
+    // A stopped agent's message is refused with a row: no reply.
+    if shared.factory.is_stopped("default") {
+        let refused = AuditEvent::new(
+            ActorKind::Service,
+            "webchat-user",
+            "message.refused",
+            &inbound_target,
+        )
+        .with_channel("webchat")
+        .with_session(conversation.as_str())
+        .with_detail(serde_json::json!({ "reason": "agent_stopped", "agent_id": "default" }));
+        if let Err(e) = shared.audit.log(refused).await {
+            tracing::error!("webchat: could not record a message refused for a stopped agent: {e}");
+        }
+        return Response::Complete(json_conflict(r#"{"error":"agent stopped"}"#));
+    }
+
     // Session. `get_or_create` moves `last_activity` but leaves
     // `message_count` alone; `record_message` is the only statement
     // that increments it. Calling just the former, as this path used

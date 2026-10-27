@@ -2701,6 +2701,69 @@ mod subagent {
     /// A child that reads a workspace file returns that file to the
     /// parent's model in its result, so the parent's session carries
     /// the child's label from then on, recorded on its own chain.
+    /// A stopped child is not woken: the spawn returns an explicit
+    /// refusal to the parent, which goes on with its turn.
+    #[tokio::test]
+    async fn spawning_a_stopped_child_returns_agent_stopped_to_the_parent() {
+        let log = make_log();
+        let tmp = TempDir::new().unwrap();
+        let config = |agent_id: &str, ceilings| AgentStaticConfig {
+            agent_id: agent_id.to_string(),
+            workspace: tmp.path().to_path_buf(),
+            llm_config: LlmConfig::ollama("test"),
+            channel_overrides: HashMap::new(),
+            api_key: None,
+            api_key_credential: None,
+            skills: Vec::new(),
+            mcp_client: None,
+            identity: None,
+            allowed_subagents: ceilings,
+            sandbox: Default::default(),
+            extra_interceptors: vec![],
+            zirkel_db_path: None,
+            plan_token_source: None,
+            channel_egress: Default::default(),
+        };
+        let mut ceilings = BTreeMap::new();
+        ceilings.insert(
+            "child".to_string(),
+            SubagentCeiling {
+                tool_allowlist: vec!["read_file".into()],
+                max_permission_tier: PermissionTier::Tier1,
+                max_rounds: 2,
+                max_runtime_secs: 10,
+            },
+        );
+        let mut configs = HashMap::new();
+        configs.insert("parent".to_string(), config("parent", ceilings));
+        configs.insert("child".to_string(), config("child", BTreeMap::new()));
+        let perms = crate::tests::test_permissions();
+        perms
+            .lock()
+            .unwrap()
+            .stop_agent("child", "operator")
+            .unwrap();
+        let factory = AgentFactory::new(configs, log.clone(), perms);
+
+        assert!(matches!(
+            factory.wake("child", "child/test/c").err(),
+            Some(AgentError::AgentStopped { .. })
+        ));
+        let parent = factory.wake("parent", "parent/test/conv").unwrap();
+        let mut agent = parent.lock().await;
+        let args = serde_json::json!({"agent_id": "child", "prompt": "read"}).to_string();
+        let result = agent.spawn_subagent_intercept(&args).await.unwrap();
+        let envelope = parse_envelope(&result.output);
+        assert_eq!(envelope["status"], "error", "{}", result.output);
+        assert!(
+            result
+                .output
+                .contains("Agent stopped: 'child' was stopped by the operator"),
+            "{}",
+            result.output
+        );
+    }
+
     #[tokio::test]
     async fn a_childs_read_reaches_the_parents_read_set() {
         let (base_url, server) = super::approved_unknown_tool::stub(vec![
@@ -3284,6 +3347,46 @@ mod subagent {
         drop(conn);
 
         (agent, tmp, expired_at)
+    }
+
+    /// A stop written to the store by another connection, as
+    /// `wirken agents stop` writes it, refuses the agent's next turn and
+    /// any tool call of a turn already running, with no restart.
+    #[tokio::test]
+    async fn a_stop_written_by_another_connection_refuses_turns_and_tools() {
+        let tmp = TempDir::new().unwrap();
+        let mut agent = Agent::new(
+            "work/test/c".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            make_log(),
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        let perm_path = tmp.path().join("perms.db");
+        let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
+        agent.set_agent_id("work");
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(store)));
+
+        let cli = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
+        assert!(cli.stop_agent("work", "operator").unwrap());
+
+        let turn = agent.process_message("hello", "m-1".into()).await.err();
+        assert!(
+            matches!(turn, Some(AgentError::AgentStopped { ref agent_id }) if agent_id == "work"),
+            "{turn:?}"
+        );
+        let tool = agent.execute_tool("read_file", r#"{"path":"x"}"#).await;
+        assert!(
+            matches!(tool, Err(AgentError::AgentStopped { .. })),
+            "{tool:?}"
+        );
+
+        assert!(cli.resume_agent("work").unwrap());
+        let tool = agent.execute_tool("read_file", r#"{"path":"x"}"#).await;
+        assert!(tool.is_ok(), "{tool:?}");
     }
 
     /// Audit rows name the logical agent, and the one consumer that

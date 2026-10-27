@@ -516,6 +516,35 @@ impl SweepReport {
     }
 }
 
+/// The agents `wirken agents stop` has stopped.
+const STOPPED_AGENTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS stopped_agents (
+     agent_id TEXT PRIMARY KEY,
+     stopped_at TEXT NOT NULL,
+     stopped_by TEXT NOT NULL
+ );";
+
+/// The stopped agents in the permission store at `db_path`, read
+/// without opening the store for writing. An absent store has none.
+pub fn stopped_agents(db_path: &std::path::Path) -> Result<Vec<String>, GatewayError> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let has_table: bool = conn.query_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE name = 'stopped_agents'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare("SELECT agent_id FROM stopped_agents ORDER BY agent_id")?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
 /// Answers whether a session is still live.
 ///
 /// Taken as a predicate so [`PermissionStore`] need not hold a
@@ -622,6 +651,7 @@ impl PermissionStore {
                  PRIMARY KEY (action_key, agent_id, channel)
              );",
         )?;
+        conn.execute_batch(STOPPED_AGENTS_TABLE)?;
 
         let mut store = Self {
             conn,
@@ -1321,6 +1351,64 @@ impl PermissionStore {
     }
 
     /// List all approvals for an agent.
+    /// Mark `agent_id` stopped. Returns whether it was running.
+    pub fn stop_agent(&self, agent_id: &str, stopped_by: &str) -> Result<bool, GatewayError> {
+        let added = self.conn.execute(
+            "INSERT OR IGNORE INTO stopped_agents (agent_id, stopped_at, stopped_by)
+             VALUES (?1, ?2, ?3)",
+            params![agent_id, Utc::now().to_rfc3339(), stopped_by],
+        )?;
+        Ok(added > 0)
+    }
+
+    /// Clear `agent_id`'s stop. Returns whether it was stopped.
+    pub fn resume_agent(&self, agent_id: &str) -> Result<bool, GatewayError> {
+        let removed = self.conn.execute(
+            "DELETE FROM stopped_agents WHERE agent_id = ?1",
+            params![agent_id],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// Whether `agent_id` is stopped. Read from the store on every call.
+    pub fn is_stopped(&self, agent_id: &str) -> Result<bool, GatewayError> {
+        let found = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM stopped_agents WHERE agent_id = ?1",
+                params![agent_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Remove every persisted grant `agent_id` holds. Returns how many.
+    pub fn revoke_all(&self, agent_id: &str) -> Result<usize, GatewayError> {
+        Ok(self.conn.execute(
+            "DELETE FROM approvals WHERE agent_id = ?1",
+            params![agent_id],
+        )?)
+    }
+
+    /// Drop the session-scoped grants held for `agent_id`'s own
+    /// sessions. A sub-agent lane (`#sub-`) under its id belongs to the
+    /// child and is left alone. Returns each session cleared with its
+    /// count.
+    pub fn clear_session_scope_for_agent(&self, agent_id: &str) -> Vec<(String, u32)> {
+        let prefix = format!("{agent_id}/");
+        let mut cache = self.session_cache.borrow_mut();
+        let sessions: Vec<String> = cache
+            .keys()
+            .filter(|s| s.starts_with(&prefix) && !s.contains("#sub-"))
+            .cloned()
+            .collect();
+        sessions
+            .into_iter()
+            .filter_map(|s| cache.remove(&s).map(|grants| (s, grants.len() as u32)))
+            .collect()
+    }
+
     pub fn list(&self, agent_id: &str) -> Result<Vec<Approval>, GatewayError> {
         let agent_id = canonical_agent_id(agent_id);
         let mut stmt = self.conn.prepare(
@@ -2615,6 +2703,77 @@ mod tier_tests {
                 lapsed_at: None,
             },
         );
+    }
+
+    #[test]
+    fn a_stopped_agent_stays_stopped_across_opens_until_resumed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let store = PermissionStore::open(tmp.path()).unwrap();
+            assert!(!store.is_stopped("work").unwrap());
+            assert!(store.stop_agent("work", "uid:1000").unwrap());
+            assert!(
+                !store.stop_agent("work", "uid:1000").unwrap(),
+                "already stopped"
+            );
+            assert!(store.is_stopped("work").unwrap());
+            assert!(!store.is_stopped("default").unwrap());
+        }
+        assert_eq!(stopped_agents(tmp.path()).unwrap(), ["work"]);
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        assert!(store.is_stopped("work").unwrap());
+        assert!(store.resume_agent("work").unwrap());
+        assert!(!store.resume_agent("work").unwrap());
+        assert!(!store.is_stopped("work").unwrap());
+        assert!(stopped_agents(tmp.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stopped_agents_of_an_absent_store_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            stopped_agents(&dir.path().join("permissions.db"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn revoke_all_and_the_agent_session_clear_touch_only_that_agent() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        store
+            .approve(&shell("ls"), "work", "telegram", "op")
+            .unwrap();
+        store.approve(&shell("cat"), "work", "slack", "op").unwrap();
+        store
+            .approve(&shell("ls"), "default", "telegram", "op")
+            .unwrap();
+        assert_eq!(store.revoke_all("work").unwrap(), 2);
+        assert!(store.list("work").unwrap().is_empty());
+        assert_eq!(store.list("default").unwrap().len(), 1);
+
+        for session in [
+            "work/telegram/c1",
+            "work/telegram/c1#sub-0",
+            "default/telegram/c1",
+        ] {
+            store
+                .approve_with_scope(
+                    &shell("ls"),
+                    "work",
+                    "telegram",
+                    "op",
+                    session_scope(session),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.clear_session_scope_for_agent("work"),
+            vec![("work/telegram/c1".to_string(), 1)]
+        );
+        assert_eq!(store.clear_session_scope("work/telegram/c1#sub-0"), 1);
+        assert_eq!(store.clear_session_scope("default/telegram/c1"), 1);
     }
 
     #[test]

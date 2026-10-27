@@ -1109,6 +1109,23 @@ impl Agent {
         self.agent_id = Some(agent_id.into());
     }
 
+    /// `Err(AgentStopped)` when the operator has stopped this agent,
+    /// read from the permission store on every call. A store that
+    /// cannot be read reads as stopped.
+    fn refuse_if_stopped(&self) -> Result<(), AgentError> {
+        let (Some(agent_id), ToolGate::Store(perms)) =
+            (self.agent_id.as_deref(), &self.permissions)
+        else {
+            return Ok(());
+        };
+        if crate::stop::is_stopped(perms, agent_id) {
+            return Err(AgentError::AgentStopped {
+                agent_id: agent_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn set_approval_gate(&mut self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
         self.approval_gate = Some(gate);
     }
@@ -2966,6 +2983,7 @@ impl Agent {
         max_rounds_budget: Option<usize>,
         inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
+        self.refuse_if_stopped()?;
         let result = self
             .process_message_turn(user_message, inbound_id, max_rounds_budget, inbound)
             .await;
@@ -3329,6 +3347,7 @@ impl Agent {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
         inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
+        self.refuse_if_stopped()?;
         let result = self
             .process_message_stream_turn(user_message, inbound_id, tx, inbound)
             .await;
@@ -3715,6 +3734,8 @@ impl Agent {
                  dispatches no tool"
             )));
         }
+        // A turn already running when its agent was stopped ends here.
+        self.refuse_if_stopped()?;
 
         // spawn_subagent runs through a dedicated intercept that
         // re-enters the factory; it never goes
@@ -5052,6 +5073,11 @@ impl Agent {
                         "child stopped after {rounds} rounds without producing a final response"
                     ),
                 ),
+                Ok(Err(AgentError::AgentStopped { agent_id })) => envelope_result(
+                    &p.child_session_id,
+                    "error",
+                    &crate::stop::stopped_child_message(&agent_id),
+                ),
                 Ok(Err(e)) => envelope_result(&p.child_session_id, "error", &format!("{e}")),
                 Err(_) => envelope_result(
                     &p.child_session_id,
@@ -5448,6 +5474,11 @@ impl Agent {
                 "rounds_exceeded",
                 &format!("child stopped after {rounds} rounds without producing a final response"),
             ),
+            Ok(Err(AgentError::AgentStopped { agent_id })) => envelope_result(
+                &child_session_id,
+                "error",
+                &crate::stop::stopped_child_message(&agent_id),
+            ),
             Ok(Err(e)) => envelope_result(&child_session_id, "error", &format!("{e}")),
             Err(_) => envelope_result(
                 &child_session_id,
@@ -5506,11 +5537,11 @@ impl Agent {
         child_session_id: &str,
         err: &AgentError,
     ) -> Result<crate::tool::ToolResult, AgentError> {
-        let envelope = envelope_result(
-            child_session_id,
-            "error",
-            &format!("factory.wake_subagent failed: {err}"),
-        );
+        let output = match err {
+            AgentError::AgentStopped { agent_id } => crate::stop::stopped_child_message(agent_id),
+            other => format!("factory.wake_subagent failed: {other}"),
+        };
+        let envelope = envelope_result(child_session_id, "error", &output);
         self.log_event(
             TrustLevel::System,
             SessionEvent::SubagentResult {

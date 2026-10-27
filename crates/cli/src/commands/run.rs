@@ -1976,6 +1976,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     ));
     let scheduler_factory = factory.clone();
     let scheduler_cron = cron_store.clone();
+    let scheduler_audit = audit.clone();
     let scheduler_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
@@ -1998,6 +1999,11 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                 let inbound_id = format!("cron-{}", uuid::Uuid::new_v4());
                 let session_id = session_id_for(&job.agent_id, "cron", &job.id);
 
+                // A firing during a stop is skipped, not deferred.
+                if scheduler_factory.is_stopped(&job.agent_id) {
+                    record_cron_skipped(&scheduler_audit, &job.id, &job.agent_id).await;
+                    continue;
+                }
                 match scheduler_factory.wake(&job.agent_id, &session_id) {
                     Ok(agent_mutex) => {
                         let mut agent = agent_mutex.lock().await;
@@ -2015,8 +2021,14 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                                     );
                                 }
                             }
+                            Err(wirken_agent::error::AgentError::AgentStopped { .. }) => {
+                                record_cron_skipped(&scheduler_audit, &job.id, &job.agent_id).await;
+                            }
                             Err(e) => tracing::error!("Cron job failed: {e}"),
                         }
+                    }
+                    Err(wirken_agent::error::AgentError::AgentStopped { .. }) => {
+                        record_cron_skipped(&scheduler_audit, &job.id, &job.agent_id).await;
                     }
                     Err(e) => {
                         tracing::warn!("Cron: factory.wake failed for '{}': {e}", job.agent_id);
@@ -2888,6 +2900,34 @@ const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
 /// drop. Shutdown aborts the task running it before it stops the
 /// connection tasks, so a connection ending at shutdown respawns
 /// nothing.
+/// The row for a message to a stopped agent: refused, no reply sent.
+/// No content: the `message.inbound` row before it holds that.
+async fn record_refused_for_stop(
+    audit: &AuditWriter,
+    sender_id: &str,
+    target: &str,
+    channel: &str,
+    conversation_id: &str,
+    agent_id: &str,
+) {
+    let row = AuditEvent::new(ActorKind::User, sender_id, "message.refused", target)
+        .with_channel(channel)
+        .with_session(conversation_id)
+        .with_detail(serde_json::json!({ "reason": "agent_stopped", "agent_id": agent_id }));
+    if let Err(e) = audit.log(row).await {
+        tracing::error!("could not record a message refused for a stopped agent: {e}");
+    }
+}
+
+/// The row for a cron firing skipped because its agent is stopped.
+async fn record_cron_skipped(audit: &AuditWriter, job_id: &str, agent_id: &str) {
+    let row = AuditEvent::new(ActorKind::Service, "cron", "cron.skipped", job_id)
+        .with_detail(serde_json::json!({ "reason": "agent_stopped", "agent_id": agent_id }));
+    if let Err(e) = audit.log(row).await {
+        tracing::error!("could not record a cron firing skipped for a stopped agent: {e}");
+    }
+}
+
 /// Set once shutdown has begun, so a connection that drops queued
 /// messages says why.
 static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -5171,6 +5211,21 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
             };
             let session_id = session_id_for(&resolved_agent, &channel, &conversation_id);
 
+            // A stopped agent's message is refused with a row: no
+            // reply, nothing queued.
+            if factory.is_stopped(&resolved_agent) {
+                record_refused_for_stop(
+                    audit,
+                    &sender_id,
+                    &inbound_target,
+                    &channel,
+                    &conversation_id,
+                    &resolved_agent,
+                )
+                .await;
+                return Ok(());
+            }
+
             let inbound_ctx = wirken_agent::InboundContext {
                 adapter_id: Some(adapter_id.to_string()),
                 sender_id: Some(sender_id.clone()),
@@ -5197,11 +5252,35 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                     };
                     match result {
                         Ok(result) => (result.response, result.denials),
+                        Err(wirken_agent::error::AgentError::AgentStopped { .. }) => {
+                            record_refused_for_stop(
+                                audit,
+                                &sender_id,
+                                &inbound_target,
+                                &channel,
+                                &conversation_id,
+                                &resolved_agent,
+                            )
+                            .await;
+                            return Ok(());
+                        }
                         Err(e) => {
                             tracing::error!("Agent '{resolved_agent}' error: {e}");
                             (turn_error_reply(&e), Vec::new())
                         }
                     }
+                }
+                Err(wirken_agent::error::AgentError::AgentStopped { .. }) => {
+                    record_refused_for_stop(
+                        audit,
+                        &sender_id,
+                        &inbound_target,
+                        &channel,
+                        &conversation_id,
+                        &resolved_agent,
+                    )
+                    .await;
+                    return Ok(());
                 }
                 Err(e) => {
                     tracing::error!("factory.wake('{resolved_agent}') failed: {e}");

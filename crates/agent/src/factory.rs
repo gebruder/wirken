@@ -767,6 +767,25 @@ impl AgentFactory {
         self.org_permissions.as_deref()
     }
 
+    /// Whether the operator has stopped `agent_id`, read from the
+    /// permission store on every call. A factory with no store has no
+    /// stopped agents.
+    pub fn is_stopped(&self, agent_id: &str) -> bool {
+        match &self.permissions {
+            ToolGate::Store(perms) => crate::stop::is_stopped(perms, agent_id),
+            ToolGate::ReplayOnly => false,
+        }
+    }
+
+    fn refuse_if_stopped(&self, agent_id: &str) -> Result<(), AgentError> {
+        if self.is_stopped(agent_id) {
+            return Err(AgentError::AgentStopped {
+                agent_id: agent_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Whether this factory has a static config for `agent_id`.
     pub fn has_agent(&self, agent_id: &str) -> bool {
         self.static_configs.contains_key(agent_id)
@@ -786,6 +805,7 @@ impl AgentFactory {
         agent_id: &str,
         session_id: &str,
     ) -> Result<Arc<AsyncMutex<Agent>>, AgentError> {
+        self.refuse_if_stopped(agent_id)?;
         // Cache lookup (cached mode only).
         if self.cache_mode == CacheMode::Cached
             && let Some(cached) = self.cache.lock().unwrap().get(session_id).cloned()
@@ -833,6 +853,7 @@ impl AgentFactory {
         child_session_id: &str,
         binding: SubagentBinding,
     ) -> Result<Arc<AsyncMutex<Agent>>, AgentError> {
+        self.refuse_if_stopped(agent_id)?;
         if self.cache_mode == CacheMode::Cached
             && self.cache.lock().unwrap().contains(child_session_id)
         {

@@ -70,6 +70,10 @@ pub enum AgentError {
     #[error("tool error: {0}")]
     Tool(String),
 
+    /// The operator stopped this agent with `wirken agents stop`.
+    #[error("agent '{agent_id}' is stopped")]
+    AgentStopped { agent_id: String },
+
     #[error("tool not found: {0}")]
     ToolNotFound(String),
 
