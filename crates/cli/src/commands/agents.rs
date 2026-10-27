@@ -589,9 +589,38 @@ pub async fn stop(id: &str, revoke_all: bool) -> Result<()> {
         println!("  Removed {grants_revoked} persisted grant(s).");
     }
     if session_grants_cleared > 0 {
-        println!("  Dropped {session_grants_cleared} session-scoped grant(s).");
+        println!("  Dropped {session_grants_cleared} session-scoped grant(s) from its sessions.");
     }
+    tell_gateway_stopped(id).await;
     Ok(())
+}
+
+/// Have a running gateway act on the stop now. The stop is recorded and
+/// holds either way; this reports what the gateway did.
+async fn tell_gateway_stopped(id: &str) {
+    use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
+    let req = PermissionsRequest::AgentStop {
+        agent_id: id.to_string(),
+        stopped_by: super::local_operator(),
+    };
+    match super::permission::gateway_rpc(&req).await {
+        Ok(None) => println!("  No gateway is running; the stop holds when it starts."),
+        Ok(Some(PermissionsResponse::AgentStopped {
+            approvals_denied,
+            turns_ended,
+            session_grants_cleared,
+        })) => println!(
+            "  The running gateway denied {approvals_denied} pending approval(s), ended \
+             {turns_ended} turn(s) and dropped {session_grants_cleared} cached session grant(s)."
+        ),
+        Ok(Some(PermissionsResponse::Error { message })) => {
+            eprintln!("  The running gateway did not act on the stop: {message}")
+        }
+        Ok(Some(other)) => eprintln!("  The running gateway answered unexpectedly: {other:?}"),
+        Err(e) => eprintln!(
+            "  Could not reach the running gateway ({e:#}); the stop holds at its next check."
+        ),
+    }
 }
 
 /// `wirken agents resume`.

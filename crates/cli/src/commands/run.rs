@@ -2493,6 +2493,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let permissions_operator_key = operator_key;
     #[cfg(unix)]
     let permissions_session_log = session_log.clone();
+    let permissions_store_for_loop = permissions.clone();
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
     #[cfg(unix)]
@@ -2524,10 +2525,12 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     let q = permissions_queue_for_loop.clone();
                     let au = permissions_audit.clone();
                     let slog = permissions_session_log.clone();
+                    let store = permissions_store_for_loop.clone();
                     permissions_connection_tasks.spawn("permissions", async move {
                         if let Err(e) = handle_permissions_request(
                             stream,
                             q,
+                            store,
                             au,
                             slog,
                             permissions_operator_key,
@@ -2925,6 +2928,69 @@ async fn record_cron_skipped(audit: &AuditWriter, job_id: &str, agent_id: &str) 
         .with_detail(serde_json::json!({ "reason": "agent_stopped", "agent_id": agent_id }));
     if let Err(e) = audit.log(row).await {
         tracing::error!("could not record a cron firing skipped for a stopped agent: {e}");
+    }
+}
+
+/// What a denial at a stop says, on its row and to the model.
+#[cfg(unix)]
+const DENIED_AT_AGENT_STOP: &str = "agent stopped";
+
+/// Act on a stop the permission store already holds: deny the agent's
+/// pending approvals, then end its running turns, which record those
+/// denials before they end, then drop its session-scoped grants.
+#[cfg(unix)]
+fn stop_running_agent(
+    agent_id: &str,
+    stopped_by: &str,
+    queue: &wirken_gateway::pending_approvals::PendingApprovalQueue,
+    permissions: &std::sync::Mutex<wirken_gateway::permissions::PermissionStore>,
+    key_id: &str,
+) -> wirken_ipc::permissions::PermissionsResponse {
+    use wirken_gateway::pending_approvals::{DecisionActor, PendingDecision, ResolveResult};
+    use wirken_ipc::permissions::PermissionsResponse;
+
+    let stopped = match permissions.lock() {
+        Ok(store) => store.is_stopped(agent_id).unwrap_or(false),
+        Err(_) => false,
+    };
+    if !stopped {
+        return PermissionsResponse::Error {
+            message: format!("agent '{agent_id}' is not stopped"),
+        };
+    }
+    let actor = DecisionActor::new(format!("operator:{key_id}")).with_display(stopped_by);
+    let mut approvals_denied = 0;
+    for pending in queue.list().into_iter().filter(|p| p.agent_id == agent_id) {
+        let decision = PendingDecision::Deny {
+            reason: Some(DENIED_AT_AGENT_STOP.to_string()),
+            actor: Some(actor.clone()),
+        };
+        if queue.resolve(&pending.request_id, decision) == ResolveResult::Accepted {
+            approvals_denied += 1;
+        }
+    }
+    let turns_ended = wirken_agent::stop::cancel_turns(agent_id) as u32;
+    let session_grants_cleared = permissions
+        .lock()
+        .map(|store| {
+            store
+                .clear_session_scope_for_agent(agent_id)
+                .iter()
+                .map(|(_, n)| n)
+                .sum()
+        })
+        .unwrap_or(0);
+    tracing::info!(
+        agent_id,
+        approvals_denied,
+        turns_ended,
+        session_grants_cleared,
+        "agent stopped"
+    );
+    PermissionsResponse::AgentStopped {
+        approvals_denied,
+        turns_ended,
+        session_grants_cleared,
     }
 }
 
@@ -4173,6 +4239,7 @@ async fn serve_egress_loop(
 async fn handle_permissions_request(
     stream: UnixStream,
     queue: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
+    permissions: Arc<std::sync::Mutex<wirken_gateway::permissions::PermissionStore>>,
     audit: Arc<AuditWriter>,
     _session_log: Arc<dyn wirken_audit::SessionLog>,
     operator_key: ed25519_dalek::VerifyingKey,
@@ -4220,7 +4287,7 @@ async fn handle_permissions_request(
     }
 
     let response = match serde_json::from_str::<PermissionsRequest>(line.trim_end()) {
-        Ok(req) => process_permissions_request(req, &queue, &key_id),
+        Ok(req) => process_permissions_request(req, &queue, &permissions, &key_id),
         Err(e) => PermissionsResponse::Error {
             message: format!("invalid request JSON: {e}"),
         },
@@ -4250,6 +4317,7 @@ async fn handle_permissions_request(
 fn process_permissions_request(
     req: wirken_ipc::permissions::PermissionsRequest,
     queue: &wirken_gateway::pending_approvals::PendingApprovalQueue,
+    permissions: &std::sync::Mutex<wirken_gateway::permissions::PermissionStore>,
     key_id: &str,
 ) -> wirken_ipc::permissions::PermissionsResponse {
     use wirken_gateway::pending_approvals::PendingDecision;
@@ -4322,6 +4390,10 @@ fn process_permissions_request(
                 },
             }
         }
+        PermissionsRequest::AgentStop {
+            agent_id,
+            stopped_by,
+        } => stop_running_agent(&agent_id, &stopped_by, queue, permissions, key_id),
         PermissionsRequest::PendingDeny {
             request_id,
             denied_by,
@@ -6006,6 +6078,70 @@ fn trim_command_for_inventory(cmd: &str) -> String {
         .collect();
     acc.push_str(&suffix);
     acc
+}
+
+#[cfg(all(test, unix))]
+mod agent_stop_tests {
+    use super::stop_running_agent;
+    use wirken_gateway::pending_approvals::{
+        PendingApprovalQueue, PendingDecision, PendingRequest,
+    };
+    use wirken_gateway::permissions::PermissionStore;
+    use wirken_ipc::permissions::PermissionsResponse;
+
+    fn request(agent_id: &str) -> PendingRequest {
+        PendingRequest {
+            agent_id: agent_id.into(),
+            session_id: format!("{agent_id}/webchat/c-1"),
+            tool_name: "exec".into(),
+            action_key: "shell:sleep".into(),
+            requested_tier: "tier3".into(),
+            trigger_message: None,
+            arguments: None,
+            assistant_text: None,
+            exec_location: None,
+            exec_runtime: None,
+            prompt_conversation: None,
+        }
+    }
+
+    #[test]
+    fn a_stop_denies_only_that_agents_pending_approvals_and_needs_the_store() {
+        let queue = PendingApprovalQueue::new();
+        let (_, mut work) = queue.register(request("work"));
+        let (_, mut other) = queue.register(request("default"));
+        let store =
+            std::sync::Mutex::new(PermissionStore::open(std::path::Path::new(":memory:")).unwrap());
+
+        let refused = stop_running_agent("work", "op", &queue, &store, "k");
+        assert!(matches!(refused, PermissionsResponse::Error { .. }));
+        assert_eq!(queue.len(), 2, "nothing is denied for an agent not stopped");
+
+        store.lock().unwrap().stop_agent("work", "op").unwrap();
+        let done = stop_running_agent("work", "op", &queue, &store, "k");
+        assert!(
+            matches!(
+                done,
+                PermissionsResponse::AgentStopped {
+                    approvals_denied: 1,
+                    ..
+                }
+            ),
+            "{done:?}"
+        );
+        match work.try_recv() {
+            Ok(PendingDecision::Deny { reason, actor }) => {
+                assert_eq!(reason.as_deref(), Some("agent stopped"));
+                assert_eq!(actor.unwrap().id, "operator:k");
+            }
+            other => panic!("expected a denial, got {other:?}"),
+        }
+        assert!(
+            other.try_recv().is_err(),
+            "another agent's approval stays pending"
+        );
+        assert_eq!(queue.len(), 1);
+    }
 }
 
 #[cfg(test)]

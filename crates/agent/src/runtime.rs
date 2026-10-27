@@ -2984,9 +2984,12 @@ impl Agent {
         inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
         self.refuse_if_stopped()?;
-        let result = self
-            .process_message_turn(user_message, inbound_id, max_rounds_budget, inbound)
-            .await;
+        let agent_id = self.agent_id.clone();
+        let result = crate::stop::until_stopped(
+            agent_id,
+            self.process_message_turn(user_message, inbound_id, max_rounds_budget, inbound),
+        )
+        .await;
         // Turn-end auto-exit for any active phase deny overlay. Runs
         // regardless of how the turn ended (Ok, Err, or dedup short-
         // circuit) so a skill that crashes mid-phase does not leave
@@ -3348,9 +3351,12 @@ impl Agent {
         inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
         self.refuse_if_stopped()?;
-        let result = self
-            .process_message_stream_turn(user_message, inbound_id, tx, inbound)
-            .await;
+        let agent_id = self.agent_id.clone();
+        let result = crate::stop::until_stopped(
+            agent_id,
+            self.process_message_stream_turn(user_message, inbound_id, tx, inbound),
+        )
+        .await;
         // Same turn-end auto-exit as the non-streaming path. See
         // `process_message_inner` for the rationale.
         self.clear_phase_at_turn_end();

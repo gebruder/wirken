@@ -23,6 +23,12 @@ tagged.
   `exec`. **For wirken-siem:** new kinds `agent_stopped` (`warn`) and
   `agent_resumed` (`info`), forwarded by default; new legacy actions
   `message.refused` and `cron.skipped`.
+- With the gateway running, `wirken agents stop` also acts at once over
+  `gateway-permissions.sock`: each pending approval of the agent is denied
+  with `denial_reason` `agent stopped`, its running turns end, which removes
+  their `exec` containers and host process groups, and its cached
+  session-scoped grants are dropped. A stopped sub-agent's spawn returns
+  `Agent stopped` to its parent, which goes on with its turn.
 - When `wirken run` cannot open the session store it asks about liveness, no
   session is live and no session-scoped grant is served until restart. The
   failure is printed at startup and recorded as a `session_liveness_unavailable`

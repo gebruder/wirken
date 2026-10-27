@@ -58,6 +58,14 @@ pub enum PermissionsRequest {
         denied_by: String,
         reason: Option<String>,
     },
+    /// `wirken agents stop <agent_id>`, after the CLI has written the
+    /// stop to the permission store: deny the agent's pending
+    /// approvals, end its running turns and drop its session-scoped
+    /// grants. Refused for an agent the store does not hold stopped.
+    AgentStop {
+        agent_id: String,
+        stopped_by: String,
+    },
 }
 
 /// One line back from the gateway to the CLI. Variants per request
@@ -74,6 +82,12 @@ pub enum PermissionsResponse {
     /// Outcome of an `Approve` or `Deny` request. The CLI prints the
     /// result verbatim.
     Decision { result: DecisionResult },
+    /// What an `AgentStop` did.
+    AgentStopped {
+        approvals_denied: u32,
+        turns_ended: u32,
+        session_grants_cleared: u32,
+    },
     /// Protocol-level error: malformed request, gateway internal
     /// error. Distinct from `Decision { UnknownKey }` which is the
     /// queue saying "no such pending entry"; this variant is for
