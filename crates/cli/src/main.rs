@@ -1438,8 +1438,10 @@ fn build_env_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
 }
 
 /// The `(command, subcommand)` an invocation names when it changes
-/// grants, skills, MCP entries, credentials, the audit halt, agents or
-/// channels; `None` for a read and for every other command. Each listed
+/// authority or configuration: grants, skills, MCP entries, credentials,
+/// the vault, the audit halt, agents, channels, cron jobs, hooks,
+/// personas, presets, web chat logins and Zirkel bindings. `None` for a
+/// read and for every other command. Each listed
 /// command is matched exhaustively, so a new subcommand is classified
 /// where it is added.
 fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> {
@@ -1524,6 +1526,68 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
                 ChannelCommands::Add { .. } => "add",
                 ChannelCommands::Remove { .. } => "remove",
                 ChannelCommands::List => return None,
+            },
+        ),
+        Commands::Vault(cmd) => (
+            "vault",
+            match cmd {
+                VaultCommands::Reset => "reset",
+                VaultCommands::Migrate { .. } => "migrate",
+            },
+        ),
+        Commands::Cron(cmd) => (
+            "cron",
+            match cmd {
+                CronCommands::Create { .. } => "create",
+                CronCommands::Delete { .. } => "delete",
+                CronCommands::Pause { .. } => "pause",
+                CronCommands::Resume { .. } => "resume",
+                CronCommands::List { .. } => return None,
+            },
+        ),
+        Commands::Hooks(cmd) => (
+            "hooks",
+            match cmd {
+                HookCommands::Register { .. } => "register",
+                HookCommands::Unregister { .. } => "unregister",
+                HookCommands::List => return None,
+            },
+        ),
+        Commands::Persona(cmd) => (
+            "persona",
+            match cmd {
+                PersonaCommands::Create { .. } => "create",
+                PersonaCommands::Edit { .. } => "edit",
+                PersonaCommands::Delete { .. } => "delete",
+                PersonaCommands::List | PersonaCommands::Show { .. } => return None,
+            },
+        ),
+        Commands::Preset(cmd) => (
+            "preset",
+            match cmd {
+                PresetCommands::Install { .. } => "install",
+                PresetCommands::Schedule { .. } => "schedule",
+                PresetCommands::Unschedule { .. } => "unschedule",
+                PresetCommands::List => return None,
+            },
+        ),
+        // A login token is a web chat session that can decide approvals.
+        Commands::Webchat(cmd) => (
+            "webchat",
+            match cmd {
+                WebchatCommands::Open { .. } => "open",
+            },
+        ),
+        Commands::Zirkel(cmd) => (
+            "zirkel",
+            match cmd {
+                ZirkelCommands::Bind { .. } => "bind",
+                ZirkelCommands::Unbind { .. } => "unbind",
+                ZirkelCommands::AuthSet { .. } => "auth-set",
+                ZirkelCommands::Run
+                | ZirkelCommands::Status
+                | ZirkelCommands::AuthList
+                | ZirkelCommands::Calibrate { .. } => return None,
             },
         ),
         _ => return None,

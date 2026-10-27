@@ -46,10 +46,61 @@ const INVOCATIONS: &[(&str, &str, &[&str])] = &[
     ("agents", "remove", &["agents", "remove", "default"]),
     ("agents", "bind", &["agents", "bind", "default", "telegram"]),
     ("channel", "remove", &["channel", "remove", "telegram"]),
+    ("vault", "reset", &["vault", "reset"]),
+    ("vault", "migrate", &["vault", "migrate"]),
+    ("cron", "create", &["cron", "create", "0 * * * *", "hello"]),
+    ("cron", "delete", &["cron", "delete", "job-1"]),
+    ("cron", "pause", &["cron", "pause", "job-1"]),
+    ("cron", "resume", &["cron", "resume", "job-1"]),
+    (
+        "hooks",
+        "register",
+        &["hooks", "register", "guard", "00", "--type", "veto"],
+    ),
+    ("hooks", "unregister", &["hooks", "unregister", "guard"]),
+    ("persona", "create", &["persona", "create", "p1"]),
+    (
+        "persona",
+        "edit",
+        &["persona", "edit", "p1", "--model", "m"],
+    ),
+    ("persona", "delete", &["persona", "delete", "p1"]),
+    ("preset", "install", &["preset", "install", "zirkel"]),
+    ("preset", "schedule", &["preset", "schedule", "zirkel"]),
+    ("preset", "unschedule", &["preset", "unschedule", "zirkel"]),
+    ("webchat", "open", &["webchat", "open"]),
+    (
+        "zirkel",
+        "bind",
+        &[
+            "zirkel",
+            "bind",
+            "--channel",
+            "signal",
+            "--conversation",
+            "c",
+        ],
+    ),
+    ("zirkel", "unbind", &["zirkel", "unbind"]),
+    (
+        "zirkel",
+        "auth-set",
+        &["zirkel", "auth-set", "--source", "congress-gov"],
+    ),
 ];
 
 fn refusals(data: &std::path::Path) -> Vec<(String, String, String)> {
     let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
+    let has_rows: bool = db
+        .query_row(
+            "SELECT count(*) > 0 FROM sqlite_master WHERE name = 'session_events'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if !has_rows {
+        return Vec::new();
+    }
     db.prepare(
         "SELECT json_extract(payload, '$.command'), json_extract(payload, '$.invocation'),
                 json_extract(payload, '$.reason')
@@ -104,16 +155,27 @@ fn authority_commands_refuse_inside_exec_and_record_it() {
 
 #[cfg(not(windows))]
 #[test]
-fn a_read_runs_inside_exec() {
-    let tmp = tempfile::tempdir().unwrap();
-    let out = wirken(tmp.path())
-        .args(["permissions", "list"])
-        .env("WIRKEN_EXEC", "1")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn reads_and_sessions_close_run_inside_exec() {
+    for args in [
+        &["permissions", "list"][..],
+        &["cron", "list"],
+        &["hooks", "list"],
+        &["persona", "list"],
+        &["preset", "list"],
+        &["zirkel", "status"],
+        &["sessions", "close", "no-such-session"],
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = wirken(tmp.path())
+            .args(args)
+            .env("WIRKEN_EXEC", "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("refuses to run inside a Wirken exec"),
+            "{args:?}: {stderr}"
+        );
+        assert!(refusals(tmp.path()).is_empty(), "{args:?}");
+    }
 }
