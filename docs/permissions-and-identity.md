@@ -291,6 +291,52 @@ The pulled org config (`wirken setup --org <url>`) deserializes `permissions.all
 - `sandbox_mode`. `apply_org_config` writes `sandbox.json` in the data directory; `wirken run` re-reads it on every gateway start. Valid values are `off`, `exec-only`, and `gvisor`; unknown values fall back to the default (`exec-only`) with a warning.
 - `allowed_tools` and `blocked_tools`. Persisted to `tool_policy.json` in the data directory when at least one list is non-empty. `wirken run` loads the file and injects it into every waked agent. The check sits in `crates/agent/src/runtime.rs::execute_tool` ahead of the tier permission check: a call to a name in `blocked_tools` fails before dispatch; a call to a name not in `allowed_tools` fails before dispatch when `allowed_tools` is non-empty; `blocked_tools` wins when a name appears in both. Denials are written to the session log as `PermissionDenied` events with `denial_source: "org_policy"` (`tier` is null for these rows; the org-policy classification lives on `denial_source`, not `tier`).
 
+### Stopping an agent
+
+```bash
+wirken agents stop <id> [--revoke-all]
+wirken agents resume <id>
+```
+
+`stop` writes the agent into a stopped set in `permissions.db`. The gate reads
+the set on every check and never caches it, so a stop holds at once, with the
+gateway down, and across restarts, until `resume` clears it. While an agent is
+stopped nothing runs under its id:
+
+- A message to it is refused: a `message.refused` row with `reason`
+  `agent_stopped` follows its `message.inbound` row, no reply is sent, and
+  nothing is queued. Web chat answers 409.
+- A cron firing for it is skipped with a `cron.skipped` row, not deferred.
+- A turn does not start, and a turn already running ends at its next tool
+  call.
+- A parent's `spawn_subagent` of it returns `Agent stopped: '<id>' was
+  stopped by the operator`, the way a denied tool returns `Permission denied`,
+  and the parent goes on with its turn.
+- The MCP proxy does not start its servers.
+
+When the gateway is running, `stop` also acts on it at once, over
+`gateway-permissions.sock`: each pending approval of the agent is denied with
+`denial_reason` `agent stopped`, its running turns end, which removes their
+`exec` containers and kills their host process groups, its cached
+session-scoped grants are dropped, and the MCP proxy stops its servers.
+`resume` has the proxy load and supervise them again, as at its start.
+
+A stop always drops the agent's session-scoped grants, and writes the
+tombstones that keep a later wake from replaying them. Persisted grants stay
+unless `--revoke-all` is given. Stopping a parent ends its running turn and
+with it any child running inside that turn, but writes nothing against the
+children's own ids and leaves their grants alone; a child is stopped by its
+own id.
+
+Each command is one `agent_stopped` or `agent_resumed` row on the
+`gateway-operator` lane, sealed by a chain head, and both refuse inside a
+Wirken `exec`. Under the sandbox the model cannot reach either: the container
+has no `wirken` binary and no data directory. Under `sandbox.json`
+`mode: off` a command the operator approves runs at the wirken UID and can
+clear the `WIRKEN_EXEC` marker, so a model-driven `exec` can stop or resume
+an agent; that is the same residual as a `setsid` child escaping the process
+group.
+
 ### Channel process isolation
 
 Each adapter runs in its own OS process with a distinct ed25519 IPC identity. A compromised adapter can only deliver inbound frames for its own channel and request outbound sends for its own channel. It cannot invoke tools directly, cannot read other channels' sessions through the IPC surface, and cannot request other channels' credentials through the IPC surface.

@@ -290,7 +290,7 @@ A running `wirken run` keeps the agent config it started with: a change made
 with `agents` takes effect at its next start, and `agents set` says so.
 `stop` and `resume` are the exception: they write the permission store, which
 is read on every check, so they hold at once, with the gateway down and across
-restarts.
+restarts. See [permissions-and-identity.md](permissions-and-identity.md#stopping-an-agent).
 
 `--api-key` prompts for the value rather than taking it on the command line,
 so it does not reach shell history or the process table. Defaults for
