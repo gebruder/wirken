@@ -206,14 +206,13 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // same agent.
     // Every stored secret, set before the skills, which are checked
     // against it as they load.
-    agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
-        &cfg.vault_db_path(),
-        || {
-            probe_keychain(&cfg.data_dir, || {
-                super::cached_vault_passphrase().unwrap_or_default()
-            })
-        },
-    )));
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            super::cached_vault_passphrase().unwrap_or_default()
+        })
+    }));
+    super::learn_key_files(&leak_matcher, &cfg.data_dir);
+    agent.set_leak_matcher(leak_matcher);
     agent
         .attach_skills(super::skills_for_default_agent(&cfg)?)
         .context("attach skills")?;
@@ -342,14 +341,13 @@ async fn send_with_agent_config(
     // operator-actionable error, not silent skill absence.
     // Every stored secret, set before the skills, which are checked
     // against it as they load.
-    agent.set_leak_matcher(Arc::new(super::seed_leak_matcher(
-        &cfg.vault_db_path(),
-        || {
-            probe_keychain(&cfg.data_dir, || {
-                super::cached_vault_passphrase().unwrap_or_default()
-            })
-        },
-    )));
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            super::cached_vault_passphrase().unwrap_or_default()
+        })
+    }));
+    super::learn_key_files(&leak_matcher, &cfg.data_dir);
+    agent.set_leak_matcher(leak_matcher);
     agent
         .attach_skills(super::skills_for_agent(cfg, agent_cfg)?)
         .context("attach skills")?;
@@ -423,6 +421,7 @@ async fn send_on_plan(
             super::cached_vault_passphrase().unwrap_or_default()
         })
     }));
+    super::learn_key_files(&leak_matcher, &cfg.data_dir);
     agent.set_leak_matcher(leak_matcher.clone());
 
     let pp = super::cached_vault_passphrase()?;

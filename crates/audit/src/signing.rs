@@ -295,6 +295,12 @@ pub fn audit_public_key_path(data_dir: &Path) -> PathBuf {
     audit_signing_dir(data_dir).join(AUDIT_PUBLIC_FILE)
 }
 
+/// Location of the hex-encoded audit-signing secret key under a gateway
+/// data dir.
+pub fn audit_secret_key_path(data_dir: &Path) -> PathBuf {
+    audit_signing_dir(data_dir).join(AUDIT_SECRET_FILE)
+}
+
 #[cfg(unix)]
 fn write_secret(path: &Path, contents: &[u8]) -> Result<(), AuditError> {
     use std::io::Write;

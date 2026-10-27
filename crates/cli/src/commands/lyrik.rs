@@ -986,6 +986,7 @@ async fn dispatch_via_agent_runtime(
             super::cached_vault_passphrase().unwrap_or_default()
         })
     }));
+    super::learn_key_files(&leak_matcher, &cfg.data_dir);
 
     // Preflight tool-call probe. Mirrors the dispatch path the real
     // run uses (LlmClient::complete) with one tool defined and a

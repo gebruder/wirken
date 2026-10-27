@@ -996,6 +996,43 @@ pub(crate) fn seed_leak_matcher(
     }
 }
 
+/// Teach `matcher` the private keys under `data_dir` in the form `cat`
+/// prints them: every agent's `identity.key`, the audit signing key and
+/// the operator key, each its file's hex. Named by its path under the
+/// data dir. A key not yet created is learned by a later call.
+pub(crate) fn learn_key_files(matcher: &wirken_gateway::leak::LeakMatcher, data_dir: &Path) {
+    use wirken_gateway::leak::MatchableSecret;
+    let mut paths = vec![
+        wirken_audit::audit_secret_key_path(data_dir),
+        wirken_ipc::operator::operator_key_path(data_dir),
+    ];
+    if let Ok(agents) = std::fs::read_dir(data_dir.join("agents")) {
+        for agent in agents.flatten() {
+            paths.push(agent.path().join("identity.key"));
+        }
+    }
+    let secrets: Vec<MatchableSecret> = paths
+        .into_iter()
+        .filter_map(|path| {
+            let body = zeroize::Zeroizing::new(std::fs::read_to_string(&path).ok()?);
+            let value = body.trim();
+            if value.len() < wirken_vault::MIN_MATCH_BYTES {
+                return None;
+            }
+            let name = path
+                .strip_prefix(data_dir)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            Some(MatchableSecret {
+                name,
+                parts: vec![zeroize::Zeroizing::new(value.to_string())],
+            })
+        })
+        .collect();
+    matcher.learn_all(secrets);
+}
+
 pub fn cached_vault_passphrase() -> anyhow::Result<String> {
     if let Some(p) = vault_passphrase_source() {
         return Ok(p);
@@ -1378,6 +1415,51 @@ mod tests {
         std::fs::write(tmp.path().join("sandbox.json"), "not json").unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::default());
+    }
+}
+
+#[cfg(test)]
+mod key_file_tests {
+    use super::learn_key_files;
+    use wirken_gateway::leak::LeakMatcher;
+
+    #[test]
+    fn the_identity_audit_and_operator_keys_are_matched_as_cat_prints_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let key = |seed: u8| -> String { (0..32).map(|i| format!("{:02x}", seed ^ i)).collect() };
+        let files = [
+            ("agents/work/identity.key", key(0x11)),
+            ("agents/default/identity.key", key(0x22)),
+            ("audit/audit-signing.key", key(0x33)),
+            ("operator/operator.key", key(0x44)),
+        ];
+        for (rel, hex) in &files {
+            let path = data.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("{hex}\n")).unwrap();
+        }
+        // Not a secret: a public key next to the identity key.
+        std::fs::write(data.join("agents/work/identity.pub"), key(0x55)).unwrap();
+
+        let matcher = LeakMatcher::new();
+        learn_key_files(&matcher, data);
+        for (rel, hex) in &files {
+            let output = format!("$ cat ~/.wirken/{rel}\n{hex}\n");
+            assert_eq!(matcher.find(&output).as_deref(), Some(*rel), "{rel}");
+        }
+        assert_eq!(matcher.find(&key(0x55)), None);
+
+        // A later call adds a key created since, and keeps the rest.
+        let path = data.join("agents/later/identity.key");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, key(0x66)).unwrap();
+        learn_key_files(&matcher, data);
+        assert_eq!(
+            matcher.find(&key(0x66)).as_deref(),
+            Some("agents/later/identity.key")
+        );
+        assert!(matcher.find(&key(0x11)).is_some());
     }
 }
 

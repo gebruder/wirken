@@ -31,6 +31,9 @@ tagged.
   directory, or containing it, is refused at start as
   `sandbox_config_invalid`. The path is resolved before the check and bound
   as resolved.
+- Leak detection also matches each agent's `identity.key`, the audit signing
+  key and the operator key, as the hex their files hold; a `leak_refused` row
+  names the file by its path under the data directory.
 
 ## [3.1.0] - 2026-10-26
 

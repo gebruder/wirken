@@ -2104,6 +2104,9 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let accept_operator_key = Some(operator_key);
     #[cfg(not(unix))]
     let accept_operator_key: Option<ed25519_dalek::VerifyingKey> = None;
+    // Every key file exists by now: the audit key, each agent's identity
+    // and the operator key.
+    super::learn_key_files(&leak_matcher, &cfg.data_dir);
 
     // --- Accept adapter connections ---
     let accept_registry = registry.clone();

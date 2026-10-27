@@ -171,8 +171,12 @@ later, so a credential rotated since the start is known once it is read. Each
 secret is matched on the parts it can appear as: an OAuth credential on its
 access and refresh tokens and its id token when one is stored, a Bedrock key on
 its secret access key and session
-token, anything else whole. Content that carries one is refused before it goes
-further, and a `leak_refused` row names the credential, never the value:
+token, anything else whole. It also knows the private keys under the data
+directory as their files hold them, the hex `cat` prints: each agent's
+`identity.key`, `audit/audit-signing.key` and `operator/operator.key`, each
+named by its path. Content that carries one is refused before it goes
+further, and a `leak_refused` row names the credential or key file, never the
+value:
 
 - a tool's output, or a sub-agent's result, before it is recorded or enters
   the conversation; the model reads the refusal instead;
@@ -192,7 +196,8 @@ further, and a `leak_refused` row names the credential, never the value:
 What it does not catch: it matches exact raw bytes only, so a secret in an
 encoded form (base64, URL or JSON escaping) passes, and so does one split across
 two pieces of content; a secret under 8 bytes is not matched (a warning names
-it at start); and there is no pattern list for secrets the vault does not hold.
+it at start); and there is no pattern list for secrets the vault does not hold beyond those
+key files.
 Identifiers (phone numbers, URLs, usernames, project numbers) are not matched;
 the nine built-in adapter identifiers are marked as such, and an operator marks
 others with `wirken credentials add --identifier`.
