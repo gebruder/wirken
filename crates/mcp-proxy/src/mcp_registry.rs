@@ -1004,14 +1004,18 @@ mod start_tests {
         Arc::new(crate::credentials::ProxyCredentials::none())
     }
 
-    fn host(data_dir: &std::path::Path, docker: Option<bollard::Docker>) -> SandboxHost {
+    /// A host whose data directory is `dirs/wirken`, beside what the
+    /// test entries mount.
+    fn host(dirs: &std::path::Path, docker: Option<bollard::Docker>) -> SandboxHost {
+        let data_dir = dirs.join("wirken");
+        std::fs::create_dir_all(&data_dir).unwrap();
         SandboxHost {
             facts: docker.as_ref().map(|_| RuntimeFacts::default()),
             docker,
-            instance: crate::container::instance_id(data_dir),
-            data_dir: data_dir.to_path_buf(),
+            instance: crate::container::instance_id(&data_dir),
+            data_dir,
             runtime: None,
-            secrets_base: Some(data_dir.join("ram")),
+            secrets_base: Some(dirs.join("ram")),
             sidecar_binary: None,
         }
     }

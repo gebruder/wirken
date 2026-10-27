@@ -359,7 +359,7 @@ impl ContainerPlan {
         let mut mounts = Vec::new();
         let working_dir = match &block.install_dir {
             Some(dir) => {
-                let dir = existing_absolute(dir, "install_dir")?;
+                let dir = bindable_source(dir, "install_dir", &host.data_dir)?;
                 mounts.push(bind(&dir, INSTALL_DIR_TARGET, false));
                 Some(INSTALL_DIR_TARGET.to_string())
             }
@@ -368,7 +368,7 @@ impl ContainerPlan {
 
         let mut targets = Vec::new();
         for m in &block.mounts {
-            let source = existing_absolute(&m.source, "mount source")?;
+            let source = bindable_source(&m.source, "mount source", &host.data_dir)?;
             let target = container_target(&m.target)?;
             if targets.contains(&target) {
                 return Err(format!("two mounts target {target}").into());
@@ -616,6 +616,32 @@ fn existing_absolute(path: &str, what: &str) -> Result<PathBuf, String> {
         return Err(format!("{what} {} does not exist", path.display()));
     }
     Ok(path)
+}
+
+/// A host path a container may bind: absolute, existing, and neither
+/// inside the data directory nor holding it. Returned resolved, so what
+/// is bound is what was checked.
+fn bindable_source(path: &str, what: &str, data_dir: &Path) -> Result<PathBuf, String> {
+    let path = existing_absolute(path, what)?;
+    let real = path
+        .canonicalize()
+        .map_err(|e| format!("{what} {}: {e}", path.display()))?;
+    let data = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    if real.starts_with(&data) {
+        return Err(format!(
+            "{what} {} is inside the data directory",
+            path.display()
+        ));
+    }
+    if data.starts_with(&real) {
+        return Err(format!(
+            "{what} {} holds the data directory",
+            path.display()
+        ));
+    }
+    Ok(real)
 }
 
 /// A mount target: absolute, no `..`, and clear of the reserved paths.
@@ -939,13 +965,17 @@ mod tests {
     use super::*;
     use crate::mcp_config::{SandboxLimits, SandboxMount};
 
-    fn host(data_dir: &Path) -> SandboxHost {
+    /// A host whose data directory is `dirs/wirken`, beside the
+    /// directories the test blocks mount.
+    fn host(dirs: &Path) -> SandboxHost {
+        let data_dir = dirs.join("wirken");
+        std::fs::create_dir_all(&data_dir).unwrap();
         SandboxHost {
             docker: None,
-            instance: instance_id(data_dir),
-            data_dir: data_dir.to_path_buf(),
+            instance: instance_id(&data_dir),
+            data_dir,
             runtime: Some("runsc".into()),
-            secrets_base: Some(data_dir.join("ram")),
+            secrets_base: Some(dirs.join("ram")),
             facts: Some(RuntimeFacts::default()),
             sidecar_binary: None,
         }
@@ -1025,8 +1055,10 @@ mod tests {
         let dirs = tempfile::tempdir().unwrap();
         let host = host(dirs.path());
         let mut block = block(&dirs);
+        let out = dirs.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
         block.mounts.push(SandboxMount {
-            source: dirs.path().to_string_lossy().into_owned(),
+            source: out.to_string_lossy().into_owned(),
             target: "/out".into(),
             writable: true,
         });
@@ -1044,9 +1076,58 @@ mod tests {
         assert_eq!(scratch.read_only, Some(false));
         assert_eq!(
             plan.scratch_dir.as_deref(),
-            Some(dirs.path().join("mcp-scratch/agent-1/github").as_path())
+            Some(
+                dirs.path()
+                    .join("wirken/mcp-scratch/agent-1/github")
+                    .as_path()
+            )
         );
         assert!(plan.mounts.iter().all(|m| m.typ == Some(MountType::BIND)));
+    }
+
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn a_source_inside_or_holding_the_data_directory_is_refused() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        let keys = host.data_dir.join("agents");
+        std::fs::create_dir_all(&keys).unwrap();
+        for (source, said) in [
+            (keys.clone(), "is inside the data directory"),
+            (host.data_dir.clone(), "is inside the data directory"),
+            (dirs.path().to_path_buf(), "holds the data directory"),
+        ] {
+            let mut block = block(&dirs);
+            block.mounts.push(SandboxMount {
+                source: source.to_string_lossy().into_owned(),
+                target: "/keys".into(),
+                writable: false,
+            });
+            let err = plan(&host, &block).expect_err("refused");
+            assert!(err.to_string().contains(said), "{source:?}: {err}");
+        }
+
+        let mut installed = block(&dirs);
+        installed.install_dir = Some(keys.to_string_lossy().into_owned());
+        let err = plan(&host, &installed).expect_err("refused");
+        assert!(err.to_string().contains("install_dir"), "{err}");
+
+        #[cfg(unix)]
+        {
+            let link = dirs.path().join("link");
+            std::os::unix::fs::symlink(&keys, &link).unwrap();
+            let mut linked = block(&dirs);
+            linked.mounts.push(SandboxMount {
+                source: link.to_string_lossy().into_owned(),
+                target: "/keys".into(),
+                writable: false,
+            });
+            let err = plan(&host, &linked).expect_err("refused");
+            assert!(
+                err.to_string().contains("inside the data directory"),
+                "{err}"
+            );
+        }
     }
 
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]

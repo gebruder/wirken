@@ -43,8 +43,8 @@ If the entry is signed, re-sign it after any change to it, the `sandbox` block i
 | Field | Default | Meaning |
 |---|---|---|
 | `image` | required | Image the server runs in. Pull it first; the proxy does not. A digest-pinned reference (`node:22-slim@sha256:...`) fixes what runs. |
-| `install_dir` | none | Absolute host path, mounted read-only at `/opt/mcp`. |
-| `mounts` | none | `{ "source", "target", "writable" }`. Read-only unless `writable` is `true`. `source` must be an absolute path that exists. `target` must be absolute, and may not be, or sit under, `/opt/mcp`, `/scratch`, `/run/wirken-secrets`, `/tmp`, `/proc`, `/sys` or `/dev`. |
+| `install_dir` | none | Absolute host path, mounted read-only at `/opt/mcp`. It may not be inside the data directory or contain it. |
+| `mounts` | none | `{ "source", "target", "writable" }`. Read-only unless `writable` is `true`. `source` must be an absolute path that exists, and may not be inside the data directory or contain it, after symlinks are resolved. `target` must be absolute, and may not be, or sit under, `/opt/mcp`, `/scratch`, `/run/wirken-secrets`, `/tmp`, `/proc`, `/sys` or `/dev`. |
 | `scratch` | `false` | A writable directory at `/scratch`, kept on the host at `~/.wirken/mcp-scratch/<agent>/<server>`. |
 | `egress.hosts` | none | Domain names the server may reach over HTTP(S). Empty or absent means no network. See [Network](#network). |
 | `limits` | 512 MB, 256 processes, 1 CPU | `memory_mb`, `pids`, `cpus`. Each one given replaces its default; there is no ceiling. |
@@ -66,7 +66,7 @@ The proxy refuses a stdio server, logs why and what to change, and writes `mcp_e
 
 | Reason | When |
 |---|---|
-| `sandbox_config_invalid` | No `sandbox` block. A block with no `image`. A path that is not absolute or does not exist. A reserved or repeated mount target. A limit of zero. An `egress.hosts` entry that is not a domain name. A `secrets_in_env` name that is not a `vault:` variable. |
+| `sandbox_config_invalid` | No `sandbox` block. A block with no `image`. A path that is not absolute or does not exist. An `install_dir` or mount `source` inside the data directory or containing it. A reserved or repeated mount target. A limit of zero. An `egress.hosts` entry that is not a domain name. A `secrets_in_env` name that is not a `vault:` variable. |
 | `sandbox_unavailable` | No container runtime answers. A secret has to be delivered as a file and the host has no memory-backed directory for it. The egress sidecar's binary is missing. |
 | `image_unavailable` | The image is not on the host. |
 | `egress_unsupported_runtime` | `egress.hosts` is set and the runtime is rootless Docker, Podman, or Windows. |
@@ -164,7 +164,7 @@ The proxy reaches each server through the container runtime's attach stream, not
 
 ### What a contained server can reach
 
-- **Files:** its install directory (read-only), the mounts its entry declares, its scratch directory, its own secret files, and its `/tmp`. Not the operator's home or the data directory (`audit.db`, `vault.db`, agent identity keys) unless a mount puts them there.
+- **Files:** its install directory (read-only), the mounts its entry declares, its scratch directory, its own secret files, and its `/tmp`. Not the data directory (`audit.db`, `vault.db`, agent identity keys): no mount may be inside it or contain it. Not the operator's home unless a mount puts it there.
 - **Network:** nothing, or HTTP(S) to its listed hosts through its sidecar.
 - **Credentials:** the `vault:` values in its own `env` block, and nothing else from the vault.
 - **Resources:** its memory, process and CPU limits.
