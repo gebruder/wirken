@@ -101,17 +101,29 @@ pub(crate) struct Pending {
     pub first: Result<String, Failure>,
 }
 
-/// The supervisors of every contained server, and the switch that
-/// stops them.
+/// The supervisors of every contained server, grouped by agent, each
+/// group with the switch that stops it.
 pub struct Supervisors {
+    registry: Arc<Mutex<ProxyRegistry>>,
+    credentials: SharedCredentials,
+    audit: Option<Arc<dyn SessionLog>>,
+    backoff: RestartBackoff,
+    agents: std::collections::HashMap<String, AgentSupervisors>,
+    restarts: Restarts,
+}
+
+/// One agent's supervisors.
+struct AgentSupervisors {
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
-    restarts: Restarts,
 }
 
 /// Each supervised server's vault names and the signal that restarts it.
 #[derive(Clone, Default)]
-pub struct Restarts(Arc<Vec<(SupervisedServer, Arc<tokio::sync::Notify>)>>);
+pub struct Restarts(Arc<std::sync::Mutex<Vec<RestartSignal>>>);
+
+/// A supervised server and the signal that restarts it.
+type RestartSignal = (SupervisedServer, Arc<tokio::sync::Notify>);
 
 #[derive(Clone)]
 struct SupervisedServer {
@@ -125,6 +137,8 @@ impl Restarts {
     /// them as `agent/server`.
     pub fn restart_using(&self, name: &str) -> Vec<String> {
         self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|(s, _)| s.vault_names.contains(name))
             .map(|(s, signal)| {
@@ -132,6 +146,20 @@ impl Restarts {
                 format!("{}/{}", s.agent_id, s.server)
             })
             .collect()
+    }
+
+    fn add(&self, server: SupervisedServer, signal: Arc<tokio::sync::Notify>) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((server, signal));
+    }
+
+    fn forget_agent(&self, agent_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(s, _)| s.agent_id != agent_id);
     }
 }
 
@@ -151,56 +179,69 @@ impl Supervisors {
         audit: Option<Arc<dyn SessionLog>>,
         backoff: RestartBackoff,
     ) -> Self {
-        let (stop, stopped) = watch::channel(false);
-        let pending = registry.lock().await.take_pending();
-        let mut restarts = Vec::new();
-        let tasks = pending
-            .into_iter()
-            .map(|p| {
-                let restart = Arc::new(tokio::sync::Notify::new());
-                restarts.push((
-                    SupervisedServer {
-                        agent_id: p.agent_id.clone(),
-                        server: p.server.clone(),
-                        vault_names: p
-                            .env
-                            .values()
-                            .filter_map(|v| v.strip_prefix("vault:"))
-                            .map(str::to_string)
-                            .collect(),
-                    },
-                    restart.clone(),
-                ));
-                let first = p.first.clone();
-                let mut life = ContainerLife {
-                    registry: registry.clone(),
-                    credentials: credentials.clone(),
-                    audit: audit.clone(),
-                    pending: p,
-                };
-                let audit = audit.clone();
-                let stopped = stopped.clone();
-                tokio::spawn(async move {
-                    let (agent_id, server) =
-                        (life.pending.agent_id.clone(), life.pending.server.clone());
-                    supervise(
-                        &mut life,
-                        &agent_id,
-                        &server,
-                        first,
-                        audit.as_ref(),
-                        backoff,
-                        stopped,
-                        &restart,
-                    )
-                    .await;
-                })
-            })
-            .collect();
-        Self {
-            stop,
-            tasks,
-            restarts: Restarts(Arc::new(restarts)),
+        let mut supervisors = Self {
+            registry,
+            credentials,
+            audit,
+            backoff,
+            agents: Default::default(),
+            restarts: Restarts::default(),
+        };
+        supervisors.supervise_pending().await;
+        supervisors
+    }
+
+    /// Supervise every server the registry has loaded since the last
+    /// call, as after a resumed agent's servers are loaded again.
+    pub async fn supervise_pending(&mut self) {
+        let pending = self.registry.lock().await.take_pending();
+        for p in pending {
+            let restart = Arc::new(tokio::sync::Notify::new());
+            self.restarts.add(
+                SupervisedServer {
+                    agent_id: p.agent_id.clone(),
+                    server: p.server.clone(),
+                    vault_names: p
+                        .env
+                        .values()
+                        .filter_map(|v| v.strip_prefix("vault:"))
+                        .map(str::to_string)
+                        .collect(),
+                },
+                restart.clone(),
+            );
+            let group = self
+                .agents
+                .entry(p.agent_id.clone())
+                .or_insert_with(|| AgentSupervisors {
+                    stop: watch::channel(false).0,
+                    tasks: Vec::new(),
+                });
+            let stopped = group.stop.subscribe();
+            let first = p.first.clone();
+            let mut life = ContainerLife {
+                registry: self.registry.clone(),
+                credentials: self.credentials.clone(),
+                audit: self.audit.clone(),
+                pending: p,
+            };
+            let audit = self.audit.clone();
+            let backoff = self.backoff;
+            group.tasks.push(tokio::spawn(async move {
+                let (agent_id, server) =
+                    (life.pending.agent_id.clone(), life.pending.server.clone());
+                supervise(
+                    &mut life,
+                    &agent_id,
+                    &server,
+                    first,
+                    audit.as_ref(),
+                    backoff,
+                    stopped,
+                    &restart,
+                )
+                .await;
+            }));
         }
     }
 
@@ -210,16 +251,36 @@ impl Supervisors {
         self.restarts.clone()
     }
 
-    /// Stop supervising. A start under way gets five seconds to finish
-    /// and leave its client in the registry, where the registry's own
-    /// shutdown stops it.
-    pub async fn stop(mut self) {
-        let _ = self.stop.send(true);
-        let finishing = futures_util::future::join_all(self.tasks.iter_mut());
-        let _ = tokio::time::timeout(STOP_GRACE, finishing).await;
-        for task in &self.tasks {
-            task.abort();
+    /// Stop supervising `agent_id`'s servers, as a stop of the agent
+    /// does. A start under way gets five seconds to finish and leave its
+    /// client in the registry, where unloading the agent stops it.
+    pub async fn stop_agent(&mut self, agent_id: &str) {
+        self.restarts.forget_agent(agent_id);
+        if let Some(group) = self.agents.remove(agent_id) {
+            stop_group(group).await;
         }
+    }
+
+    /// Stop supervising every server. A start under way gets five
+    /// seconds to finish and leave its client in the registry, where the
+    /// registry's own shutdown stops it.
+    pub async fn stop_all(&mut self) {
+        let groups: Vec<AgentSupervisors> = self.agents.drain().map(|(_, g)| g).collect();
+        futures_util::future::join_all(groups.into_iter().map(stop_group)).await;
+    }
+
+    /// [`Self::stop_all`], taking the supervisors.
+    pub async fn stop(mut self) {
+        self.stop_all().await;
+    }
+}
+
+async fn stop_group(mut group: AgentSupervisors) {
+    let _ = group.stop.send(true);
+    let finishing = futures_util::future::join_all(group.tasks.iter_mut());
+    let _ = tokio::time::timeout(STOP_GRACE, finishing).await;
+    for task in &group.tasks {
+        task.abort();
     }
 }
 

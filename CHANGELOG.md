@@ -29,6 +29,10 @@ tagged.
   their `exec` containers and host process groups, and its cached
   session-scoped grants are dropped. A stopped sub-agent's spawn returns
   `Agent stopped` to its parent, which goes on with its turn.
+- A stopped agent's MCP servers are stopped: the MCP proxy stops their
+  supervisors and then the servers, and does not start them at its own start
+  while the agent is stopped. `wirken agents resume` has the proxy load and
+  supervise them again, as at start.
 - When `wirken run` cannot open the session store it asks about liveness, no
   session is live and no session-scoped grant is served until restart. The
   failure is printed at startup and recorded as a `session_liveness_unavailable`

@@ -99,7 +99,7 @@ pub struct RefreshService {
     /// checks nothing.
     pins: HashMap<String, BTreeSet<ServerPin>>,
     /// Credentials changed in the vault, for the proxy's watch.
-    changes: tokio::sync::broadcast::Sender<String>,
+    changes: tokio::sync::broadcast::Sender<WatchNotice>,
 }
 
 impl RefreshService {
@@ -139,8 +139,26 @@ impl RefreshService {
         if !self.handed.contains(name) {
             return false;
         }
-        let _ = self.changes.send(name.to_string());
+        let _ = self.changes.send(WatchNotice::Changed {
+            credential: name.to_string(),
+        });
         true
+    }
+
+    /// Tell the proxy `agent_id` was stopped, so it stops the agent's
+    /// servers.
+    pub fn notify_agent_stopped(&self, agent_id: &str) {
+        let _ = self.changes.send(WatchNotice::AgentStopped {
+            agent_id: agent_id.to_string(),
+        });
+    }
+
+    /// Tell the proxy `agent_id` was resumed, so it starts the agent's
+    /// servers again.
+    pub fn notify_agent_resumed(&self, agent_id: &str) {
+        let _ = self.changes.send(WatchNotice::AgentResumed {
+            agent_id: agent_id.to_string(),
+        });
     }
 
     /// Have `leak` learn every value this service reads or refreshes.
@@ -210,11 +228,8 @@ impl RefreshService {
                             }
                         }
                         changed = changes.recv() => match changed {
-                            Ok(credential) => {
-                                let mut out = serde_json::to_vec(
-                                    &WatchNotice::Changed { credential },
-                                )
-                                .unwrap_or_default();
+                            Ok(notice) => {
+                                let mut out = serde_json::to_vec(&notice).unwrap_or_default();
                                 out.push(b'\n');
                                 wr.write_all(&out).await?;
                             }
@@ -1034,7 +1049,22 @@ mod tests {
             .await
             .expect("the notice arrives")
             .unwrap();
-        assert_eq!(name, "linear-token");
+        assert_eq!(
+            name,
+            crate::credentials::ProxyNotice::Changed("linear-token".into())
+        );
+        gateway.service.notify_agent_stopped("work");
+        gateway.service.notify_agent_resumed("work");
+        for expected in [
+            crate::credentials::ProxyNotice::AgentStopped("work".into()),
+            crate::credentials::ProxyNotice::AgentResumed("work".into()),
+        ] {
+            let notice = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("the notice arrives")
+                .unwrap();
+            assert_eq!(notice, expected);
+        }
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         watching.abort();
     }

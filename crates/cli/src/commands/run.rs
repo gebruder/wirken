@@ -2495,6 +2495,8 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let permissions_session_log = session_log.clone();
     #[cfg(unix)]
     let permissions_store_for_loop = permissions.clone();
+    #[cfg(unix)]
+    let permissions_mcp = mcp_refresh_service.clone();
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
     #[cfg(unix)]
@@ -2527,11 +2529,13 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     let au = permissions_audit.clone();
                     let slog = permissions_session_log.clone();
                     let store = permissions_store_for_loop.clone();
+                    let mcp = permissions_mcp.clone();
                     permissions_connection_tasks.spawn("permissions", async move {
                         if let Err(e) = handle_permissions_request(
                             stream,
                             q,
                             store,
+                            mcp,
                             au,
                             slog,
                             permissions_operator_key,
@@ -2945,6 +2949,7 @@ fn stop_running_agent(
     stopped_by: &str,
     queue: &wirken_gateway::pending_approvals::PendingApprovalQueue,
     permissions: &std::sync::Mutex<wirken_gateway::permissions::PermissionStore>,
+    mcp: Option<&wirken_mcp_proxy::refresh_service::RefreshService>,
     key_id: &str,
 ) -> wirken_ipc::permissions::PermissionsResponse {
     use wirken_gateway::pending_approvals::{DecisionActor, PendingDecision, ResolveResult};
@@ -2981,6 +2986,9 @@ fn stop_running_agent(
                 .sum()
         })
         .unwrap_or(0);
+    if let Some(mcp) = mcp {
+        mcp.notify_agent_stopped(agent_id);
+    }
     tracing::info!(
         agent_id,
         approvals_denied,
@@ -2992,6 +3000,34 @@ fn stop_running_agent(
         approvals_denied,
         turns_ended,
         session_grants_cleared,
+        mcp_told: mcp.is_some(),
+    }
+}
+
+/// Act on a resume the permission store already holds: have the MCP
+/// proxy start the agent's servers again.
+#[cfg(unix)]
+fn resume_running_agent(
+    agent_id: &str,
+    permissions: &std::sync::Mutex<wirken_gateway::permissions::PermissionStore>,
+    mcp: Option<&wirken_mcp_proxy::refresh_service::RefreshService>,
+) -> wirken_ipc::permissions::PermissionsResponse {
+    use wirken_ipc::permissions::PermissionsResponse;
+    let still_stopped = match permissions.lock() {
+        Ok(store) => store.is_stopped(agent_id).unwrap_or(true),
+        Err(_) => true,
+    };
+    if still_stopped {
+        return PermissionsResponse::Error {
+            message: format!("agent '{agent_id}' is still stopped"),
+        };
+    }
+    if let Some(mcp) = mcp {
+        mcp.notify_agent_resumed(agent_id);
+    }
+    tracing::info!(agent_id, "agent resumed");
+    PermissionsResponse::AgentResumed {
+        mcp_told: mcp.is_some(),
     }
 }
 
@@ -4241,6 +4277,7 @@ async fn handle_permissions_request(
     stream: UnixStream,
     queue: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
     permissions: Arc<std::sync::Mutex<wirken_gateway::permissions::PermissionStore>>,
+    mcp: Option<Arc<wirken_mcp_proxy::refresh_service::RefreshService>>,
     audit: Arc<AuditWriter>,
     _session_log: Arc<dyn wirken_audit::SessionLog>,
     operator_key: ed25519_dalek::VerifyingKey,
@@ -4288,7 +4325,7 @@ async fn handle_permissions_request(
     }
 
     let response = match serde_json::from_str::<PermissionsRequest>(line.trim_end()) {
-        Ok(req) => process_permissions_request(req, &queue, &permissions, &key_id),
+        Ok(req) => process_permissions_request(req, &queue, &permissions, mcp.as_deref(), &key_id),
         Err(e) => PermissionsResponse::Error {
             message: format!("invalid request JSON: {e}"),
         },
@@ -4319,6 +4356,7 @@ fn process_permissions_request(
     req: wirken_ipc::permissions::PermissionsRequest,
     queue: &wirken_gateway::pending_approvals::PendingApprovalQueue,
     permissions: &std::sync::Mutex<wirken_gateway::permissions::PermissionStore>,
+    mcp: Option<&wirken_mcp_proxy::refresh_service::RefreshService>,
     key_id: &str,
 ) -> wirken_ipc::permissions::PermissionsResponse {
     use wirken_gateway::pending_approvals::PendingDecision;
@@ -4394,7 +4432,10 @@ fn process_permissions_request(
         PermissionsRequest::AgentStop {
             agent_id,
             stopped_by,
-        } => stop_running_agent(&agent_id, &stopped_by, queue, permissions, key_id),
+        } => stop_running_agent(&agent_id, &stopped_by, queue, permissions, mcp, key_id),
+        PermissionsRequest::AgentResume { agent_id } => {
+            resume_running_agent(&agent_id, permissions, mcp)
+        }
         PermissionsRequest::PendingDeny {
             request_id,
             denied_by,
@@ -6114,12 +6155,12 @@ mod agent_stop_tests {
         let store =
             std::sync::Mutex::new(PermissionStore::open(std::path::Path::new(":memory:")).unwrap());
 
-        let refused = stop_running_agent("work", "op", &queue, &store, "k");
+        let refused = stop_running_agent("work", "op", &queue, &store, None, "k");
         assert!(matches!(refused, PermissionsResponse::Error { .. }));
         assert_eq!(queue.len(), 2, "nothing is denied for an agent not stopped");
 
         store.lock().unwrap().stop_agent("work", "op").unwrap();
-        let done = stop_running_agent("work", "op", &queue, &store, "k");
+        let done = stop_running_agent("work", "op", &queue, &store, None, "k");
         assert!(
             matches!(
                 done,

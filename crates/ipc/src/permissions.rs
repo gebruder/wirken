@@ -66,6 +66,10 @@ pub enum PermissionsRequest {
         agent_id: String,
         stopped_by: String,
     },
+    /// `wirken agents resume <agent_id>`, after the CLI has cleared the
+    /// stop: start the agent's MCP servers again. Refused for an agent
+    /// the store still holds stopped.
+    AgentResume { agent_id: String },
 }
 
 /// One line back from the gateway to the CLI. Variants per request
@@ -87,6 +91,13 @@ pub enum PermissionsResponse {
         approvals_denied: u32,
         turns_ended: u32,
         session_grants_cleared: u32,
+        /// Whether the MCP proxy was told to stop the agent's servers.
+        mcp_told: bool,
+    },
+    /// What an `AgentResume` did.
+    AgentResumed {
+        /// Whether the MCP proxy was told to start the agent's servers.
+        mcp_told: bool,
     },
     /// Protocol-level error: malformed request, gateway internal
     /// error. Distinct from `Decision { UnknownKey }` which is the

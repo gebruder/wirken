@@ -100,6 +100,10 @@ pub struct ProxyRegistry {
     pending: Vec<Pending>,
     /// Agents with a server under supervision, running or not.
     supervised_agents: std::collections::HashSet<String>,
+    /// Stopped agents with servers configured, none of them running. Kept
+    /// so the gateway holds the agent's proxy connection, and a resume
+    /// offers the servers again on its next turn.
+    deferred: std::collections::HashSet<String>,
     /// Where shutdown records the containers it stopped.
     audit: Option<Arc<dyn SessionLog>>,
     /// Stdio servers run without a container, kept to start one again
@@ -129,6 +133,7 @@ impl ProxyRegistry {
             sandbox: SandboxHost::unavailable(),
             pending: Vec::new(),
             supervised_agents: Default::default(),
+            deferred: Default::default(),
             audit: None,
             host_servers: Vec::new(),
         }
@@ -265,6 +270,7 @@ impl ProxyRegistry {
         credentials: SharedCredentials,
         audit: Option<&Arc<dyn SessionLog>>,
     ) -> Result<usize, ProxyError> {
+        self.deferred.remove(agent_id);
         let mut clients = HashMap::new();
         let bundled_root = bundled_mcp_pubkey();
         if let Some(log) = audit {
@@ -512,7 +518,54 @@ impl ProxyRegistry {
     /// failed at load keeps its proxy connection on this, so the tools a
     /// restart brings are offered on its next turn.
     pub fn has_agent(&self, agent_id: &str) -> bool {
+        self.by_agent.contains_key(agent_id)
+            || self.supervised_agents.contains(agent_id)
+            || self.deferred.contains(agent_id)
+    }
+
+    /// Whether `agent_id` has servers loaded or under supervision, as
+    /// against held for a stopped agent.
+    pub fn is_running(&self, agent_id: &str) -> bool {
         self.by_agent.contains_key(agent_id) || self.supervised_agents.contains(agent_id)
+    }
+
+    /// Hold a stopped agent's place without starting its servers.
+    pub fn defer_agent(&mut self, agent_id: &str) {
+        self.deferred.insert(agent_id.to_string());
+    }
+
+    /// Stop every server `agent_id` has and hold its place, as a stop
+    /// does. Its supervisors are stopped first, by the caller, so a
+    /// container stopping here is not taken for an exit to restart
+    /// from. Returns how many servers were running.
+    pub async fn unload_agent(&mut self, agent_id: &str) -> usize {
+        let servers = self.by_agent.remove(agent_id).unwrap_or_default();
+        let count = servers.len();
+        let stopping = servers.into_iter().map(|(name, mut client)| async move {
+            tracing::info!("Stopping MCP server '{name}' (agent '{agent_id}' stopped)");
+            let exit = client.shutdown().await;
+            (name, exit)
+        });
+        for (server_name, exit) in futures_util::future::join_all(stopping).await {
+            if let Some(exit) = exit {
+                record(
+                    self.audit.as_ref(),
+                    SessionEvent::McpServerExited {
+                        server_name,
+                        agent_id: agent_id.to_string(),
+                        container_id: exit.container_id,
+                        exit_code: exit.exit_code,
+                        stopped_by_proxy: true,
+                    },
+                );
+            }
+        }
+        self.costs_by_agent.remove(agent_id);
+        self.host_servers.retain(|h| h.agent_id != agent_id);
+        self.pending.retain(|p| p.agent_id != agent_id);
+        self.supervised_agents.remove(agent_id);
+        self.deferred.insert(agent_id.to_string());
+        count
     }
 
     /// Tool definitions for one agent. Empty if the agent has no servers.
@@ -1134,6 +1187,47 @@ mod start_tests {
             }),
             "{events:?}"
         );
+    }
+
+    /// A stop unloads the agent's servers and keeps its place; a
+    /// resume loads them again.
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "spawns a process; miri has no I/O")]
+    #[tokio::test]
+    async fn an_unloaded_agent_keeps_its_place_and_loads_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"read a; printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"t","version":"1"}}}\n'; read b; read c; printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n'; cat >/dev/null"#;
+        let config: McpConfig = serde_json::from_value(serde_json::json!({ "servers": { "srv": {
+            "command": "sh", "args": ["-c", script], "sandbox": "off"
+        }}}))
+        .unwrap();
+        let mut registry = ProxyRegistry::new().with_sandbox(host(dir.path(), None));
+        assert_eq!(
+            registry
+                .load_agent("agent-1", &config, no_vault(), None)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(registry.is_running("agent-1"));
+
+        assert_eq!(registry.unload_agent("agent-1").await, 1);
+        assert!(!registry.is_running("agent-1"));
+        assert!(
+            registry.has_agent("agent-1"),
+            "the gateway keeps the agent's connection"
+        );
+        assert!(registry.definitions("agent-1").is_empty());
+
+        assert_eq!(
+            registry
+                .load_agent("agent-1", &config, no_vault(), None)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(registry.is_running("agent-1"));
+        registry.shutdown().await;
     }
 
     async fn docker_with(image: &str) -> Option<bollard::Docker> {

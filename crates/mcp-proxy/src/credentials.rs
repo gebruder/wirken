@@ -45,12 +45,37 @@ pub struct ServerPin {
 
 /// What the gateway sends on a watch connection after `Watching`, one
 /// line each.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WatchNotice {
     /// A credential the proxy was handed changed in the vault: rotated,
     /// removed, or given other destinations.
     Changed { credential: String },
+    /// `wirken agents stop`: stop the agent's servers.
+    AgentStopped { agent_id: String },
+    /// `wirken agents resume`: start the agent's servers again.
+    AgentResumed { agent_id: String },
+}
+
+/// A watch notice, as the proxy acts on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyNotice {
+    /// A handed credential changed in the vault.
+    Changed(String),
+    /// An agent was stopped.
+    AgentStopped(String),
+    /// An agent was resumed.
+    AgentResumed(String),
+}
+
+impl From<WatchNotice> for ProxyNotice {
+    fn from(notice: WatchNotice) -> Self {
+        match notice {
+            WatchNotice::Changed { credential } => Self::Changed(credential),
+            WatchNotice::AgentStopped { agent_id } => Self::AgentStopped(agent_id),
+            WatchNotice::AgentResumed { agent_id } => Self::AgentResumed(agent_id),
+        }
+    }
 }
 
 /// Cap on one watch notice line.
@@ -230,7 +255,7 @@ impl ProxyCredentials {
     /// and the next proxy's start removes what it leaves behind.
     /// Each credential the gateway reports changed in the vault while it
     /// runs is sent on `changed`.
-    pub async fn gateway_gone(&self, changed: tokio::sync::mpsc::UnboundedSender<String>) {
+    pub async fn gateway_gone(&self, changed: tokio::sync::mpsc::UnboundedSender<ProxyNotice>) {
         let Some(gateway) = &self.gateway else {
             return std::future::pending().await;
         };
@@ -258,7 +283,7 @@ impl GatewayLink {
     /// gateway gone.
     async fn watch(
         &self,
-        changed: tokio::sync::mpsc::UnboundedSender<String>,
+        changed: tokio::sync::mpsc::UnboundedSender<ProxyNotice>,
     ) -> Result<(), ProxyError> {
         let stream = tokio::time::timeout(REFRESH_TIMEOUT, async {
             let stream = wirken_ipc::connect(&self.socket).await.map_err(|e| {
@@ -303,8 +328,8 @@ impl GatewayLink {
         let (reader, _wr) = stream;
         let mut lines = reader.take(MAX_NOTICE_BYTES).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Ok(WatchNotice::Changed { credential }) = serde_json::from_str(&line) {
-                let _ = changed.send(credential);
+            if let Ok(notice) = serde_json::from_str::<WatchNotice>(&line) {
+                let _ = changed.send(notice.into());
             }
             lines.get_mut().set_limit(MAX_NOTICE_BYTES);
         }

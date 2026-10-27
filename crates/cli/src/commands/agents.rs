@@ -609,10 +609,17 @@ async fn tell_gateway_stopped(id: &str) {
             approvals_denied,
             turns_ended,
             session_grants_cleared,
-        })) => println!(
-            "  The running gateway denied {approvals_denied} pending approval(s), ended \
-             {turns_ended} turn(s) and dropped {session_grants_cleared} cached session grant(s)."
-        ),
+            mcp_told,
+        })) => {
+            println!(
+                "  The running gateway denied {approvals_denied} pending approval(s), ended \
+                 {turns_ended} turn(s) and dropped {session_grants_cleared} cached session \
+                 grant(s)."
+            );
+            if mcp_told {
+                println!("  The MCP proxy was told to stop the agent's servers.");
+            }
+        }
         Ok(Some(PermissionsResponse::Error { message })) => {
             eprintln!("  The running gateway did not act on the stop: {message}")
         }
@@ -651,7 +658,31 @@ pub async fn resume(id: &str) -> Result<()> {
     .context("Failed to record the resume in the audit chain")?;
     super::seal_operator_lane(&log, wirken_audit::OPERATOR_COMMANDS_SESSION);
     println!("  Agent '{id}' resumed.");
+    tell_gateway_resumed(id).await;
     Ok(())
+}
+
+/// Have a running gateway start the agent's MCP servers again.
+async fn tell_gateway_resumed(id: &str) {
+    use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
+    let req = PermissionsRequest::AgentResume {
+        agent_id: id.to_string(),
+    };
+    match super::permission::gateway_rpc(&req).await {
+        Ok(None) => println!("  No gateway is running; its MCP servers start with it."),
+        Ok(Some(PermissionsResponse::AgentResumed { mcp_told })) => {
+            if mcp_told {
+                println!("  The MCP proxy was told to start the agent's servers.");
+            }
+        }
+        Ok(Some(PermissionsResponse::Error { message })) => {
+            eprintln!("  The running gateway did not act on the resume: {message}")
+        }
+        Ok(Some(other)) => eprintln!("  The running gateway answered unexpectedly: {other:?}"),
+        Err(e) => eprintln!(
+            "  Could not reach the running gateway ({e:#}); its MCP servers start at its next start."
+        ),
+    }
 }
 
 pub async fn bind(agent_id: &str, channel: &str) -> Result<()> {

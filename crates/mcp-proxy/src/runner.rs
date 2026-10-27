@@ -58,7 +58,8 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
     // Watched from the start, so a gateway that dies while servers are
     // still starting is noticed as well. The same connection reports
     // each handed credential that changes in the vault.
-    let (changed_tx, mut changed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (changed_tx, mut changed_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::credentials::ProxyNotice>();
     let mut gateway_gone = {
         let credentials = credentials.clone();
         tokio::spawn(async move { credentials.gateway_gone(changed_tx).await })
@@ -101,7 +102,20 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
         }
     };
 
+    // A stopped agent's servers are not started; its place is held so a
+    // resume starts them. A store that cannot be read stops none: the
+    // gateway still refuses every turn and tool call of a stopped agent.
+    let stopped = wirken_gateway::permissions::stopped_agents(&data_dir.join("permissions.db"))
+        .unwrap_or_else(|e| {
+            tracing::warn!("could not read which agents are stopped: {e}");
+            Vec::new()
+        });
     for (agent_id, config) in &configs {
+        if stopped.contains(agent_id) {
+            registry.defer_agent(agent_id);
+            tracing::info!("agent '{agent_id}' is stopped; its MCP servers are not started");
+            continue;
+        }
         load_for_agent(
             &mut registry,
             agent_id,
@@ -148,37 +162,71 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
     let registry = Arc::new(Mutex::new(registry));
 
     // Contained servers are restarted when their containers exit.
-    let supervisors =
+    let supervisors = Arc::new(Mutex::new(
         crate::supervise::Supervisors::start(registry.clone(), credentials.clone(), audit.clone())
-            .await;
+            .await,
+    ));
 
     // A credential changed in the vault: take its current value, or drop
     // it when the gateway no longer sends it, then start again every
     // stdio server it is passed to. HTTP servers read it per request.
+    //
+    // A stopped agent's servers are stopped, supervision first, and a
+    // resumed one's are loaded and supervised as at start.
     let reloads = {
-        let (credentials, registry, restarts) = (
+        let (credentials, registry, supervisors, audit, data_dir) = (
             credentials.clone(),
             registry.clone(),
-            supervisors.restarts(),
+            supervisors.clone(),
+            audit.clone(),
+            data_dir.clone(),
         );
+        let restarts = supervisors.lock().await.restarts();
         tokio::spawn(async move {
-            while let Some(name) = changed_rx.recv().await {
-                if let Err(e) = credentials.refetch(&name).await {
-                    tracing::warn!("credential '{name}' is no longer held: {e}");
+            while let Some(notice) = changed_rx.recv().await {
+                match notice {
+                    crate::credentials::ProxyNotice::Changed(name) => {
+                        if let Err(e) = credentials.refetch(&name).await {
+                            tracing::warn!("credential '{name}' is no longer held: {e}");
+                        }
+                        let mut restarted = restarts.restart_using(&name);
+                        restarted.extend(
+                            registry
+                                .lock()
+                                .await
+                                .restart_host_using(&name, &credentials)
+                                .await,
+                        );
+                        tracing::info!(
+                            credential = name,
+                            servers = ?restarted,
+                            "credential changed in the vault"
+                        );
+                    }
+                    crate::credentials::ProxyNotice::AgentStopped(agent_id) => {
+                        supervisors.lock().await.stop_agent(&agent_id).await;
+                        let stopped = registry.lock().await.unload_agent(&agent_id).await;
+                        tracing::info!(agent_id, servers = stopped, "agent stopped");
+                    }
+                    crate::credentials::ProxyNotice::AgentResumed(agent_id) => {
+                        if registry.lock().await.is_running(&agent_id) {
+                            continue;
+                        }
+                        let Some(config) = load_config(&agent_id, &data_dir) else {
+                            continue;
+                        };
+                        load_for_agent(
+                            &mut *registry.lock().await,
+                            &agent_id,
+                            &config,
+                            credentials.clone(),
+                            audit.as_ref(),
+                        )
+                        .await;
+                        supervisors.lock().await.supervise_pending().await;
+                        tracing::info!(agent_id, "agent resumed");
+                    }
                 }
-                let mut restarted = restarts.restart_using(&name);
-                restarted.extend(
-                    registry
-                        .lock()
-                        .await
-                        .restart_host_using(&name, &credentials)
-                        .await,
-                );
-                tracing::info!(
-                    credential = name,
-                    servers = ?restarted,
-                    "credential changed in the vault"
-                );
             }
         })
     };
@@ -201,7 +249,7 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
     };
     gateway_gone.abort();
     reloads.abort();
-    supervisors.stop().await;
+    supervisors.lock().await.stop_all().await;
     registry.lock().await.shutdown().await;
     served
 }
