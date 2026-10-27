@@ -1987,6 +1987,13 @@ pub enum SessionEvent {
         /// Why it was refused: `inside_exec`.
         reason: String,
     },
+    /// `wirken run` could not open the session store it asks whether a
+    /// session is live, so no session-scoped grant is served until it
+    /// restarts. On the permissions lane, sealed by a chain head.
+    SessionLivenessUnavailable {
+        /// The open error.
+        error: String,
+    },
     /// One veto-hook invocation completed. Emitted per hook per tool
     /// call (in series, in `hook_registry` insertion order). The
     /// invocation runs after Wirken's tier and per-skill permission

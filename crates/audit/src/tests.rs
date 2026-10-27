@@ -3894,6 +3894,9 @@ fn every_session_event() -> Vec<SessionEvent> {
             invocation: String::new(),
             reason: String::new(),
         },
+        SessionEvent::SessionLivenessUnavailable {
+            error: String::new(),
+        },
         SessionEvent::CredentialDestinationRefused {
             credential: String::new(),
             destination_kind: String::new(),
@@ -4001,6 +4004,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::OperatorCommand { .. } => "OperatorCommand",
         SessionEvent::AuthorityReloaded { .. } => "AuthorityReloaded",
         SessionEvent::OperatorCommandRefused { .. } => "OperatorCommandRefused",
+        SessionEvent::SessionLivenessUnavailable { .. } => "SessionLivenessUnavailable",
         SessionEvent::CredentialDestinationRefused { .. } => "CredentialDestinationRefused",
         SessionEvent::CredentialDestinationGranted { .. } => "CredentialDestinationGranted",
         SessionEvent::CredentialDestinationRevoked { .. } => "CredentialDestinationRevoked",
@@ -4032,7 +4036,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 87;
+const SESSION_EVENT_VARIANTS: usize = 88;
 
 /// The list covers the enum.
 #[test]

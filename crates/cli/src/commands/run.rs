@@ -723,21 +723,15 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // runs under a std mutex, so it cannot await a tokio one, and a
     // `try_lock` that treated contention as "live" would fail in the
     // direction that keeps a revoked grant working.
-    match SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs) {
-        Ok(liveness_store) => {
-            let liveness_store = std::sync::Mutex::new(liveness_store);
-            permission_store.set_session_liveness(Arc::new(move |session_id: &str| {
-                session_is_live(&liveness_store, session_id)
-            }));
-        }
+    let liveness_store = match SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
+    {
+        Ok(store) => Some(store),
         Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "session liveness is unavailable: a session-scoped grant will stay \
-                 in this process's cache until restart even after its session closes"
-            );
+            record_liveness_unavailable(&session_log_for_shutdown, &e.to_string());
+            None
         }
-    }
+    };
+    permission_store.set_session_liveness(session_liveness(liveness_store));
 
     let permissions = Arc::new(std::sync::Mutex::new(permission_store));
 
@@ -3005,6 +2999,40 @@ impl Drop for WaitingInbound {
                 "could not record queued messages dropped unhandled: {e}"
             );
         }
+    }
+}
+
+/// Report a session store that did not open: on the console, in the
+/// log, and as a `session_liveness_unavailable` row on the permissions
+/// lane, sealed by a chain head.
+fn record_liveness_unavailable(log: &wirken_audit::SqliteSessionLog, error: &str) {
+    use wirken_audit::SessionLog as _;
+    println!("  Session grants: not served until restart; the session store did not open");
+    tracing::warn!(
+        error,
+        "session liveness is unavailable: no session-scoped grant is served until restart"
+    );
+    let lane = wirken_gateway::permissions::OPERATOR_PERMISSIONS_SESSION;
+    let handle = log.handle_for(wirken_audit::SessionId::new(lane.to_string()));
+    let row = wirken_audit::SessionEvent::SessionLivenessUnavailable {
+        error: error.to_string(),
+    };
+    match log.append(&handle, wirken_audit::TrustLevel::System, row) {
+        Ok(_) => super::seal_operator_lane(log, lane),
+        Err(e) => tracing::error!("could not record that session liveness is unavailable: {e}"),
+    }
+}
+
+/// The permission store's session-liveness predicate. With no store to
+/// ask, every session reads as not live, so no session-scoped grant is
+/// served from the cache.
+fn session_liveness(store: Option<SessionStore>) -> wirken_gateway::permissions::SessionLiveness {
+    match store {
+        Some(store) => {
+            let store = std::sync::Mutex::new(store);
+            Arc::new(move |session_id: &str| session_is_live(&store, session_id))
+        }
+        None => Arc::new(|_: &str| false),
     }
 }
 
@@ -6015,6 +6043,35 @@ mod stop_record_tests {
 mod session_liveness_tests {
     use super::session_is_live;
     use wirken_gateway::session::SessionStore;
+
+    #[test]
+    fn an_unavailable_store_is_a_sealed_row_on_the_permissions_lane() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog};
+        let log = wirken_audit::SqliteSessionLog::open_in_memory_with_signer(std::sync::Arc::new(
+            wirken_audit::AuditSigningKey::generate(),
+        ))
+        .unwrap();
+        super::record_liveness_unavailable(&log, "unable to open database file");
+        let lane = wirken_gateway::permissions::OPERATOR_PERMISSIONS_SESSION;
+        let rows = log
+            .get_since(&log.handle_for(SessionId::new(lane.to_string())), 0)
+            .unwrap();
+        assert!(rows.iter().any(|r| matches!(
+            &r.event,
+            SessionEvent::SessionLivenessUnavailable { error } if error == "unable to open database file"
+        )));
+        assert!(matches!(
+            rows.last().map(|r| &r.event),
+            Some(SessionEvent::ChainHead { .. })
+        ));
+    }
+
+    #[test]
+    fn with_no_store_no_session_reads_as_live() {
+        let live = super::session_liveness(None);
+        assert!(!live("default/webchat/c1"));
+        assert!(!live("gateway-operator"));
+    }
 
     #[test]
     fn a_poisoned_liveness_lock_reads_as_not_live() {

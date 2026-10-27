@@ -12,6 +12,12 @@ tagged.
 
 ### Security
 
+- When `wirken run` cannot open the session store it asks about liveness, no
+  session is live and no session-scoped grant is served until restart. The
+  failure is printed at startup and recorded as a `session_liveness_unavailable`
+  row on the `gateway-permissions` lane, sealed by a chain head. **For
+  wirken-siem:** new kind `session_liveness_unavailable`, forwarded by default,
+  at `warn`.
 - An `exec` container, its egress sidecar and its networks are removed when
   the turn running it is aborted or the gateway stops mid-call. Each carries
   `wirken.exec` labels naming the data directory and the creating process;
