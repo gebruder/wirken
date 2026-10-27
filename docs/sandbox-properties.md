@@ -61,8 +61,9 @@ A gated `exec` call does not leave work running after it returns.
   [`sandbox.rs`](../crates/agent/src/sandbox.rs)). That ends every process
   in its PID namespace, including children detached with `&`, `nohup`,
   `setsid`, or a double fork. Each object is labelled with the data
-  directory's instance and the creating process, and `wirken run` removes at
-  start any whose process has ended, as after a kill.
+  directory's instance and the creating process, and `wirken run` and
+  `wirken lyrik run` remove at start any whose process has ended, as after a
+  kill.
 - **`Off` on Linux and macOS.** The shell leads its own process group, and
   the group is killed when the call returns or times out (`HostGroup` in
   [`tool.rs`](../crates/agent/src/tool.rs)). That ends children started with

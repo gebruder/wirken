@@ -157,6 +157,17 @@ pub async fn run(
         anyhow::bail!("target is not a directory: {}", target.display());
     }
     check_run_id(run_id)?;
+
+    // Exec containers an earlier process left behind, swept as
+    // `wirken run` sweeps them at start.
+    let swept = wirken_agent::sandbox::sweep_local_leftovers(
+        &super::load_sandbox_config(&super::config().data_dir).instance,
+    )
+    .await;
+    if swept > 0 {
+        tracing::info!("removed {swept} exec container(s) an earlier run left behind");
+    }
+
     let config_path = target.join(".lyrik").join("config.json");
     if !config_path.exists() {
         anyhow::bail!(
