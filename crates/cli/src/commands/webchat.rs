@@ -4795,11 +4795,11 @@ pub async fn capabilities_snapshot(
 ) -> serde_json::Value {
     use serde_json::{Value, json};
     let session_id = webchat_session_id(conversation);
-    let org = wirken_gateway::org::load_tool_policy(&cfg.data_dir)
-        .ok()
-        .flatten();
+    // The policy the gate enforces, loaded at start; the file can be
+    // newer.
+    let org = factory.org_permissions();
     let org_policy_for = |name: &str| -> &'static str {
-        match &org {
+        match org {
             Some(p) if p.blocked_tools.iter().any(|t| t == name) => "blocked",
             Some(p)
                 if !p.allowed_tools.is_empty() && !p.allowed_tools.iter().any(|t| t == name) =>
@@ -7812,6 +7812,22 @@ mod tests {
             .expect("read_file offered");
         assert_eq!(read["tier"], "tier1");
         assert_eq!(read["org_policy"], "allowed");
+
+        // A policy written after start is not the one the gate enforces,
+        // and the panel does not show it.
+        std::fs::write(
+            cfg.data_dir.join("tool_policy.json"),
+            r#"{"blocked_tools": ["read_file"]}"#,
+        )
+        .unwrap();
+        let after = capabilities_snapshot(&cfg, &factory, super::WEBCHAT_CONVERSATION).await;
+        let read_after = after["tools"]
+            .as_array()
+            .and_then(|t| t.iter().find(|t| t["name"] == "read_file"))
+            .expect("read_file offered");
+        assert_eq!(read_after["org_policy"], "allowed");
+        std::fs::remove_file(cfg.data_dir.join("tool_policy.json")).unwrap();
+
         let grants = snap["grants"].as_array().expect("grants listed");
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0]["action_key"], "shell:ls");

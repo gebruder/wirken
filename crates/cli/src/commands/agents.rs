@@ -612,6 +612,9 @@ pub async fn deny_subagent(parent: &str, child: &str) -> Result<()> {
     Ok(())
 }
 
+/// A running `wirken run` keeps the agent config it started with.
+const RESTART_HINT: &str = "  A running `wirken run` keeps the agent config it started with; this takes effect at its next start.";
+
 pub async fn set(
     id: &str,
     tools_enabled: Option<&str>,
@@ -778,7 +781,6 @@ pub async fn set(
                  operator again."
             );
         }
-        println!("  Takes effect at the next start of `wirken run`.");
         details.push(format!("exempt_exec_mcp_output {exempt}"));
         changed = true;
     }
@@ -790,6 +792,7 @@ pub async fn set(
         );
     } else {
         super::note_operator_command("agents set", id, &details.join("; "));
+        println!("{RESTART_HINT}");
     }
 
     Ok(())

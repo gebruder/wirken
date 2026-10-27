@@ -42,7 +42,9 @@ All fields are optional; only provided fields are applied.
   change takes effect at the next gateway start.
 - `permissions.allowed_tools` and `permissions.blocked_tools` drive
   `tool_policy.json`, persisted when at least one list is non-empty.
-  `wirken run` loads it and injects it into every waked agent. The check sits
+  `wirken run` loads it once at start and injects it into every waked agent,
+  so a change takes effect at the next start; web chat's About panel shows the
+  policy that start loaded. The check sits
   in `execute_tool` ahead of the tier check: a name in `blocked_tools` fails
   before dispatch, a name not in a non-empty `allowed_tools` fails before
   dispatch, and `blocked_tools` wins when a name is in both. Denials land as

@@ -38,6 +38,13 @@ moves every process at once.
 | `signing-key.hex` | Per-author skill and MCP signing seed | `wirken skills sign` |
 | `keychain/` | age-encrypted device key when the OS keychain is unavailable | `wirken setup` |
 | `skills/` | Installed skills | `wirken skills install` or setup |
+
+`wirken run` reads `provider.json`, `agent_config.db`, `tool_policy.json`,
+`sandbox.json`, `budget.json`, `permissions.json`, `mcp.json` and `skills/`
+once at start; a change to any of them takes effect at the next start. It
+reads `permissions.db` and `senders.db` on every check, `cron.db` on every
+scheduler tick, and takes up changes to `vault.db`, `adapters.db` and
+`hooks.db` within seconds.
 | `agents/<id>/` | Per-agent `identity.{key,pub}`, `workspace/`, `skills/`, `mcp.json` | `wirken agents add` |
 | `sockets/` | Unix domain sockets for IPC. On Windows the gateway uses named pipes derived from these path stems and the directory holds no live files | `wirken run` |
 | `workspace/` | Default agent workspace | `wirken run` |

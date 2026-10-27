@@ -279,6 +279,9 @@ takes no `--api-key-env` or `--base-url`, and `agents set` refuses `--api-key`
 and `--base-url` on it; `agents set --model list` lists the signed-in
 account's models.
 
+A running `wirken run` keeps the agent config it started with: a change made
+with `agents` takes effect at its next start, and `agents set` says so.
+
 `--api-key` prompts for the value rather than taking it on the command line,
 so it does not reach shell history or the process table. Defaults for
 `allow-subagent`: no tools, `tier1`, 5 rounds, 30s. See

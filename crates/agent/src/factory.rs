@@ -764,6 +764,12 @@ impl AgentFactory {
         }
     }
 
+    /// The org tool policy every woken agent is gated by, as loaded at
+    /// start.
+    pub fn org_permissions(&self) -> Option<&OrgPermissions> {
+        self.org_permissions.as_deref()
+    }
+
     /// Whether this factory has a static config for `agent_id`.
     pub fn has_agent(&self, agent_id: &str) -> bool {
         self.static_configs.contains_key(agent_id)

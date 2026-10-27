@@ -40,6 +40,12 @@ tagged.
   `message.inbound_dropped` row with their count. **For wirken-siem:** new
   legacy action `message.inbound_dropped`.
 
+### Changed
+
+- `wirken agents set` says that a running `wirken run` keeps the agent config
+  it started with. Web chat's About panel shows the org tool policy the gate
+  loaded at start rather than `tool_policy.json` as it is now on disk.
+
 ## [3.1.0] - 2026-10-26
 
 Thanks to @olive-mm for #305, the Discord approval gate, now merged as
