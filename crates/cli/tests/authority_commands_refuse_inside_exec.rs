@@ -45,6 +45,8 @@ const INVOCATIONS: &[(&str, &str, &[&str])] = &[
     ("audit", "acknowledge", &["audit", "acknowledge", "--all"]),
     ("agents", "remove", &["agents", "remove", "default"]),
     ("agents", "bind", &["agents", "bind", "default", "telegram"]),
+    ("agents", "stop", &["agents", "stop", "default"]),
+    ("agents", "resume", &["agents", "resume", "default"]),
     ("channel", "remove", &["channel", "remove", "telegram"]),
     ("vault", "reset", &["vault", "reset"]),
     ("vault", "migrate", &["vault", "migrate"]),

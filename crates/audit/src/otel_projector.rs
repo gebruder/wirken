@@ -556,6 +556,8 @@ impl OtelProjector {
             SessionEvent::AuthorityReloaded { .. } => Vec::new(),
             SessionEvent::OperatorCommandRefused { .. } => Vec::new(),
             SessionEvent::SessionLivenessUnavailable { .. } => Vec::new(),
+            SessionEvent::AgentStopped { .. } => Vec::new(),
+            SessionEvent::AgentResumed { .. } => Vec::new(),
             // The verdict lands on the tool result the tool span already
             // times.
             SessionEvent::HookDispatched { .. } => Vec::new(),

@@ -620,6 +620,20 @@ enum AgentCommands {
         /// Agent ID
         id: String,
     },
+    /// Stop an agent: nothing runs under its id until it is resumed.
+    /// Refuses inside a Wirken `exec`.
+    Stop {
+        /// Agent ID
+        id: String,
+        /// Also remove every persisted grant the agent holds.
+        #[arg(long)]
+        revoke_all: bool,
+    },
+    /// Resume a stopped agent. Refuses inside a Wirken `exec`.
+    Resume {
+        /// Agent ID
+        id: String,
+    },
     /// Bind a channel to an agent
     Bind {
         /// Agent ID
@@ -1518,6 +1532,8 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
                 AgentCommands::DenySubagent { .. } => "deny-subagent",
                 AgentCommands::Set { .. } => "set",
                 AgentCommands::SetEgress { .. } => "set-egress",
+                AgentCommands::Stop { .. } => "stop",
+                AgentCommands::Resume { .. } => "resume",
                 AgentCommands::List => return None,
             },
         ),
@@ -2108,6 +2124,8 @@ async fn main() -> Result<()> {
             }
             AgentCommands::List => commands::agents::list().await,
             AgentCommands::Remove { id } => commands::agents::remove(&id).await,
+            AgentCommands::Stop { id, revoke_all } => commands::agents::stop(&id, revoke_all).await,
+            AgentCommands::Resume { id } => commands::agents::resume(&id).await,
             AgentCommands::Bind { agent, channel } => {
                 commands::agents::bind(&agent, &channel).await
             }

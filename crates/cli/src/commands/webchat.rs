@@ -4599,6 +4599,8 @@ pub fn session_events(
             SessionEvent::AuthorityReloaded { .. } => None,
             SessionEvent::OperatorCommandRefused { .. } => None,
             SessionEvent::SessionLivenessUnavailable { .. } => None,
+            SessionEvent::AgentStopped { .. } => None,
+            SessionEvent::AgentResumed { .. } => None,
             // The hook's verdict is already the outcome on the tool row it
             // gated.
             SessionEvent::HookDispatched { .. } => None,

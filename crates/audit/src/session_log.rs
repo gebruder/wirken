@@ -1994,6 +1994,24 @@ pub enum SessionEvent {
         /// The open error.
         error: String,
     },
+    /// `wirken agents stop`, on the operator lane, sealed by a chain
+    /// head. Nothing runs under `agent_id` until it is resumed.
+    AgentStopped {
+        agent_id: String,
+        /// The OS account that ran it.
+        stopped_by: String,
+        /// Persisted grants removed by `--revoke-all`.
+        grants_revoked: u32,
+        /// Session-scoped grants dropped from the agent's sessions.
+        session_grants_cleared: u32,
+    },
+    /// `wirken agents resume`, on the operator lane, sealed by a chain
+    /// head.
+    AgentResumed {
+        agent_id: String,
+        /// The OS account that ran it.
+        resumed_by: String,
+    },
     /// One veto-hook invocation completed. Emitted per hook per tool
     /// call (in series, in `hook_registry` insertion order). The
     /// invocation runs after Wirken's tier and per-skill permission

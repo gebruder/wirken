@@ -29,6 +29,11 @@ handled are one `message.inbound_dropped` row per connection, carrying
 `count` and `reason` (`gateway_stopped`, or `connection_ended` when the
 connection ended for another reason), with no sender or content.
 
+A message to a stopped agent is a `message.refused` row with detail
+`{reason: "agent_stopped", agent_id}` after its `message.inbound` row, and no
+reply is sent. A cron firing for a stopped agent is a `cron.skipped` row with
+the same detail, targeting the job id; the firing is not deferred.
+
 | `kind` | Identity fields | Emit context |
 |--------|-----------------|--------------|
 | `user_message` | `adapter_id`, `sender_id`, `inbound_id` | Inbound that triggered a turn. `None` for subagent recursion. |
@@ -73,6 +78,8 @@ connection ended for another reason), with no sender or content.
 | `operator_command` | none | A command that changes what the gateway trusts or runs completed, on the `gateway-operator` lane, sealed by a chain head right after it: `credentials add`, `rotate`, `remove`, `rescope`, `authorize`, `sign-out` and `import-plan`; `channel add` and `remove`; `hooks register` and `unregister`; `agents add`, `remove`, `bind`, `set`, `set-egress`, `allow-subagent` and `deny-subagent`; `persona create`, `edit` and `delete`; `mcp sign` and `authorize`; `skills trust-root`; `cron create`, `delete`, `pause` and `resume`. Carries `command`, `target`, `detail` (what changed, never a secret) and `run_by`. A change whose row cannot be written stands, and the command says so. Forwarded by default. `credentials grant` and `revoke` write `credential_destination_granted` and `credential_destination_revoked` instead. |
 | `operator_command_refused` | none | An operator command ran inside a Wirken `exec` and was refused before it opened anything, on its lane (`gateway-senders` for `wirken senders`, `gateway-approvers` for `wirken approvers`, `gateway-operator` for the authority-changing subcommands listed in [cli.md](cli.md)), sealed by a chain head right after it. Carries `command`, `invocation` (the subcommand, empty for `setup` and `import`) and `reason` (`inside_exec`). Forwarded by default, at `warn`. |
 | `session_liveness_unavailable` | none | `wirken run` could not open the session store it asks whether a session is live, so no session-scoped grant is served until it restarts. On the `gateway-permissions` lane, sealed by a chain head right after it, and printed at startup. Carries `error`. Forwarded by default, at `warn`. |
+| `agent_stopped` | `agent_id` | `wirken agents stop`, on the `gateway-operator` lane, sealed by a chain head. Carries `stopped_by`, `grants_revoked` (persisted grants `--revoke-all` removed) and `session_grants_cleared`. Forwarded by default, at `warn`. |
+| `agent_resumed` | `agent_id` | `wirken agents resume`, on the `gateway-operator` lane, sealed by a chain head. Carries `resumed_by`. Forwarded by default, at `info`. |
 | `rewind` | `agent_id`, `reason` | Sentinel emitted before truncating the most recent N events. |
 | `audit_legacy` | `actor_kind`, `actor_id`, `action`, `target` | Gateway-emitted flat-tuple events. |
 

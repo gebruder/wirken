@@ -261,6 +261,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         // Something other than the operator tried to.
         SessionEvent::OperatorCommandRefused { .. } => true,
         SessionEvent::SessionLivenessUnavailable { .. } => true,
+        SessionEvent::AgentStopped { .. } => true,
+        SessionEvent::AgentResumed { .. } => true,
         // The tool-call hook's verdict; EgressHookDispatched is the egress
         // half the set carries.
         SessionEvent::HookDispatched { .. } => false,
@@ -349,6 +351,8 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::AuthorityReloaded { .. } => "authority_reloaded",
         SessionEvent::OperatorCommandRefused { .. } => "operator_command_refused",
         SessionEvent::SessionLivenessUnavailable { .. } => "session_liveness_unavailable",
+        SessionEvent::AgentStopped { .. } => "agent_stopped",
+        SessionEvent::AgentResumed { .. } => "agent_resumed",
         SessionEvent::HookDispatched { .. } => "hook_dispatched",
         SessionEvent::HookCrashed { .. } => "hook_crashed",
         SessionEvent::McpEntryVerified { .. } => "mcp_entry_verified",

@@ -270,6 +270,8 @@ wirken agents add                        # wizard, or --id/--provider/--model fo
 wirken agents add --id ID --provider openai --model SLUG --auth plan [--credential ENTRY]
 wirken agents list
 wirken agents remove <ID>
+wirken agents stop <ID> [--revoke-all]
+wirken agents resume <ID>
 wirken agents bind <AGENT> <CHANNEL>
 wirken agents set <ID> [--model M] [--base-url U] [--tools-enabled true|false|auto] [--api-key]
 wirken agents set-egress <ID> --channel C --mode none|allowlist|open [--domains "a,b"]
@@ -286,6 +288,9 @@ account's models.
 
 A running `wirken run` keeps the agent config it started with: a change made
 with `agents` takes effect at its next start, and `agents set` says so.
+`stop` and `resume` are the exception: they write the permission store, which
+is read on every check, so they hold at once, with the gateway down and across
+restarts.
 
 `--api-key` prompts for the value rather than taking it on the command line,
 so it does not reach shell history or the process table. Defaults for

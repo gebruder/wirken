@@ -12,6 +12,17 @@ tagged.
 
 ### Security
 
+- `wirken agents stop <id>` stops an agent and `wirken agents resume <id>`
+  resumes it. The state is in `permissions.db`, read on every check, so it
+  holds with the gateway down and across restarts. A stopped agent runs no
+  turn, tool call, cron firing or child spawn; a message to it is refused with
+  a `message.refused` row and no reply, and a cron firing is a `cron.skipped`
+  row. A stop drops the agent's session-scoped grants; `--revoke-all` also
+  removes its persisted grants. Each command is one sealed `agent_stopped` or
+  `agent_resumed` row on `gateway-operator`, and both refuse inside a Wirken
+  `exec`. **For wirken-siem:** new kinds `agent_stopped` (`warn`) and
+  `agent_resumed` (`info`), forwarded by default; new legacy actions
+  `message.refused` and `cron.skipped`.
 - When `wirken run` cannot open the session store it asks about liveness, no
   session is live and no session-scoped grant is served until restart. The
   failure is printed at startup and recorded as a `session_liveness_unavailable`

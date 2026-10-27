@@ -1498,6 +1498,10 @@ pub enum PermissionCheck {
 /// downstream pattern-match share one string.
 pub const SESSION_CLEAR_REASON_ENDED: &str = "session_ended";
 
+/// `reason` on the tombstones `wirken agents stop` writes for the
+/// agent's sessions.
+pub const SESSION_CLEAR_REASON_AGENT_STOPPED: &str = "agent_stopped";
+
 /// Session id the audit chain uses for operator actions on the
 /// permission store that belong to no agent session.
 ///

@@ -897,6 +897,9 @@ fn extract_identity_for_sentinel(
         SessionEvent::AuthorityReloaded { .. } => (None, None, None),
         SessionEvent::OperatorCommandRefused { .. } => (None, None, None),
         SessionEvent::SessionLivenessUnavailable { .. } => (None, None, None),
+        // An operator command about one agent.
+        SessionEvent::AgentStopped { agent_id, .. } => (None, None, Some(agent_id.clone())),
+        SessionEvent::AgentResumed { agent_id, .. } => (None, None, Some(agent_id.clone())),
         // A hook id and an error; none of the three.
         SessionEvent::HookCrashed { .. } => (None, None, None),
         // A server name and a signer; none of the three.
@@ -1215,6 +1218,19 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::SessionLivenessUnavailable { error } => {
             format!("session liveness unavailable, no session-scoped grant served: {error}")
         }
+        SessionEvent::AgentStopped {
+            agent_id,
+            stopped_by,
+            grants_revoked,
+            session_grants_cleared,
+        } => format!(
+            "agent {agent_id} stopped by={stopped_by} grants_revoked={grants_revoked} \
+             session_grants_cleared={session_grants_cleared}"
+        ),
+        SessionEvent::AgentResumed {
+            agent_id,
+            resumed_by,
+        } => format!("agent {agent_id} resumed by={resumed_by}"),
         SessionEvent::AuthorityReloaded {
             subject_kind,
             subject,
@@ -1409,6 +1425,7 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
         SessionEvent::CredentialDestinationRefused { .. } => "error",
         SessionEvent::OperatorCommandRefused { .. } => "warn",
         SessionEvent::SessionLivenessUnavailable { .. } => "warn",
+        SessionEvent::AgentStopped { .. } => "warn",
         SessionEvent::McpServerExited {
             stopped_by_proxy, ..
         } => {

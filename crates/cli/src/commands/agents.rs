@@ -500,6 +500,131 @@ pub async fn remove(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// An agent id `stop` and `resume` act on: a configured agent, or the
+/// implicit `default`.
+fn known_agent(cfg: &wirken_gateway::config::GatewayConfig, id: &str) -> Result<()> {
+    if id == "default" {
+        return Ok(());
+    }
+    let store = AgentConfigStore::open(&cfg.agent_config_db_path())
+        .context("Failed to open agent config store")?;
+    store.get(id).context(format!("Agent '{id}' not found"))?;
+    Ok(())
+}
+
+/// Tombstone the session-scoped grants recorded on `agent_id`'s own
+/// sessions, so a wake does not replay them. Sub-agent lanes are the
+/// child's and are left alone. Returns how many grants.
+fn clear_logged_session_grants(
+    log: &wirken_audit::SqliteSessionLog,
+    agent_id: &str,
+) -> Result<u32> {
+    use wirken_gateway::permissions::{
+        SESSION_CLEAR_REASON_AGENT_STOPPED, count_active_session_scoped_approvals,
+        emit_session_scoped_approvals_cleared,
+    };
+    let prefix = format!("{agent_id}/");
+    let mut cleared = 0;
+    for session in log.list_session_ids()? {
+        if !session.starts_with(&prefix) || session.contains("#sub-") {
+            continue;
+        }
+        let active = count_active_session_scoped_approvals(log, &session)?;
+        if active > 0 {
+            emit_session_scoped_approvals_cleared(
+                log,
+                &session,
+                active,
+                SESSION_CLEAR_REASON_AGENT_STOPPED,
+            )?;
+            cleared += active;
+        }
+    }
+    Ok(cleared)
+}
+
+/// `wirken agents stop`: written to the permission store, which every
+/// turn, tool call, inbound message, cron firing and child spawn asks,
+/// so it holds with the gateway down and across restarts.
+pub async fn stop(id: &str, revoke_all: bool) -> Result<()> {
+    use wirken_audit::SessionLog as _;
+    let cfg = config();
+    known_agent(&cfg, id)?;
+    let store = super::open_permission_store(&cfg)?;
+    let operator = super::local_operator();
+    let newly = store
+        .stop_agent(id, &operator)
+        .context(format!("Failed to stop agent '{id}'"))?;
+    if !newly && !revoke_all {
+        println!("  Agent '{id}' is already stopped.");
+        return Ok(());
+    }
+    let grants_revoked = if revoke_all {
+        store
+            .revoke_all(id)
+            .context(format!("Failed to revoke the grants of '{id}'"))? as u32
+    } else {
+        0
+    };
+    let log = super::open_signed_session_log(&cfg)?;
+    let session_grants_cleared = clear_logged_session_grants(&log, id)?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(
+        wirken_audit::OPERATOR_COMMANDS_SESSION.to_string(),
+    ));
+    log.append(
+        &handle,
+        wirken_audit::TrustLevel::User,
+        wirken_audit::SessionEvent::AgentStopped {
+            agent_id: id.to_string(),
+            stopped_by: operator,
+            grants_revoked,
+            session_grants_cleared,
+        },
+    )
+    .context("Failed to record the stop in the audit chain")?;
+    super::seal_operator_lane(&log, wirken_audit::OPERATOR_COMMANDS_SESSION);
+
+    println!("  Agent '{id}' stopped. Nothing runs under it until `wirken agents resume {id}`.");
+    if revoke_all {
+        println!("  Removed {grants_revoked} persisted grant(s).");
+    }
+    if session_grants_cleared > 0 {
+        println!("  Dropped {session_grants_cleared} session-scoped grant(s).");
+    }
+    Ok(())
+}
+
+/// `wirken agents resume`.
+pub async fn resume(id: &str) -> Result<()> {
+    use wirken_audit::SessionLog as _;
+    let cfg = config();
+    known_agent(&cfg, id)?;
+    let store = super::open_permission_store(&cfg)?;
+    let was = store
+        .resume_agent(id)
+        .context(format!("Failed to resume agent '{id}'"))?;
+    if !was {
+        println!("  Agent '{id}' is not stopped.");
+        return Ok(());
+    }
+    let log = super::open_signed_session_log(&cfg)?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(
+        wirken_audit::OPERATOR_COMMANDS_SESSION.to_string(),
+    ));
+    log.append(
+        &handle,
+        wirken_audit::TrustLevel::User,
+        wirken_audit::SessionEvent::AgentResumed {
+            agent_id: id.to_string(),
+            resumed_by: super::local_operator(),
+        },
+    )
+    .context("Failed to record the resume in the audit chain")?;
+    super::seal_operator_lane(&log, wirken_audit::OPERATOR_COMMANDS_SESSION);
+    println!("  Agent '{id}' resumed.");
+    Ok(())
+}
+
 pub async fn bind(agent_id: &str, channel: &str) -> Result<()> {
     let cfg = config();
     let store = AgentConfigStore::open(&cfg.agent_config_db_path())
