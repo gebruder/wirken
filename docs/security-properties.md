@@ -1,6 +1,6 @@
 # Security properties
 
-Three mapping tables, the exec perimeter, and the escape-hatch inventory. Every mechanism named
+Four mapping tables, the exec perimeter, and the escape-hatch inventory. Every mechanism named
 here is owned by another page; the cells say what the control is and link to
 where it is described, rather than restating it.
 
@@ -119,3 +119,20 @@ to satisfy.
 
 Subcategories wirken ships no mechanism for, including the whole of the
 GOVERN function beyond 1.7, are deliberately absent.
+
+## EU AI Act Article 14(4)
+
+Point text is quoted verbatim from Article 14(4) of
+[Regulation (EU) 2024/1689](https://eur-lex.europa.eu/eli/reg/2024/1689/oj),
+Official Journal L of 12 July 2024. Its lead-in requires that "natural persons
+to whom human oversight is assigned are enabled, as appropriate and
+proportionate:". A row is here only where a shipped mechanism does what the
+point says; points (b) and (c) have no wirken control and are absent. A row is
+a claim about the mechanism, not a claim that a deployment meets the
+Regulation. Ratings follow the ASI table above.
+
+| Point | Verbatim text | Mechanism | Rating | Gap |
+|---|---|---|---|---|
+| 14(4)(a) | "to properly understand the relevant capacities and limitations of the high-risk AI system and be able to duly monitor its operation, including in view of detecting and addressing anomalies, dysfunctions and unexpected performance" | Monitoring: every action is a typed event written before it executes, on a per-session SHA-256 chain with signed chain heads ([audit-cli.md](audit-cli.md)), forwarded to a SIEM as it is written ([siem-forwarder.md](siem-forwarder.md)). Anomalies: content carrying a stored secret is refused as a `leak_refused` row ([architecture.md](architecture.md#2-credential-lifecycle)); inbound messages matching extraction or override patterns emit `message.threat_flagged` (`InjectionDetector::scan`, `crates/gateway/src/injection_detect.rs`); the audit writer halts on repeated failed flushes or chain-verification passes, and `wirken run` does not start again until `wirken audit acknowledge --all` ([audit-cli.md](audit-cli.md#tamper-response)). Capacities and limitations are documented in [threat-model.md](threat-model.md) and this page; no mechanism conveys them. | Partial | Understanding is documentation, not a mechanism. Threat flagging records and does not block. Nothing detects drift whose individual calls each pass the gate. |
+| 14(4)(d) | "to decide, in any particular situation, not to use the high-risk AI system or to otherwise disregard, override or reverse the output of the high-risk AI system" | At the action edge: every Tier 3 call prompts and runs only on approval (`ApprovalGate`, `crates/agent/src/approval_gate.rs`); a pending request is denied with `wirken permissions pending deny`; org `blocked_tools` fails a named tool before dispatch; an unregistered tool name is denied (`Action::UnknownTool`, `Agent::execute_tool`, `crates/agent/src/runtime.rs`). [permissions-and-identity.md](permissions-and-identity.md) | Partial | Nothing reverses a completed action: a call that ran stays done, and the chain records it. A Tier 2 call with a stored grant runs without a prompt. A `blocked_tools` change takes effect at the next gateway start. |
+| 14(4)(e) | "to intervene in the operation of the high-risk AI system or interrupt the system through a ‘stop’ button or a similar procedure that allows the system to come to a halt in a safe state." | Intervene: the approval gates hold each Tier 3 call until the operator approves or denies it (`ApprovalGate`, `crates/agent/src/approval_gate.rs`). Interrupt: SIGINT or SIGTERM to `wirken run` (`StopSignal`, `crates/cli/src/commands/run.rs`) stops the adapters, the MCP proxy and its servers, and every turn in flight; each `exec` container with its egress sidecar and networks is removed (`ExecResources`, `drain_cleanups`, `crates/agent/src/sandbox.rs`), a host `exec` is killed with its process group (`HostGroup`, `crates/agent/src/tool.rs`), and each session ends on a signed chain head. [sandbox-properties.md](sandbox-properties.md#processes-end-with-the-call) | Mitigated (with opt-out) | Under `sandbox.json` `mode: off`, a process the command started with `setsid` leaves the group and keeps running. |
