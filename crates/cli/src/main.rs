@@ -1440,7 +1440,8 @@ fn build_env_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
 /// The `(command, subcommand)` an invocation names when it changes
 /// authority or configuration: grants, skills, MCP entries, credentials,
 /// the vault, the audit halt, agents, channels, cron jobs, hooks,
-/// personas, presets, web chat logins and Zirkel bindings. `None` for a
+/// personas, presets, web chat logins, Zirkel bindings, setup and
+/// imported archives. `None` for a
 /// read and for every other command. Each listed
 /// command is matched exhaustively, so a new subcommand is classified
 /// where it is added.
@@ -1578,6 +1579,10 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
                 WebchatCommands::Open { .. } => "open",
             },
         ),
+        // Setup writes the provider, the vault, channels, the service
+        // and, with `--org`, the org policy.
+        Commands::Setup { .. } => ("setup", ""),
+        Commands::Import { .. } => ("import", ""),
         Commands::Zirkel(cmd) => (
             "zirkel",
             match cmd {

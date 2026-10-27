@@ -82,6 +82,8 @@ const INVOCATIONS: &[(&str, &str, &[&str])] = &[
         ],
     ),
     ("zirkel", "unbind", &["zirkel", "unbind"]),
+    ("setup", "", &["setup"]),
+    ("import", "", &["import", "/nonexistent/archive.zip"]),
     (
         "zirkel",
         "auth-set",
@@ -134,6 +136,7 @@ fn authority_commands_refuse_inside_exec_and_record_it() {
             stderr.contains("refuses to run inside a Wirken exec"),
             "{args:?}: {stderr}"
         );
+        assert!(!stderr.contains("  refuses"), "{args:?}: {stderr}");
     }
 
     let expected: Vec<_> = INVOCATIONS

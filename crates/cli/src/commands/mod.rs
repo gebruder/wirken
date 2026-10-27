@@ -476,7 +476,8 @@ fn record_operator_command(command: &str, target: &str, detail: &str) -> anyhow:
 }
 
 /// Refuse `wirken <command> <invocation>` under the `exec` marker, and
-/// record the refusal on the operator lane; the row is best effort.
+/// record the refusal on the operator lane; the row is best effort. An
+/// empty `invocation` names a command with no subcommand.
 pub fn refuse_inside_exec(command: &str, invocation: &str) -> anyhow::Result<()> {
     if std::env::var_os(wirken_agent::tool::EXEC_MARKER_ENV).is_none() {
         return Ok(());
@@ -488,8 +489,13 @@ pub fn refuse_inside_exec(command: &str, invocation: &str) -> anyhow::Result<()>
             wirken_audit::OPERATOR_COMMANDS_SESSION
         );
     }
+    let named = if invocation.is_empty() {
+        command.to_string()
+    } else {
+        format!("{command} {invocation}")
+    };
     anyhow::bail!(
-        "wirken {command} {invocation} refuses to run inside a Wirken exec ({} is set); \
+        "wirken {named} refuses to run inside a Wirken exec ({} is set); \
          run it yourself, from a terminal",
         wirken_agent::tool::EXEC_MARKER_ENV
     )

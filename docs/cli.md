@@ -13,7 +13,7 @@ every `credentials` subcommand but `list` and `show`; `vault reset` and
 `channel add` and `remove`; `cron create`, `delete`, `pause` and `resume`;
 `hooks register` and `unregister`; `persona create`, `edit` and `delete`;
 `preset install`, `schedule` and `unschedule`; `webchat open`; `zirkel bind`,
-`unbind` and `auth-set`. Reads run, and so does `sessions close`, which only
+`unbind` and `auth-set`; `setup`; `import`. Reads run, and so does `sessions close`, which only
 takes authority away.
 
 ## wirken setup

@@ -36,7 +36,9 @@ tagged.
   Wirken `exec`, each refusal an `operator_command_refused` row on the
   `gateway-operator` lane. **For wirken-siem:** `command` takes these names.
   The same holds for the subcommands of `vault`, `cron`, `hooks`, `persona`,
-  `preset`, `webchat` and `zirkel` that change authority or configuration.
+  `preset`, `webchat` and `zirkel` that change authority or configuration,
+  and for `wirken setup` and `wirken import`, whose rows carry an empty
+  `invocation`.
 - A stdio MCP server's `install_dir` or mount `source` inside the data
   directory, or containing it, is refused at start as
   `sandbox_config_invalid`. The path is resolved before the check and bound
