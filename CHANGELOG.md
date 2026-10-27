@@ -34,6 +34,11 @@ tagged.
 - Leak detection also matches each agent's `identity.key`, the audit signing
   key and the operator key, as the hex their files hold; a `leak_refused` row
   names the file by its path under the data directory.
+- A clean stop records what it drops, after `gateway.stop`: each pending
+  approval is a `permission_denied` row on its session with `denial_reason`
+  `gateway stopped`, and messages a connection had queued are one
+  `message.inbound_dropped` row with their count. **For wirken-siem:** new
+  legacy action `message.inbound_dropped`.
 
 ## [3.1.0] - 2026-10-26
 

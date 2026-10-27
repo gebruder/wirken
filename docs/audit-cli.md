@@ -22,6 +22,13 @@ adapter handshake records). Variants are serde-tagged with `kind =
 `gateway.start` carries the starting build's `version`, `commit` and `dirty`
 state in its detail.
 
+`gateway.stop` is the first row a clean stop writes. Each approval still
+pending then is denied on its session as `permission_denied` with
+`denial_reason` `gateway stopped`. Messages a connection had read and not yet
+handled are one `message.inbound_dropped` row per connection, carrying
+`count` and `reason` (`gateway_stopped`, or `connection_ended` when the
+connection ended for another reason), with no sender or content.
+
 | `kind` | Identity fields | Emit context |
 |--------|-----------------|--------------|
 | `user_message` | `adapter_id`, `sender_id`, `inbound_id` | Inbound that triggered a turn. `None` for subagent recursion. |

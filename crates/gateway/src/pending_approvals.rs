@@ -112,6 +112,15 @@ struct Entry {
     tx: oneshot::Sender<PendingDecision>,
 }
 
+/// Every entry taken out of a queue at shutdown. While this is held the
+/// gates keep waiting, so none resolves on its own and writes a row of
+/// its own; dropping it releases them.
+pub struct Withdrawn {
+    /// Each entry's request id and request, ordered by id.
+    pub requests: Vec<(String, PendingRequest)>,
+    _senders: Vec<oneshot::Sender<PendingDecision>>,
+}
+
 /// Outcome of a `resolve` call from the IPC handler. `Accepted` and
 /// `UnknownKey` map directly to the wire shape in
 /// `wirken_ipc::permissions::DecisionResult`. `UnknownKey` collapses
@@ -306,6 +315,23 @@ impl PendingApprovalQueue {
         })
     }
 
+    /// Take every entry out of the queue. A later `resolve` of one
+    /// finds nothing.
+    pub fn withdraw_all(&self) -> Withdrawn {
+        let drained: Vec<(String, Entry)> = self.inner.lock().unwrap().drain().collect();
+        let mut requests = Vec::with_capacity(drained.len());
+        let mut senders = Vec::with_capacity(drained.len());
+        for (id, entry) in drained {
+            requests.push((id, entry.request));
+            senders.push(entry.tx);
+        }
+        requests.sort_by(|a, b| a.0.cmp(&b.0));
+        Withdrawn {
+            requests,
+            _senders: senders,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
     }
@@ -333,6 +359,40 @@ mod tests {
             session_id: String::new(),
             prompt_conversation: None,
         }
+    }
+
+    #[tokio::test]
+    async fn withdrawn_entries_wait_until_released_and_resolve_to_nothing() {
+        let q = PendingApprovalQueue::new();
+        let (a, mut rx_a) = q.register(req("exec"));
+        let (b, _rx_b) = q.register(req("http_request"));
+
+        let withdrawn = q.withdraw_all();
+        let mut ids: Vec<_> = [a.clone(), b].into_iter().collect();
+        ids.sort();
+        assert_eq!(
+            withdrawn
+                .requests
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert!(q.is_empty());
+        assert_eq!(
+            q.resolve(&a, PendingDecision::Allow { actor: None }),
+            ResolveResult::UnknownKey
+        );
+        assert!(matches!(
+            rx_a.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        drop(withdrawn);
+        assert!(matches!(
+            rx_a.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
     }
 
     #[tokio::test]

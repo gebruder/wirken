@@ -580,6 +580,15 @@ impl AuditWriter {
             .map_err(|_| AuditError::ChannelClosed)
     }
 
+    /// Send an audit event without waiting, from a context that can
+    /// neither await nor block, such as `Drop` on a runtime thread.
+    /// Fails when the channel is full or closed.
+    pub fn try_log(&self, event: AuditEvent) -> Result<(), AuditError> {
+        self.tx
+            .try_send(event)
+            .map_err(|_| AuditError::ChannelClosed)
+    }
+
     /// Send an audit event, blocking version for non-async contexts.
     pub fn log_blocking(&self, event: AuditEvent) -> Result<(), AuditError> {
         self.tx

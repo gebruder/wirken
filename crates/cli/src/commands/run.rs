@@ -2544,14 +2544,23 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     println!();
     println!("  Shutting down...");
 
-    audit
-        .log(AuditEvent::new(
-            ActorKind::Service,
-            "gateway",
-            "gateway.stop",
-            "daemon",
-        ))
-        .await?;
+    let stop_row = AuditEvent::new(ActorKind::Service, "gateway", "gateway.stop", "daemon");
+    let stop_at = stop_row.ts;
+    audit.log(stop_row).await?;
+    STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // A pending approval ends as a denial on its session's chain, the
+    // row an approval nobody answers gets. The gates keep waiting while
+    // `withdrawn` is held, so none writes a row of its own before its
+    // turn is stopped below. The denials are appended directly, so
+    // they wait for the writer to store `gateway.stop` first.
+    let withdrawn = pending_approval_queue.withdraw_all();
+    if !withdrawn.requests.is_empty() {
+        if !stored_since(&cfg.audit_db_path(), "gateway.stop", stop_at).await {
+            tracing::warn!("gateway.stop was not stored within 2s; denials at stop follow anyway");
+        }
+        record_withdrawn_approvals(session_log.as_ref(), &withdrawn);
+    }
 
     // Abort adapter processes before emitting SessionEnd ChainHeads
     // so no concurrent appends race the shutdown signature.
@@ -2580,6 +2589,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // A turn stopped mid-`exec` started its container's removal from
     // `Drop`; wait for it before the runtime ends.
     wirken_agent::sandbox::drain_cleanups().await;
+    drop(withdrawn);
     // It holds a handle on the audit writer, and the flush below waits
     // for every handle to go. Kept to the end of this function, it kept
     // the gateway waiting there for ever after "Shutting down".
@@ -2884,6 +2894,120 @@ const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
 /// drop. Shutdown aborts the task running it before it stops the
 /// connection tasks, so a connection ending at shutdown respawns
 /// nothing.
+/// Set once shutdown has begun, so a connection that drops queued
+/// messages says why.
+static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the audit writer has stored an `action` row at or after
+/// `at`, asked for up to two seconds.
+async fn stored_since(
+    db: &std::path::Path,
+    action: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Ok(log) = wirken_audit::AuditLog::open(db) else {
+        return false;
+    };
+    let query = wirken_audit::AuditQuery {
+        action: Some(action.to_string()),
+        since: Some(at - chrono::Duration::milliseconds(1)),
+        limit: Some(1),
+        ..Default::default()
+    };
+    for _ in 0..200 {
+        if log.query(&query).is_ok_and(|rows| !rows.is_empty()) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// What a shutdown denial says on its row.
+const DENIED_AT_STOP: &str = "gateway stopped";
+
+/// Write a `permission_denied` row on each withdrawn request's session,
+/// with the reason [`DENIED_AT_STOP`]. Returns how many were written.
+fn record_withdrawn_approvals(
+    log: &dyn wirken_audit::SessionLog,
+    withdrawn: &wirken_gateway::pending_approvals::Withdrawn,
+) -> usize {
+    let mut written = 0;
+    for (request_id, request) in &withdrawn.requests {
+        let handle = log.handle_for(wirken_audit::SessionId::new(request.session_id.clone()));
+        let row = wirken_audit::SessionEvent::PermissionDenied {
+            tool: request.tool_name.clone(),
+            action_key: request.action_key.clone(),
+            denial_source: wirken_audit::DenialSource::Tier,
+            tier: Some(request.requested_tier.clone()),
+            agent_id: request.agent_id.clone(),
+            trigger: request.trigger_message.clone(),
+            denied_via: None,
+            denial_reason: Some(DENIED_AT_STOP.to_string()),
+            adapter_id: None,
+            sender_id: None,
+            // The queue holds where an `exec` would run as display text
+            // only; the typed location is on the turn's own rows.
+            exec_location: None,
+            denied_by: None,
+            denier_display: None,
+        };
+        match log.append(&handle, wirken_audit::TrustLevel::System, row) {
+            Ok(_) => written += 1,
+            Err(e) => tracing::error!(
+                request_id,
+                session = request.session_id,
+                "could not record the denial of a pending approval at stop: {e}"
+            ),
+        }
+    }
+    written
+}
+
+/// Messages read off a connection and not yet handled. Dropped with
+/// some left, it writes one `message.inbound_dropped` row with their
+/// count, and no sender or content: a queued message has not passed the
+/// sender allowlist.
+struct WaitingInbound {
+    items: std::collections::VecDeque<InboundAction>,
+    audit: Arc<AuditWriter>,
+    adapter_id: String,
+    channel: String,
+}
+
+impl Drop for WaitingInbound {
+    fn drop(&mut self) {
+        let count = self
+            .items
+            .iter()
+            .filter(|a| matches!(a, InboundAction::Message { .. }))
+            .count();
+        if count == 0 {
+            return;
+        }
+        let reason = if STOPPING.load(std::sync::atomic::Ordering::SeqCst) {
+            "gateway_stopped"
+        } else {
+            "connection_ended"
+        };
+        let row = AuditEvent::new(
+            ActorKind::Service,
+            "gateway",
+            "message.inbound_dropped",
+            &self.adapter_id,
+        )
+        .with_channel(&self.channel)
+        .with_detail(serde_json::json!({ "count": count, "reason": reason }));
+        if let Err(e) = self.audit.try_log(row) {
+            tracing::error!(
+                adapter_id = self.adapter_id,
+                count,
+                "could not record queued messages dropped unhandled: {e}"
+            );
+        }
+    }
+}
+
 /// Whether `session_id` is live, for the permission store's session
 /// cache. A lock a panic poisoned reads as not live, so no
 /// session-scoped grant is served from it.
@@ -4516,7 +4640,12 @@ async fn message_loop(
         frames_tx,
     )));
 
-    let mut waiting: std::collections::VecDeque<InboundAction> = std::collections::VecDeque::new();
+    let mut waiting = WaitingInbound {
+        items: std::collections::VecDeque::new(),
+        audit: audit.clone(),
+        adapter_id: adapter_id.to_string(),
+        channel: authenticated_channel.as_str().to_string(),
+    };
     let mut turn: Option<
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>,
     > = None;
@@ -4526,7 +4655,7 @@ async fn message_loop(
 
     loop {
         if turn.is_none() {
-            if let Some(next) = waiting.pop_front() {
+            if let Some(next) = waiting.items.pop_front() {
                 turn = Some(Box::pin(handle_action(&conn, next)));
             } else if let Some(end) = ended.take() {
                 return end;
@@ -4539,9 +4668,9 @@ async fn message_loop(
                 turn = None;
                 result?;
             }
-            frame = frames.recv(), if ended.is_none() && waiting.len() < MESSAGES_WAITING => {
+            frame = frames.recv(), if ended.is_none() && waiting.items.len() < MESSAGES_WAITING => {
                 match frame {
-                    Some(Ok(action @ InboundAction::Message { .. })) => waiting.push_back(action),
+                    Some(Ok(action @ InboundAction::Message { .. })) => waiting.items.push_back(action),
                     Some(Ok(action)) => handle_action(&conn, action).await?,
                     Some(Err(e)) => ended = Some(Err(e)),
                     None => ended = Some(Ok(())),
@@ -5770,6 +5899,116 @@ fn trim_command_for_inventory(cmd: &str) -> String {
         .collect();
     acc.push_str(&suffix);
     acc
+}
+
+#[cfg(test)]
+mod stop_record_tests {
+    use super::{InboundAction, WaitingInbound, record_withdrawn_approvals};
+    use std::sync::Arc;
+    use wirken_audit::{
+        AuditLog, AuditQuery, AuditWriter, SessionId, SessionLog, SqliteSessionLog,
+    };
+    use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingRequest};
+
+    #[test]
+    fn a_withdrawn_approval_is_a_denial_on_its_session() {
+        let log = SqliteSessionLog::open_in_memory().unwrap();
+        let queue = PendingApprovalQueue::new();
+        let (_id, _rx) = queue.register(PendingRequest {
+            agent_id: "default".into(),
+            session_id: "default/webchat/c-1".into(),
+            tool_name: "exec".into(),
+            action_key: "shell:sleep".into(),
+            requested_tier: "tier3".into(),
+            trigger_message: Some("run sleep".into()),
+            arguments: None,
+            assistant_text: None,
+            exec_location: None,
+            exec_runtime: None,
+            prompt_conversation: None,
+        });
+        let withdrawn = queue.withdraw_all();
+        assert_eq!(record_withdrawn_approvals(&log, &withdrawn), 1);
+
+        let handle = log.handle_for(SessionId::new("default/webchat/c-1".to_string()));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let denial = rows
+            .iter()
+            .find_map(|r| match &r.event {
+                wirken_audit::SessionEvent::PermissionDenied {
+                    action_key,
+                    tier,
+                    denial_reason,
+                    trigger,
+                    ..
+                } => Some((
+                    action_key.clone(),
+                    tier.clone(),
+                    denial_reason.clone(),
+                    trigger.clone(),
+                )),
+                _ => None,
+            })
+            .expect("a denial row");
+        assert_eq!(
+            denial,
+            (
+                "shell:sleep".to_string(),
+                Some("tier3".to_string()),
+                Some("gateway stopped".to_string()),
+                Some("run sleep".to_string())
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_messages_dropped_unhandled_are_one_counted_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("audit.db");
+        let (writer, flush) = AuditWriter::new(&db).unwrap();
+        let writer = Arc::new(writer);
+        let message = |id: &str| InboundAction::Message {
+            id: id.into(),
+            text: "secret plans".into(),
+            sender_id: "stranger".into(),
+            sender_name: "stranger".into(),
+            platform_ts_millis: 0,
+            channel: "telegram".into(),
+            conversation_id: "chat-1".into(),
+            reply_to_id: String::new(),
+        };
+        drop(WaitingInbound {
+            items: [message("m-1"), message("m-2"), InboundAction::Heartbeat(1)].into(),
+            audit: writer.clone(),
+            adapter_id: "telegram".into(),
+            channel: "telegram".into(),
+        });
+        drop(WaitingInbound {
+            items: Default::default(),
+            audit: writer.clone(),
+            adapter_id: "telegram".into(),
+            channel: "telegram".into(),
+        });
+        drop(writer);
+        flush.await.unwrap();
+
+        let rows = AuditLog::open(&db)
+            .unwrap()
+            .query(&AuditQuery {
+                action: Some("message.inbound_dropped".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let detail = rows[0].event.detail.clone();
+        assert_eq!(detail["count"], 2);
+        assert_eq!(detail["reason"], "connection_ended");
+        let text = serde_json::to_string(&rows[0].event).unwrap();
+        assert!(
+            !text.contains("stranger") && !text.contains("secret plans"),
+            "{text}"
+        );
+    }
 }
 
 #[cfg(test)]
