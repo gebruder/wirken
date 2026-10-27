@@ -727,20 +727,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
         Ok(liveness_store) => {
             let liveness_store = std::sync::Mutex::new(liveness_store);
             permission_store.set_session_liveness(Arc::new(move |session_id: &str| {
-                // The cache is keyed on `{agent}/{channel}/{conversation}`.
-                // An id that is not that shape is a sentinel lane, which
-                // never carries a session-scoped grant, so there is
-                // nothing for this to be wrong about.
-                let mut parts = session_id.splitn(3, '/');
-                let (Some(_agent), Some(channel), Some(conversation)) =
-                    (parts.next(), parts.next(), parts.next())
-                else {
-                    return true;
-                };
-                match liveness_store.lock() {
-                    Ok(store) => store.is_live(channel, conversation),
-                    Err(_) => true,
-                }
+                session_is_live(&liveness_store, session_id)
             }));
         }
         Err(e) => {
@@ -2894,6 +2881,26 @@ const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
 /// drop. Shutdown aborts the task running it before it stops the
 /// connection tasks, so a connection ending at shutdown respawns
 /// nothing.
+/// Whether `session_id` is live, for the permission store's session
+/// cache. A lock a panic poisoned reads as not live, so no
+/// session-scoped grant is served from it.
+fn session_is_live(store: &std::sync::Mutex<SessionStore>, session_id: &str) -> bool {
+    // The cache is keyed on `{agent}/{channel}/{conversation}`. An id
+    // that is not that shape is a sentinel lane, which never carries a
+    // session-scoped grant, so there is nothing for this to be wrong
+    // about.
+    let mut parts = session_id.splitn(3, '/');
+    let (Some(_agent), Some(channel), Some(conversation)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return true;
+    };
+    match store.lock() {
+        Ok(store) => store.is_live(channel, conversation),
+        Err(_) => false,
+    }
+}
+
 /// Ctrl-C, or SIGTERM where there is one, which is how a service
 /// manager or `kill` asks the gateway to stop. Both run the same
 /// shutdown, so the MCP proxy is asked to stop its servers either way;
@@ -5760,6 +5767,31 @@ fn trim_command_for_inventory(cmd: &str) -> String {
         .collect();
     acc.push_str(&suffix);
     acc
+}
+
+#[cfg(test)]
+mod session_liveness_tests {
+    use super::session_is_live;
+    use wirken_gateway::session::SessionStore;
+
+    #[test]
+    fn a_poisoned_liveness_lock_reads_as_not_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("sessions.db"), 3600).unwrap();
+        store.get_or_create("webchat", "c1").unwrap();
+        let store = std::sync::Mutex::new(store);
+        assert!(session_is_live(&store, "default/webchat/c1"));
+
+        let _ = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _guard = store.lock().unwrap();
+                panic!("poison the liveness lock");
+            })
+            .join()
+        });
+        assert!(store.is_poisoned());
+        assert!(!session_is_live(&store, "default/webchat/c1"));
+    }
 }
 
 #[cfg(test)]

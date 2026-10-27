@@ -19,7 +19,7 @@
 //! (base64, URL or JSON escaping), and a secret split across two
 //! pieces of content.
 
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock};
 
 use aho_corasick::AhoCorasick;
 use zeroize::Zeroizing;
@@ -61,11 +61,12 @@ impl LeakMatcher {
     /// Learn the secret parts in `secrets`. A part already known under
     /// the same name is not added again.
     pub fn learn_all(&self, secrets: impl IntoIterator<Item = MatchableSecret>) {
-        let Ok(mut state) = self.state.write() else {
-            tracing::error!("leak matcher lock poisoned; a new secret is not learned");
-            return;
+        // A panic under the lock leaves the patterns appended to and the
+        // automaton possibly older; recovering rebuilds it from them.
+        let (mut state, mut changed) = match self.state.write() {
+            Ok(state) => (state, false),
+            Err(poisoned) => (poisoned.into_inner(), true),
         };
-        let mut changed = false;
         for secret in secrets {
             for part in secret.parts {
                 let known = state
@@ -84,6 +85,8 @@ impl LeakMatcher {
         if changed {
             state.rebuild();
         }
+        drop(state);
+        self.state.clear_poison();
     }
 
     /// Learn `value`, just decrypted under `name` as `kind`. Identifiers
@@ -97,7 +100,9 @@ impl LeakMatcher {
 
     /// The name of the first stored secret `text` contains.
     pub fn find(&self, text: &str) -> Option<String> {
-        let state = self.state.read().ok()?;
+        // Patterns are only appended, so an automaton older than them
+        // still indexes them correctly.
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
         let automaton = state.automaton.as_ref()?;
         let found = automaton.find(text)?;
         Some(state.patterns[found.pattern().as_usize()].name.clone())
@@ -107,15 +112,19 @@ impl LeakMatcher {
     /// is. A stream that holds back this many bytes less one cannot have
     /// sent part of a secret it has not yet checked.
     pub fn longest(&self) -> usize {
-        self.state.read().map(|s| s.longest).unwrap_or(0)
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .longest
     }
 
     /// Whether no secret is known.
     pub fn is_empty(&self) -> bool {
         self.state
             .read()
-            .map(|s| s.patterns.is_empty())
-            .unwrap_or(true)
+            .unwrap_or_else(PoisonError::into_inner)
+            .patterns
+            .is_empty()
     }
 }
 
@@ -226,6 +235,26 @@ mod tests {
                 .map(|p| Zeroizing::new(p.to_string()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_poisoned_lock_still_matches_and_learns() {
+        let m = LeakMatcher::seeded([secret("bot", &["123456:telegram-bot-token"])]);
+        let _ = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _guard = m.state.write().unwrap();
+                panic!("poison the matcher lock");
+            })
+            .join()
+        });
+        assert!(m.state.is_poisoned());
+        assert_eq!(m.find("x 123456:telegram-bot-token y"), Some("bot".into()));
+        assert_eq!(m.longest(), "123456:telegram-bot-token".len());
+        assert!(!m.is_empty());
+
+        m.learn_all([secret("key", &["sk-later-learned-value"])]);
+        assert_eq!(m.find("sk-later-learned-value"), Some("key".into()));
+        assert!(!m.state.is_poisoned());
     }
 
     #[test]

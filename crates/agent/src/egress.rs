@@ -330,8 +330,13 @@ impl EgressClient {
         // allowed the host, and surfaces a `Phase` reason so the
         // runtime emits `SkillDeniedReason::Phase { phase_name }` on
         // the audit row instead of `Profile`.
-        if let Ok(overlay) = self.overlay_deny.read()
-            && let Some(deny) = overlay.as_ref()
+        // A poisoned overlay lock denies, as the enforcement read below
+        // does: the overlay in force cannot be known.
+        let overlay = self.overlay_deny.read().map_err(|_| EgressDenied {
+            host: host.clone(),
+            reason: EgressDenyReason::Profile,
+        })?;
+        if let Some(deny) = overlay.as_ref()
             && deny.hosts.iter().any(|pat| host_matches(&host, pat))
         {
             return Err(EgressDenied {
@@ -341,6 +346,7 @@ impl EgressClient {
                 },
             });
         }
+        drop(overlay);
         let guard = self.enforcement.read().map_err(|_| EgressDenied {
             host: host.clone(),
             reason: EgressDenyReason::Profile,
@@ -597,6 +603,19 @@ mod tests {
             }
             other => panic!("expected Egress denial, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_overlay_lock_denies() {
+        let c = EgressClient::new();
+        let overlay = c.overlay_deny.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = overlay.write().unwrap();
+            panic!("poison the overlay lock");
+        })
+        .join();
+        let err = c.get("https://allowed.example.com/x").await.unwrap_err();
+        assert!(matches!(err, HttpAccessDenied::Egress(_)), "{err:?}");
     }
 
     #[tokio::test]

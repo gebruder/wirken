@@ -1059,7 +1059,15 @@ impl ToolRegistry {
     /// `runtime.rs` before this runs.
     async fn http_request(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
         let resolver = self.credential_resolver.read().ok().and_then(|g| g.clone());
-        let audit = self.http_audit.read().ok().and_then(|g| g.clone());
+        // A poisoned lock would read as no audit context, and the
+        // request would run with no row.
+        let Ok(audit) = self.http_audit.read().map(|g| g.clone()) else {
+            return Ok(ToolResult {
+                output: "http_request refused: its audit context is unavailable".into(),
+                success: false,
+                sandbox: None,
+            });
+        };
         crate::http_tool::execute(&self.http, resolver.as_ref(), audit.as_ref(), args).await
     }
 
@@ -2138,5 +2146,33 @@ mod read_capped_tests {
         let resp = reqwest::Client::new().get(&url).send().await.unwrap();
         let body = read_capped(resp).await.unwrap();
         assert_eq!(body, b"hello world");
+    }
+}
+
+#[cfg(test)]
+mod http_audit_lock_tests {
+    use super::{ToolConfig, ToolRegistry};
+
+    #[tokio::test]
+    async fn a_poisoned_audit_lock_refuses_the_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default()).unwrap();
+        let _ = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _guard = registry.http_audit.write().unwrap();
+                panic!("poison the audit lock");
+            })
+            .join()
+        });
+        let result = registry
+            .http_request(&serde_json::json!({"method": "GET", "url": "https://example.com/"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            result.output.contains("audit context is unavailable"),
+            "{}",
+            result.output
+        );
     }
 }

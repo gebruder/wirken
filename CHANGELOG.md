@@ -16,6 +16,10 @@ tagged.
   the turn running it is aborted or the gateway stops mid-call. Each carries
   `wirken.exec` labels naming the data directory and the creating process;
   `wirken run` removes at start any whose process has ended.
+- A lock poisoned by a panic no longer reads as permission on the dispatch
+  path: a session-scoped grant is not served, a phase egress overlay denies,
+  `http_request` is refused rather than run without its audit row, and the
+  leak matcher keeps matching and learning.
 
 ## [3.1.0] - 2026-10-26
 
