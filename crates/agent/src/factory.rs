@@ -45,10 +45,7 @@ use wirken_audit::{ApprovalScopeKind, SessionEvent, SessionId, SessionLog};
 use wirken_gateway::agent_config::SubagentCeiling;
 use wirken_gateway::budget::{BudgetConfig, BudgetStore};
 use wirken_gateway::org::OrgPermissions;
-use wirken_gateway::permissions::{
-    PermissionStore, PermissionTier, SESSION_CLEAR_REASON_ENDED,
-    emit_session_scoped_approvals_cleared,
-};
+use wirken_gateway::permissions::{PermissionStore, PermissionTier};
 
 use crate::error::AgentError;
 use crate::llm::LlmConfig;
@@ -1072,58 +1069,6 @@ impl AgentFactory {
     pub(crate) fn is_cached_for_test(&self, session_id: &str) -> bool {
         self.cache.lock().unwrap().contains(session_id)
     }
-
-    /// Drop a session from the cache. Used by callers that know the
-    /// session is finished (e.g., after a `wirken sessions close`).
-    /// No-op in drop mode.
-    ///
-    /// Also clears any session-scoped approvals held under
-    /// `session_id` and appends a `SessionScopedApprovalsCleared`
-    /// audit event when at least one approval was cleared. Audit
-    /// emission failures are logged and swallowed: the in-memory
-    /// clear has already happened, so a missed audit row is a
-    /// reconciliation issue, not a correctness one (the cache is
-    /// gone with the process anyway). No emit when count is zero,
-    /// matching the rest of the audit surface's "no noise for
-    /// no-op" pattern.
-    pub fn evict(&self, session_id: &str) {
-        if self.cache_mode == CacheMode::Cached {
-            self.cache.lock().unwrap().pop(session_id);
-        }
-
-        if let ToolGate::Store(perms) = &self.permissions {
-            let cleared = {
-                let store = match perms.lock() {
-                    Ok(s) => s,
-                    Err(err) => {
-                        tracing::warn!(
-                            session_id,
-                            error = %err,
-                            "factory.evict: permission store poisoned; skipping session-scope clear"
-                        );
-                        return;
-                    }
-                };
-                store.clear_session_scope(session_id)
-            };
-
-            if cleared > 0
-                && let Err(err) = emit_session_scoped_approvals_cleared(
-                    self.session_log.as_ref(),
-                    session_id,
-                    cleared,
-                    SESSION_CLEAR_REASON_ENDED,
-                )
-            {
-                tracing::warn!(
-                    session_id,
-                    cleared,
-                    error = %err,
-                    "factory.evict: failed to append SessionScopedApprovalsCleared; in-memory clear already applied"
-                );
-            }
-        }
-    }
 }
 
 /// Walk the session log for `session_id` and re-apply any
@@ -1378,7 +1323,9 @@ mod replay_tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
     use wirken_audit::{SqliteSessionLog, TrustLevel};
-    use wirken_gateway::permissions::{Action, PermissionCheck, PermissionStore, PermissionTier};
+    use wirken_gateway::permissions::{
+        Action, PermissionCheck, PermissionStore, PermissionTier, SESSION_CLEAR_REASON_ENDED,
+    };
 
     fn make_store() -> Arc<StdMutex<PermissionStore>> {
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1500,8 +1447,8 @@ mod replay_tests {
     #[test]
     fn replay_respects_session_scoped_approvals_cleared_tombstone() {
         // grant + clear → cache empty on wake. Mirrors the clean
-        // session-end path: evict cleared the cache and emitted the
-        // tombstone; a later wake on the same session id must not
+        // session-end path: the cache was cleared and the tombstone
+        // emitted; a later wake on the same session id must not
         // re-establish the grants from the earlier PermissionApproved
         // rows that survived in the log.
         let perms = make_store();
@@ -1605,7 +1552,7 @@ mod replay_tests {
         let session = "default/signal/sender-1";
 
         append_session_grant(&log, session, "shell:ls", "default");
-        // No clear event: crash happened before evict ran.
+        // No clear event: the process ended before the session did.
 
         replay_session_scoped_approvals(&perms, &log, session).unwrap();
 
@@ -1619,7 +1566,7 @@ mod replay_tests {
     #[test]
     fn replay_clean_session_end_leaves_cache_empty() {
         // Symmetric counterpart to the crash test: the log has
-        // matching grant + clear pairs (evict ran cleanly), so a
+        // matching grant + clear pairs (the session ended cleanly), so a
         // wake on this session must produce an empty cache.
         let perms = make_store();
         let log = make_log();

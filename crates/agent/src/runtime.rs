@@ -2023,8 +2023,8 @@ impl Agent {
         }
     }
 
-    /// Turn-end auto-exit for any active phase deny overlay. Mirrors
-    /// `factory.evict`'s posture: emission failures are logged and
+    /// Turn-end auto-exit for any active phase deny overlay. Emission
+    /// failures are logged and
     /// swallowed because the in-memory clear has already happened, so
     /// a missed audit row is a reconciliation issue, not a correctness
     /// one. The reason is fixed to `TurnEnd`; skill-initiated exits
@@ -5074,8 +5074,7 @@ impl Agent {
     /// [`crate::skill_perms::PhaseDenyOverlay`], installs it via
     /// [`crate::skill_perms::PhasedEffective::enter_phase`], emits a
     /// `PhaseEntered` audit row, and returns a JSON status envelope
-    /// to the LLM. Ordering matches `factory.evict`: the in-memory
-    /// swap happens first, and an audit-emit failure is logged and
+    /// to the LLM. The in-memory swap happens first, and an audit-emit failure is logged and
     /// swallowed because the policy is already live and refusing
     /// calls.
     ///

@@ -9745,8 +9745,8 @@ mod phase_overlay {
 
     #[tokio::test]
     async fn clear_phase_at_turn_end_is_noop_when_no_overlay_active() {
-        // No-emit-on-no-op: same pattern as factory.evict and the
-        // session-scoped allowlist clear. Empty session log after
+        // No-emit-on-no-op: same pattern as the session-scoped
+        // allowlist clear. Empty session log after
         // calling the helper means the rule holds.
         let (mut agent, log, agent_id) = agent_with_session_log();
         agent.clear_phase_at_turn_end();

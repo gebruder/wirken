@@ -11,8 +11,8 @@ use wirken_gateway::session::SessionStore;
 use super::config;
 
 /// Resolve a CLI session-id argument to the composite log id
-/// (`{agent_id}/{channel}/{conversation_id}`) the session log and
-/// `factory.evict` key on. Accepts either form so the CLI's "Use
+/// (`{agent_id}/{channel}/{conversation_id}`) the session log keys
+/// on. Accepts either form so the CLI's "Use
 /// STORE ID for `wirken sessions close`, LOG ID for `wirken sessions
 /// verify`" message stays operator-friendly:
 ///

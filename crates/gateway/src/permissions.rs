@@ -1430,8 +1430,7 @@ pub const OPERATOR_PERMISSIONS_SESSION: &str = "gateway-permissions";
 
 /// Append a `SessionEvent::SessionScopedApprovalsCleared` tombstone
 /// to `log` under `session_id`. The shared emission point for any
-/// caller that ends a session: today the in-daemon
-/// [`AgentFactory::evict`] hook and the CLI `wirken sessions close`
+/// caller that ends a session: today the CLI `wirken sessions close`
 /// shim. Centralising the call shape here keeps the trust level
 /// (`System`), the field layout, and the wire-stable `reason`
 /// constant in one place, so a future caller cannot accidentally
@@ -1441,11 +1440,6 @@ pub const OPERATOR_PERMISSIONS_SESSION: &str = "gateway-permissions";
 /// observed; replay treats the tombstone as authoritative
 /// regardless of count, but SIEM consumers use it to size the
 /// blast radius of the clear.
-///
-/// [`AgentFactory::evict`]: crate::permissions
-// Note: the link target lives in crates/agent; rustdoc cannot resolve
-// it from here without pulling agent in as a doc dep. Plain prose
-// references it instead.
 pub fn emit_session_scoped_approvals_cleared(
     log: &dyn wirken_audit::SessionLog,
     session_id: &str,
@@ -1474,9 +1468,8 @@ pub fn emit_session_scoped_approvals_cleared(
 /// tombstone is meaningful: returning zero lets the caller skip the
 /// emit and preserve the "no audit noise for no-op" convention.
 ///
-/// Returns the same number that `factory.evict`'s
-/// `clear_session_scope` would have returned if it had run inside the
-/// daemon, modulo grants made and not yet replayed (which an
+/// Returns the same number that `PermissionStore::clear_session_scope`
+/// would return inside the daemon, modulo grants made and not yet replayed (which an
 /// out-of-process caller has no way to see anyway). Replay walks
 /// events in seq order, so `grant + clear + grant` reports `1`.
 pub fn count_active_session_scoped_approvals(
