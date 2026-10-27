@@ -59,6 +59,10 @@ tagged.
   it started with. Web chat's About panel shows the org tool policy the gate
   loaded at start rather than `tool_policy.json` as it is now on disk.
 - `wirken permissions pending list` shows each request's action key.
+- A `wirken lyrik run` with no terminal says once, before it dispatches, that
+  every command needing approval is refused, and each refusal's
+  `permission_denied` row carries `denial_reason` `no terminal for approval`.
+  What is refused is unchanged.
 
 ## [3.1.0] - 2026-10-26
 

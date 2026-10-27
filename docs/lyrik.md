@@ -343,7 +343,9 @@ With stdin on a terminal, the operator is asked at the moment each command is
 about to run, one prompt at a time across concurrent walks, in a prompt that
 is the walk's name and the exact command and nothing else; an answer covers
 that one call and nothing is stored for later runs. Without a terminal every
-such command is refused. A refused command is a skipped step, not a failed
+such command is refused: the run says so once, before it dispatches, and each
+refusal's `permission_denied` row carries `denial_reason` `no terminal for
+approval`. A refused command is a skipped step, not a failed
 walk. An approved command runs in the `exec` sandbox, so the sandbox image
 needs `git` or `cargo` for these walks; the default image has neither. Before
 the first prompt the run asks the sandbox which of the binaries its walks need

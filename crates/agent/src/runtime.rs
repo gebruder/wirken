@@ -448,6 +448,8 @@ pub struct Agent {
     /// TTY; the webchat, Telegram and Signal adapters each install
     /// their own.
     approval_gate: Option<Arc<dyn crate::approval_gate::ApprovalGate>>,
+    /// The `denial_reason` a refusal with no gate attached records.
+    unmediated_denial_reason: Option<String>,
     /// One-shot approval bypass. Set by
     /// [`Self::dispatch_tool_with_approval`] right before the retry
     /// after the gate returns `Approved`; checked and cleared by
@@ -808,6 +810,7 @@ impl Agent {
             veto_dispatcher: Arc::new(wirken_gateway::hook_dispatcher::NoopDispatcher),
             egress_dispatcher: Arc::new(wirken_gateway::egress_dispatcher::NoopEgressDispatcher),
             approval_gate: None,
+            unmediated_denial_reason: None,
             approval_bypass: None,
         })
     }
@@ -919,6 +922,7 @@ impl Agent {
             veto_dispatcher: Arc::new(wirken_gateway::hook_dispatcher::NoopDispatcher),
             egress_dispatcher: Arc::new(wirken_gateway::egress_dispatcher::NoopEgressDispatcher),
             approval_gate: None,
+            unmediated_denial_reason: None,
             approval_bypass: None,
         })
     }
@@ -1107,6 +1111,12 @@ impl Agent {
 
     pub fn set_approval_gate(&mut self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
         self.approval_gate = Some(gate);
+    }
+
+    /// Say on the row why a call that needs approval is refused when no
+    /// gate is attached. Changes nothing about what is refused.
+    pub fn set_unmediated_denial_reason(&mut self, reason: impl Into<String>) {
+        self.unmediated_denial_reason = Some(reason.into());
     }
 
     /// Register a recovery observer. Forwarded to the
@@ -4794,7 +4804,7 @@ impl Agent {
                 agent_id: ctx.agent_id.clone(),
                 trigger: ctx.trigger_message.clone(),
                 denied_via: None,
-                denial_reason: None,
+                denial_reason: self.unmediated_denial_reason.clone(),
                 adapter_id: self.current_inbound.adapter_id.clone(),
                 sender_id: self.current_inbound.sender_id.clone(),
                 exec_location: None,

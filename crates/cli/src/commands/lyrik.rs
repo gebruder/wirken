@@ -146,6 +146,27 @@ fn check_run_skill_reaches_no_network(skill: &wirken_agent::skill::Skill) -> Res
     Ok(())
 }
 
+/// What a refused call's row says when no terminal can be asked.
+const NO_TERMINAL_FOR_APPROVAL: &str = "no terminal for approval";
+
+/// The prompt gate for `asker` when there is a terminal. Without one,
+/// every call that needs approval is refused as before, and its row
+/// says why.
+fn attach_terminal_gate(
+    agent: &mut wirken_agent::Agent,
+    asker: &str,
+    terminal: Option<
+        Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
+    >,
+) {
+    match terminal {
+        Some(terminal) => agent.set_approval_gate(Arc::new(
+            super::stdin_approval::LyrikPromptGate::new(asker, terminal),
+        )),
+        None => agent.set_unmediated_denial_reason(NO_TERMINAL_FOR_APPROVAL),
+    }
+}
+
 pub async fn run(
     target: &Path,
     run_id: &str,
@@ -301,6 +322,17 @@ pub async fn run(
             }
         }
     };
+
+    // Said once for the run: without a terminal no walk step can be
+    // approved, and each refused one is recorded with this reason.
+    if !super::oauth_scope::stdin_is_tty()
+        && super::load_sandbox_config(&super::config().data_dir).mode
+            != wirken_agent::sandbox::SandboxMode::Off
+    {
+        eprintln!(
+            "  exec: {NO_TERMINAL_FOR_APPROVAL}; every command that needs approval is refused"
+        );
+    }
 
     // Skill dispatch. Default path: invoke the wirken Agent runtime
     // against the model pin in the target's .lyrik/config.json and
@@ -1178,12 +1210,7 @@ async fn dispatch_via_agent_runtime(
             super::stdin_approval::StdinApprovalGate::new(),
         ))
     });
-    if let Some(terminal) = &terminal {
-        agent.set_approval_gate(Arc::new(super::stdin_approval::LyrikPromptGate::new(
-            "lyrik",
-            terminal.clone(),
-        )));
-    }
+    attach_terminal_gate(&mut agent, "lyrik", terminal.clone());
 
     // Stage and sign the bundled Lyrik skill into the run dir,
     // then merge it into the agent's loaded set. The `/lyrik` slash
@@ -2284,11 +2311,7 @@ async fn dispatch_fixes(
             };
             agent.set_agent_id(agent_id_t);
             agent.set_leak_matcher(leak_t);
-            if let Some(terminal) = terminal_t {
-                agent.set_approval_gate(Arc::new(super::stdin_approval::LyrikPromptGate::new(
-                    "fix", terminal,
-                )));
-            }
+            attach_terminal_gate(&mut agent, "fix", terminal_t);
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()));
@@ -2479,11 +2502,7 @@ async fn dispatch_replays(
             };
             agent.set_agent_id(agent_id_t);
             agent.set_leak_matcher(leak_t);
-            if let Some(terminal) = terminal_t {
-                agent.set_approval_gate(Arc::new(super::stdin_approval::LyrikPromptGate::new(
-                    "replay", terminal,
-                )));
-            }
+            attach_terminal_gate(&mut agent, "replay", terminal_t);
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()));
@@ -2718,11 +2737,7 @@ async fn dispatch_walks_concurrent(
             // persisted grants.
             local_agent.set_agent_id(agent_id_t.clone());
             local_agent.set_leak_matcher(leak_t);
-            if let Some(terminal) = terminal_t {
-                local_agent.set_approval_gate(Arc::new(
-                    super::stdin_approval::LyrikPromptGate::new(&walk_name, terminal),
-                ));
-            }
+            attach_terminal_gate(&mut local_agent, &walk_name, terminal_t);
 
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))

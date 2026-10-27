@@ -140,10 +140,18 @@ fn scenario(walk: bool, sandbox_off: bool) {
         assert_eq!(gate[0]["axis"], "tools");
         assert!(operator.is_empty(), "{operator:?}");
     } else {
-        // Unchanged: offered, then refused because no one can be asked.
+        // Unchanged: offered, then refused because no one can be asked,
+        // and the row and the run's output say so.
         assert!(gate.is_empty(), "{gate:?}");
         assert_eq!(operator.len(), 1, "{report}");
+        assert_eq!(operator[0]["denial_reason"], "no terminal for approval");
     }
+    let notice = "exec: no terminal for approval; every command that needs approval is refused";
+    assert_eq!(
+        report.matches(notice).count(),
+        usize::from(!sandbox_off),
+        "{report}"
+    );
     let failed: Vec<_> = chain_rows(&data, "tool_result")
         .into_iter()
         .filter(|r| r["tool_name"] == "exec")
