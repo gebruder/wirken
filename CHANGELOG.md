@@ -83,6 +83,9 @@ tagged.
   it started with. Web chat's About panel shows the org tool policy the gate
   loaded at start rather than `tool_policy.json` as it is now on disk.
 - `wirken permissions pending list` shows each request's action key.
+- `wirken agents stop` and `resume` persist, tell the running gateway, and
+  only then print, so a command whose output is closed early still reaches
+  the gateway.
 - A clean stop of `wirken run` removes every socket it bound, including
   `gateway-hooks.sock` and `gateway-permissions.sock`.
 - A `wirken` command whose output is closed early, as by `| head`, exits 141

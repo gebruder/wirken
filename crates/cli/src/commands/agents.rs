@@ -583,6 +583,9 @@ pub async fn stop(id: &str, revoke_all: bool) -> Result<()> {
     )
     .context("Failed to record the stop in the audit chain")?;
     super::seal_operator_lane(&log, wirken_audit::OPERATOR_COMMANDS_SESSION);
+    // Everything is done before the first line is printed, so a closed
+    // stdout cannot end the command before the gateway hears.
+    let told = tell_gateway_stopped(id).await;
 
     println!("  Agent '{id}' stopped. Nothing runs under it until `wirken agents resume {id}`.");
     if revoke_all {
@@ -591,43 +594,78 @@ pub async fn stop(id: &str, revoke_all: bool) -> Result<()> {
     if session_grants_cleared > 0 {
         println!("  Dropped {session_grants_cleared} session-scoped grant(s) from its sessions.");
     }
-    tell_gateway_stopped(id).await;
+    told.print();
     Ok(())
 }
 
+/// What the running gateway said to a stop or resume, printed after the
+/// command's own lines.
+struct GatewayTold {
+    out: Vec<String>,
+    err: Option<String>,
+}
+
+impl GatewayTold {
+    fn print(&self) {
+        for line in &self.out {
+            println!("{line}");
+        }
+        if let Some(err) = &self.err {
+            eprintln!("{err}");
+        }
+    }
+}
+
 /// Have a running gateway act on the stop now. The stop is recorded and
-/// holds either way; this reports what the gateway did.
-async fn tell_gateway_stopped(id: &str) {
+/// holds either way; this returns what the gateway did, for printing
+/// once the command has nothing left to do.
+async fn tell_gateway_stopped(id: &str) -> GatewayTold {
     use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
     let req = PermissionsRequest::AgentStop {
         agent_id: id.to_string(),
         stopped_by: super::local_operator(),
     };
+    let mut told = GatewayTold {
+        out: Vec::new(),
+        err: None,
+    };
     match super::permission::gateway_rpc(&req).await {
-        Ok(None) => println!("  No gateway is running; the stop holds when it starts."),
+        Ok(None) => told
+            .out
+            .push("  No gateway is running; the stop holds when it starts.".into()),
         Ok(Some(PermissionsResponse::AgentStopped {
             approvals_denied,
             turns_ended,
             session_grants_cleared,
             mcp_told,
         })) => {
-            println!(
+            told.out.push(format!(
                 "  The running gateway denied {approvals_denied} pending approval(s), ended \
                  {turns_ended} turn(s) and dropped {session_grants_cleared} cached session \
                  grant(s)."
-            );
+            ));
             if mcp_told {
-                println!("  The MCP proxy was told to stop the agent's servers.");
+                told.out
+                    .push("  The MCP proxy was told to stop the agent's servers.".into());
             }
         }
         Ok(Some(PermissionsResponse::Error { message })) => {
-            eprintln!("  The running gateway did not act on the stop: {message}")
+            told.err = Some(format!(
+                "  The running gateway did not act on the stop: {message}"
+            ))
         }
-        Ok(Some(other)) => eprintln!("  The running gateway answered unexpectedly: {other:?}"),
-        Err(e) => eprintln!(
-            "  Could not reach the running gateway ({e:#}); the stop holds at its next check."
-        ),
+        Ok(Some(other)) => {
+            told.err = Some(format!(
+                "  The running gateway answered unexpectedly: {other:?}"
+            ))
+        }
+        Err(e) => {
+            told.err = Some(format!(
+                "  Could not reach the running gateway ({e:#}); the stop holds at its next check."
+            ))
+        }
     }
+    told
 }
 
 /// `wirken agents resume`.
@@ -657,32 +695,51 @@ pub async fn resume(id: &str) -> Result<()> {
     )
     .context("Failed to record the resume in the audit chain")?;
     super::seal_operator_lane(&log, wirken_audit::OPERATOR_COMMANDS_SESSION);
+    let told = tell_gateway_resumed(id).await;
     println!("  Agent '{id}' resumed.");
-    tell_gateway_resumed(id).await;
+    told.print();
     Ok(())
 }
 
-/// Have a running gateway start the agent's MCP servers again.
-async fn tell_gateway_resumed(id: &str) {
+/// Have a running gateway start the agent's MCP servers again. Returns
+/// what it said, for printing once the command has nothing left to do.
+async fn tell_gateway_resumed(id: &str) -> GatewayTold {
     use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
     let req = PermissionsRequest::AgentResume {
         agent_id: id.to_string(),
     };
+    let mut told = GatewayTold {
+        out: Vec::new(),
+        err: None,
+    };
     match super::permission::gateway_rpc(&req).await {
-        Ok(None) => println!("  No gateway is running; its MCP servers start with it."),
+        Ok(None) => told
+            .out
+            .push("  No gateway is running; its MCP servers start with it.".into()),
         Ok(Some(PermissionsResponse::AgentResumed { mcp_told })) => {
             if mcp_told {
-                println!("  The MCP proxy was told to start the agent's servers.");
+                told.out
+                    .push("  The MCP proxy was told to start the agent's servers.".into());
             }
         }
         Ok(Some(PermissionsResponse::Error { message })) => {
-            eprintln!("  The running gateway did not act on the resume: {message}")
+            told.err = Some(format!(
+                "  The running gateway did not act on the resume: {message}"
+            ))
         }
-        Ok(Some(other)) => eprintln!("  The running gateway answered unexpectedly: {other:?}"),
-        Err(e) => eprintln!(
-            "  Could not reach the running gateway ({e:#}); its MCP servers start at its next start."
-        ),
+        Ok(Some(other)) => {
+            told.err = Some(format!(
+                "  The running gateway answered unexpectedly: {other:?}"
+            ))
+        }
+        Err(e) => {
+            told.err = Some(format!(
+                "  Could not reach the running gateway ({e:#}); its MCP servers start at its \
+                 next start."
+            ))
+        }
     }
+    told
 }
 
 pub async fn bind(agent_id: &str, channel: &str) -> Result<()> {

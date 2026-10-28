@@ -149,3 +149,85 @@ fn stop_and_resume_hold_without_a_gateway_and_leave_sealed_rows() {
     assert_eq!(revoked[..2], [0, 1]);
     assert_eq!(rows.last().unwrap().0, "chain_head", "the lane is sealed");
 }
+
+/// A gateway listening on the permissions socket: takes the operator
+/// handshake, records one request and answers it. Returns what it saw.
+#[cfg(unix)]
+async fn fake_gateway(data: std::path::PathBuf) -> wirken_ipc::permissions::PermissionsRequest {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use wirken_ipc::operator::{OperatorKey, PERMISSIONS_SOCKET, handshake_as_gateway};
+    use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
+
+    let key = OperatorKey::load_or_create(&data).unwrap().verifying_key();
+    let sockets = data.join("sockets");
+    std::fs::create_dir_all(&sockets).unwrap();
+    let listener =
+        tokio::net::UnixListener::bind(sockets.join("gateway-permissions.sock")).unwrap();
+    let (stream, _) = listener.accept().await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    handshake_as_gateway(&mut reader, &mut writer, &key, PERMISSIONS_SOCKET)
+        .await
+        .unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let request: PermissionsRequest = serde_json::from_str(line.trim_end()).unwrap();
+    let reply = serde_json::to_string(&PermissionsResponse::AgentStopped {
+        approvals_denied: 0,
+        turns_ended: 0,
+        session_grants_cleared: 0,
+        mcp_told: false,
+    })
+    .unwrap();
+    writer.write_all(reply.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.shutdown().await.unwrap();
+    request
+}
+
+/// The stop is persisted and the gateway is told before anything is
+/// printed, so a stdout closed from the start changes neither.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_reaches_the_gateway_with_stdout_closed() {
+    use std::process::Stdio;
+    use wirken_ipc::permissions::PermissionsRequest;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().to_path_buf();
+    let gateway = tokio::spawn(fake_gateway(data.clone()));
+    // The listener is bound once the key file exists.
+    while !data
+        .join("sockets")
+        .join("gateway-permissions.sock")
+        .exists()
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let status = tokio::task::spawn_blocking(move || {
+        let mut child = wirken(&data)
+            .env_remove("WIRKEN_EXEC")
+            .args(["agents", "stop", "default"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        child.wait().unwrap()
+    })
+    .await
+    .unwrap();
+
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(10), gateway)
+        .await
+        .expect("the gateway was asked")
+        .unwrap();
+    assert!(
+        matches!(seen, PermissionsRequest::AgentStop { ref agent_id, .. } if agent_id == "default"),
+        "{seen:?}"
+    );
+    assert_eq!(stopped(tmp.path()), ["default"]);
+    // The first line it prints finds stdout closed.
+    assert_eq!(status.code(), Some(141), "{status:?}");
+}
