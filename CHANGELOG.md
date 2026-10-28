@@ -28,7 +28,9 @@ tagged.
   with `denial_reason` `agent stopped`, its running turns end, which removes
   their `exec` containers and host process groups, and its cached
   session-scoped grants are dropped. A stopped sub-agent's spawn returns
-  `Agent stopped` to its parent, which goes on with its turn.
+  `Agent stopped` to its parent, which goes on with its turn. A tool call the
+  ended turn was in gets its `PARTIAL_RESULT_LOST:` result on the chain and in
+  the conversation at once, not at the next wake.
 - A stopped agent's MCP servers are stopped: the MCP proxy stops their
   supervisors and then the servers, and does not start them at its own start
   while the agent is stopped. `wirken agents resume` has the proxy load and

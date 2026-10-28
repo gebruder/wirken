@@ -320,7 +320,10 @@ When the gateway is running, `stop` also acts on it at once, over
 `gateway-permissions.sock`: each pending approval of the agent is denied with
 `denial_reason` `agent stopped`, its running turns end, which removes their
 `exec` containers and kills their host process groups, its cached
-session-scoped grants are dropped, and the MCP proxy stops its servers.
+session-scoped grants are dropped, and the MCP proxy stops its servers. A tool
+call a turn was in when it ended gets a `tool_result` with the
+`PARTIAL_RESULT_LOST:` prefix then, as a wake writes for an interrupted
+round.
 `resume` has the proxy load and supervise them again, as at its start.
 
 A stop always drops the agent's session-scoped grants, and writes the

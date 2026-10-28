@@ -931,12 +931,13 @@ impl Agent {
     /// a synthetic ToolResult for every missing call. Self-heals the
     /// log so subsequent reads see a consistent state. The synthetic
     /// result is recognizable by the [`PARTIAL_RESULT_LOST_SENTINEL`]
-    /// prefix in its output.
+    /// prefix in its output. Returns each result written as
+    /// `(call_id, tool_name, output)`.
     fn heal_partial_tool_rounds(
         log: &dyn SessionLog,
         handle: &SessionHandle<OwnSession>,
         agent_id: &str,
-    ) -> Result<(), AgentError> {
+    ) -> Result<Vec<(String, String, String)>, AgentError> {
         use std::collections::HashSet;
 
         let rows = log
@@ -963,6 +964,7 @@ impl Agent {
         // Write a synthetic failure for every expected call without a
         // matching result. Order preserves the original tool-call
         // order so the conversation projection sees them in sequence.
+        let mut healed = Vec::new();
         for (call_id, tool_name) in expected {
             if completed.contains(&call_id) {
                 continue;
@@ -972,13 +974,14 @@ impl Agent {
                 call_id,
                 tool_name,
             );
+            let output = format!(
+                "{PARTIAL_RESULT_LOST_SENTINEL} previous invocation did not complete; \
+                 the tool was not retried"
+            );
             let event = SessionEvent::ToolResult {
                 call_id: call_id.clone(),
-                tool_name,
-                output: format!(
-                    "{PARTIAL_RESULT_LOST_SENTINEL} previous invocation did not complete; \
-                     the tool was not retried"
-                ),
+                tool_name: tool_name.clone(),
+                output: output.clone(),
                 success: false,
                 agent_id: agent_id.to_string(),
                 // heal_partial_tool_rounds runs at session-load time
@@ -993,10 +996,31 @@ impl Agent {
             // Mark as completed so a later AssistantToolCalls with
             // the same call_id (shouldn't happen, but be safe)
             // doesn't get a second synthetic result.
-            completed.insert(call_id);
+            completed.insert(call_id.clone());
+            healed.push((call_id, tool_name, output));
         }
 
-        Ok(())
+        Ok(healed)
+    }
+
+    /// A turn a stop ended leaves its last tool calls without results.
+    /// Give each the result a wake writes, on the chain and in this
+    /// agent's conversation, so the session is whole now rather than at
+    /// the next wake.
+    fn close_stopped_round(&mut self) {
+        let agent_id = self.audited_agent_id();
+        match Self::heal_partial_tool_rounds(&*self.session_log, &self.session_handle, &agent_id) {
+            Ok(healed) => {
+                for (call_id, tool_name, output) in healed {
+                    self.conversation
+                        .add_tool_result(&call_id, &tool_name, &output);
+                }
+            }
+            Err(e) => tracing::warn!(
+                agent_id,
+                "could not record the tool calls a stop left unfinished: {e}"
+            ),
+        }
     }
 
     /// Replace the permission store, for tests that build an agent and
@@ -2990,6 +3014,9 @@ impl Agent {
             self.process_message_turn(user_message, inbound_id, max_rounds_budget, inbound),
         )
         .await;
+        if matches!(result, Err(AgentError::AgentStopped { .. })) {
+            self.close_stopped_round();
+        }
         // Turn-end auto-exit for any active phase deny overlay. Runs
         // regardless of how the turn ended (Ok, Err, or dedup short-
         // circuit) so a skill that crashes mid-phase does not leave
@@ -3357,6 +3384,9 @@ impl Agent {
             self.process_message_stream_turn(user_message, inbound_id, tx, inbound),
         )
         .await;
+        if matches!(result, Err(AgentError::AgentStopped { .. })) {
+            self.close_stopped_round();
+        }
         // Same turn-end auto-exit as the non-streaming path. See
         // `process_message_inner` for the rationale.
         self.clear_phase_at_turn_end();

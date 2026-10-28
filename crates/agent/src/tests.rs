@@ -13278,6 +13278,106 @@ mod approved_unknown_tool {
 }
 
 // ---------------------------------------------------------------------------
+// A stop that ends a turn mid tool call records the call's result then,
+// on the chain and in the conversation, rather than at the next wake.
+// ---------------------------------------------------------------------------
+mod stopped_mid_call {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use super::approved_unknown_tool::stub;
+    use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
+    use crate::error::AgentError;
+    use crate::llm::LlmConfig;
+    use crate::runtime::PARTIAL_RESULT_LOST_SENTINEL;
+
+    /// A gate nobody answers. Says when it is asked.
+    struct Unanswered(Arc<tokio::sync::Notify>);
+
+    #[async_trait::async_trait]
+    impl ApprovalGate for Unanswered {
+        async fn request_approval(
+            &self,
+            _ctx: &crate::error::PermissionDenialContext,
+        ) -> ApprovalOutcome {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+
+        fn source(&self) -> wirken_audit::ApprovalSource {
+            wirken_audit::ApprovalSource::Cli
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_a_stop_cuts_off_gets_its_result_at_once() {
+        let (base_url, _server) = stub(vec![serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_held",
+                "type": "function",
+                "function": {"name": "vault_dump_all", "arguments": "{}"},
+            }],
+        })])
+        .await;
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let session = "stop-mid-call/test/c".to_string();
+        let mut agent = crate::runtime::Agent::new(
+            session.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        agent.set_agent_id("stop-mid-call");
+        let asked = Arc::new(tokio::sync::Notify::new());
+        agent.set_approval_gate(Arc::new(Unanswered(asked.clone())));
+
+        let (turn, ()) = tokio::join!(agent.process_message("dump it", "m-1".into()), async {
+            asked.notified().await;
+            crate::stop::cancel_turns("stop-mid-call");
+        });
+        assert!(
+            matches!(turn.err(), Some(AgentError::AgentStopped { .. })),
+            "the turn ends as stopped"
+        );
+
+        let lost = log
+            .get_since(&log.handle_for(SessionId::new(session)), 0)
+            .unwrap()
+            .into_iter()
+            .filter(|r| {
+                matches!(&r.event, SessionEvent::ToolResult { call_id, output, success: false, .. }
+                    if call_id == "call_held" && output.starts_with(PARTIAL_RESULT_LOST_SENTINEL))
+            })
+            .count();
+        assert_eq!(lost, 1, "the cut-off call's result is on the chain");
+
+        let messages = agent.conversation_mut_for_test().messages().to_vec();
+        let last = messages.last().unwrap();
+        assert_eq!(last.tool_call_id.as_deref(), Some("call_held"));
+        assert!(last.content.starts_with(PARTIAL_RESULT_LOST_SENTINEL));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // An approval prompt that nobody answers. The gate times out, the call
 // resolves to deny, and the model reads a refusal: not a timeout, not a
 // transport error it could take for an unreachable host. The chain
