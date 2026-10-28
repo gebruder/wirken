@@ -95,6 +95,14 @@ tagged.
   `permission_denied` row carries `denial_reason` `no terminal for approval`.
   What is refused is unchanged.
 
+### Dependencies
+
+- tokio 1.54.1, uuid 1.29.0 and open 5.4.5, taken from #307. Deferred to a
+  soak cycle from the same group, each a 0.x minor: rusqlite 0.41.0 with
+  libsqlite3-sys 0.39.1, under the audit chain, the permission store and the
+  session store, whose soak is an operator's gateway run on main; and zip
+  9.1.3 with typed-path 0.13.0, whose soak is a `wirken import` of an archive.
+
 ## [3.1.0] - 2026-10-26
 
 Thanks to @olive-mm for #305, the Discord approval gate, now merged as
