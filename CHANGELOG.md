@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-10-28
+
 ### Security
 
 - `wirken agents stop <id>` stops an agent and `wirken agents resume <id>`
@@ -55,7 +57,9 @@ tagged.
   panicking in `Drop`.
 - `tree` and `file` are Tier 3: `tree -o` and `file -C` write files. A stored
   `shell:tree` or `shell:file` grant is removed when the permission store
-  opens, with the sweep's row.
+  opens, with the sweep's row. The CLI and the on-disk audit format are
+  unchanged and the removal needs no operator action, so this is the one
+  behavior change of the release and a minor bump.
 - The subcommands of `wirken permissions`, `skills`, `mcp`, `credentials`,
   `audit`, `agents` and `channel` that change authority refuse inside a
   Wirken `exec`, each refusal an `operator_command_refused` row on the
