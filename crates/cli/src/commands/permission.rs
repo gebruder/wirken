@@ -74,14 +74,27 @@ async fn permissions_rpc(_req: &PermissionsRequest) -> Result<PermissionsRespons
 /// for historical denials without a matching approval); this
 /// command shows the live queue an operator can `approve` or
 /// `deny` right now.
-/// Send `req` to the running gateway. `None` when there is no gateway
-/// socket, which is no gateway running.
+/// Send `req` to the running gateway. `None` when no gateway is
+/// running: no socket, or one a stopped gateway left that refuses the
+/// connection.
 pub async fn gateway_rpc(req: &PermissionsRequest) -> Result<Option<PermissionsResponse>> {
     let path = config().socket_dir().join("gateway-permissions.sock");
     if !path.exists() {
         return Ok(None);
     }
-    permissions_rpc(req).await.map(Some)
+    match permissions_rpc(req).await {
+        Ok(response) => Ok(Some(response)),
+        Err(e)
+            if e.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+            }) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn pending_list() -> Result<()> {

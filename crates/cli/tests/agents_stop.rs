@@ -102,6 +102,23 @@ fn stop_and_resume_hold_without_a_gateway_and_leave_sealed_rows() {
     assert!(ok, "{out}");
     assert!(out.contains("is not stopped"), "{out}");
 
+    // A socket a stopped gateway left behind is no gateway running.
+    #[cfg(unix)]
+    {
+        let sockets = data.join("sockets");
+        std::fs::create_dir_all(&sockets).unwrap();
+        drop(
+            std::os::unix::net::UnixListener::bind(sockets.join("gateway-permissions.sock"))
+                .unwrap(),
+        );
+        let (ok, out) = run(data, &["agents", "stop", "default"]);
+        assert!(ok, "{out}");
+        assert!(out.contains("No gateway is running"), "{out}");
+        let (ok, out) = run(data, &["agents", "resume", "default"]);
+        assert!(ok, "{out}");
+        assert!(out.contains("No gateway is running"), "{out}");
+    }
+
     let (ok, out) = run(data, &["agents", "stop", "nobody"]);
     assert!(!ok, "{out}");
     assert!(stopped(data).is_empty());
@@ -112,12 +129,23 @@ fn stop_and_resume_hold_without_a_gateway_and_leave_sealed_rows() {
         .map(|(k, _)| k.as_str())
         .filter(|k| *k != "chain_head" && *k != "operator_command")
         .collect();
-    assert_eq!(kinds, ["agent_stopped", "agent_stopped", "agent_resumed"]);
+    let expected: &[&str] = if cfg!(unix) {
+        &[
+            "agent_stopped",
+            "agent_stopped",
+            "agent_resumed",
+            "agent_stopped",
+            "agent_resumed",
+        ]
+    } else {
+        &["agent_stopped", "agent_stopped", "agent_resumed"]
+    };
+    assert_eq!(kinds, expected);
     let revoked: Vec<_> = rows
         .iter()
         .filter(|(k, _)| k == "agent_stopped")
         .map(|(_, p)| p["grants_revoked"].as_u64().unwrap())
         .collect();
-    assert_eq!(revoked, [0, 1]);
+    assert_eq!(revoked[..2], [0, 1]);
     assert_eq!(rows.last().unwrap().0, "chain_head", "the lane is sealed");
 }
