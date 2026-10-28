@@ -32,7 +32,8 @@ tagged.
 - A stopped agent's MCP servers are stopped: the MCP proxy stops their
   supervisors and then the servers, and does not start them at its own start
   while the agent is stopped. `wirken agents resume` has the proxy load and
-  supervise them again, as at start.
+  supervise them again, as at start. A proxy that cannot read the stopped set
+  at its start starts no agent's servers.
 - When `wirken run` cannot open the session store it asks about liveness, no
   session is live and no session-scoped grant is served until restart. The
   failure is printed at startup and recorded as a `session_liveness_unavailable`

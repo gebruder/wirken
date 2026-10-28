@@ -312,7 +312,9 @@ stopped nothing runs under its id:
 - A parent's `spawn_subagent` of it returns `Agent stopped: '<id>' was
   stopped by the operator`, the way a denied tool returns `Permission denied`,
   and the parent goes on with its turn.
-- The MCP proxy does not start its servers.
+- The MCP proxy does not start its servers. A proxy that cannot read the
+  stopped set at its start starts no agent's servers, as the gateway reads an
+  unreadable store as stopped.
 
 When the gateway is running, `stop` also acts on it at once, over
 `gateway-permissions.sock`: each pending approval of the agent is denied with

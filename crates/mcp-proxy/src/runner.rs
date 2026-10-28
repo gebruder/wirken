@@ -103,15 +103,12 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
     };
 
     // A stopped agent's servers are not started; its place is held so a
-    // resume starts them. A store that cannot be read stops none: the
-    // gateway still refuses every turn and tool call of a stopped agent.
-    let stopped = wirken_gateway::permissions::stopped_agents(&data_dir.join("permissions.db"))
-        .unwrap_or_else(|e| {
-            tracing::warn!("could not read which agents are stopped: {e}");
-            Vec::new()
-        });
+    // resume starts them. A store that cannot be read holds every agent
+    // stopped, as the gateway reads it: no server holds credentials for
+    // an agent the gateway refuses.
+    let stopped = stopped_at_start(&data_dir);
     for (agent_id, config) in &configs {
-        if stopped.contains(agent_id) {
+        if held_stopped(stopped.as_deref(), agent_id) {
             registry.defer_agent(agent_id);
             tracing::info!("agent '{agent_id}' is stopped; its MCP servers are not started");
             continue;
@@ -306,6 +303,24 @@ fn load_agent_pubkey(data_dir: &Path, agent_id: &str) -> Result<Option<Verifying
     Ok(Some(key))
 }
 
+/// The agents stopped when the proxy starts, or `None` when the
+/// permission store cannot be read.
+fn stopped_at_start(data_dir: &Path) -> Option<Vec<String>> {
+    wirken_gateway::permissions::stopped_agents(&data_dir.join("permissions.db"))
+        .map_err(|e| {
+            tracing::error!(
+                "could not read which agents are stopped: {e}; no MCP server is started"
+            );
+        })
+        .ok()
+}
+
+/// Whether `agent_id`'s servers stay unstarted: it is stopped, or the
+/// store could not say, which the gateway reads as stopped too.
+fn held_stopped(stopped: Option<&[String]>, agent_id: &str) -> bool {
+    stopped.is_none_or(|ids| ids.iter().any(|id| id == agent_id))
+}
+
 /// Every agent id with an identity, plus `default`, and the MCP config
 /// each of them runs with.
 fn agent_configs(data_dir: &Path) -> (Vec<String>, Vec<(String, McpConfig)>) {
@@ -448,7 +463,28 @@ async fn load_for_agent(
 
 #[cfg(test)]
 mod tests {
-    use super::load_agent_pubkey;
+    use super::{held_stopped, load_agent_pubkey, stopped_at_start};
+
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn an_unreadable_store_holds_every_agent_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(stopped_at_start(tmp.path()), Some(Vec::new()));
+        assert!(!held_stopped(
+            stopped_at_start(tmp.path()).as_deref(),
+            "default"
+        ));
+
+        std::fs::write(tmp.path().join("permissions.db"), b"not a database").unwrap();
+        let stopped = stopped_at_start(tmp.path());
+        assert_eq!(stopped, None);
+        assert!(held_stopped(stopped.as_deref(), "default"));
+        assert!(held_stopped(stopped.as_deref(), "work"));
+
+        let ids = vec!["work".to_string()];
+        assert!(held_stopped(Some(&ids), "work"));
+        assert!(!held_stopped(Some(&ids), "default"));
+    }
 
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
