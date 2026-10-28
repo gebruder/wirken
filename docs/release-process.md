@@ -189,8 +189,11 @@ what the flagged value actually is, what it is used for, and a verdict of
 *not a secret* (domain string, test vector, public constant) or *real
 finding*. A real finding is fixed in its own commit, not dismissed. Use the
 narrowest reason GitHub offers and put the evidence in the dismissal comment,
-including what makes the site test-only. A dismissal with no reason recorded
-is indistinguishable later from one nobody read.
+including what makes the site test-only. The comment is capped at 280
+characters: write the file path, line and commit first, the verdict last,
+and count before sending, because the API refuses a longer one rather than
+truncating it. A dismissal with no reason recorded is indistinguishable later
+from one nobody read.
 
 Do not suppress a rule repository-wide to clear test-path noise. CodeQL's
 config cannot scope a single rule to a path: `query-filters` selects on query
