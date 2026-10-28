@@ -85,6 +85,8 @@ tagged.
 - `wirken permissions pending list` shows each request's action key.
 - A clean stop of `wirken run` removes every socket it bound, including
   `gateway-hooks.sock` and `gateway-permissions.sock`.
+- A `wirken` command whose output is closed early, as by `| head`, exits 141
+  with nothing on stderr instead of reporting a panic.
 - A `wirken lyrik run` with no terminal says once, before it dispatches, that
   every command needing approval is refused, and each refusal's
   `permission_denied` row carries `denial_reason` `no terminal for approval`.

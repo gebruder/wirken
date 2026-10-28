@@ -1616,6 +1616,29 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
     Some(change)
 }
 
+/// A command whose output is closed early, as by `| head`, exits 141, as
+/// a process the pipe signal ended would, instead of reporting a panic.
+/// Main thread only: a gateway task that cannot print fails on its own,
+/// as before.
+fn exit_quietly_on_closed_output() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if std::thread::current().name() == Some("main")
+            && message.starts_with("failed printing to std")
+            && message.contains("Broken pipe")
+        {
+            std::process::exit(141);
+        }
+        previous(info);
+    }));
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -1625,6 +1648,7 @@ async fn main() -> Result<()> {
     // chain head.
     wirken_audit::set_build_identity(build_info::audit_identity());
 
+    exit_quietly_on_closed_output();
     let cli = Cli::parse();
 
     // The default filter applies to every crate whose name starts
