@@ -2702,10 +2702,13 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
 
     // Cleanup sockets
     let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&hooks_socket_path);
     let _ = std::fs::remove_file(&mcp_proxy_socket);
     let _ = std::fs::remove_file(&mcp_refresh_socket);
     #[cfg(unix)]
     let _ = std::fs::remove_file(&orchestrator_socket_path);
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(&permissions_socket_path);
 
     println!("  Wirken stopped.");
     Ok(())

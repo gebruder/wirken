@@ -81,6 +81,8 @@ tagged.
   it started with. Web chat's About panel shows the org tool policy the gate
   loaded at start rather than `tool_policy.json` as it is now on disk.
 - `wirken permissions pending list` shows each request's action key.
+- A clean stop of `wirken run` removes every socket it bound, including
+  `gateway-hooks.sock` and `gateway-permissions.sock`.
 - A `wirken lyrik run` with no terminal says once, before it dispatches, that
   every command needing approval is refused, and each refusal's
   `permission_denied` row carries `denial_reason` `no terminal for approval`.

@@ -128,6 +128,20 @@ fn stops_on(signal: libc::c_int) {
     assert!(status.success(), "{status:?}\n{output}");
     assert!(output.contains("Shutting down"), "{output}");
     assert!(output.contains("Wirken stopped."), "{output}");
+
+    // A clean stop leaves no socket for a later command to take for a
+    // running gateway.
+    use std::os::unix::fs::FileTypeExt;
+    let left: Vec<String> = std::fs::read_dir(data.path().join("sockets"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_socket()))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(left.is_empty(), "sockets left after a clean stop: {left:?}");
 }
 
 #[test]
