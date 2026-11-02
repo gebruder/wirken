@@ -154,8 +154,8 @@ rules collapse to a blank line.
 
 ### Approvals
 
-**Unit-tested only.** No run against a live Discord bot has posted the card or
-taken a press.
+**Exercised against a live Discord bot.** A live bot has posted the card, taken
+a button press, and redrawn the button row as disabled.
 
 Tool calls that need approval on a Discord session post a card with Approve
 and Deny buttons in the approval channel:
@@ -171,7 +171,8 @@ request nobody decides within `WIRKEN_DISCORD_APPROVAL_TIMEOUT_S` (300 seconds
 by default) is refused. Every presser gets the same reply; the gateway drops a
 press from anyone not on the approver list, or from any channel other than the
 one the card was posted in, and records it. The approval row's `approved_by` is
-the presser's Discord user id.
+the presser's Discord user id. The first press redraws the card with both
+buttons disabled, so a decided card does not invite a second press.
 
 ## Slack
 

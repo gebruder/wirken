@@ -214,8 +214,8 @@ The surfaces, and what each adds after the card:
   (HTML on Telegram, every value escaped; plain text on Signal), then the
   channel's way of deciding: buttons on Telegram, `!approve <prefix>` /
   `!deny <prefix> [reason]` on Signal. Discord receives it with Approve and
-  Deny buttons. These are the channels `wirken run` attaches a channel
-  approval gate to.
+  Deny buttons, redrawn disabled on the first press. These are the channels
+  `wirken run` attaches a channel approval gate to.
 - A session on any other channel, Slack included, prompts on the CLI
   surface: the request appears in `wirken permissions pending list` and is
   decided with `wirken permissions approve` or `deny`. Nothing is posted in

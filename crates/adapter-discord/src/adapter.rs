@@ -4,8 +4,8 @@ use std::sync::Arc;
 use serenity::Client;
 use serenity::all::{
     ButtonStyle, ChannelId, Context, CreateActionRow, CreateButton, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EventHandler, GatewayIntents, Interaction,
-    Message as DcMessage, MessageId, Ready,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
+    EventHandler, GatewayIntents, Interaction, Message as DcMessage, MessageId, Ready,
 };
 use tokio::sync::Mutex;
 
@@ -206,15 +206,31 @@ impl EventHandler for Handler {
             }
         }
 
+        // Redraw the row inert so the decision cannot be pressed twice.
+        let response = match approval_row(&payload.request_id, true) {
+            Ok(row) => CreateInteractionResponse::UpdateMessage(
+                CreateInteractionResponseMessage::new().components(vec![row]),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    request_id = %payload.request_id,
+                    error = %e,
+                    "discord interaction: could not rebuild disabled row; \
+                     acknowledging without editing the card"
+                );
+                CreateInteractionResponse::Acknowledge
+            }
+        };
+        let _ = component.create_response(&ctx.http, response).await;
+
+        // Only the user that clicked a button sees this message.
         let ack_text = acknowledgement(is_allow);
         let _ = component
-            .create_response(
+            .create_followup(
                 &ctx.http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content(ack_text)
-                        .ephemeral(true),
-                ),
+                CreateInteractionResponseFollowup::new()
+                    .content(ack_text)
+                    .ephemeral(true),
             )
             .await;
     }
@@ -363,6 +379,28 @@ pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
 /// emits an `ApprovalRequestFailed` frame back to the gateway with
 /// a snake_case reason label so the audit row records the failure
 /// distinctly from a generic timeout.
+/// The Approve / Deny row for an approval card, live or inert.
+pub(crate) fn approval_row(
+    request_id: &str,
+    disabled: bool,
+) -> Result<CreateActionRow, approval::EncodeError> {
+    let encode = |decision| {
+        approval::encode(&ApprovalPayload {
+            request_id: request_id.to_string(),
+            decision,
+        })
+    };
+    let approve = CreateButton::new(encode(Decision::Allow)?)
+        .label("Approve")
+        .style(ButtonStyle::Success)
+        .disabled(disabled);
+    let deny = CreateButton::new(encode(Decision::Deny)?)
+        .label("Deny")
+        .style(ButtonStyle::Danger)
+        .disabled(disabled);
+    Ok(CreateActionRow::Buttons(vec![approve, deny]))
+}
+
 async fn send_approval_request(
     http: &Arc<serenity::http::Http>,
     writer: &Arc<Mutex<IpcFrameWriter>>,
@@ -374,11 +412,8 @@ async fn send_approval_request(
     // convention. Encoding failure here would indicate a malformed
     // request_id; emit ApprovalRequestFailed rather than building a
     // half-shaped message.
-    let allow_id = match approval::encode(&ApprovalPayload {
-        request_id: fields.request_id.clone(),
-        decision: Decision::Allow,
-    }) {
-        Ok(s) => s,
+    let row = match approval_row(&fields.request_id, false) {
+        Ok(row) => row,
         Err(e) => {
             tracing::error!(
                 request_id = %fields.request_id,
@@ -389,29 +424,6 @@ async fn send_approval_request(
             return;
         }
     };
-    let deny_id = match approval::encode(&ApprovalPayload {
-        request_id: fields.request_id.clone(),
-        decision: Decision::Deny,
-    }) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                request_id = %fields.request_id,
-                error = %e,
-                "discord approval: encode failed; emitting ApprovalRequestFailed"
-            );
-            emit_failure(writer, &fields.request_id, "encode_failed").await;
-            return;
-        }
-    };
-
-    let approve = CreateButton::new(allow_id)
-        .label("Approve")
-        .style(ButtonStyle::Success);
-    let deny = CreateButton::new(deny_id)
-        .label("Deny")
-        .style(ButtonStyle::Danger);
-    let row = CreateActionRow::Buttons(vec![approve, deny]);
 
     let channel = ChannelId::new(fields.target_channel_id);
     let message = CreateMessage::new().content(text).components(vec![row]);

@@ -10,6 +10,14 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- A Discord approval card's Approve and Deny buttons stayed pressable after a
+  decision, so a second press drew the ephemeral acknowledgement again. The
+  first press now redraws the button row disabled. The pending-approval queue is
+  consumed on the first resolve, so the second decision was already discarded:
+  this changes what the card shows, not what it does.
+
 ## [3.2.0] - 2026-10-28
 
 ### Security

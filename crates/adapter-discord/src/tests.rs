@@ -584,3 +584,40 @@ fn every_presser_gets_the_same_acknowledgement() {
     assert_eq!(crate::adapter::acknowledgement(true), "Approved");
     assert_eq!(crate::adapter::acknowledgement(false), "Denied");
 }
+
+/// The row Discord redraws after a press differs from the one it is
+/// already holding only in `disabled`. The `custom_id`s have to
+/// survive byte-identical, or the redraw would leave buttons whose
+/// press no longer decodes to this request.
+#[test]
+fn a_decided_row_is_redrawn_inert_with_the_same_custom_ids() {
+    let request_id = "0f9d3c52-1234-5678-9abc-deadbeef0001";
+    let row = |disabled| {
+        serde_json::to_value(crate::adapter::approval_row(request_id, disabled).unwrap()).unwrap()
+    };
+    let live = row(false);
+    let inert = row(true);
+
+    assert_eq!(
+        live["components"][0]["custom_id"],
+        format!("req:{request_id}:allow")
+    );
+    assert_eq!(
+        live["components"][1]["custom_id"],
+        format!("req:{request_id}:deny")
+    );
+    assert_eq!(live["components"][0]["disabled"], false);
+    assert_eq!(live["components"][1]["disabled"], false);
+    assert_eq!(inert["components"][0]["disabled"], true);
+    assert_eq!(inert["components"][1]["disabled"], true);
+
+    // Identical in every other respect, so a press on the redrawn
+    // row carries the same payload the original would have.
+    let without_disabled = |mut row: serde_json::Value| {
+        for button in row["components"].as_array_mut().unwrap() {
+            button.as_object_mut().unwrap().remove("disabled");
+        }
+        row
+    };
+    assert_eq!(without_disabled(live), without_disabled(inert));
+}
