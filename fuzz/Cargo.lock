@@ -1785,9 +1785,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2615,9 +2615,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags",
  "fallible-iterator",
@@ -3499,9 +3499,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typenum"
@@ -4017,11 +4017,11 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-core"
-version = "3.2.0"
+version = "3.2.1"
 
 [[package]]
 name = "wirken-agent"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -4060,7 +4060,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-audit"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4094,7 +4094,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-gateway"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-ipc"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "async-trait",
  "capnp",
@@ -4140,7 +4140,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-mcp-proxy"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4169,7 +4169,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-sandbox"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4185,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-vault"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -4344,16 +4344,19 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.5"
+version = "9.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
+checksum = "eaeb7f16d2605b49aef586996ded29e65642fab7259a3077e537351df6d80426"
 dependencies = [
  "crc32fast",
  "flate2",
+ "getrandom 0.4.3",
  "indexmap",
+ "libc",
  "memchr",
  "nix",
  "typed-path",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

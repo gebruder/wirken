@@ -10,28 +10,9 @@ tagged.
 
 ## [Unreleased]
 
-### Changed
+## [3.2.1] - 2026-11-03
 
-- An `http_request` the skill profile refuses names the method and the host
-  in the tool result, and its `skill_permission_denied` row carries both as
-  `method` and `host`, on the `http_method`, `http_post_path`, `credentials`
-  and `egress` axes. A host in `egress.domains` is read-only for
-  `http_request`: GET and HEAD reach it, POST reaches only an endpoint in
-  `http.post_paths`, and PUT, PATCH and DELETE are refused on every host.
-  **For wirken-siem:** `skill_permission_denied` gains the optional fields
-  `method` and `host`.
-- The hostile corpus replays an `http_request` line that carries a skill
-  `permissions` block and a `gate` expectation through the skill-profile
-  gates, and checks that each refusal names the host and the method. Lines
-  cover GET and HEAD to a listed host, POST, PUT and DELETE to the same
-  host, a signup-shaped POST, a webhook-registration POST, a declared POST
-  endpoint and a lowercase verb.
-- A `sandbox_egress_verdict` row from an `exec` or a contained MCP server
-  carries `method`: `CONNECT` for a tunnel, whose inner requests the proxy
-  does not see, or the verb of a plain HTTP request. **For wirken-siem:**
-  `sandbox_egress_verdict` gains the optional field `method`.
-
-### Fixed
+### Security
 
 - A tool that ran and whose result row then failed to land returns
   `ToolEffectUnrecorded`, naming the tool and the call, instead of the
@@ -55,6 +36,30 @@ tagged.
   empty with no operator root installed refuses every skill as
   `RegistryRootUnusable` instead of loading self-signed bundles on the floor.
   Shipped builds carry the compiled root and are unaffected.
+
+### Changed
+
+- An `http_request` the skill profile refuses names the method and the host
+  in the tool result, and its `skill_permission_denied` row carries both as
+  `method` and `host`, on the `http_method`, `http_post_path`, `credentials`
+  and `egress` axes. A host in `egress.domains` is read-only for
+  `http_request`: GET and HEAD reach it, POST reaches only an endpoint in
+  `http.post_paths`, and PUT, PATCH and DELETE are refused on every host.
+  **For wirken-siem:** `skill_permission_denied` gains the optional fields
+  `method` and `host`.
+- The hostile corpus replays an `http_request` line that carries a skill
+  `permissions` block and a `gate` expectation through the skill-profile
+  gates, and checks that each refusal names the host and the method. Lines
+  cover GET and HEAD to a listed host, POST, PUT and DELETE to the same
+  host, a signup-shaped POST, a webhook-registration POST, a declared POST
+  endpoint and a lowercase verb.
+- A `sandbox_egress_verdict` row from an `exec` or a contained MCP server
+  carries `method`: `CONNECT` for a tunnel, whose inner requests the proxy
+  does not see, or the verb of a plain HTTP request. **For wirken-siem:**
+  `sandbox_egress_verdict` gains the optional field `method`.
+
+### Fixed
+
 - The local commit-msg hook in `scripts/git-hooks` applies the commit rule
   the CI name check applies: a co-author trailer naming the tool or its
   vendor is refused, one naming a person is allowed. The hook has tests,
@@ -68,6 +73,17 @@ tagged.
 - rusqlite 0.41.1 and zip 9.3.0, with libsqlite3-sys 0.39.1 and typed-path
   0.13.0, from #308. Every `deny.toml` exemption path resolves unchanged on
   the new lockfile.
+
+### Deferred
+
+- Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
+  serenity 0.12.5 in the Discord adapter. #27 is RUSTSEC-2026-0346 and #28 is
+  RUSTSEC-2026-0349, both ignored in `deny.toml` with their reachability
+  written there. #26 is RUSTSEC-2026-0348, Brotli certificate decompression:
+  RustSec marks every rustls below 0.23.9 unaffected, and 0.22.4 carries no
+  certificate-compression code, so the alert's `< 0.23.46` range over-reports
+  it. The fix for all three is serenity on rustls 0.23, held until the
+  migrated adapter passes a live Discord round-trip.
 
 ## [3.2.0] - 2026-10-28
 
