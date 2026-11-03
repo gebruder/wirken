@@ -304,10 +304,19 @@ surviving channel. The independence is inode-level only; a same-UID attacker
 can rewrite both files. Detection against that attacker rests on SIEM
 corroboration of the alarm log plus the writer's `tracing::error!` halt event.
 
-**Halt-boundary gap.** When the writer halts at `MAX_INTEGRITY_FAILURES` (3),
-the `audit.chain_broken` event from the halt-triggering pass can be dropped
-before flush. Operators see `N-1` chain_broken rows on the SIEM pipe plus the
-halt log line plus the full alarm-log set. The alarm log is canonical at the
+**Halt boundaries.** The writer halts on three conditions: three failed
+verify passes in a row, three failed alarm-log writes in a row, or persistent
+SQLite write failure (eight failed flushes in a row, or a retained buffer past
+1600 events). On every halt the channel is drained before the receiver drops,
+so an event already accepted is not lost to the halt. The verify halts drain
+into SQLite and then the SIEM pipe. The write-failure halts cannot write, so
+they forward the drained events to the SIEM pipe only and close the batch
+with one `audit.writer_halted` row, at level `error`, carrying `reason`
+(`consecutive_write_failures` or `buffer_over_cap`), `consecutive_failures`
+and `unchained_events`, the number of events in that batch that never
+entered the chain; the alarm log gets a `writer_halted` record. Read against
+the signed log those events are absent, and the row says why, so the gap
+reads as this halt and not as tampering. The alarm log is canonical at every
 halt boundary.
 
 **Halt counters are per-process.** The writer halts after 3 consecutive failed

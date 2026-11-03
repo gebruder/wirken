@@ -31,6 +31,31 @@ const CHANNEL_CAPACITY: usize = 4096;
 const MAX_CONSECUTIVE_FAILURES: u32 = 8;
 const MAX_BUFFER_ON_FAILURE: usize = BATCH_SIZE * 16;
 
+/// The action of the row that closes a write-failure halt's drain.
+/// It is the last event forwarded before the receiver drops, and it
+/// says how many events before it in the same batch never entered
+/// the chain, so a reconciliation of SIEM output against the signed
+/// log reads the gap as this halt and not as tampering.
+pub const WRITER_HALTED_ACTION: &str = "audit.writer_halted";
+
+/// Which persistent-failure gate the flush loop tripped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteFailureHalt {
+    /// `MAX_CONSECUTIVE_FAILURES` flushes failed in a row.
+    ConsecutiveFailures,
+    /// The retained buffer grew past `MAX_BUFFER_ON_FAILURE`.
+    BufferOverflow,
+}
+
+impl WriteFailureHalt {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ConsecutiveFailures => "consecutive_write_failures",
+            Self::BufferOverflow => "buffer_over_cap",
+        }
+    }
+}
+
 /// Number of successful flushes between continuous chain-verification
 /// passes. The flush loop calls `AuditLog::verify` every Nth flush so a
 /// chain break detected by a process other than the operator's CLI
@@ -647,9 +672,14 @@ async fn flush_loop(
             // Timer tick — flush whatever we have
             _ = tick.tick() => {
                 if !buffer.is_empty()
-                    && attempt_flush(&log, &mut buffer, &forwarder, &mut consecutive_failures)
-                        .await
+                    && let Some(halt) =
+                        attempt_flush(&log, &mut buffer, &forwarder, &mut consecutive_failures)
+                            .await
                 {
+                    drain_and_forward_at_write_failure_halt(
+                        &mut rx, &mut buffer, &forwarder, &alarms, halt, consecutive_failures,
+                    )
+                    .await;
                     break;
                 }
                 flushes_since_verify = flushes_since_verify.saturating_add(1);
@@ -691,7 +721,7 @@ async fn flush_loop(
                     Some(event) => {
                         buffer.push(event);
                         if buffer.len() >= BATCH_SIZE
-                            && attempt_flush(
+                            && let Some(halt) = attempt_flush(
                                 &log,
                                 &mut buffer,
                                 &forwarder,
@@ -699,6 +729,10 @@ async fn flush_loop(
                             )
                             .await
                         {
+                            drain_and_forward_at_write_failure_halt(
+                                &mut rx, &mut buffer, &forwarder, &alarms, halt, consecutive_failures,
+                            )
+                            .await;
                             break;
                         }
                     }
@@ -721,7 +755,10 @@ async fn flush_loop(
 /// verify pass dispatched through the channel (typically a
 /// channel-routed `audit.chain_broken` or `audit.row_unverifiable`)
 /// reaches the SIEM forwarder before the receiver drops and the
-/// writer enters its halt state.
+/// writer enters its halt state. The two write-failure halts drain
+/// through [`drain_and_forward_at_write_failure_halt`] instead,
+/// because on those the SQLite write this function depends on is
+/// what is failing.
 ///
 /// Safe to mutate `rx` here without contending with the receive arm
 /// of the surrounding `tokio::select!`: the verify pass has already
@@ -752,28 +789,94 @@ async fn drain_channel_and_flush(
     }
 }
 
-/// Run one flush and update `consecutive_failures`. Returns `true`
-/// when the loop should halt (persistent failure) so the caller can
-/// break and let `rx` drop, closing the audit channel.
+/// Drain `rx` into `buffer` and forward everything, with a closing
+/// [`WRITER_HALTED_ACTION`] row, on a write-failure halt. Forward
+/// only: the halt was reached because the SQLite write keeps
+/// failing, so [`drain_channel_and_flush`] would drain into a batch
+/// write that fails and forward nothing. The durability-first order
+/// `flush` keeps exists so a retry does not re-send a batch to SIEM;
+/// at a terminal halt there is no retry, so the order does not
+/// apply.
+///
+/// The forwarded events never entered the chain. Read against the
+/// signed log they look like what tampering produces, so the batch
+/// is closed by a row naming the halt and how many events in the
+/// batch are unchained, and the alarm log gets a `writer_halted`
+/// record on its own file. Best-effort: nothing here reverses the
+/// halt.
+async fn drain_and_forward_at_write_failure_halt(
+    rx: &mut mpsc::Receiver<AuditEvent>,
+    buffer: &mut Vec<AuditEvent>,
+    forwarder: &Option<SiemForwarder>,
+    alarms: &AlarmLog,
+    halt: WriteFailureHalt,
+    consecutive_failures: u32,
+) {
+    while let Ok(event) = rx.try_recv() {
+        buffer.push(event);
+    }
+    let unchained = buffer.len();
+    let alarm = AlarmRecord {
+        timestamp: now_rfc3339(),
+        alarm_type: "writer_halted".into(),
+        session_id: None,
+        seq: None,
+        expected_hash: None,
+        actual_hash: None,
+        hostname: hostname_best_effort(),
+        gateway_pid: std::process::id(),
+        hmac: None,
+    };
+    if let Err(e) = alarms.append(&alarm) {
+        tracing::error!("Audit writer halt: alarm-log write failed: {e}");
+    }
+    buffer.push(
+        AuditEvent::new(
+            ActorKind::Service,
+            "audit-writer",
+            WRITER_HALTED_ACTION,
+            "audit.db",
+        )
+        .with_detail(serde_json::json!({
+            "reason": halt.as_str(),
+            "consecutive_failures": consecutive_failures,
+            "unchained_events": unchained,
+        })),
+    );
+    if let Some(fwd) = forwarder {
+        fwd.forward(buffer).await;
+    }
+    buffer.clear();
+}
+
+/// Run one flush and update `consecutive_failures`. Returns the halt
+/// the loop should take on persistent failure, so the caller drains,
+/// breaks and lets `rx` drop, closing the audit channel.
 async fn attempt_flush(
     log: &AuditLog,
     buffer: &mut Vec<AuditEvent>,
     forwarder: &Option<SiemForwarder>,
     consecutive_failures: &mut u32,
-) -> bool {
+) -> Option<WriteFailureHalt> {
     match flush(log, buffer, forwarder).await {
         Ok(()) => {
             *consecutive_failures = 0;
-            false
+            None
         }
         Err(_) => {
             *consecutive_failures += 1;
-            let halt = *consecutive_failures >= MAX_CONSECUTIVE_FAILURES
-                || buffer.len() > MAX_BUFFER_ON_FAILURE;
-            if halt {
+            let halt = if *consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                Some(WriteFailureHalt::ConsecutiveFailures)
+            } else if buffer.len() > MAX_BUFFER_ON_FAILURE {
+                Some(WriteFailureHalt::BufferOverflow)
+            } else {
+                None
+            };
+            if let Some(halt) = halt {
                 tracing::error!(
                     failures = *consecutive_failures,
                     buffered = buffer.len(),
+                    reason = halt.as_str(),
                     "Audit flush halting after persistent write failures; \
                      closing channel so callers observe ChannelClosed"
                 );
@@ -1744,6 +1847,174 @@ mod tests {
         // Restore perms so TempDir cleanup can remove the file.
         let _ = std::fs::set_permissions(&alarm_path, std::fs::Permissions::from_mode(0o600));
         assert!(halted);
+    }
+
+    /// A log whose every write fails: a second connection holds the
+    /// database's write lock for as long as this value lives, so the
+    /// writer's batch gets `SQLITE_BUSY` once its busy timeout runs
+    /// out. The real failure the halts are built for, not a stub.
+    struct LockedLog {
+        tmp: tempfile::TempDir,
+        log: AuditLog,
+        _lock: rusqlite::Connection,
+    }
+
+    impl LockedLog {
+        fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db_path = tmp.path().join("audit.db");
+            let log = AuditLog::open(&db_path).unwrap();
+            let lock = rusqlite::Connection::open(&db_path).unwrap();
+            lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+            Self {
+                tmp,
+                log,
+                _lock: lock,
+            }
+        }
+    }
+
+    /// A webhook sink: one request's body, as a JSON array.
+    async fn webhook_sink() -> (
+        String,
+        tokio::sync::oneshot::Receiver<Vec<serde_json::Value>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/events", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let body_start = loop {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "connection closed before the head ended");
+                bytes.extend_from_slice(&chunk[..n]);
+                if let Some(p) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break p + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&bytes[..body_start]).to_ascii_lowercase();
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .expect("content-length")
+                .trim()
+                .parse()
+                .unwrap();
+            while bytes.len() < body_start + len {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "connection closed mid-body");
+                bytes.extend_from_slice(&chunk[..n]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            let body: Vec<serde_json::Value> =
+                serde_json::from_slice(&bytes[body_start..body_start + len]).unwrap();
+            let _ = tx.send(body);
+        });
+        (endpoint, rx)
+    }
+
+    fn webhook_forwarder(endpoint: String) -> SiemForwarder {
+        SiemForwarder::new(SiemConfig {
+            target: crate::siem::SiemTarget::Webhook,
+            endpoint,
+            api_key: String::new(),
+            service: "wirken".into(),
+            environment: "test".into(),
+            hmac_secret: None,
+            sentinel_typed: None,
+            typed_include_variants: None,
+            typed_exclude_variants: None,
+            typed_forwarding_enabled: None,
+            typed_poll_interval_ms: None,
+        })
+        .unwrap()
+    }
+
+    /// Drive one write-failure halt path end to end: the flush that
+    /// trips it, then the drain, with one event still in the channel.
+    /// That event and the buffered ones reach the SIEM sink in one
+    /// batch closed by the halt row, and the alarm log has the halt.
+    async fn write_failure_halt_drains_in_flight_event(
+        buffered: usize,
+        failures_before: u32,
+        expected: WriteFailureHalt,
+    ) {
+        let locked = LockedLog::new();
+        let alarms = AlarmLog::new(locked.tmp.path());
+        let mut buffer: Vec<AuditEvent> = (0..buffered)
+            .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("buffered-{i}"), "t"))
+            .collect();
+        let mut failures = failures_before;
+        let halt = attempt_flush(&locked.log, &mut buffer, &None, &mut failures).await;
+        assert_eq!(halt, Some(expected), "the flush must trip this halt");
+        assert_eq!(buffer.len(), buffered, "a failed flush retains the buffer");
+
+        let (tx, mut rx) = mpsc::channel::<AuditEvent>(16);
+        tx.send(AuditEvent::new(ActorKind::User, "actor", "in-flight", "t"))
+            .await
+            .unwrap();
+        let (endpoint, body) = webhook_sink().await;
+        let forwarder = Some(webhook_forwarder(endpoint));
+        drain_and_forward_at_write_failure_halt(
+            &mut rx,
+            &mut buffer,
+            &forwarder,
+            &alarms,
+            expected,
+            failures,
+        )
+        .await;
+        assert!(
+            buffer.is_empty(),
+            "the drained batch is forwarded and released"
+        );
+
+        let body = body.await.expect("the sink received one batch");
+        let actions: Vec<&str> = body.iter().map(|e| e["action"].as_str().unwrap()).collect();
+        assert_eq!(actions.len(), buffered + 2, "{actions:?}");
+        assert!(actions.contains(&"in-flight"), "{actions:?}");
+        assert!(actions.contains(&"buffered-0"), "{actions:?}");
+        let marker = body.last().unwrap();
+        assert_eq!(marker["action"], WRITER_HALTED_ACTION);
+        assert_eq!(marker["detail"]["reason"], expected.as_str());
+        assert_eq!(marker["detail"]["unchained_events"], buffered + 1);
+        assert_eq!(marker["detail"]["consecutive_failures"], failures);
+
+        let alarm_types: Vec<String> = alarms
+            .read_all()
+            .unwrap()
+            .into_iter()
+            .map(|a| a.record.alarm_type)
+            .collect();
+        assert_eq!(alarm_types, ["writer_halted"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn consecutive_write_failure_halt_drains_in_flight_event_to_siem() {
+        write_failure_halt_drains_in_flight_event(
+            2,
+            MAX_CONSECUTIVE_FAILURES - 1,
+            WriteFailureHalt::ConsecutiveFailures,
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn buffer_overflow_halt_drains_in_flight_event_to_siem() {
+        write_failure_halt_drains_in_flight_event(
+            MAX_BUFFER_ON_FAILURE + 1,
+            0,
+            WriteFailureHalt::BufferOverflow,
+        )
+        .await;
     }
 
     #[tokio::test]

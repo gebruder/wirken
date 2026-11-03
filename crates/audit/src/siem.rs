@@ -1392,7 +1392,7 @@ pub fn compute_webhook_signature(secret: &[u8], body: &[u8]) -> String {
 /// restarts are typed events with levels of their own ([`typed_level`]).
 fn severity(action: &str, _detail: &serde_json::Value) -> &'static str {
     match action {
-        "connection.panic" => "error",
+        "connection.panic" | crate::writer::WRITER_HALTED_ACTION => "error",
         _ => action_to_severity(action),
     }
 }

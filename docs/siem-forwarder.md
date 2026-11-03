@@ -39,7 +39,9 @@ opt-in.
 50 ms or every 100 events and forwards each batch. Always on when any endpoint
 is configured. Carries gateway-level events: `gateway.start`, adapter
 handshake records, MCP proxy registration, permission denials,
-`audit.chain_broken`. Source: `crates/audit/src/writer.rs:591-704`,
+`audit.chain_broken`, and `audit.writer_halted` closing the forward-only drain
+of a write-failure halt ([audit-cli](audit-cli.md#tamper-response)). Source:
+`crates/audit/src/writer.rs`,
 `crates/audit/src/siem.rs:178-261`.
 
 **Typed pipe.** A polling worker forwards new `session_events` rows. Each pass

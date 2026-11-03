@@ -42,6 +42,14 @@ tagged.
   refused with reason `record_failed`; a contained MCP server's verdict
   rows are held to the same rule. **For wirken-siem:**
   `sandbox_egress_verdict.reason` gains `record_failed`.
+- The audit writer's two persistent-write-failure halts drain the channel
+  before dropping the receiver, as the verify-pass halt does (#228). The
+  SQLite write is what is failing on those halts, so the drained events are
+  forwarded to the SIEM pipe only, and the batch is closed by one
+  `audit.writer_halted` row carrying the reason, the failure count and how
+  many events in the batch never entered the chain; the alarm log gets a
+  `writer_halted` record. **For wirken-siem:** new legacy action
+  `audit.writer_halted` at level `error`.
 - The local commit-msg hook in `scripts/git-hooks` applies the commit rule
   the CI name check applies: a co-author trailer naming the tool or its
   vendor is refused, one naming a person is allowed. The hook has tests,
