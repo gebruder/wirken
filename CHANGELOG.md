@@ -37,6 +37,12 @@ tagged.
   first press, and the adapter forwards no second decision for a card it has
   already decided. Reported, with a patch, by olive-mm in #309.
 
+### Dependencies
+
+- rusqlite 0.41.1 and zip 9.3.0, with libsqlite3-sys 0.39.1 and typed-path
+  0.13.0, from #308. Every `deny.toml` exemption path resolves unchanged on
+  the new lockfile.
+
 ## [3.2.0] - 2026-10-28
 
 ### Security

@@ -48,7 +48,7 @@ tokio = { version = "1.52", features = ["full"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 
 # SQLite
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 # Zip reading for imported data-export archives. Narrowed deliberately:
 # the default feature set enables aes-crypto, bzip2, deflate64, lzma,
@@ -58,7 +58,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # rather than adding a second backend. A member compressed with
 # anything else fails to open with a clear error, which is the
 # fail-closed direction.
-zip = { version = "9.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.1", default-features = false, features = ["deflate-flate2"] }
 # zip's `deflate-flate2` enables the flate2 dependency but selects no
 # backend for it. Name the pure-Rust one explicitly so the feature
 # unifies on miniz_oxide, already in the tree, rather than pulling a C
