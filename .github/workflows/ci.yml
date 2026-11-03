@@ -269,6 +269,11 @@ jobs:
       - name: Source lints
         run: python3 -W error::ResourceWarning scripts/source_lints.py
 
+      # The local commit-msg hook applies the commit rules check-names
+      # applies above; this keeps the two from drifting.
+      - name: Commit-msg hook tests
+        run: scripts/git-hooks/test-commit-msg.sh
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest

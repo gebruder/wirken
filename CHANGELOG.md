@@ -33,6 +33,10 @@ tagged.
 
 ### Fixed
 
+- The local commit-msg hook in `scripts/git-hooks` applies the commit rule
+  the CI name check applies: a co-author trailer naming the tool or its
+  vendor is refused, one naming a person is allowed. The hook has tests,
+  run in CI.
 - A Discord approval card's Approve and Deny buttons are disabled by the
   first press, and the adapter forwards no second decision for a card it has
   already decided. Reported, with a patch, by @olive-mm in #309.

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Reject commit messages that leak local paths or attribution trailers.
+# Reject commit messages that leak local paths or attribute the work
+# to a tool. The rules are the ones scripts/check-names.sh applies in
+# CI: a co-author trailer naming the tool or its vendor is refused, a
+# co-author trailer naming a person is allowed.
 #
 # Install: scripts/git-hooks/install.sh
+# Test:    scripts/git-hooks/test-commit-msg.sh
 set -euo pipefail
 
 msg_file="${1:?usage: commit-msg <path>}"
@@ -19,8 +23,10 @@ if printf '%s' "$payload" | grep -qE '(/home/|/Users/)[a-z]'; then
 	report 'absolute home path in message; use $REPO or a relative path'
 fi
 
-if printf '%s' "$payload" | grep -qiE 'Co-Authored-By:'; then
-	report 'attribution trailer (Co-Authored-By)'
+# The name is written as a character class so this file passes
+# check-names itself.
+if printf '%s' "$payload" | grep -qiE '^[[:space:]]*co-authored-by:.*(c[l]aude|anthropic)'; then
+	report 'co-author trailer naming the tool or its vendor'
 fi
 
 if printf '%s' "$payload" | grep -qiE '^Generated with '; then
