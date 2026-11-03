@@ -1425,6 +1425,17 @@ pub enum SessionEvent {
         /// pre-upgrade emit produced.
         #[serde(default)]
         denied_reason: SkillDeniedReason,
+        /// The request method, upper-cased, when the refused call was
+        /// an `http_request`. Absent on every other axis and on rows
+        /// written before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        /// The request host when the refused call was an
+        /// `http_request`, on every axis it can be refused on, so a
+        /// rule reading `host` sees the method refusals as well as
+        /// the `egress` ones. Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// Zirkel: the librarian ran a perspective-expansion turn for
     /// `topic`. `perspectives` carries the ephemeral noun-phrase

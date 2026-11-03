@@ -197,8 +197,10 @@ fn undeclared_credential_refused_at_gate_declared_passes() {
         http_tool::gate(&declared, &call).is_none(),
         "declared slot must pass"
     );
-    let (axis, _) = http_tool::gate(&none, &call).expect("undeclared slot must refuse");
-    assert_eq!(axis, "credentials");
+    let refusal = http_tool::gate(&none, &call).expect("undeclared slot must refuse");
+    assert_eq!(refusal.axis, "credentials");
+    assert_eq!(refusal.method, "GET");
+    assert_eq!(refusal.host.as_deref(), Some("x.example"));
 }
 
 // ---- 3. egress allowlist blocks non-listed host: refusal, not prompt -----
@@ -233,8 +235,15 @@ async fn allowlisted_get_runs_without_prompt_write_verb_refused() {
 
     // A write verb is refused at the gate and by the handler.
     let del = serde_json::json!({"method": "DELETE", "url": "https://x.example/"}).to_string();
-    let (axis, _) = http_tool::gate(&perms_allow_all(), &del).expect("DELETE must refuse");
-    assert_eq!(axis, "http_method");
+    let refusal = http_tool::gate(&perms_allow_all(), &del).expect("DELETE must refuse");
+    assert_eq!(refusal.axis, "http_method");
+    assert_eq!(refusal.method, "DELETE");
+    assert_eq!(refusal.host.as_deref(), Some("x.example"));
+    assert!(
+        refusal.message.contains("'DELETE'") && refusal.message.contains("'x.example'"),
+        "the refusal names the method and the host: {}",
+        refusal.message
+    );
 
     let put = serde_json::json!({"method": "PUT", "url": "https://x.example/"});
     let handled = http_tool::execute(&egress(&["x.example"]), None, None, &put)
@@ -403,9 +412,62 @@ async fn post_only_to_declared_search_path() {
 
     // Undeclared path on the same (allowlisted) host: refused at the gate.
     let bad = serde_json::json!({"method": "POST", "url": format!("{base}/other"), "body": "{}"});
-    let (axis, _) =
-        http_tool::gate(&perms, &bad.to_string()).expect("undeclared POST path refused");
-    assert_eq!(axis, "http_post_path");
+    let refusal = http_tool::gate(&perms, &bad.to_string()).expect("undeclared POST path refused");
+    assert_eq!(refusal.axis, "http_post_path");
+    assert_eq!(refusal.method, "POST");
+    assert_eq!(refusal.host.as_deref(), Some("localhost"));
+    assert!(
+        refusal.message.contains("POST to host 'localhost'"),
+        "the refusal names the method and the host: {}",
+        refusal.message
+    );
+}
+
+// ---- 9b. a listed host is read-only: every write verb names it -----------
+
+#[test]
+fn listed_host_is_read_only_and_each_refusal_names_host_and_method() {
+    // The host is in egress.domains and nothing else is declared: the
+    // package-source shape. GET and HEAD pass the gate; a publish, a
+    // signup and a delete on the same host are refused, each naming
+    // the host and the verb on the row and in the tool result.
+    let perms = perms("egress:\n  mode: allowlist\n  domains: [pypi.org]\n");
+    for verb in ["GET", "HEAD", "get"] {
+        let call = serde_json::json!({"method": verb, "url": "https://pypi.org/simple/requests/"});
+        assert!(
+            http_tool::gate(&perms, &call.to_string()).is_none(),
+            "{verb} to a listed host passes the gate"
+        );
+    }
+    let cases = [
+        ("POST", "https://pypi.org/legacy/", "http_post_path"),
+        (
+            "POST",
+            "https://pypi.org/account/register/",
+            "http_post_path",
+        ),
+        ("PUT", "https://pypi.org/api/v3/packages/x", "http_method"),
+        (
+            "DELETE",
+            "https://pypi.org/api/v3/packages/x/1.0",
+            "http_method",
+        ),
+        ("patch", "https://pypi.org/api/v3/packages/x", "http_method"),
+    ];
+    for (verb, url, axis) in cases {
+        let call = serde_json::json!({"method": verb, "url": url, "body": "{}"});
+        let refusal = http_tool::gate(&perms, &call.to_string())
+            .unwrap_or_else(|| panic!("{verb} {url} must be refused"));
+        let verb_up = verb.to_ascii_uppercase();
+        assert_eq!(refusal.axis, axis, "{verb} {url}");
+        assert_eq!(refusal.method, verb_up, "{verb} {url}");
+        assert_eq!(refusal.host.as_deref(), Some("pypi.org"), "{verb} {url}");
+        assert!(
+            refusal.message.contains(&verb_up) && refusal.message.contains("'pypi.org'"),
+            "{verb} {url}: the tool result names the method and the host: {}",
+            refusal.message
+        );
+    }
 }
 
 // ---- 10. caps: truncation + timeout --------------------------------------

@@ -296,16 +296,33 @@ fn scheme_permitted(url: &url::Url) -> bool {
     false
 }
 
+/// Why the pre-dispatch gate refused an `http_request`, with the
+/// method and host it was refused on. `axis` is the
+/// `SkillPermissionDenied` axis; `message` is the tool result the
+/// model sees, which names both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateRefusal {
+    pub axis: &'static str,
+    pub message: String,
+    /// The request method, upper-cased as the gate compared it.
+    pub method: String,
+    /// The request host, when the URL parsed to one.
+    pub host: Option<String>,
+}
+
 /// Pre-dispatch gate for `http_request` beyond `tools.allow`, called
 /// from the runtime gate block: method must be GET/HEAD/POST (write
 /// verbs refused), a POST must target a declared `http.post_paths`
 /// endpoint, and a named `credential` must be in `credentials.allow`.
-/// Returns `Some((axis, message))` to refuse, `None` to allow.
-/// Unparseable args return `None`; the handler surfaces the parse error.
-pub(crate) fn gate(
-    perms: &crate::skill_perms::PhasedEffective,
-    arguments: &str,
-) -> Option<(&'static str, String)> {
+/// Returns `Some` to refuse, `None` to allow. Unparseable args return
+/// `None`; the handler surfaces the parse error.
+///
+/// A listed host is read-only by default: `egress.domains` admits a
+/// host for GET and HEAD, and nothing else reaches it unless the exact
+/// endpoint is in `http.post_paths`. Every refusal names the host and
+/// the method, so a refused publish, signup or delete reads as one in
+/// the tool result and on the audit row.
+pub fn gate(perms: &crate::skill_perms::PhasedEffective, arguments: &str) -> Option<GateRefusal> {
     use crate::skill_perms::GateDecision;
     let raw = if arguments.is_empty() {
         "{}"
@@ -316,37 +333,53 @@ pub(crate) fn gate(
 
     let method = args.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let method_up = method.to_ascii_uppercase();
+    let url = args
+        .get("url")
+        .and_then(|u| u.as_str())
+        .and_then(|s| url::Url::parse(s).ok());
+    let host = url.as_ref().and_then(|u| u.host_str().map(str::to_string));
+    let host_text = host.as_deref().unwrap_or("<no host>");
+    let refuse = |axis: &'static str, message: String| {
+        Some(GateRefusal {
+            axis,
+            message,
+            method: method_up.clone(),
+            host: host.clone(),
+        })
+    };
+
     if !matches!(method_up.as_str(), "GET" | "HEAD" | "POST") {
-        return Some((
+        return refuse(
             "http_method",
-            format!("method '{method}' is not allowed; http_request permits GET, HEAD, POST"),
-        ));
+            format!(
+                "method '{method_up}' is not allowed on host '{host_text}'; http_request \
+                 permits GET and HEAD, and POST only to an endpoint declared in the \
+                 skill's permissions.http.post_paths"
+            ),
+        );
     }
 
-    if method_up == "POST" {
-        let allowed = args
-            .get("url")
-            .and_then(|u| u.as_str())
-            .and_then(|s| url::Url::parse(s).ok())
-            .as_ref()
-            .is_some_and(|u| perms.allows_post_path(u));
-        if !allowed {
-            return Some((
-                "http_post_path",
-                "POST is only allowed to an endpoint declared in the skill's \
-                 permissions.http.post_paths"
-                    .to_string(),
-            ));
-        }
+    if method_up == "POST" && !url.as_ref().is_some_and(|u| perms.allows_post_path(u)) {
+        return refuse(
+            "http_post_path",
+            format!(
+                "POST to host '{host_text}' is not allowed: the host is read-only for \
+                 http_request, and POST is only allowed to an endpoint declared in \
+                 the skill's permissions.http.post_paths"
+            ),
+        );
     }
 
     if let Some(cred) = args.get("credential").and_then(|c| c.as_str())
         && !matches!(perms.gate_credential(cred), GateDecision::Allow)
     {
-        return Some((
+        return refuse(
             "credentials",
-            format!("credential '{cred}' is not in the skill's permissions.credentials.allow"),
-        ));
+            format!(
+                "credential '{cred}' is not in the skill's permissions.credentials.allow \
+                 ({method_up} to host '{host_text}')"
+            ),
+        );
     }
 
     None

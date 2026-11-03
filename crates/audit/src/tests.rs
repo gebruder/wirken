@@ -3489,6 +3489,8 @@ fn every_session_event() -> Vec<SessionEvent> {
             agent_id: String::new(),
             trigger: None,
             denied_reason: SkillDeniedReason::Profile,
+            method: None,
+            host: None,
         },
         SessionEvent::PerspectiveSkipped {
             run_id: String::new(),

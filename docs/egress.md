@@ -45,6 +45,15 @@ from `Agent::execute_tool` in `crates/agent/src/runtime.rs`):
 A request that clears all four still goes out through `EgressClient`, so the
 host allowset above applies on top.
 
+A host in `egress.domains` is read-only for `http_request`: GET and HEAD
+reach it, POST reaches only an endpoint listed in `http.post_paths`, and
+PUT, PATCH and DELETE are refused on every host. Listing a host as a package
+source does not admit publishing, account creation or webhook registration
+on it. Each refusal names the method and the host in the tool result, and
+the `SkillPermissionDenied` row carries them as `method` and `host` on the
+`http_method`, `http_post_path`, `credentials` and `egress` axes, so a
+refused publish reads as one from the row alone.
+
 Once the session has read something restricting, which is every read label but
 `aggregated_external` (workspace files, either channel's memory, an imported
 archive, `exec` output, MCP tool output, the response to an `http_request` that

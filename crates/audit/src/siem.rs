@@ -2326,6 +2326,8 @@ mod identity_tests {
                     agent_id: agent(),
                     trigger: None,
                     denied_reason: SkillDeniedReason::Profile,
+                    method: None,
+                    host: None,
                 },
                 None,
                 None,

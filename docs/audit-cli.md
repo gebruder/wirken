@@ -49,7 +49,7 @@ the same detail, targeting the job id; the firing is not deferred.
 | `permission_approved` / `permission_renewed` / `permission_grant_expired` / `permission_grant_pruned` | `agent_id` | Grant lifecycle. See [permissions](permissions-and-identity.md#what-the-chain-records-about-a-grant). |
 | `permission_revoked` | `agent_id` | An operator removed a grant. Carries `revoked_by` and the `tier` and `expires_at` the row held. |
 | `permission_approval_refused` | `adapter_id` | A decision arrived from a caller the gate would not take it from. Carries `request_id`, `caller` and `reason`; see [permissions](permissions-and-identity.md#what-the-chain-records-about-a-grant). |
-| `skill_permission_denied` | `agent_id` | A per-skill profile denied an axis. |
+| `skill_permission_denied` | `agent_id` | A per-skill profile denied an axis. For an `http_request`, carries `method` and `host` on every axis. See [egress](egress.md#the-http_request-gate). |
 | `sandbox_egress_verdict` / `sandbox_egress_unsupported` | `agent_id`, `channel`, `adapter_id`, `sender_id`, `mcp_server` | One row per sandbox egress request, allowed or not, from an `exec` or a contained MCP server. See [egress](egress.md#audit). |
 | `subagent_spawned` / `subagent_session_bound` / `subagent_result` | `agent_id`, `child_agent_id` | Sub-agent lifecycle under capability-attenuated ceilings. |
 | `read_sensitivity_exempted` | none | The agent's `exempt_exec_mcp_output` setting left `exempted` labels (`exec_output`, `mcp_output`) out of an `http_request` escalation decision, once per turn where it did. `still_escalated` is whether other labels sent the call to the operator anyway. See [egress](egress.md#the-http_request-gate). |

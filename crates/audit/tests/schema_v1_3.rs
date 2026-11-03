@@ -271,6 +271,58 @@ fn pre_request_bytes_llm_request_reads_as_a_turn_of_unknown_size() {
 }
 
 /// `request_bytes` is on the wire when known; `purpose` only when the
+/// A `skill_permission_denied` row for an `http_request` carries the
+/// method and the host on every axis it can be refused on; every other
+/// axis omits both keys, and a row written before the fields existed
+/// reads back with neither.
+#[test]
+fn snapshot_skill_permission_denied_carries_method_and_host_for_http_request() {
+    let http = SessionEvent::SkillPermissionDenied {
+        axis: "http_method".into(),
+        requested: "http_request".into(),
+        agent_id: "worker".into(),
+        trigger: None,
+        denied_reason: wirken_audit::SkillDeniedReason::Profile,
+        method: Some("PUT".into()),
+        host: Some("pypi.org".into()),
+    };
+    let v: Value = serde_json::to_value(&http).unwrap();
+    assert_eq!(v["method"], "PUT");
+    assert_eq!(v["host"], "pypi.org");
+
+    let tools = SessionEvent::SkillPermissionDenied {
+        axis: "tools".into(),
+        requested: "exec".into(),
+        agent_id: "worker".into(),
+        trigger: None,
+        denied_reason: wirken_audit::SkillDeniedReason::Profile,
+        method: None,
+        host: None,
+    };
+    let v: Value = serde_json::to_value(&tools).unwrap();
+    assert!(v.get("method").is_none() && v.get("host").is_none(), "{v}");
+
+    let old = serde_json::json!({
+        "kind": "skill_permission_denied",
+        "axis": "egress",
+        "requested": "evil.example",
+        "agent_id": "worker",
+        "trigger": null
+    });
+    let back: SessionEvent = serde_json::from_value(old).unwrap();
+    assert!(
+        matches!(
+            back,
+            SessionEvent::SkillPermissionDenied {
+                method: None,
+                host: None,
+                ..
+            }
+        ),
+        "{back:?}"
+    );
+}
+
 /// call is not a turn, so a turn's row keeps the shape it had.
 #[test]
 fn snapshot_llm_request_size_and_purpose() {

@@ -10,6 +10,17 @@ tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- An `http_request` the skill profile refuses names the method and the host
+  in the tool result, and its `skill_permission_denied` row carries both as
+  `method` and `host`, on the `http_method`, `http_post_path`, `credentials`
+  and `egress` axes. A host in `egress.domains` is read-only for
+  `http_request`: GET and HEAD reach it, POST reaches only an endpoint in
+  `http.post_paths`, and PUT, PATCH and DELETE are refused on every host.
+  **For wirken-siem:** `skill_permission_denied` gains the optional fields
+  `method` and `host`.
+
 ## [3.2.0] - 2026-10-28
 
 ### Security

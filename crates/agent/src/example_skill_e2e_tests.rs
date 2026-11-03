@@ -149,7 +149,7 @@ fn gate_allows_declared_search_refuses_others_and_undeclared_credential() {
     assert_eq!(
         http_tool::gate(&perms, &bad)
             .expect("undeclared path refused")
-            .0,
+            .axis,
         "http_post_path"
     );
 
@@ -158,7 +158,7 @@ fn gate_allows_declared_search_refuses_others_and_undeclared_credential() {
     assert_eq!(
         http_tool::gate(&perms, &cred)
             .expect("undeclared credential refused")
-            .0,
+            .axis,
         "credentials"
     );
 

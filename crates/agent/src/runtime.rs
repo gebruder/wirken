@@ -1778,6 +1778,8 @@ impl Agent {
                         denied_reason: SkillDeniedReason::Phase {
                             phase_name: phase_name.clone(),
                         },
+                        method: None,
+                        host: None,
                     },
                 )?;
                 Err(AgentError::PermissionDenied(format!(
@@ -1793,6 +1795,8 @@ impl Agent {
                         agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_reason: SkillDeniedReason::Profile,
+                        method: None,
+                        host: None,
                     },
                 )?;
                 Err(AgentError::PermissionDenied(format!(
@@ -3834,6 +3838,8 @@ impl Agent {
                         denied_reason: SkillDeniedReason::Phase {
                             phase_name: phase_name.clone(),
                         },
+                        method: None,
+                        host: None,
                     },
                 )?;
                 return Ok(crate::tool::ToolResult {
@@ -3851,6 +3857,8 @@ impl Agent {
                         agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_reason: SkillDeniedReason::Profile,
+                        method: None,
+                        host: None,
                     },
                 )?;
                 return Ok(crate::tool::ToolResult {
@@ -3869,21 +3877,22 @@ impl Agent {
         // the POST search-path carve-out. Every failure is a refusal
         // recorded as SkillPermissionDenied, never a prompt.
         if name == "http_request"
-            && let Some((axis, message)) =
-                crate::http_tool::gate(&self.effective_permissions, arguments)
+            && let Some(refusal) = crate::http_tool::gate(&self.effective_permissions, arguments)
         {
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::SkillPermissionDenied {
-                    axis: axis.to_string(),
+                    axis: refusal.axis.to_string(),
                     requested: "http_request".to_string(),
                     agent_id: self.audited_agent_id(),
                     trigger: self.current_trigger.clone(),
                     denied_reason: SkillDeniedReason::Profile,
+                    method: Some(refusal.method),
+                    host: refusal.host,
                 },
             )?;
             return Ok(crate::tool::ToolResult {
-                output: message,
+                output: refusal.message,
                 success: false,
                 sandbox: None,
             });
@@ -3984,6 +3993,8 @@ impl Agent {
                             denied_reason: SkillDeniedReason::Phase {
                                 phase_name: phase_name.clone(),
                             },
+                            method: None,
+                            host: None,
                         },
                     )?;
                     return Ok(crate::tool::ToolResult {
@@ -4013,6 +4024,8 @@ impl Agent {
                             agent_id: self.audited_agent_id(),
                             trigger: self.current_trigger.clone(),
                             denied_reason: SkillDeniedReason::Profile,
+                            method: None,
+                            host: None,
                         },
                     )?;
                     return Ok(crate::tool::ToolResult {
@@ -4346,6 +4359,18 @@ impl Agent {
             // surface a non-success ToolResult to the LLM rather
             // than propagating the error out of the agent.
             Err(AgentError::EgressDenied(denied)) => {
+                // The method is on the row for `http_request`, whose
+                // method the model chooses. `web_search` and
+                // `generate_image` fix their own and carry none.
+                let method = (name == "http_request")
+                    .then(|| serde_json::from_str::<serde_json::Value>(arguments).ok())
+                    .flatten()
+                    .and_then(|a| {
+                        a.get("method")
+                            .and_then(|m| m.as_str())
+                            .map(str::to_ascii_uppercase)
+                    });
+                let verb = method.as_deref().unwrap_or("request");
                 // `EgressClient::check_egress` consults the phase
                 // overlay before the base enforcement and returns a
                 // typed reason. The audit emit matches on it so the
@@ -4358,7 +4383,7 @@ impl Agent {
                     crate::egress::EgressDenyReason::Profile => (
                         SkillDeniedReason::Profile,
                         format!(
-                            "egress denied: host '{}' is not in the agent's \
+                            "egress denied: {verb} to host '{}' is not in the agent's \
                              effective skill permissions egress allow-set",
                             denied.host,
                         ),
@@ -4368,7 +4393,7 @@ impl Agent {
                             phase_name: phase_name.clone(),
                         },
                         format!(
-                            "egress denied: host '{}' is denied by active phase '{}'",
+                            "egress denied: {verb} to host '{}' is denied by active phase '{}'",
                             denied.host, phase_name,
                         ),
                     ),
@@ -4381,6 +4406,8 @@ impl Agent {
                         agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_reason,
+                        host: method.is_some().then(|| denied.host.clone()),
+                        method,
                     },
                 )?;
                 Ok(crate::tool::ToolResult {
