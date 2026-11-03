@@ -50,6 +50,11 @@ tagged.
   many events in the batch never entered the chain; the alarm log gets a
   `writer_halted` record. **For wirken-siem:** new legacy action
   `audit.writer_halted` at level `error`.
+- A missing registry root is a hard failure at skill load, the same as a
+  zero-byte or unparseable root file (#177). A build whose compiled root is
+  empty with no operator root installed refuses every skill as
+  `RegistryRootUnusable` instead of loading self-signed bundles on the floor.
+  Shipped builds carry the compiled root and are unaffected.
 - The local commit-msg hook in `scripts/git-hooks` applies the commit rule
   the CI name check applies: a co-author trailer naming the tool or its
   vendor is refused, one naming a person is allowed. The hook has tests,

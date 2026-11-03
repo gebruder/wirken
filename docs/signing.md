@@ -103,8 +103,11 @@ The gate resolves the root from the same `default_data_dir()` the running
 gateway uses, so the two never look in different directories.
 
 **Absent versus corrupt root.** No root file means the compiled root. A root
-file present but unparseable fails closed: it refuses every skill and surfaces
-as `AgentError::RegistryRootUnusable` at error level.
+file present but unreadable, zero bytes or unparseable fails closed: it refuses
+every skill and surfaces as `AgentError::RegistryRootUnusable` at error level.
+So does no root at all, a build whose compiled root is empty with no operator
+root installed: the loader never treats an empty anchor as a trust set, so a
+self-signed third-party bundle cannot load through the gap.
 
 **Revocation and containment.** The root file is writable by anyone with
 gateway-UID write, so the file is not the anchor: the offline private key is.

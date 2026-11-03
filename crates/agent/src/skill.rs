@@ -659,17 +659,15 @@ pub fn envelope_collision_check(
 /// rather than silently dropping to the self-signed floor, so a
 /// corrupted anchor cannot disable strict mode unnoticed.
 ///
-/// - No root configured: self-signed verification (the floor). The
-///   self-signed check proves the bundle is internally consistent
-///   (`SKILL.md` hashes to what `SKILL.sig` covers under `SKILL.pub`),
-///   catching post-install tampering. `WIRKEN_ALLOW_UNSIGNED_SKILLS=1`
-///   lets a bundle without sig + pub load with a `tracing::warn!`; a
-///   present-but-bad signature is always a hard fail.
-/// - Root configured (strict): the signer must be delegated by the
-///   root. A self-signed-only bundle (no `SKILL.deleg`) and an unsigned
-///   bundle are both rejected; the unsigned bypass does not apply once
-///   a root is set, because the operator has opted into requiring
-///   identity.
+/// - No usable root: refused. That is a root file present but
+///   unreadable, zero bytes or unparseable, and also no root file with
+///   an empty compiled root. Every skill fails the same way, as
+///   `RegistryRootUnusable`; an empty anchor is never read as a trust
+///   set that a self-signed bundle passes through.
+/// - Root in effect (the operator's, else the compiled one): the
+///   signer must be delegated by the root. A self-signed-only bundle
+///   (no `SKILL.deleg`) and an unsigned bundle are both rejected; the
+///   `WIRKEN_ALLOW_UNSIGNED_SKILLS` bypass does not apply under a root.
 ///
 /// `skill_md` is the `SKILL.md` content the caller read and will parse;
 /// `skill_md_path` only names it in errors.
@@ -681,12 +679,12 @@ fn verify_skill_signature(
     let data_dir = wirken_gateway::config::default_data_dir();
     let operator_root =
         wirken_gateway::skill_registry::load_registry_root(&data_dir).map_err(|e| {
-            // Fail-closed: a configured-but-unusable anchor refuses to
-            // load rather than downgrading to the self-signed floor. The
+            // Fail-closed: no usable anchor refuses to load rather than
+            // downgrading to the self-signed floor, whether the root
+            // file is unparseable or there is no root at all. The
             // distinct `RegistryRootUnusable` variant lets `load_dir`
-            // surface this loudly: an absent root is the intended floor,
-            // but an unparseable one is a misconfigured strict anchor
-            // that must not read as a generic per-skill failure.
+            // surface this loudly, as one problem with the anchor rather
+            // than N per-skill failures.
             let error = AgentError::RegistryRootUnusable(format!(
                 "{e}; refusing to load {} (fail-closed)",
                 skill_md_path.display()
@@ -697,7 +695,7 @@ fn verify_skill_signature(
                 error,
             }
         })?;
-    verify_skill_signature_with_root(skill_dir, skill_md_path, skill_md, operator_root.as_ref())
+    verify_skill_signature_with_root(skill_dir, skill_md_path, skill_md, Some(&operator_root))
         .map_err(|(refusal, error)| Refused {
             refusal,
             // From the bytes that were just refused, not a fresh read.
@@ -708,16 +706,19 @@ fn verify_skill_signature(
                     .and_then(|n| n.to_str())
                     .unwrap_or_default(),
                 skill_md,
-                operator_root.as_ref(),
+                Some(&operator_root),
             ),
             error,
         })
 }
 
 /// Branch logic for [`verify_skill_signature`], split out so the
-/// root-present and root-absent paths can be exercised directly without
-/// touching ambient operator state. `operator_root` is `Some` when a
-/// registry root is configured (strict), `None` otherwise (floor).
+/// root-present and floor paths can be exercised directly without
+/// touching ambient operator state. The load path always passes
+/// `Some`: [`wirken_gateway::skill_registry::load_registry_root`]
+/// refuses before this is reached when there is no usable root. `None`
+/// is the self-signed floor, which only the direct callers of this
+/// function reach.
 fn verify_skill_signature_with_root(
     skill_dir: &Path,
     skill_md_path: &Path,
@@ -860,8 +861,12 @@ mod root_branch_tests {
         .unwrap();
     }
 
-    /// No operator root: the self-signed floor accepts a self-signed
-    /// bundle, exactly as before this branch existed.
+    /// The floor function itself, called directly with no root,
+    /// accepts a self-signed bundle. The load path never calls it
+    /// that way: with no usable root `load_registry_root` refuses
+    /// first, which `a_missing_root_refuses_to_load_skills` and
+    /// `a_zero_byte_root_file_refuses_to_load_skills` in the gateway
+    /// crate pin.
     #[test]
     fn no_root_accepts_self_signed_floor() {
         let tmp = tempfile::TempDir::new().unwrap();

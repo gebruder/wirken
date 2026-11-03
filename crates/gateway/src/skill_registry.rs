@@ -123,8 +123,9 @@ pub fn save_registry_root(data_dir: &Path, pubkey_hex: &str) -> Result<(), Gatew
 /// The registry root in effect for `data_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryRootState {
-    /// No operator root and no compiled root: skills load on their own
-    /// signature.
+    /// No operator root and no compiled root. The loader refuses every
+    /// skill: an empty anchor is not a trust set a self-signed bundle
+    /// passes through.
     Absent,
     /// The operator's root file holds a usable key: skills need a signer
     /// it delegated.
@@ -142,10 +143,20 @@ pub enum RegistryRootState {
 /// compiled root. Install, load and the status report all resolve it
 /// here.
 pub fn registry_root_state(data_dir: &Path) -> RegistryRootState {
+    registry_root_state_with(data_dir, bundled_registry_pubkey())
+}
+
+/// [`registry_root_state`] with the compiled root passed in, so the
+/// build with an empty `wirken-registry-pubkey.pub` can be exercised
+/// without producing one.
+pub fn registry_root_state_with(
+    data_dir: &Path,
+    compiled: Option<VerifyingKey>,
+) -> RegistryRootState {
     let raw = match std::fs::read_to_string(registry_root_path(data_dir)) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return match bundled_registry_pubkey() {
+            return match compiled {
                 Some(key) => RegistryRootState::Compiled(key),
                 None => RegistryRootState::Absent,
             };
@@ -165,16 +176,29 @@ pub fn registry_root_state(data_dir: &Path) -> RegistryRootState {
 }
 
 /// The registry root in effect for `data_dir`, per
-/// [`registry_root_state`].
-///
-/// - `Ok(None)`: no root at all; skills load on their own signature.
-/// - `Ok(Some(key))`: the operator's root, else the compiled root.
-/// - `Err(..)`: the operator's root file is unreadable or does not
-///   parse. Fail closed: every skill is refused.
-pub fn load_registry_root(data_dir: &Path) -> Result<Option<VerifyingKey>, GatewayError> {
-    match registry_root_state(data_dir) {
-        RegistryRootState::Absent => Ok(None),
-        RegistryRootState::Pinned(key) | RegistryRootState::Compiled(key) => Ok(Some(key)),
+/// [`registry_root_state`]: the operator's root, else the compiled
+/// root. `Err` when there is no usable root, and every skill is
+/// refused: the operator's root file is unreadable, zero bytes or
+/// does not parse, or there is no root file and the compiled root is
+/// empty. No root is a hard failure at load, never an empty trust
+/// set.
+pub fn load_registry_root(data_dir: &Path) -> Result<VerifyingKey, GatewayError> {
+    load_registry_root_with(data_dir, bundled_registry_pubkey())
+}
+
+/// [`load_registry_root`] with the compiled root passed in.
+pub fn load_registry_root_with(
+    data_dir: &Path,
+    compiled: Option<VerifyingKey>,
+) -> Result<VerifyingKey, GatewayError> {
+    match registry_root_state_with(data_dir, compiled) {
+        RegistryRootState::Pinned(key) | RegistryRootState::Compiled(key) => Ok(key),
+        RegistryRootState::Absent => Err(GatewayError::Config(format!(
+            "no registry root: the compiled root is empty and no operator root is \
+             installed at {}; refusing to load skills without an anchor. Install one \
+             with `wirken skills trust-root <pubkey-hex>`",
+            registry_root_path(data_dir).display()
+        ))),
         RegistryRootState::Unusable { reason } => Err(GatewayError::Config(format!(
             "registry root {} is present but {reason}; refusing to load skills with an \
              unusable anchor",
@@ -838,16 +862,56 @@ mod tests {
     }
 
     #[test]
-    fn empty_bundled_pubkey_returns_none() {
-        // A build whose `wirken-registry-pubkey.pub` is empty should
-        // resolve to None and let the legacy trust path apply.
-        let trimmed = BUNDLED_REGISTRY_PUBKEY_HEX.trim();
-        // We commit the placeholder file empty; this assert pins the
-        // default-build behavior. A real-key build would fail here
-        // and the test would need an explicit expected_some variant.
-        if trimmed.is_empty() {
-            assert!(bundled_registry_pubkey().is_none());
+    fn empty_bundled_pubkey_contents_parse_to_no_root() {
+        assert!(parse_bundled_registry_pubkey("").is_none());
+        assert!(parse_bundled_registry_pubkey("\n").is_none());
+    }
+
+    /// No root file and an empty compiled root is a refusal, not a
+    /// trust set a self-signed bundle passes through.
+    #[test]
+    fn a_missing_root_refuses_to_load_skills() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(
+            registry_root_state_with(tmp.path(), None),
+            RegistryRootState::Absent
+        );
+        let err = load_registry_root_with(tmp.path(), None).expect_err("no root refuses");
+        let text = err.to_string();
+        assert!(text.contains("no registry root"), "{text}");
+        assert!(text.contains("refusing to load skills"), "{text}");
+    }
+
+    /// A zero-byte operator root file is a refusal too, whatever the
+    /// compiled root holds: a present anchor that says nothing is
+    /// corrupt, not absent.
+    #[test]
+    fn a_zero_byte_root_file_refuses_to_load_skills() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(registry_root_path(tmp.path()), b"").unwrap();
+        let compiled = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        assert!(matches!(
+            registry_root_state_with(tmp.path(), Some(compiled)),
+            RegistryRootState::Unusable { .. }
+        ));
+        for compiled in [Some(compiled), None] {
+            let err = load_registry_root_with(tmp.path(), compiled)
+                .expect_err("a zero-byte root refuses");
+            let text = err.to_string();
+            assert!(text.contains("does not parse"), "{text}");
+            assert!(text.contains("refusing to load skills"), "{text}");
         }
+    }
+
+    /// No root file: the compiled root applies.
+    #[test]
+    fn a_missing_root_file_uses_the_compiled_root() {
+        let tmp = TempDir::new().unwrap();
+        let compiled = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        assert_eq!(
+            load_registry_root_with(tmp.path(), Some(compiled)).unwrap(),
+            compiled
+        );
     }
 
     #[test]
@@ -1171,11 +1235,11 @@ mod tests {
             registry_root_state(tmp.path()),
             RegistryRootState::Compiled(compiled)
         );
-        assert_eq!(load_registry_root(tmp.path()).unwrap(), Some(compiled));
+        assert_eq!(load_registry_root(tmp.path()).unwrap(), compiled);
 
         let own = random_signing_key().verifying_key();
         save_registry_root(tmp.path(), &hex_encode(&own.to_bytes())).unwrap();
-        assert_eq!(load_registry_root(tmp.path()).unwrap(), Some(own));
+        assert_eq!(load_registry_root(tmp.path()).unwrap(), own);
     }
 
     #[test]

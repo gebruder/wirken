@@ -116,7 +116,7 @@ pub async fn install(name: &str) -> Result<()> {
             sig_hex,
             key_hex,
             delegation,
-            root.as_ref(),
+            Some(&root),
         )?;
         match result {
             VerifyResult::Valid { signer } => {
@@ -156,16 +156,9 @@ pub async fn install(name: &str) -> Result<()> {
             }
             VerifyResult::Unsigned => {}
         }
-    } else if root.is_none()
-        && wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_SKILLS")
-    {
-        tracing::warn!(
-            "WIRKEN_ALLOW_UNSIGNED_SKILLS=1: installing '{}' without a registry-anchored \
-             signer key; the bundle's provenance is unverified",
-            entry.name
-        );
-        println!("  Warning: skill is unsigned (WIRKEN_ALLOW_UNSIGNED_SKILLS=1).");
     } else {
+        // A root is always in effect here, and under a root the
+        // unsigned bypass does not apply, at install as at load.
         std::fs::remove_dir_all(&skill_dir)?;
         anyhow::bail!(
             "Skill '{}' has no signer_key in the registry index; refusing to install.",
