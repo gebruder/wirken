@@ -449,6 +449,7 @@ async fn serve_decision(
     write_reply(&mut wr, &reply).await
 }
 
+#[cfg(unix)]
 /// Record a refusal. A refusal whose row does not land is still a
 /// refusal; the failure is logged, since there is nothing further to
 /// withhold.
@@ -464,6 +465,7 @@ fn record_or_log(
     }
 }
 
+#[cfg(unix)]
 /// The reply for a request policy allowed and resolution answered.
 /// The allow row is recorded first: it lets the chain assert that
 /// this connection was permitted, not only that other ones were
