@@ -96,7 +96,7 @@ impl EgressDecider for McpEgressPolicy {
         self.check(host, port, kind)
     }
 
-    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) {
+    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) -> Result<(), String> {
         if !verdict.allowed {
             tracing::warn!(
                 agent_id = %self.agent_id,
@@ -106,7 +106,7 @@ impl EgressDecider for McpEgressPolicy {
             );
         }
         let Some(log) = &self.audit else {
-            return;
+            return Ok(());
         };
         let handle = log.handle_for(SessionId::new(MCP_SENTINEL_SESSION));
         let event = SessionEvent::SandboxEgressVerdict {
@@ -124,9 +124,9 @@ impl EgressDecider for McpEgressPolicy {
             sender_id: None,
             mcp_server: Some(self.server.clone()),
         };
-        if let Err(e) = log.append(&handle, TrustLevel::System, event) {
-            tracing::warn!("could not record MCP server egress verdict: {e}");
-        }
+        log.append(&handle, TrustLevel::System, event)
+            .map(|_| ())
+            .map_err(|e| format!("could not record MCP server egress verdict: {e}"))
     }
 }
 
@@ -227,7 +227,8 @@ mod tests {
             443,
             "CONNECT",
             &Verdict::deny(SandboxEgressDenyReason::NotAllowed),
-        );
+        )
+        .unwrap();
         let handle = log.handle_for(SessionId::new(MCP_SENTINEL_SESSION));
         let events: Vec<_> = log
             .get_since(&handle, 0)

@@ -130,6 +130,21 @@ pub enum AgentError {
     #[error("session log error: {0}")]
     SessionLog(String),
 
+    /// A tool ran and its result could not be recorded on the session
+    /// log. The effect happened; the evidence did not. Distinct from
+    /// [`Self::SessionLog`] so a caller cannot mistake it for a tool
+    /// that never ran and retry an effect that already landed.
+    #[error(
+        "tool '{tool}' ran but its result was not recorded: {cause}. The effect \
+         happened and the evidence did not; do not retry"
+    )]
+    ToolEffectUnrecorded {
+        tool: String,
+        /// The model's call id, when the tool was dispatched by one.
+        call_id: Option<String>,
+        cause: String,
+    },
+
     #[error(
         "context overflow: conversation requires {current_tokens} tokens but the model budget is {budget_tokens}"
     )]

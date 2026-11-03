@@ -43,10 +43,19 @@ pub struct MemoryContext {
 }
 
 impl MemoryContext {
-    fn record(&self, event: SessionEvent) {
-        if let Err(e) = self.log.append(&self.handle, TrustLevel::System, event) {
-            tracing::warn!("could not record memory event: {e}");
-        }
+    /// Record what `tool` just did. The store write or the crossing
+    /// has already happened, so a failure here is an effect without
+    /// evidence and propagates as such rather than being logged and
+    /// passed over.
+    fn record(&self, tool: &str, event: SessionEvent) -> Result<(), AgentError> {
+        self.log
+            .append(&self.handle, TrustLevel::System, event)
+            .map(|_| ())
+            .map_err(|e| AgentError::ToolEffectUnrecorded {
+                tool: tool.to_string(),
+                call_id: None,
+                cause: e.to_string(),
+            })
     }
 }
 
@@ -85,14 +94,17 @@ fn write(ctx: &MemoryContext, args: &serde_json::Value) -> Result<ToolResult, Ag
         .write(&ctx.labels, content, &created_at);
     match written {
         Ok(entry_id) => {
-            ctx.record(SessionEvent::MemoryEntryWritten {
-                entry_id: entry_id.clone(),
-                channel: ctx.labels.channel.clone(),
-                adapter_id: ctx.labels.adapter_id.clone(),
-                sender_id: ctx.labels.sender_id.clone(),
-                agent_id: ctx.labels.agent_id.clone(),
-                origin_session_id: ctx.labels.origin_session_id.clone(),
-            });
+            ctx.record(
+                "memory_write",
+                SessionEvent::MemoryEntryWritten {
+                    entry_id: entry_id.clone(),
+                    channel: ctx.labels.channel.clone(),
+                    adapter_id: ctx.labels.adapter_id.clone(),
+                    sender_id: ctx.labels.sender_id.clone(),
+                    agent_id: ctx.labels.agent_id.clone(),
+                    origin_session_id: ctx.labels.origin_session_id.clone(),
+                },
+            )?;
             Ok(ToolResult {
                 output: format!("recorded on {} as {entry_id}", ctx.labels.channel),
                 success: true,
@@ -148,14 +160,17 @@ fn read_other_channel(
 
     // Emitted whether or not anything came back: zero entries still
     // records that the crossing was made.
-    ctx.record(SessionEvent::CrossChannelMemoryRead {
-        from_channel: from.to_string(),
-        to_channel: ctx.labels.channel.clone(),
-        entry_count: entries.len() as u64,
-        agent_id: ctx.labels.agent_id.clone(),
-        adapter_id: Some(ctx.labels.adapter_id.clone()),
-        sender_id: Some(ctx.labels.sender_id.clone()),
-    });
+    ctx.record(
+        "memory_read_channel",
+        SessionEvent::CrossChannelMemoryRead {
+            from_channel: from.to_string(),
+            to_channel: ctx.labels.channel.clone(),
+            entry_count: entries.len() as u64,
+            agent_id: ctx.labels.agent_id.clone(),
+            adapter_id: Some(ctx.labels.adapter_id.clone()),
+            sender_id: Some(ctx.labels.sender_id.clone()),
+        },
+    )?;
 
     Ok(ToolResult {
         output: render(&entries, from),

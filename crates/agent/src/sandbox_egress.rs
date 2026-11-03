@@ -295,9 +295,16 @@ impl SandboxEgressContext {
     }
 
     /// Record one request verdict, allow or deny, with the basis it
-    /// was decided on.
+    /// was decided on. `Err` when the row did not land; the broker
+    /// refuses an allow on that.
     #[cfg(unix)]
-    pub(crate) fn record_verdict(&self, host: &str, port: u16, method: &str, verdict: &Verdict) {
+    pub(crate) fn record_verdict(
+        &self,
+        host: &str,
+        port: u16,
+        method: &str,
+        verdict: &Verdict,
+    ) -> Result<(), String> {
         if !verdict.allowed {
             tracing::warn!(
                 "sandbox egress denied: host={host} port={port} reason={:?} \
@@ -309,7 +316,7 @@ impl SandboxEgressContext {
             );
         }
         let Some(audit) = &self.audit else {
-            return;
+            return Ok(());
         };
         let event = SessionEvent::SandboxEgressVerdict {
             host: host.to_string(),
@@ -326,22 +333,25 @@ impl SandboxEgressContext {
             sender_id: self.attribution.sender_id.clone(),
             mcp_server: None,
         };
-        if let Err(e) = audit.log.append(&audit.handle, TrustLevel::System, event) {
-            tracing::warn!("could not record sandbox egress verdict: {e}");
-        }
+        audit
+            .log
+            .append(&audit.handle, TrustLevel::System, event)
+            .map(|_| ())
+            .map_err(|e| format!("could not record sandbox egress verdict: {e}"))
     }
 
     /// Record that egress was configured on a platform with no broker
     /// transport, so the `exec` was refused. Not a request verdict.
+    /// `Err` when the row did not land.
     #[cfg(not(unix))]
-    pub(crate) fn record_unsupported(&self) {
+    pub(crate) fn record_unsupported(&self) -> Result<(), String> {
         tracing::warn!(
             "sandbox egress unsupported on this platform: agent={} mode={}",
             self.attribution.agent_id,
             self.policy.mode.as_str(),
         );
         let Some(audit) = &self.audit else {
-            return;
+            return Ok(());
         };
         let event = SessionEvent::SandboxEgressUnsupported {
             mode: self.policy.mode.label(),
@@ -350,9 +360,11 @@ impl SandboxEgressContext {
             adapter_id: self.attribution.adapter_id.clone(),
             sender_id: self.attribution.sender_id.clone(),
         };
-        if let Err(e) = audit.log.append(&audit.handle, TrustLevel::System, event) {
-            tracing::warn!("could not record sandbox egress platform refusal: {e}");
-        }
+        audit
+            .log
+            .append(&audit.handle, TrustLevel::System, event)
+            .map(|_| ())
+            .map_err(|e| format!("could not record sandbox egress platform refusal: {e}"))
     }
 
     /// Decide a request that has already cleared [`check_target`],
@@ -453,8 +465,8 @@ impl wirken_sandbox::egress::EgressDecider for SandboxEgressContext {
         self.decide_with_sensitivity(host, port).await
     }
 
-    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) {
-        self.record_verdict(host, port, method, verdict);
+    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) -> Result<(), String> {
+        self.record_verdict(host, port, method, verdict)
     }
 }
 

@@ -714,13 +714,17 @@ impl DockerSandbox {
         // egress that will never carry any, and that belongs in the
         // audit log with the rest of the enforcement record. Recorded
         // once per refused exec, since nothing reaches a proxy here.
-        ctx.record_unsupported();
-        AgentError::Sandbox(
+        // The refusal stands either way; a row that did not land is
+        // named in the error rather than passed over.
+        let unrecorded = match ctx.record_unsupported() {
+            Ok(()) => String::new(),
+            Err(e) => format!(" ({e})"),
+        };
+        AgentError::Sandbox(format!(
             "sandbox egress modes 'allowlist' and 'open' are unavailable on this platform: \
              the decision broker needs a Unix socket. Refusing the exec rather than running \
-             it unproxied; set the channel's egress mode to 'none'"
-                .into(),
-        )
+             it unproxied; set the channel's egress mode to 'none'{unrecorded}"
+        ))
     }
 
     #[cfg(unix)]

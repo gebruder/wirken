@@ -33,6 +33,15 @@ tagged.
 
 ### Fixed
 
+- A tool that ran and whose result row then failed to land returns
+  `ToolEffectUnrecorded`, naming the tool and the call, instead of the
+  generic session-log error, so a caller can tell an effect without
+  evidence from a tool that never ran (#227). The `http_request` row and
+  the memory tool's rows propagate the same way instead of logging and
+  going on. A sandbox egress allow whose verdict row does not land is
+  refused with reason `record_failed`; a contained MCP server's verdict
+  rows are held to the same rule. **For wirken-siem:**
+  `sandbox_egress_verdict.reason` gains `record_failed`.
 - The local commit-msg hook in `scripts/git-hooks` applies the commit rule
   the CI name check applies: a co-author trailer naming the tool or its
   vendor is refused, one naming a person is allowed. The hook has tests,

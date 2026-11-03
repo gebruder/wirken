@@ -18,6 +18,184 @@ fn test_session_log() -> Arc<dyn SessionLog> {
 
 /// Test helper: an in-memory permission store. Every agent is built
 /// with one; there is no ungated agent to build.
+/// A session log whose `append` fails for the events `fail_when`
+/// selects, after the inner log took everything else. Stands in for
+/// a log that breaks between a tool's effect and its evidence.
+pub(crate) struct FailingAppendLog {
+    pub(crate) inner: Arc<dyn SessionLog>,
+    pub(crate) fail_when: fn(&wirken_audit::SessionEvent) -> bool,
+}
+
+impl SessionLog for FailingAppendLog {
+    fn handle_for(
+        &self,
+        id: wirken_audit::SessionId,
+    ) -> wirken_audit::SessionHandle<wirken_audit::OwnSession> {
+        self.inner.handle_for(id)
+    }
+    fn append(
+        &self,
+        handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+        trust: wirken_audit::TrustLevel,
+        event: wirken_audit::SessionEvent,
+    ) -> Result<u64, wirken_audit::AuditError> {
+        if (self.fail_when)(&event) {
+            return Err(wirken_audit::AuditError::ChannelClosed);
+        }
+        self.inner.append(handle, trust, event)
+    }
+    fn get_range(
+        &self,
+        handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<wirken_audit::StoredSessionEvent>, wirken_audit::AuditError> {
+        self.inner.get_range(handle, range)
+    }
+    fn get_since(
+        &self,
+        handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+        start: u64,
+    ) -> Result<Vec<wirken_audit::StoredSessionEvent>, wirken_audit::AuditError> {
+        self.inner.get_since(handle, start)
+    }
+    fn last_index(
+        &self,
+        handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    ) -> Result<Option<u64>, wirken_audit::AuditError> {
+        self.inner.last_index(handle)
+    }
+    fn rewind(
+        &self,
+        handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+        n_before: u64,
+        reason: &str,
+    ) -> Result<u64, wirken_audit::AuditError> {
+        self.inner.rewind(handle, n_before, reason)
+    }
+    fn verify(
+        &self,
+        handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    ) -> Result<wirken_audit::SessionVerifyResult, wirken_audit::AuditError> {
+        self.inner.verify(handle)
+    }
+}
+
+/// Tool-path dual write (#227): the effect lands, then the row fails.
+mod tool_effect_unrecorded {
+    use super::*;
+    use crate::error::AgentError;
+    use wirken_audit::SessionEvent;
+
+    fn failing_on(fail_when: fn(&SessionEvent) -> bool) -> Arc<dyn SessionLog> {
+        Arc::new(FailingAppendLog {
+            inner: Arc::new(SqliteSessionLog::open_in_memory().unwrap()),
+            fail_when,
+        })
+    }
+
+    /// A file is written in the workspace, then the result row is
+    /// refused by the log. The caller gets `ToolEffectUnrecorded`
+    /// naming the tool and the call, not `SessionLog`.
+    #[tokio::test]
+    async fn a_tool_that_ran_whose_result_is_not_recorded_is_effect_unrecorded() {
+        let tmp = TempDir::new().unwrap();
+        let log = failing_on(|e| matches!(e, SessionEvent::ToolResult { .. }));
+        let mut agent = crate::runtime::Agent::new(
+            "unrecorded".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log,
+            test_permissions(),
+        )
+        .unwrap();
+        let result = agent
+            .execute_tool("write_file", r#"{"path":"out.txt","content":"landed"}"#)
+            .await
+            .expect("the tool runs");
+        assert!(result.success, "{}", result.output);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("out.txt")).unwrap(),
+            "landed",
+            "the effect landed before the row was attempted"
+        );
+        let err = agent
+            .record_tool_result("c1", "write_file", &result)
+            .expect_err("the row must fail");
+        match err {
+            AgentError::ToolEffectUnrecorded {
+                tool,
+                call_id,
+                cause,
+            } => {
+                assert_eq!(tool, "write_file");
+                assert_eq!(call_id.as_deref(), Some("c1"));
+                assert!(cause.contains("channel closed"), "{cause}");
+            }
+            other => panic!("expected ToolEffectUnrecorded, got {other:?}"),
+        }
+        assert!(
+            !err_is_session_log(&agent, "c1", "write_file", &result),
+            "the generic SessionLog error must not be what the caller sees"
+        );
+    }
+
+    fn err_is_session_log(
+        agent: &crate::runtime::Agent,
+        call_id: &str,
+        name: &str,
+        result: &crate::tool::ToolResult,
+    ) -> bool {
+        matches!(
+            agent.record_tool_result(call_id, name, result),
+            Err(AgentError::SessionLog(_))
+        )
+    }
+
+    /// The memory write lands in the store, then its row fails: the
+    /// same distinct error, from the path that used to log and go on.
+    #[tokio::test]
+    async fn a_memory_write_whose_row_is_not_recorded_is_effect_unrecorded() {
+        let tmp = TempDir::new().unwrap();
+        let store = Arc::new(std::sync::Mutex::new(
+            wirken_gateway::memory::MemoryStore::open(&tmp.path().join("memory.db")).unwrap(),
+        ));
+        let log = failing_on(|e| matches!(e, SessionEvent::MemoryEntryWritten { .. }));
+        let labels = wirken_gateway::memory::OriginLabels {
+            agent_id: "work".into(),
+            channel: "slack".into(),
+            adapter_id: "slack".into(),
+            sender_id: "U1".into(),
+            origin_session_id: "work/slack/1".into(),
+        };
+        let ctx = crate::memory_tool::MemoryContext {
+            store: store.clone(),
+            labels: labels.clone(),
+            log: log.clone(),
+            handle: log.handle_for(wirken_audit::SessionId::new("work/slack/1")),
+        };
+        let err =
+            crate::memory_tool::execute(&ctx, "memory_write", &serde_json::json!({"content": "x"}))
+                .await
+                .expect_err("the row must fail");
+        assert!(
+            matches!(&err, AgentError::ToolEffectUnrecorded { tool, .. } if tool == "memory_write"),
+            "{err:?}"
+        );
+        let entries = store
+            .lock()
+            .unwrap()
+            .read_channel("work", "slack", 10)
+            .unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the write landed before the row was attempted"
+        );
+    }
+}
+
 pub(crate) fn test_permissions()
 -> Arc<std::sync::Mutex<wirken_gateway::permissions::PermissionStore>> {
     Arc::new(std::sync::Mutex::new(

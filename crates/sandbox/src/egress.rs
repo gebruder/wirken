@@ -257,7 +257,10 @@ pub trait EgressDecider: Send + Sync + 'static {
 
     /// Record a final verdict, allow or deny. `method` is `CONNECT`
     /// for a tunnel or the plain-HTTP verb, as the sidecar parsed it.
-    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict);
+    /// An `Err` means the row did not land. For an allow the broker
+    /// then refuses the request as `RecordFailed`: the connection
+    /// never happens unrecorded.
+    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) -> Result<(), String>;
 }
 
 #[cfg(unix)]
@@ -388,7 +391,7 @@ async fn serve_decision(
 
     let verdict = decider.decide(&req.host, req.port, kind).await;
     if !verdict.allowed {
-        decider.record(&req.host, req.port, &req.method, &verdict);
+        record_or_log(decider.as_ref(), &req.host, req.port, &req.method, &verdict);
         let reply = DecisionReply {
             allow: false,
             addrs: Vec::new(),
@@ -426,7 +429,7 @@ async fn serve_decision(
             reason: Some(SandboxEgressDenyReason::ResolutionFailed),
             ..verdict
         };
-        decider.record(&req.host, req.port, &req.method, &refused);
+        record_or_log(decider.as_ref(), &req.host, req.port, &req.method, &refused);
         let reply = DecisionReply {
             allow: false,
             addrs: Vec::new(),
@@ -435,19 +438,67 @@ async fn serve_decision(
         return write_reply(&mut wr, &reply).await;
     }
 
-    // The allow row is recorded too: it lets the chain assert that
-    // this connection was permitted, not only that other ones were
-    // refused.
-    decider.record(&req.host, req.port, &req.method, &verdict);
-    write_reply(
-        &mut wr,
-        &DecisionReply {
-            allow: true,
-            addrs,
-            reason: None,
-        },
-    )
-    .await
+    let reply = finalize_allow(
+        decider.as_ref(),
+        &req.host,
+        req.port,
+        &req.method,
+        &verdict,
+        addrs,
+    );
+    write_reply(&mut wr, &reply).await
+}
+
+/// Record a refusal. A refusal whose row does not land is still a
+/// refusal; the failure is logged, since there is nothing further to
+/// withhold.
+fn record_or_log(
+    decider: &dyn EgressDecider,
+    host: &str,
+    port: u16,
+    method: &str,
+    verdict: &Verdict,
+) {
+    if let Err(e) = decider.record(host, port, method, verdict) {
+        tracing::error!("sandbox egress: refusal of {host}:{port} not recorded: {e}");
+    }
+}
+
+/// The reply for a request policy allowed and resolution answered.
+/// The allow row is recorded first: it lets the chain assert that
+/// this connection was permitted, not only that other ones were
+/// refused. If that row does not land, the request is refused as
+/// `RecordFailed` instead, so no connection is made that the log
+/// does not show.
+fn finalize_allow(
+    decider: &dyn EgressDecider,
+    host: &str,
+    port: u16,
+    method: &str,
+    verdict: &Verdict,
+    addrs: Vec<String>,
+) -> DecisionReply {
+    if let Err(e) = decider.record(host, port, method, verdict) {
+        tracing::error!(
+            "sandbox egress: refusing {host}:{port}: the allow verdict was not recorded: {e}"
+        );
+        let refused = Verdict {
+            allowed: false,
+            reason: Some(SandboxEgressDenyReason::RecordFailed),
+            ..verdict.clone()
+        };
+        record_or_log(decider, host, port, method, &refused);
+        return DecisionReply {
+            allow: false,
+            addrs: Vec::new(),
+            reason: refused.reason,
+        };
+    }
+    DecisionReply {
+        allow: true,
+        addrs,
+        reason: None,
+    }
 }
 
 #[cfg(unix)]
@@ -989,14 +1040,74 @@ mod tests {
         async fn decide(&self, _host: &str, _port: u16, _kind: RequestKind) -> Verdict {
             self.verdict.clone()
         }
-        fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) {
+        fn record(
+            &self,
+            host: &str,
+            port: u16,
+            method: &str,
+            verdict: &Verdict,
+        ) -> Result<(), String> {
             self.recorded.lock().unwrap().push((
                 host.to_string(),
                 port,
                 method.to_string(),
                 verdict.clone(),
             ));
+            Ok(())
         }
+    }
+
+    /// A decider whose log is broken: every record fails.
+    #[cfg(unix)]
+    struct Unrecordable {
+        attempts: std::sync::Mutex<Vec<Verdict>>,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl EgressDecider for Unrecordable {
+        async fn decide(&self, _host: &str, _port: u16, _kind: RequestKind) -> Verdict {
+            Verdict::allow()
+        }
+        fn record(
+            &self,
+            _host: &str,
+            _port: u16,
+            _method: &str,
+            verdict: &Verdict,
+        ) -> Result<(), String> {
+            self.attempts.lock().unwrap().push(verdict.clone());
+            Err("database is locked".into())
+        }
+    }
+
+    /// An allow whose row cannot be written is not an allow: the
+    /// reply refuses as `record_failed` and no address is handed out,
+    /// after the refusal itself was offered to the log too.
+    #[cfg(unix)]
+    #[test]
+    fn an_allow_whose_record_fails_is_refused() {
+        let decider = Unrecordable {
+            attempts: Default::default(),
+        };
+        let reply = finalize_allow(
+            &decider,
+            "api.example.com",
+            443,
+            "CONNECT",
+            &Verdict::allow(),
+            vec!["93.184.216.34:443".into()],
+        );
+        assert!(!reply.allow);
+        assert!(reply.addrs.is_empty());
+        assert_eq!(reply.reason, Some(SandboxEgressDenyReason::RecordFailed));
+        let attempts = decider.attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 2, "the allow, then the refusal");
+        assert!(attempts[0].allowed);
+        assert_eq!(
+            attempts[1].reason,
+            Some(SandboxEgressDenyReason::RecordFailed)
+        );
     }
 
     #[cfg(unix)]

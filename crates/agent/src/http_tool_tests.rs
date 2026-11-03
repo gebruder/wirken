@@ -470,6 +470,39 @@ fn listed_host_is_read_only_and_each_refusal_names_host_and_method() {
     }
 }
 
+// ---- 9c. the request went out, the row did not land ----------------------
+
+/// The server answers, the body is read, then the `HttpRequest` row is
+/// refused by the log. The caller gets `ToolEffectUnrecorded`, not the
+/// generic session-log error, because the request already happened.
+#[tokio::test]
+async fn a_completed_request_whose_row_is_not_recorded_is_effect_unrecorded() {
+    let (base, rx) = serve_once(build_response("200 OK", &[], "ok")).await;
+    let (inner, _handle, _ctx) = audit();
+    let log: Arc<dyn SessionLog> = Arc::new(crate::tests::FailingAppendLog {
+        inner,
+        fail_when: |e| matches!(e, wirken_audit::SessionEvent::HttpRequest { .. }),
+    });
+    let ctx = HttpAuditCtx {
+        handle: log.handle_for(SessionId::new("test-session")),
+        log,
+        agent_id: "agent-test".to_string(),
+    };
+    let args = serde_json::json!({"method": "GET", "url": format!("{base}/")});
+    let err = http_tool::execute(&egress(&["localhost"]), None, Some(&ctx), &args)
+        .await
+        .expect_err("the row must fail");
+    assert!(
+        matches!(&err, AgentError::ToolEffectUnrecorded { tool, call_id: None, .. } if tool == "http_request"),
+        "{err:?}"
+    );
+    let wire = rx.await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&wire).starts_with("GET / HTTP/1.1"),
+        "the request went out before the row was attempted"
+    );
+}
+
 // ---- 10. caps: truncation + timeout --------------------------------------
 
 #[tokio::test]

@@ -2620,6 +2620,32 @@ impl Agent {
         Ok(())
     }
 
+    /// Record a tool's result after the tool has run. An append failure
+    /// here is [`AgentError::ToolEffectUnrecorded`], not the generic
+    /// [`AgentError::SessionLog`]: the tool's effect has landed and the
+    /// evidence has not, and a caller must be able to tell that from
+    /// a tool that never ran. Every dispatch path records through
+    /// this, so the distinction holds wherever a tool runs.
+    pub(crate) fn record_tool_result(
+        &self,
+        call_id: &str,
+        name: &str,
+        result: &crate::tool::ToolResult,
+    ) -> Result<(), AgentError> {
+        self.session_log
+            .append(
+                &self.session_handle,
+                TrustLevel::Tool,
+                self.tool_result_row(call_id, name, result),
+            )
+            .map(|_| ())
+            .map_err(|e| AgentError::ToolEffectUnrecorded {
+                tool: name.to_string(),
+                call_id: Some(call_id.to_string()),
+                cause: e.to_string(),
+            })
+    }
+
     /// Record that content carrying the stored secret `credential` was
     /// refused at `surface`. Names the credential, never the value.
     pub(crate) fn record_leak(
@@ -3292,10 +3318,7 @@ impl Agent {
                         turn_calls.note(&call.name, &result, true);
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
-                        self.log_event(
-                            TrustLevel::Tool,
-                            self.tool_result_row(&call.id, &call.name, &result),
-                        )?;
+                        self.record_tool_result(&call.id, &call.name, &result)?;
                     }
 
                     // Partition into regular and spawn calls.
@@ -3314,10 +3337,7 @@ impl Agent {
                         turn_calls.note(&call.name, &result, denials.len() > denied_before);
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
-                        self.log_event(
-                            TrustLevel::Tool,
-                            self.tool_result_row(&call.id, &call.name, &result),
-                        )?;
+                        self.record_tool_result(&call.id, &call.name, &result)?;
                     }
 
                     // Phase 2: prepare all spawn calls sequentially
@@ -3330,10 +3350,7 @@ impl Agent {
                             turn_calls.note(&call.name, &result, false);
                             self.conversation
                                 .add_tool_result(&call.id, &call.name, &result.output);
-                            self.log_event(
-                                TrustLevel::Tool,
-                                self.tool_result_row(&call.id, &call.name, &result),
-                            )?;
+                            self.record_tool_result(&call.id, &call.name, &result)?;
                         }
                     }
 
@@ -3708,10 +3725,7 @@ impl Agent {
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
-                        self.log_event(
-                            TrustLevel::Tool,
-                            self.tool_result_row(&call.id, &call.name, &result),
-                        )?;
+                        self.record_tool_result(&call.id, &call.name, &result)?;
                         let _ = tx
                             .send(StreamEvent::ToolResult {
                                 id: call.id.clone(),

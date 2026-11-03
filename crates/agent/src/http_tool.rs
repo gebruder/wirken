@@ -229,7 +229,13 @@ pub async fn execute(
                     agent_id: ctx.agent_id.clone(),
                 },
             )
-            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+            // The request went out and was answered; a row that fails
+            // here is missing evidence of an effect, not a failed call.
+            .map_err(|e| AgentError::ToolEffectUnrecorded {
+                tool: "http_request".to_string(),
+                call_id: None,
+                cause: e.to_string(),
+            })?;
     }
 
     let output = json!({

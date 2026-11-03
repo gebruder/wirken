@@ -2553,6 +2553,10 @@ pub enum SandboxEgressDenyReason {
     /// has no operator-authored allowlist to fall back on, or no
     /// approval surface was reachable, or the operator declined.
     SensitivityRefused,
+    /// The request was allowed by policy but its verdict could not be
+    /// written to the session log, so it was refused: nothing reaches
+    /// the network without a row saying it did.
+    RecordFailed,
 }
 
 /// Egress mode recorded on a [`SessionEvent::SandboxEgressVerdict`]
