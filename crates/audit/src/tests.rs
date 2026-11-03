@@ -3714,6 +3714,7 @@ fn every_session_event() -> Vec<SessionEvent> {
         SessionEvent::SandboxEgressVerdict {
             host: String::new(),
             port: 0,
+            method: None,
             allowed: false,
             reason: None,
             mode: SandboxEgressModeLabel::None,

@@ -2465,6 +2465,12 @@ pub enum SessionEvent {
     SandboxEgressVerdict {
         host: String,
         port: u16,
+        /// The method the proxy decided on: `CONNECT` for a tunnel,
+        /// whose requests inside it the proxy does not see, or the
+        /// verb of a plain HTTP request. Absent on rows written before
+        /// the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
         /// Whether the request was permitted.
         allowed: bool,
         /// Set when `allowed` is false.

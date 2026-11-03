@@ -297,21 +297,15 @@ impl SandboxEgressContext {
     /// Record one request verdict, allow or deny, with the basis it
     /// was decided on.
     #[cfg(unix)]
-    pub(crate) fn record_verdict(
-        &self,
-        host: &str,
-        port: u16,
-        allowed: bool,
-        reason: Option<SandboxEgressDenyReason>,
-        escalated: bool,
-        basis: Vec<String>,
-    ) {
-        if !allowed {
+    pub(crate) fn record_verdict(&self, host: &str, port: u16, method: &str, verdict: &Verdict) {
+        if !verdict.allowed {
             tracing::warn!(
-                "sandbox egress denied: host={host} port={port} reason={reason:?} \
-                 agent={} mode={} basis={basis:?}",
+                "sandbox egress denied: host={host} port={port} reason={:?} \
+                 agent={} mode={} basis={:?}",
+                verdict.reason,
                 self.attribution.agent_id,
                 self.policy.mode.as_str(),
+                verdict.basis,
             );
         }
         let Some(audit) = &self.audit else {
@@ -320,11 +314,12 @@ impl SandboxEgressContext {
         let event = SessionEvent::SandboxEgressVerdict {
             host: host.to_string(),
             port,
-            allowed,
-            reason,
+            method: (!method.is_empty()).then(|| method.to_string()),
+            allowed: verdict.allowed,
+            reason: verdict.reason,
             mode: self.policy.mode.label(),
-            sensitivity_basis: basis,
-            escalated,
+            sensitivity_basis: verdict.basis.clone(),
+            escalated: verdict.escalated,
             agent_id: self.attribution.agent_id.clone(),
             channel: self.attribution.channel.clone(),
             adapter_id: self.attribution.adapter_id.clone(),
@@ -458,15 +453,8 @@ impl wirken_sandbox::egress::EgressDecider for SandboxEgressContext {
         self.decide_with_sensitivity(host, port).await
     }
 
-    fn record(&self, host: &str, port: u16, verdict: &Verdict) {
-        self.record_verdict(
-            host,
-            port,
-            verdict.allowed,
-            verdict.reason,
-            verdict.escalated,
-            verdict.basis.clone(),
-        );
+    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) {
+        self.record_verdict(host, port, method, verdict);
     }
 }
 

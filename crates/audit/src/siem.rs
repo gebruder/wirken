@@ -2506,6 +2506,7 @@ mod identity_tests {
                 SessionEvent::SandboxEgressVerdict {
                     host: "api.example.com".into(),
                     port: 443,
+                    method: Some("CONNECT".into()),
                     allowed: true,
                     reason: None,
                     mode: crate::SandboxEgressModeLabel::Allowlist,

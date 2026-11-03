@@ -189,6 +189,11 @@ pub struct DecisionRequest {
     pub host: String,
     pub port: u16,
     pub connect: bool,
+    /// `CONNECT`, or the verb of a plain HTTP request. Recorded on
+    /// the verdict row; no policy turns on it, since a tunnel's
+    /// inner requests are not visible here.
+    #[serde(default)]
+    pub method: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -250,8 +255,9 @@ pub trait EgressDecider: Send + Sync + 'static {
     /// the broker, which can still refuse.
     async fn decide(&self, host: &str, port: u16, kind: RequestKind) -> Verdict;
 
-    /// Record a final verdict, allow or deny.
-    fn record(&self, host: &str, port: u16, verdict: &Verdict);
+    /// Record a final verdict, allow or deny. `method` is `CONNECT`
+    /// for a tunnel or the plain-HTTP verb, as the sidecar parsed it.
+    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict);
 }
 
 #[cfg(unix)]
@@ -382,7 +388,7 @@ async fn serve_decision(
 
     let verdict = decider.decide(&req.host, req.port, kind).await;
     if !verdict.allowed {
-        decider.record(&req.host, req.port, &verdict);
+        decider.record(&req.host, req.port, &req.method, &verdict);
         let reply = DecisionReply {
             allow: false,
             addrs: Vec::new(),
@@ -420,7 +426,7 @@ async fn serve_decision(
             reason: Some(SandboxEgressDenyReason::ResolutionFailed),
             ..verdict
         };
-        decider.record(&req.host, req.port, &refused);
+        decider.record(&req.host, req.port, &req.method, &refused);
         let reply = DecisionReply {
             allow: false,
             addrs: Vec::new(),
@@ -432,7 +438,7 @@ async fn serve_decision(
     // The allow row is recorded too: it lets the chain assert that
     // this connection was permitted, not only that other ones were
     // refused.
-    decider.record(&req.host, req.port, &verdict);
+    decider.record(&req.host, req.port, &req.method, &verdict);
     write_reply(
         &mut wr,
         &DecisionReply {
@@ -534,6 +540,7 @@ async fn sidecar_connection(
             host: request.host.clone(),
             port: request.port,
             connect: matches!(request.kind, RequestKind::Connect),
+            method: request.method.clone(),
         },
     )
     .await
@@ -620,6 +627,8 @@ struct ProxyRequest {
     kind: RequestKind,
     host: String,
     port: u16,
+    /// `CONNECT`, or the plain-HTTP verb.
+    method: String,
     /// Origin-form request line to send upstream. Empty for CONNECT.
     rewritten_head: Vec<u8>,
 }
@@ -651,6 +660,7 @@ fn parse_request(head: &[u8]) -> Result<ProxyRequest, SandboxEgressDenyReason> {
             kind: RequestKind::Connect,
             host,
             port,
+            method: method.to_string(),
             rewritten_head: Vec::new(),
         });
     }
@@ -714,6 +724,7 @@ fn parse_request(head: &[u8]) -> Result<ProxyRequest, SandboxEgressDenyReason> {
         kind: RequestKind::Plain,
         host,
         port,
+        method: method.to_string(),
         rewritten_head: rewritten,
     })
 }
@@ -896,6 +907,7 @@ mod tests {
         assert_eq!(req.kind, RequestKind::Connect);
         assert_eq!(req.host, "api.example.com");
         assert_eq!(req.port, 443);
+        assert_eq!(req.method, "CONNECT");
     }
 
     #[cfg(unix)]
@@ -929,6 +941,7 @@ mod tests {
         assert_eq!(req.kind, RequestKind::Plain);
         assert_eq!(req.host, "api.example.com");
         assert_eq!(req.port, 80);
+        assert_eq!(req.method, "GET");
         let rewritten = String::from_utf8(req.rewritten_head.clone()).unwrap();
         assert!(rewritten.starts_with("GET /v1/x?q=1 HTTP/1.1\r\n"));
         assert!(!rewritten.to_ascii_lowercase().contains("proxy-connection"));
@@ -967,7 +980,7 @@ mod tests {
     #[cfg(unix)]
     struct Fixed {
         verdict: Verdict,
-        recorded: std::sync::Mutex<Vec<(String, u16, Verdict)>>,
+        recorded: std::sync::Mutex<Vec<(String, u16, String, Verdict)>>,
     }
 
     #[cfg(unix)]
@@ -976,16 +989,21 @@ mod tests {
         async fn decide(&self, _host: &str, _port: u16, _kind: RequestKind) -> Verdict {
             self.verdict.clone()
         }
-        fn record(&self, host: &str, port: u16, verdict: &Verdict) {
-            self.recorded
-                .lock()
-                .unwrap()
-                .push((host.to_string(), port, verdict.clone()));
+        fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) {
+            self.recorded.lock().unwrap().push((
+                host.to_string(),
+                port,
+                method.to_string(),
+                verdict.clone(),
+            ));
         }
     }
 
     #[cfg(unix)]
-    async fn ask(verdict: Verdict, host: &str) -> (DecisionReply, Vec<(String, u16, Verdict)>) {
+    async fn ask(
+        verdict: Verdict,
+        host: &str,
+    ) -> (DecisionReply, Vec<(String, u16, String, Verdict)>) {
         let dir = std::env::temp_dir().join(format!(
             "wirken-broker-test-{}-{}",
             std::process::id(),
@@ -1006,6 +1024,7 @@ mod tests {
                 host: host.into(),
                 port: 443,
                 connect: true,
+                method: "CONNECT".into(),
             },
         )
         .await
@@ -1032,6 +1051,7 @@ mod tests {
             [(
                 "evil.example.com".to_string(),
                 443,
+                "CONNECT".to_string(),
                 Verdict::deny(SandboxEgressDenyReason::NotAllowed)
             )]
         );
@@ -1058,6 +1078,7 @@ mod tests {
             [(
                 "localhost".to_string(),
                 443,
+                "CONNECT".to_string(),
                 Verdict {
                     allowed: false,
                     reason: Some(SandboxEgressDenyReason::ResolutionFailed),

@@ -96,7 +96,7 @@ impl EgressDecider for McpEgressPolicy {
         self.check(host, port, kind)
     }
 
-    fn record(&self, host: &str, port: u16, verdict: &Verdict) {
+    fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) {
         if !verdict.allowed {
             tracing::warn!(
                 agent_id = %self.agent_id,
@@ -112,6 +112,7 @@ impl EgressDecider for McpEgressPolicy {
         let event = SessionEvent::SandboxEgressVerdict {
             host: host.to_string(),
             port,
+            method: (!method.is_empty()).then(|| method.to_string()),
             allowed: verdict.allowed,
             reason: verdict.reason,
             mode: self.mode(),
@@ -224,6 +225,7 @@ mod tests {
         p.record(
             "evil.example.com",
             443,
+            "CONNECT",
             &Verdict::deny(SandboxEgressDenyReason::NotAllowed),
         );
         let handle = log.handle_for(SessionId::new(MCP_SENTINEL_SESSION));
@@ -238,6 +240,7 @@ mod tests {
             [SessionEvent::SandboxEgressVerdict {
                 host: "evil.example.com".into(),
                 port: 443,
+                method: Some("CONNECT".into()),
                 allowed: false,
                 reason: Some(SandboxEgressDenyReason::NotAllowed),
                 mode: SandboxEgressModeLabel::Allowlist,

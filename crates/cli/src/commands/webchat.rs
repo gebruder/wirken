@@ -4427,6 +4427,7 @@ pub fn session_events(
             SessionEvent::SandboxEgressVerdict {
                 host,
                 port,
+                method,
                 allowed,
                 reason,
                 mode,
@@ -4445,6 +4446,9 @@ pub fn session_events(
                 });
                 if let Some(server) = mcp_server {
                     row["mcp_server"] = json!(server);
+                }
+                if let Some(method) = method {
+                    row["method"] = json!(method);
                 }
                 Some(row)
             }
@@ -6661,6 +6665,7 @@ mod tests {
                 SessionEvent::SandboxEgressVerdict {
                     host: "api.example.com".into(),
                     port: 443,
+                    method: Some("CONNECT".into()),
                     allowed: false,
                     reason: Some(SandboxEgressDenyReason::NotAllowed),
                     mode: SandboxEgressModeLabel::Allowlist,

@@ -26,6 +26,10 @@ tagged.
   cover GET and HEAD to a listed host, POST, PUT and DELETE to the same
   host, a signup-shaped POST, a webhook-registration POST, a declared POST
   endpoint and a lowercase verb.
+- A `sandbox_egress_verdict` row from an `exec` or a contained MCP server
+  carries `method`: `CONNECT` for a tunnel, whose inner requests the proxy
+  does not see, or the verb of a plain HTTP request. **For wirken-siem:**
+  `sandbox_egress_verdict` gains the optional field `method`.
 
 ## [3.2.0] - 2026-10-28
 
