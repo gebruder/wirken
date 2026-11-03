@@ -171,7 +171,10 @@ request nobody decides within `WIRKEN_DISCORD_APPROVAL_TIMEOUT_S` (300 seconds
 by default) is refused. Every presser gets the same reply; the gateway drops a
 press from anyone not on the approver list, or from any channel other than the
 one the card was posted in, and records it. The approval row's `approved_by` is
-the presser's Discord user id.
+the presser's Discord user id. The first press redraws the card with both
+buttons disabled, and the adapter sends no second decision for a card it has
+already decided: a press from a client still showing the buttons live gets an
+ephemeral reply that the request was decided, and nothing is forwarded.
 
 ## Slack
 

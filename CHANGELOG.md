@@ -31,6 +31,12 @@ tagged.
   does not see, or the verb of a plain HTTP request. **For wirken-siem:**
   `sandbox_egress_verdict` gains the optional field `method`.
 
+### Fixed
+
+- A Discord approval card's Approve and Deny buttons are disabled by the
+  first press, and the adapter forwards no second decision for a card it has
+  already decided. Reported, with a patch, by olive-mm in #309.
+
 ## [3.2.0] - 2026-10-28
 
 ### Security

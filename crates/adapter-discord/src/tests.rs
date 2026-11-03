@@ -584,3 +584,52 @@ fn every_presser_gets_the_same_acknowledgement() {
     assert_eq!(crate::adapter::acknowledgement(true), "Approved");
     assert_eq!(crate::adapter::acknowledgement(false), "Denied");
 }
+
+/// The row a press redraws differs from the posted one in `disabled`
+/// and nothing else, so a button on either decodes to the same
+/// request and decision.
+#[test]
+fn a_decided_card_is_redrawn_with_both_buttons_disabled_and_the_same_ids() {
+    let request_id = "3c1f7a2e-0000-4000-8000-00000000abcd";
+    let row = |disabled: bool| {
+        serde_json::to_value(crate::adapter::approval_buttons(request_id, disabled).unwrap())
+            .unwrap()
+    };
+    let posted = row(false);
+    let redrawn = row(true);
+    let buttons = |row: &serde_json::Value| row["components"].as_array().unwrap().clone();
+    assert_eq!(buttons(&posted).len(), 2);
+    for (i, decision) in ["allow", "deny"].into_iter().enumerate() {
+        let id = format!("req:{request_id}:{decision}");
+        assert_eq!(buttons(&posted)[i]["custom_id"], id);
+        assert_eq!(buttons(&redrawn)[i]["custom_id"], id);
+        assert_eq!(buttons(&posted)[i]["disabled"], false);
+        assert_eq!(buttons(&redrawn)[i]["disabled"], true);
+    }
+    let without_disabled = |mut row: serde_json::Value| {
+        for button in row["components"].as_array_mut().unwrap() {
+            button.as_object_mut().unwrap().remove("disabled");
+        }
+        row
+    };
+    assert_eq!(without_disabled(posted), without_disabled(redrawn));
+}
+
+/// The first press on a card decides it; a second press on the same
+/// card is a no-op for the adapter. The set is bounded, so the oldest
+/// card is forgotten past the cap rather than the set growing with
+/// the process.
+#[test]
+fn a_second_press_on_a_decided_card_is_a_no_op() {
+    let mut decided = crate::adapter::DecidedCards::default();
+    assert!(decided.insert("req-1"), "the first press decides");
+    assert!(!decided.insert("req-1"), "the second press sends nothing");
+    assert!(decided.insert("req-2"), "another card is its own decision");
+    for i in 0..2000 {
+        decided.insert(&format!("fill-{i}"));
+    }
+    assert!(
+        decided.insert("req-1"),
+        "past the cap the oldest card is forgotten"
+    );
+}

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use serenity::Client;
 use serenity::all::{
     ButtonStyle, ChannelId, Context, CreateActionRow, CreateButton, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EventHandler, GatewayIntents, Interaction,
-    Message as DcMessage, MessageId, Ready,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
+    EventHandler, GatewayIntents, Interaction, Message as DcMessage, MessageId, Ready,
 };
 use tokio::sync::Mutex;
 
@@ -68,6 +68,7 @@ impl DiscordAdapter {
             writer: writer.clone(),
             bot_id: Arc::new(Mutex::new(0)),
             http_slot: http.clone(),
+            decided: Arc::new(Mutex::new(DecidedCards::default())),
         };
 
         // Intents: guild messages, DM messages, message content
@@ -93,6 +94,37 @@ struct Handler {
     writer: Arc<Mutex<IpcFrameWriter>>,
     bot_id: Arc<Mutex<u64>>,
     http_slot: Arc<Mutex<Option<Arc<serenity::http::Http>>>>,
+    /// Cards a press has already decided in this process.
+    decided: Arc<Mutex<DecidedCards>>,
+}
+
+/// How many decided request ids the adapter keeps. Far more than are
+/// ever open at once; past it the oldest is forgotten, and the
+/// gateway drops a repeat decision on its own in any case.
+const DECIDED_CARDS_CAP: usize = 1024;
+
+/// Request ids this adapter has forwarded a decision for. A second
+/// press on the same card is answered and sends nothing.
+#[derive(Default)]
+pub(crate) struct DecidedCards {
+    order: std::collections::VecDeque<String>,
+    set: std::collections::HashSet<String>,
+}
+
+impl DecidedCards {
+    /// Mark `request_id` decided. False when it already was.
+    pub(crate) fn insert(&mut self, request_id: &str) -> bool {
+        if !self.set.insert(request_id.to_string()) {
+            return false;
+        }
+        self.order.push_back(request_id.to_string());
+        if self.order.len() > DECIDED_CARDS_CAP
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.set.remove(&oldest);
+        }
+        true
+    }
 }
 
 #[serenity::async_trait]
@@ -180,6 +212,23 @@ impl EventHandler for Handler {
             }
         };
 
+        // The first press decides the card. A later one, from a client
+        // that still shows the buttons live, sends nothing to the
+        // gateway and gets a reply that depends on the card alone.
+        if !self.decided.lock().await.insert(&payload.request_id) {
+            let _ = component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("This request has already been decided.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+
         let user_id = component.user.id.get();
         let user_display = component
             .user
@@ -206,15 +255,36 @@ impl EventHandler for Handler {
             }
         }
 
-        let ack_text = acknowledgement(is_allow);
+        // Answer the interaction by redrawing the card with both
+        // buttons disabled. Only `components` is set, so the card's
+        // text stays as posted. The ids encode from the request id
+        // alone, so the redrawn row carries the same `custom_id`s.
+        let response = match approval_buttons(&payload.request_id, true) {
+            Ok(row) => CreateInteractionResponse::UpdateMessage(
+                CreateInteractionResponseMessage::new().components(vec![row]),
+            ),
+            // The id encoded when the card was posted, so this does
+            // not happen; if it did, the press still has to be
+            // acknowledged or the client shows a stuck spinner.
+            Err(e) => {
+                tracing::warn!(
+                    request_id = %payload.request_id,
+                    error = %e,
+                    "discord interaction: could not rebuild the button row; card left as is"
+                );
+                CreateInteractionResponse::Acknowledge
+            }
+        };
+        let _ = component.create_response(&ctx.http, response).await;
+
+        // The presser's own reply, as before, now as a follow-up to
+        // the redraw.
         let _ = component
-            .create_response(
+            .create_followup(
                 &ctx.http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content(ack_text)
-                        .ephemeral(true),
-                ),
+                CreateInteractionResponseFollowup::new()
+                    .content(acknowledgement(is_allow))
+                    .ephemeral(true),
             )
             .await;
     }
@@ -354,10 +424,37 @@ pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
     fields.card().render(CardStyle::Markdown)
 }
 
+/// The Approve / Deny button row for one card. `disabled` is the
+/// only difference between the row a card is posted with and the
+/// row it is redrawn with after a press: each button's `custom_id`
+/// is the cross-adapter encoding from `wirken_adapter_core::approval`
+/// of the request id and the decision, so both rows decode to the
+/// same request.
+pub(crate) fn approval_buttons(
+    request_id: &str,
+    disabled: bool,
+) -> Result<CreateActionRow, approval::EncodeError> {
+    let button = |decision, label, style| {
+        approval::encode(&ApprovalPayload {
+            request_id: request_id.to_string(),
+            decision,
+        })
+        .map(|id| {
+            CreateButton::new(id)
+                .label(label)
+                .style(style)
+                .disabled(disabled)
+        })
+    };
+    Ok(CreateActionRow::Buttons(vec![
+        button(Decision::Allow, "Approve", ButtonStyle::Success)?,
+        button(Decision::Deny, "Deny", ButtonStyle::Danger)?,
+    ]))
+}
+
 /// Render an approval message in the configured channel and ship
 /// it with a Components-v2 button row carrying Approve / Deny
-/// buttons. Each button's `custom_id` is the cross-adapter
-/// encoding from `wirken_adapter_core::approval`.
+/// buttons, built by [`approval_buttons`].
 ///
 /// On send failure (channel inaccessible, Discord API rejection),
 /// emits an `ApprovalRequestFailed` frame back to the gateway with
@@ -370,15 +467,11 @@ async fn send_approval_request(
 ) {
     let text = approval_text(&fields);
 
-    // Encode the approval payloads under the cross-adapter
-    // convention. Encoding failure here would indicate a malformed
-    // request_id; emit ApprovalRequestFailed rather than building a
-    // half-shaped message.
-    let allow_id = match approval::encode(&ApprovalPayload {
-        request_id: fields.request_id.clone(),
-        decision: Decision::Allow,
-    }) {
-        Ok(s) => s,
+    // Encoding failure here would indicate a malformed request_id;
+    // emit ApprovalRequestFailed rather than building a half-shaped
+    // message.
+    let row = match approval_buttons(&fields.request_id, false) {
+        Ok(row) => row,
         Err(e) => {
             tracing::error!(
                 request_id = %fields.request_id,
@@ -389,29 +482,6 @@ async fn send_approval_request(
             return;
         }
     };
-    let deny_id = match approval::encode(&ApprovalPayload {
-        request_id: fields.request_id.clone(),
-        decision: Decision::Deny,
-    }) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                request_id = %fields.request_id,
-                error = %e,
-                "discord approval: encode failed; emitting ApprovalRequestFailed"
-            );
-            emit_failure(writer, &fields.request_id, "encode_failed").await;
-            return;
-        }
-    };
-
-    let approve = CreateButton::new(allow_id)
-        .label("Approve")
-        .style(ButtonStyle::Success);
-    let deny = CreateButton::new(deny_id)
-        .label("Deny")
-        .style(ButtonStyle::Danger);
-    let row = CreateActionRow::Buttons(vec![approve, deny]);
 
     let channel = ChannelId::new(fields.target_channel_id);
     let message = CreateMessage::new().content(text).components(vec![row]);
