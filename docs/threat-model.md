@@ -336,7 +336,11 @@ hatch is a Tier B step and is reported as such.
   and a proof that depends on a file-permission denial does not show there.
 - `cargo test -p wirken-agent --test hostile_corpus -- --nocapture` replays
   `tests/hostile/corpus.jsonl`, the hostile tool-call corpus, through
-  `tool_to_action` and `PermissionStore::check`. A new hostile shape is one
+  `tool_to_action` and `PermissionStore::check`. An `http_request` line that
+  carries `permissions`, a skill block, and `gate`, `allowed` or
+  `refused:<axis>`, is also replayed through the skill-profile gates behind
+  the tier gate: `tools.allow`, the method and POST-endpoint rules, the
+  credential allow-set and the egress allow-set. A new hostile shape is one
   JSON line with its expected outcome.
 - `crates/cli/tests/` drives the built binary end to end: adapter credential
   hand-off, the MCP proxy holding no vault, audit verification of malformed

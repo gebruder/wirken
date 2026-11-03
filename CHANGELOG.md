@@ -20,6 +20,12 @@ tagged.
   `http.post_paths`, and PUT, PATCH and DELETE are refused on every host.
   **For wirken-siem:** `skill_permission_denied` gains the optional fields
   `method` and `host`.
+- The hostile corpus replays an `http_request` line that carries a skill
+  `permissions` block and a `gate` expectation through the skill-profile
+  gates, and checks that each refusal names the host and the method. Lines
+  cover GET and HEAD to a listed host, POST, PUT and DELETE to the same
+  host, a signup-shaped POST, a webhook-registration POST, a declared POST
+  endpoint and a lowercase verb.
 
 ## [3.2.0] - 2026-10-28
 

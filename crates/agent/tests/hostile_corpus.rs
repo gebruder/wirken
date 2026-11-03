@@ -25,6 +25,16 @@
 //! `InboundGate::check` against its `allow` entries and expects
 //! `dropped` or `admitted`.
 //!
+//! An `http_request` line may also carry `permissions`, a skill
+//! `permissions:` block as JSON, and `gate`, what the skill-profile
+//! gates the runtime runs after the tier gate answer under that
+//! block: `allowed`, or `refused:<axis>` with the axis of the
+//! `skill_permission_denied` row (`tools`, `http_method`,
+//! `http_post_path`, `credentials`, `egress`). Those gates are the
+//! layer the `tier1` lines above point at, replayed in the runtime's
+//! order, and every refusal they produce is checked to name the host
+//! and the method.
+//!
 //! A mismatch is a finding about the gate, not a stale expectation.
 //! The rule for this file is that a line is changed only when the
 //! classification it asserts was wrong to begin with, and never to
@@ -38,6 +48,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use wirken_agent::egress::{EgressClient, EgressEnforcement};
+use wirken_agent::http_tool;
+use wirken_agent::skill_perms::{
+    EffectiveProfile, GateDecision, PermissionsBlock, PhasedEffective, resolve_block,
+};
 use wirken_agent::tool::{ToolConfig, ToolRegistry, tool_to_action};
 use wirken_gateway::permissions::{
     Action, ApprovalScope, PermissionCheck, PermissionStore, PermissionTier,
@@ -188,6 +203,37 @@ fn text(entry: &Value, name: &str, lineno: usize) -> String {
         .to_string()
 }
 
+/// What the skill-profile gates should answer for an `http_request`
+/// line, when the line says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GateExpect {
+    Allowed,
+    Refused(String),
+}
+
+impl GateExpect {
+    fn parse(raw: &str) -> Option<Self> {
+        if raw == "allowed" {
+            return Some(Self::Allowed);
+        }
+        let axis = raw.strip_prefix("refused:")?;
+        matches!(
+            axis,
+            "tools" | "http_method" | "http_post_path" | "credentials" | "egress"
+        )
+        .then(|| Self::Refused(axis.to_string()))
+    }
+}
+
+impl std::fmt::Display for GateExpect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allowed => f.write_str("allowed"),
+            Self::Refused(axis) => write!(f, "refused:{axis}"),
+        }
+    }
+}
+
 /// One corpus line, ready to replay.
 struct Entry {
     lineno: usize,
@@ -197,6 +243,9 @@ struct Entry {
     expect: Outcome,
     key: String,
     why: String,
+    /// The skill `permissions:` block and the gate answer under it,
+    /// for an `http_request` line that carries them.
+    gate: Option<(PermissionsBlock, GateExpect)>,
 }
 
 fn parse_corpus(fixtures: &Path) -> Vec<Entry> {
@@ -237,14 +286,43 @@ fn parse_corpus(fixtures: &Path) -> Vec<Entry> {
             "{CORPUS_PATH}:{lineno}: 'why' carries the reasoning a reader needs \
              when this line fails, so it may not be empty."
         );
+        let tool = text(&entry, "tool", lineno);
+        let gate = entry.get("gate").map(|g| {
+            let raw = g
+                .as_str()
+                .unwrap_or_else(|| panic!("{CORPUS_PATH}:{lineno}: 'gate' must be a string"));
+            let expect = GateExpect::parse(raw).unwrap_or_else(|| {
+                panic!(
+                    "{CORPUS_PATH}:{lineno}: unknown gate '{raw}'. 'allowed', or \
+                     'refused:' and one of tools, http_method, http_post_path, \
+                     credentials, egress."
+                )
+            });
+            assert_eq!(
+                tool, "http_request",
+                "{CORPUS_PATH}:{lineno}: 'gate' replays the http_request gates and \
+                 is only meaningful on an http_request line"
+            );
+            let block: PermissionsBlock =
+                serde_json::from_value(field(&entry, "permissions", lineno).clone())
+                    .unwrap_or_else(|e| {
+                        panic!("{CORPUS_PATH}:{lineno}: 'permissions' is not a skill block: {e}")
+                    });
+            (block, expect)
+        });
+        assert!(
+            gate.is_some() || entry.get("permissions").is_none(),
+            "{CORPUS_PATH}:{lineno}: 'permissions' without 'gate' replays nothing"
+        );
         entries.push(Entry {
             lineno,
             id,
-            tool: text(&entry, "tool", lineno),
+            tool,
             args: substitute(&args, fixtures),
             expect,
             key: text(&entry, "key", lineno),
             why,
+            gate,
         });
     }
     assert!(
@@ -531,6 +609,87 @@ fn hostile_corpus_replays_to_its_expected_outcome() {
                 );
             }
         }
+    }
+}
+
+/// Replay one `http_request` line through the skill-profile gates
+/// in the runtime's order: `tools.allow`, then the `http_request`
+/// gate (method, POST endpoint, credential), then the egress
+/// allow-set. The answer is what the tool call would get with the
+/// line's block as the agent's whole effective profile.
+fn replay_gate(block: PermissionsBlock, args: &Value) -> GateExpect {
+    let profile = resolve_block(block, Path::new("/skill"), None, None)
+        .expect("corpus permissions block resolves");
+    let effective = EffectiveProfile::Resolved(profile);
+    let perms = PhasedEffective::from_base(effective.clone());
+    if perms.gate_tool("http_request") != GateDecision::Allow {
+        return GateExpect::Refused("tools".into());
+    }
+    if let Some(refusal) = http_tool::gate(&perms, &args.to_string()) {
+        // The property the row and the tool result carry: a refusal
+        // names the host and the method it was refused on.
+        let host = refusal
+            .host
+            .clone()
+            .expect("every corpus http_request line has a host");
+        assert!(
+            refusal.message.contains(&format!("'{host}'"))
+                && refusal.message.contains(&refusal.method),
+            "a refusal names the host and the method: {refusal:?}"
+        );
+        return GateExpect::Refused(refusal.axis.to_string());
+    }
+    let client = EgressClient::new();
+    client.set_enforcement(EgressEnforcement::from_profile(&effective));
+    let url = args["url"].as_str().unwrap_or_default();
+    if client.request_would_pass(url) {
+        GateExpect::Allowed
+    } else {
+        GateExpect::Refused("egress".into())
+    }
+}
+
+/// Replay every `http_request` line that carries a block through the
+/// gates behind the tier gate. The corpus has to reach every refusal
+/// axis and an allow, or a gate that refused everything would pass.
+#[test]
+fn http_request_lines_replay_through_the_skill_gates() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixtures = build_fixtures(scratch.path());
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for entry in parse_corpus(&fixtures) {
+        let Some((block, expect)) = entry.gate else {
+            continue;
+        };
+        let observed = replay_gate(block, &entry.args);
+        assert_eq!(
+            observed,
+            expect,
+            "\n{CORPUS_PATH}:{lineno}  id={id}\n  \
+             call      http_request {args}\n  \
+             expected  {expect}\n  \
+             observed  {observed}\n  \
+             why       {why}\n\n\
+             This is a finding about the gate, not a stale expectation.\n",
+            lineno = entry.lineno,
+            id = entry.id,
+            args = entry.args,
+            why = entry.why,
+        );
+        seen.insert(observed.to_string());
+    }
+    for required in [
+        "allowed",
+        "refused:http_method",
+        "refused:http_post_path",
+        "refused:credentials",
+        "refused:egress",
+    ] {
+        assert!(
+            seen.contains(required),
+            "no http_request line in {CORPUS_PATH} replays to '{required}'; \
+             the gate's {required} arm is unpinned"
+        );
     }
 }
 
