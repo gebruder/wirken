@@ -31,6 +31,12 @@ tagged.
 - A sandboxed `exec` container's `/etc/resolv.conf` no longer carries the
   host's resolver and search domains. With egress `none`, and on the
   proxied network, it holds a loopback nameserver and no search domain.
+- An `exec` container runs under a seccomp profile Wirken ships and names,
+  `crates/sandbox/src/seccomp.json`: Docker's default allowlist with every
+  capability-conditional allowance removed, so `unshare`, `mount`, `setns`
+  and a namespace-making `clone` are refused whatever the daemon's default
+  is. On Podman, whose API takes no inline profile, `exec` keeps the
+  runtime default.
 
 ### Changed
 

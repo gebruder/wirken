@@ -462,6 +462,10 @@ pub async fn sweep_leftovers(docker: &Docker, instance: &str) -> usize {
 pub struct DockerSandbox {
     client: Docker,
     config: SandboxConfig,
+    /// Whether the runtime is Podman, asked once. Its API takes a
+    /// seccomp profile as a path, not as JSON, so an `exec` there runs
+    /// under the runtime's default profile.
+    podman: tokio::sync::OnceCell<bool>,
 }
 
 impl DockerSandbox {
@@ -469,7 +473,25 @@ impl DockerSandbox {
     pub fn new(config: SandboxConfig) -> Result<Self, AgentError> {
         let client = Docker::connect_with_local_defaults()
             .map_err(|e| AgentError::Sandbox(format!("Docker connect: {e}")))?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            podman: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    /// Whether the runtime behind the socket is Podman. A runtime that
+    /// cannot be asked is taken as Docker: the profile is then sent,
+    /// and a runtime that cannot take it refuses the container.
+    async fn is_podman(&self) -> bool {
+        *self
+            .podman
+            .get_or_init(|| async {
+                wirken_sandbox::RuntimeFacts::probe(&self.client)
+                    .await
+                    .is_ok_and(|f| f.podman)
+            })
+            .await
     }
 
     /// Execute a command inside an ephemeral container.
@@ -541,13 +563,18 @@ impl DockerSandbox {
         #[cfg(not(unix))]
         let env: Option<Vec<String>> = None;
 
+        let mut host_config = build_host_config(&self.config, &workspace_str, decision);
+        if self.is_podman().await {
+            wirken_sandbox::seccomp::use_runtime_default(&mut host_config);
+        }
+
         let container_config = ContainerCreateBody {
             image: Some(self.config.image.clone()),
             cmd: Some(vec!["sh".into(), "-c".into(), command.into()]),
             working_dir: Some("/workspace".into()),
             user: Some("1000:1000".into()),
             env,
-            host_config: Some(build_host_config(&self.config, &workspace_str, decision)),
+            host_config: Some(host_config),
             labels: Some(exec_labels(&self.config.instance)),
             ..Default::default()
         };
@@ -863,10 +890,13 @@ pub(crate) enum EgressDecision<'a> {
 /// hardening settings can be asserted without spinning up Docker.
 ///
 /// The fixed hardening (no capabilities, no privilege elevation,
-/// default seccomp, read-only root, tmpfs `/tmp`) comes from
+/// read-only root, tmpfs `/tmp`) comes from
 /// [`wirken_sandbox::hardened_host_config`], the same function MCP server
 /// containers use. What is particular to `exec` is set here:
 ///
+/// * the seccomp profile in [`wirken_sandbox::seccomp`], which refuses
+///   `unshare`, `mount` and a namespace-making `clone` on its own terms
+///   rather than on the runtime default's;
 /// * the agent workspace, bind-mounted read-write at `/workspace`;
 /// * the memory and PID caps, and no CPU cap;
 /// * `egress`: what the egress layer decided. `Proxied` joins the
@@ -924,6 +954,7 @@ pub(crate) fn build_host_config(
         pids: PIDS_LIMIT,
         nano_cpus: None,
         runtime: config.mode.runtime_name(),
+        seccomp: wirken_sandbox::seccomp::Seccomp::Profile,
     })
 }
 

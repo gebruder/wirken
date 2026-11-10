@@ -188,26 +188,39 @@ start and ignored. The loader never refuses a file over one, so a file written
 for a newer build does not stop an older one from starting; the warning is
 what says the setting did nothing.
 
-`security_opt` does NOT explicitly set seccomp. Per Docker semantics
-([upstream](https://docs.docker.com/engine/security/seccomp/)), when no
-seccomp profile is named, the daemon applies its **default profile**. That
-profile blocks ~44 syscalls including:
+`security_opt` names a seccomp profile for every `exec` container:
+`crates/sandbox/src/seccomp.json`, passed to the runtime with the container
+(`crates/sandbox/src/seccomp.rs`). It is Docker's default allowlist
+([upstream](https://docs.docker.com/engine/security/seccomp/)) with every
+allowance that depends on a capability removed. The default refuses
+`unshare`, `mount`, `setns` and a namespace-making `clone` only because the
+container holds no `CAP_SYS_ADMIN`; this profile refuses them
+unconditionally, so a user namespace or a mount is refused by what Wirken
+sends and not by what the daemon applies when nothing is named. `clone3`,
+whose flags a filter cannot read, answers `ENOSYS`, and a libc falls back to
+`clone`. No syscall is allowed that the default does not allow a container
+with no capabilities. `seccomp.NOTICE` records the profile's origin.
+
+The profile blocks, among others:
+
+- Namespaces: `unshare`, `setns`, and `clone` with any `CLONE_NEW*` flag.
 
 - Kernel-module loaders: `init_module`, `finit_module`, `delete_module`.
 - Mount manipulation: `mount`, `umount`, `umount2`, `pivot_root`.
 - Kernel keyring: `add_key`, `request_key`, `keyctl`.
 - Kexec: `kexec_load`, `kexec_file_load`.
-- Cross-process state: `ptrace` (when not in `cap_sys_ptrace`), `process_vm_readv`/`_writev`.
-- Personality: `personality` non-zero.
-- Clock and time setting: `clock_settime`, `clock_adjtime`, `settimeofday`,
-  `stime`.
-- BPF programs: `bpf` (when not in `cap_sys_admin`).
+- Personality: `personality` outside five listed values.
+- Clock setting: `clock_settime`, `settimeofday`, `stime`.
+- BPF programs: `bpf`.
 - Reboot: `reboot`.
 
-The full list is the Docker daemon's responsibility, not Wirken's. Setting
-`security_opt: ["seccomp=default"]` is rejected by the Docker API as an
-invalid token; the absence of a seccomp `SecurityOpt` is what activates the
-default profile ([`crates/sandbox/src/lib.rs:141-144, 166-169`](../crates/sandbox/src/lib.rs)).
+`sandbox_refuses_user_namespaces_and_mounts` in
+`crates/agent/src/tests.rs` runs `unshare -Urm` and `mount` through `exec`
+against a live daemon and expects both refused.
+
+Two cases run under the runtime's own default profile instead. Podman's API
+takes a profile as a path and not as JSON, so an `exec` there names none.
+MCP server containers name none either ([mcp.md](mcp.md)).
 
 ## gVisor delta (`SandboxMode::GVisor`)
 
@@ -216,7 +229,7 @@ When mode is `GVisor`, `runtime_name()` returns `Some("runsc")`
 launches the container under gVisor instead of `runc`.
 
 gVisor changes the threat model. Under `runc`, the guest's syscalls reach
-the host kernel directly, filtered by Docker's seccomp profile. Under
+the host kernel directly, filtered by the seccomp profile above. Under
 gVisor, **every** guest syscall is trapped by `runsc` and serviced by the
 Sentry, gVisor's userspace re-implementation of the Linux syscall surface
 in Go. The host kernel sees only a small, fixed set of syscalls from
@@ -277,7 +290,7 @@ claims:
 cat ~/.wirken/sandbox.json
 # Expect: {"mode":"exec-only"} or {"mode":"gvisor"} or {"mode":"off"}
 
-# 2. ExecOnly: `cap_drop ALL` and the seccomp default both block `mount`
+# 2. ExecOnly: `cap_drop ALL` and the seccomp profile both block `mount`
 wirken run &
 # In another terminal, send the agent: "run `mount -t tmpfs none /tmp`"
 # Expected response: the container reports `mount: ... Operation not permitted`,

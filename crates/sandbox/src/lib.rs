@@ -2,10 +2,12 @@
 //! stdio MCP servers run in.
 //!
 //! What every container gets is fixed here: no Linux capabilities, no
-//! privilege elevation, Docker's default seccomp profile, a read-only
-//! root with a tmpfs at `/tmp`, and memory and PID caps. What differs
-//! between an `exec` and an MCP server, its mounts, network and
-//! limits, is passed in as [`HostSettings`].
+//! privilege elevation, a seccomp profile, a read-only root with a
+//! tmpfs at `/tmp`, and memory and PID caps. What differs between an
+//! `exec` and an MCP server, its mounts, network, limits and which
+//! seccomp profile, is passed in as [`HostSettings`]. An `exec` runs
+//! under the profile in [`seccomp`]; an MCP server under the runtime's
+//! default.
 //!
 //! The egress proxy both use, a policy-free sidecar and a host-side
 //! decision broker, is in [`egress`], and the networks that make the
@@ -24,6 +26,7 @@ pub mod child_env;
 pub mod egress;
 #[cfg(unix)]
 pub mod egress_net;
+pub mod seccomp;
 
 use std::collections::HashMap;
 
@@ -135,6 +138,8 @@ pub struct HostSettings {
     pub nano_cpus: Option<i64>,
     /// OCI runtime, `None` for Docker's default (runc).
     pub runtime: Option<String>,
+    /// The seccomp profile the container runs under.
+    pub seccomp: seccomp::Seccomp,
 }
 
 /// The host config every sandbox container runs under.
@@ -147,10 +152,10 @@ pub struct HostSettings {
 ///   case breaks this, re-evaluate rather than loosening by default.
 /// * `no-new-privileges`: block setuid/setgid elevation inside the
 ///   container. Pairs with `cap_drop`.
-/// * seccomp: rely on Docker's default seccomp profile. Docker
-///   applies it automatically when no seccomp SecurityOpt is set;
-///   the string `seccomp=default` is not a valid option and causes
-///   the daemon to reject container start.
+/// * seccomp: the profile the caller chose. [`seccomp::Seccomp::Profile`]
+///   passes [`seccomp::PROFILE`]; `RuntimeDefault` names none, and the
+///   runtime then applies its own (the string `seccomp=default` is not
+///   a valid option and causes the daemon to reject container start).
 /// * `readonly_rootfs`: make the container's `/` read-only. Bind
 ///   mounts keep the mode the caller gave them, and a tmpfs at `/tmp`
 ///   gives the process somewhere to scratch.
@@ -173,10 +178,11 @@ pub fn hardened_host_config(settings: HostSettings) -> HostConfig {
         runtime: settings.runtime,
         cap_drop: Some(vec!["ALL".into()]),
         cap_add: Some(Vec::new()),
-        security_opt: Some(vec![
-            "no-new-privileges:true".into(),
-            // Docker applies its default seccomp profile when no seccomp SecurityOpt is set.
-        ]),
+        security_opt: Some(
+            std::iter::once("no-new-privileges:true".to_string())
+                .chain(settings.seccomp.security_opt())
+                .collect(),
+        ),
         readonly_rootfs: Some(true),
         tmpfs: Some(tmpfs_mounts),
         ..Default::default()
@@ -290,6 +296,7 @@ mod tests {
             pids: PIDS_LIMIT,
             nano_cpus: Some(1_000_000_000),
             runtime: Some("runsc".into()),
+            seccomp: seccomp::Seccomp::RuntimeDefault,
         }
     }
 

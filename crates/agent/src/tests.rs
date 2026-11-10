@@ -5165,12 +5165,16 @@ fn host_config_sets_no_new_privileges_and_seccomp() {
         opts.iter().any(|o| o == "no-new-privileges:true"),
         "security_opt must include no-new-privileges:true, got {opts:?}"
     );
-    // Docker applies its default seccomp profile when no seccomp
-    // SecurityOpt is set; setting `seccomp=default` is not a valid
-    // option string and causes the daemon to reject container start.
+    // The exec profile is named, so the refusals it states do not rest
+    // on whatever the daemon applies when none is.
+    assert_eq!(
+        opts.iter().filter(|o| o.starts_with("seccomp=")).count(),
+        1,
+        "security_opt names one seccomp profile"
+    );
     assert!(
-        !opts.iter().any(|o| o.starts_with("seccomp=")),
-        "security_opt must not set a seccomp option, got {opts:?}"
+        opts.contains(&format!("seccomp={}", wirken_sandbox::seccomp::PROFILE)),
+        "the profile is the one this build ships"
     );
 }
 
@@ -5681,6 +5685,52 @@ async fn sandbox_blocks_setuid_via_no_new_privileges() {
         r.output.contains("PASSWD_RC=") && !r.output.contains("PASSWD_RC=0"),
         "setuid binary must fail to elevate under no-new-privileges, got: {}",
         r.output
+    );
+}
+
+/// The exec profile refuses a user namespace and a mount, as the
+/// command reported from a model does them, and an ordinary command
+/// still runs under it.
+#[tokio::test]
+async fn sandbox_refuses_user_namespaces_and_mounts() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime};
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+        return;
+    }
+    let sandbox = DockerSandbox::new(SandboxConfig {
+        mode: SandboxMode::ExecOnly,
+        ..Default::default()
+    })
+    .expect("sandbox");
+    let tmp = TempDir::new().unwrap();
+    let result = sandbox
+        .exec(
+            "command -v unshare >/dev/null && echo ran=1; \
+             unshare -Urm --propagation private sh -c \
+               'mount -t tmpfs -o exec tmpfs /mnt && echo MOUNT_OK' 2>&1; echo userns_rc=$?; \
+             unshare -U true 2>&1; echo unshare_rc=$?; \
+             mount -t tmpfs tmpfs /mnt 2>&1; echo mount_rc=$?; \
+             (sleep 0 & wait) && ls / >/dev/null && echo ordinary=ok",
+            tmp.path(),
+            None,
+        )
+        .await
+        .expect("exec runs");
+    let out = &result.output;
+    assert!(out.contains("ran=1"), "unshare is in the image: {out}");
+    assert!(!out.contains("MOUNT_OK"), "{out}");
+    assert!(!out.contains("userns_rc=0"), "{out}");
+    assert!(!out.contains("unshare_rc=0"), "{out}");
+    assert!(!out.contains("mount_rc=0"), "{out}");
+    assert!(
+        out.contains("ordinary=ok"),
+        "fork, wait and a directory listing still work: {out}"
     );
 }
 

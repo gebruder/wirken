@@ -591,6 +591,7 @@ impl ContainerPlan {
                     pids: self.pids,
                     nano_cpus: Some(self.nano_cpus),
                     runtime: self.runtime.clone(),
+                    seccomp: wirken_sandbox::seccomp::Seccomp::RuntimeDefault,
                 },
             )),
             ..Default::default()

@@ -1,0 +1,15 @@
+seccomp.json in this directory is derived from profiles/seccomp/default.json
+of the Moby project, release v28.0.0 (https://github.com/moby/moby),
+Copyright 2012-2017 Docker, Inc., licensed under the Apache License,
+Version 2.0. A copy of that license is in seccomp.LICENSE.
+
+Changes from the original:
+
+- Every rule that applied only to a container holding a capability
+  (an "includes.caps" condition) is removed.
+- The rules that applied only to a container without CAP_SYS_ADMIN, the
+  flag-masked "clone" allowance and the ENOSYS answer to "clone3", apply
+  unconditionally.
+
+No syscall is allowed that the original does not allow a container with
+no capabilities.
