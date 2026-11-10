@@ -54,6 +54,9 @@ tagged.
   request the sidecar read: the method and URL of a plain HTTP request, or
   the tunnel's target for `CONNECT`.
 
+- MCP server containers run under the same seccomp profile as `exec`
+  containers, and their `/etc/resolv.conf` holds a loopback nameserver and
+  no search domain instead of the host's.
 - The hostile corpus gains the recon-then-upload, plain-HTTP PUT, metadata
   address and user-namespace shapes, and lines that replay the address
   check, approval cards, the over-long ask, the exec container's settings,

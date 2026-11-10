@@ -331,6 +331,10 @@ pub struct ContainerPlan {
     pub pids: i64,
     pub nano_cpus: i64,
     pub runtime: Option<String>,
+    /// The seccomp profile the server runs under: the one `exec`
+    /// containers get, or the runtime's default on Podman, whose API
+    /// takes a profile as a path and not as JSON.
+    pub seccomp: wirken_sandbox::seccomp::Seccomp,
     pub labels: HashMap<String, String>,
     /// Host directory to create before the container starts.
     pub scratch_dir: Option<PathBuf>,
@@ -500,6 +504,11 @@ impl ContainerPlan {
             pids,
             nano_cpus,
             runtime: host.runtime.clone(),
+            seccomp: if host.facts.is_some_and(|f| f.podman) {
+                wirken_sandbox::seccomp::Seccomp::RuntimeDefault
+            } else {
+                wirken_sandbox::seccomp::Seccomp::Profile
+            },
             labels,
             scratch_dir,
         })
@@ -558,13 +567,21 @@ impl ContainerPlan {
                 env.push(format!("{name}={value}"));
             }
         }
-        let (network_mode, dns) = match route {
+        let network_mode = match route {
             Some(route) => {
                 env.extend(route.proxy_env());
-                (route.network(), Some(vec!["127.0.0.1".to_string()]))
+                route.network()
             }
-            None => (self.network_mode.clone(), None),
+            None => self.network_mode.clone(),
         };
+        // On the egress network the server must not resolve names
+        // itself; the broker does, after the hosts check. With no
+        // network it cannot. Either way the loopback resolver and the
+        // empty search list are what the container's resolv.conf is
+        // written with, so it names nothing of the host's network, as
+        // an `exec` container's does.
+        let dns = Some(vec!["127.0.0.1".to_string()]);
+        let dns_search = Some(vec![".".to_string()]);
         let (entrypoint, args) = self.cmd.split_at(self.cmd.len().min(1));
         ContainerCreateBody {
             image: Some(self.image.clone()),
@@ -586,12 +603,12 @@ impl ContainerPlan {
                     mounts: self.mounts.clone(),
                     network_mode: Some(network_mode),
                     dns,
-                    dns_search: None,
+                    dns_search,
                     memory: self.memory_bytes,
                     pids: self.pids,
                     nano_cpus: Some(self.nano_cpus),
                     runtime: self.runtime.clone(),
-                    seccomp: wirken_sandbox::seccomp::Seccomp::RuntimeDefault,
+                    seccomp: self.seccomp,
                 },
             )),
             ..Default::default()
@@ -1044,10 +1061,19 @@ mod tests {
         assert_eq!(host_config.runtime.as_deref(), Some("runsc"));
         assert_eq!(host_config.cap_drop, Some(vec!["ALL".to_string()]));
         assert_eq!(host_config.readonly_rootfs, Some(true));
+        // The exec seccomp profile is named, so a server is refused a
+        // namespace or a mount by it and not by the daemon's default.
         assert_eq!(
             host_config.security_opt,
-            Some(vec!["no-new-privileges:true".to_string()])
+            Some(vec![
+                "no-new-privileges:true".to_string(),
+                format!("seccomp={}", wirken_sandbox::seccomp::PROFILE),
+            ])
         );
+        // With no network there is still a resolv.conf, and it names a
+        // loopback resolver and no search domain, not the host's.
+        assert_eq!(host_config.dns, Some(vec!["127.0.0.1".to_string()]));
+        assert_eq!(host_config.dns_search, Some(vec![".".to_string()]));
         assert_eq!(host_config.binds, Some(Vec::new()));
     }
 
@@ -1439,6 +1465,28 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    /// A server runs under the exec seccomp profile, and on Podman
+    /// under the runtime's default.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn the_seccomp_profile_follows_the_runtime() {
+        use wirken_sandbox::seccomp::Seccomp;
+        let dirs = tempfile::tempdir().unwrap();
+        let mut host = host(dirs.path());
+        assert_eq!(
+            plan(&host, &block(&dirs)).unwrap().seccomp,
+            Seccomp::Profile
+        );
+        host.facts = Some(RuntimeFacts {
+            podman: true,
+            ..Default::default()
+        });
+        let on_podman = plan(&host, &block(&dirs)).unwrap();
+        assert_eq!(on_podman.seccomp, Seccomp::RuntimeDefault);
+        let body = on_podman.create_body(&HashMap::new(), None);
+        assert!(!wirken_sandbox::seccomp::is_set(&body.host_config.unwrap()));
     }
 
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]

@@ -188,7 +188,8 @@ start and ignored. The loader never refuses a file over one, so a file written
 for a newer build does not stop an older one from starting; the warning is
 what says the setting did nothing.
 
-`security_opt` names a seccomp profile for every `exec` container:
+`security_opt` names a seccomp profile for every `exec` and MCP server
+container:
 `crates/sandbox/src/seccomp.json`, passed to the runtime with the container
 (`crates/sandbox/src/seccomp.rs`). It is Docker's default allowlist
 ([upstream](https://docs.docker.com/engine/security/seccomp/)), as released
@@ -220,9 +221,8 @@ The profile blocks, among others:
 `crates/agent/src/tests.rs` runs `unshare -Urm` and `mount` through `exec`
 against a live daemon and expects both refused.
 
-Two cases run under the runtime's own default profile instead. Podman's API
-takes a profile as a path and not as JSON, so an `exec` there names none.
-MCP server containers name none either ([mcp.md](mcp.md)).
+One case runs under the runtime's own default profile instead. Podman's API
+takes a profile as a path and not as JSON, so an `exec` or MCP server container there names none.
 
 ## gVisor delta (`SandboxMode::GVisor`)
 
