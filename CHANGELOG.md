@@ -24,6 +24,11 @@ tagged.
   Discord escapes each value, so a backtick no longer ends the code span.
   The Slack and Matrix prompts, which no gate sends today, are plain text.
 
+### Dependencies
+
+- hyper 1.12.0 and want 0.3.2 in the lockfile. hyper no longer depends on
+  pin-utils, which RUSTSEC-2026-0441 marks unmaintained.
+
 ## [3.2.1] - 2026-11-03
 
 ### Security
