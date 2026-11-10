@@ -1,7 +1,8 @@
-seccomp.json in this directory is derived from profiles/seccomp/default.json
-of the Moby project, release v28.0.0 (https://github.com/moby/moby),
-Copyright 2012-2017 Docker, Inc., licensed under the Apache License,
-Version 2.0. A copy of that license is in seccomp.LICENSE.
+seccomp.json in this directory is derived from seccomp/default.json of the
+Moby profiles project, release seccomp/v0.3.0
+(https://github.com/moby/profiles), Copyright 2012-2017 Docker, Inc.,
+licensed under the Apache License, Version 2.0. A copy of that license is
+in seccomp.LICENSE.
 
 Changes from the original:
 

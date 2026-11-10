@@ -36,7 +36,8 @@ tagged.
   capability-conditional allowance removed, so `unshare`, `mount`, `setns`
   and a namespace-making `clone` are refused whatever the daemon's default
   is. On Podman, whose API takes no inline profile, `exec` keeps the
-  runtime default.
+  runtime default. The allowlist is the one released as Moby profiles
+  `seccomp/v0.3.0`, which allows `socket` per address family.
 
 ### Changed
 

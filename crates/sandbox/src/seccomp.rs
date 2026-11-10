@@ -154,6 +154,42 @@ mod tests {
         assert_eq!(clone3_rules, 1);
     }
 
+    /// `socket` is allowed per address family, as the release this
+    /// profile is derived from allows it, and never by a rule that
+    /// admits every family but one.
+    #[test]
+    fn a_socket_is_allowed_by_address_family() {
+        let mut families = Vec::new();
+        for rule in rules() {
+            if !names(&rule).contains(&"socket") {
+                continue;
+            }
+            assert_eq!(names(&rule), ["socket"], "socket shares no rule: {rule}");
+            let args = rule["args"]
+                .as_array()
+                .expect("socket is allowed on its family");
+            assert_eq!(args.len(), 1);
+            assert_eq!(args[0]["index"], 0, "the family is the first argument");
+            let op = args[0]["op"].as_str().unwrap();
+            assert!(
+                matches!(op, "SCMP_CMP_EQ" | "SCMP_CMP_LT"),
+                "a family is named or bounded from above, never excluded: {rule}"
+            );
+            families.push((op.to_string(), args[0]["value"].as_u64().unwrap()));
+        }
+        // AF_UNSPEC, AF_UNIX and AF_INET by the bound, AF_INET6 and
+        // AF_NETLINK by name.
+        assert!(families.contains(&("SCMP_CMP_LT".to_string(), 3)));
+        for family in [10, 16] {
+            assert!(
+                families.contains(&("SCMP_CMP_EQ".to_string(), family)),
+                "{family}"
+            );
+        }
+        // AF_VSOCK reaches the hypervisor and is on no rule.
+        assert!(!families.iter().any(|(_, f)| *f == 40));
+    }
+
     #[test]
     fn the_profile_is_one_security_option_and_can_be_taken_back_out() {
         let mut host = HostConfig {

@@ -191,8 +191,10 @@ what says the setting did nothing.
 `security_opt` names a seccomp profile for every `exec` container:
 `crates/sandbox/src/seccomp.json`, passed to the runtime with the container
 (`crates/sandbox/src/seccomp.rs`). It is Docker's default allowlist
-([upstream](https://docs.docker.com/engine/security/seccomp/)) with every
-allowance that depends on a capability removed. The default refuses
+([upstream](https://docs.docker.com/engine/security/seccomp/)), as released
+in the Moby profiles project's `seccomp/v0.3.0`, with every allowance that
+depends on a capability removed. Like that release it allows `socket` per
+address family. The default refuses
 `unshare`, `mount`, `setns` and a namespace-making `clone` only because the
 container holds no `CAP_SYS_ADMIN`; this profile refuses them
 unconditionally, so a user namespace or a mount is refused by what Wirken
