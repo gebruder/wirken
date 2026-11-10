@@ -586,6 +586,7 @@ impl ContainerPlan {
                     mounts: self.mounts.clone(),
                     network_mode: Some(network_mode),
                     dns,
+                    dns_search: None,
                     memory: self.memory_bytes,
                     pids: self.pids,
                     nano_cpus: Some(self.nano_cpus),

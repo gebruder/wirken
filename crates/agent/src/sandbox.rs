@@ -877,6 +877,11 @@ pub(crate) enum EgressDecision<'a> {
 ///   names itself, because the proxy resolves them after the allowlist
 ///   decision. `Denied` gets no network. `Unset` means no policy
 ///   reached this exec and the legacy flag decides.
+/// * `/etc/resolv.conf`: Docker writes the host's resolver and search
+///   domains into it even for a container with no network. Every exec
+///   but one on Docker's default bridge gets the loopback resolver and
+///   no search domain instead, so the file names nothing of the host's
+///   network.
 pub(crate) fn build_host_config(
     config: &SandboxConfig,
     workspace_str: &str,
@@ -895,17 +900,26 @@ pub(crate) fn build_host_config(
         (EgressDecision::Unset, true) => None,
         (EgressDecision::Unset, false) => Some("none".to_string()),
     };
-    // Only meaningful on the egress-network path; harmless otherwise
-    // since `--network none` has no resolver to point anywhere.
-    let dns = match egress {
-        EgressDecision::Proxied(_) => Some(vec!["127.0.0.1".to_string()]),
-        _ => None,
+    // On the egress network the container must not resolve names
+    // itself. With no network it cannot, and the pin is there for what
+    // the file would otherwise say: the host's resolver and search
+    // domains. Only an exec on Docker's default bridge, the legacy
+    // flag with no policy, keeps the host's, because it resolves.
+    let on_default_bridge = network_mode.is_none();
+    let (dns, dns_search) = if on_default_bridge {
+        (None, None)
+    } else {
+        (
+            Some(vec!["127.0.0.1".to_string()]),
+            Some(vec![".".to_string()]),
+        )
     };
     wirken_sandbox::hardened_host_config(wirken_sandbox::HostSettings {
         binds: vec![format!("{workspace_str}:/workspace:rw")],
         mounts: Vec::new(),
         network_mode,
         dns,
+        dns_search,
         memory: MEMORY_LIMIT,
         pids: PIDS_LIMIT,
         nano_cpus: None,

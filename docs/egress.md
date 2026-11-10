@@ -225,7 +225,7 @@ The sidecar holds no policy. For each request it asks the gateway over a per-exe
 
 The sidecar runs the wirken binary itself, bind-mounted read-only, so there is no second artifact to ship or version. That requires the gateway binary to be the statically linked build, which is how releases ship. A dynamically linked development build cannot run inside the sandbox image; `sandbox.json`'s `sidecar_binary` points at a static build for those cases.
 
-The sandbox has no working resolver: DNS is pinned to an address with nothing behind it, and it is handed the sidecar's address directly rather than a name.
+The sandbox has no working resolver: DNS is pinned to an address with nothing behind it, and it is handed the sidecar's address directly rather than a name. In every mode but the legacy `network: true` with no channel policy, the container's `/etc/resolv.conf` holds that one loopback nameserver and no search domain, so it does not name the host's resolver or its search domains; with mode `none` this is what the file says even though the container has no network.
 
 ### Properties
 

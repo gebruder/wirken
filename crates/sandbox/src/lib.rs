@@ -124,6 +124,9 @@ pub struct HostSettings {
     pub network_mode: Option<String>,
     /// DNS servers, pinned only where a resolver must not work.
     pub dns: Option<Vec<String>>,
+    /// DNS search domains. `None` copies the host's into the
+    /// container's `/etc/resolv.conf`; `["."]` writes none.
+    pub dns_search: Option<Vec<String>>,
     /// Memory cap in bytes.
     pub memory: i64,
     /// PID cap.
@@ -159,6 +162,7 @@ pub fn hardened_host_config(settings: HostSettings) -> HostConfig {
         mounts: (!settings.mounts.is_empty()).then_some(settings.mounts),
         network_mode: settings.network_mode,
         dns: settings.dns,
+        dns_search: settings.dns_search,
         memory: Some(settings.memory),
         pids_limit: Some(settings.pids),
         nano_cpus: settings.nano_cpus,
@@ -281,6 +285,7 @@ mod tests {
             mounts: Vec::new(),
             network_mode: Some("none".into()),
             dns: None,
+            dns_search: None,
             memory: MEMORY_LIMIT,
             pids: PIDS_LIMIT,
             nano_cpus: Some(1_000_000_000),

@@ -28,6 +28,9 @@ tagged.
   `arguments too long to show for approval`. `wirken chat` draws the
   arguments in full and takes no approval on a card that does not fit the
   terminal.
+- A sandboxed `exec` container's `/etc/resolv.conf` no longer carries the
+  host's resolver and search domains. With egress `none`, and on the
+  proxied network, it holds a loopback nameserver and no search domain.
 
 ### Dependencies
 

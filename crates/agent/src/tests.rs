@@ -5199,10 +5199,38 @@ fn host_config_without_egress_network_has_no_networking() {
     let cfg = SandboxConfig::default();
     let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Unset);
     assert_eq!(hc.network_mode.as_deref(), Some("none"));
-    assert!(
-        hc.dns.is_none(),
-        "no resolver needs pinning when there is no network"
+    assert_names_no_host_resolver(&hc);
+}
+
+/// The settings that keep the host's resolver and search domains out of
+/// the container's `/etc/resolv.conf`.
+fn assert_names_no_host_resolver(hc: &bollard::models::HostConfig) {
+    assert_eq!(
+        hc.dns.as_deref(),
+        Some(&["127.0.0.1".to_string()][..]),
+        "the host's resolver is not copied in"
     );
+    assert_eq!(
+        hc.dns_search.as_deref(),
+        Some(&[".".to_string()][..]),
+        "the host's search domains are not copied in"
+    );
+}
+
+/// An exec on Docker's default bridge, the legacy flag with no policy,
+/// is the one that resolves names, so it keeps the host's resolver.
+#[test]
+fn an_exec_on_the_default_bridge_keeps_the_host_resolver() {
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
+
+    let cfg = SandboxConfig {
+        network: true,
+        ..SandboxConfig::default()
+    };
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Unset);
+    assert_eq!(hc.network_mode, None);
+    assert_eq!(hc.dns, None);
+    assert_eq!(hc.dns_search, None);
 }
 
 /// The exec sidecar runs as the operator, and its broker socket and
@@ -5296,10 +5324,7 @@ fn a_denied_egress_policy_overrides_the_legacy_network_flag() {
         "a policy that grants no egress must leave the container with no \
          network, whatever the legacy flag says",
     );
-    assert!(
-        hc.dns.is_none(),
-        "no resolver needs pinning when there is no network",
-    );
+    assert_names_no_host_resolver(&hc);
 }
 
 /// The exec site reads a deny policy as a decision, not as an absence.
@@ -5484,6 +5509,22 @@ async fn a_denied_policy_leaves_a_live_container_with_no_interface() {
         "a policy granting no egress must leave no external interface, and the \
          legacy network flag must not put one back: {:?}",
         result.output,
+    );
+
+    // What the container can read about the host's network: nothing.
+    // Docker writes `/etc/resolv.conf` even with no network.
+    let resolv = sandbox
+        .exec(
+            "grep -E '^(nameserver|search|domain|options)' /etc/resolv.conf",
+            tmp.path(),
+            Some(&ctx),
+        )
+        .await
+        .expect("exec runs");
+    assert_eq!(
+        resolv.output.trim(),
+        "nameserver 127.0.0.1",
+        "the host's resolver and search domains are not in the container"
     );
 }
 
