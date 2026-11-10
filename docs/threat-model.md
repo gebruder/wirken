@@ -340,8 +340,13 @@ hatch is a Tier B step and is reported as such.
   carries `permissions`, a skill block, and `gate`, `allowed` or
   `refused:<axis>`, is also replayed through the skill-profile gates behind
   the tier gate: `tools.allow`, the method and POST-endpoint rules, the
-  credential allow-set and the egress allow-set. A new hostile shape is one
-  JSON line with its expected outcome.
+  credential allow-set and the egress allow-set. A line can also name a
+  control behind the gate and the answer it has to give: `resolves_to` (the
+  address check on `http_request`), `card` (an approval card shows the
+  arguments as sent), `ask` (a call too long for the card is not asked),
+  `container` (what an exec container is given), `egress_ask` (what an
+  egress approval shows) and `seccomp_refuses` (syscalls the exec profile
+  refuses). A new hostile shape is one JSON line with its expected outcome.
 - `crates/cli/tests/` drives the built binary end to end: adapter credential
   hand-off, the MCP proxy holding no vault, audit verification of malformed
   signatures, session replay.

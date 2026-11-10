@@ -35,6 +35,27 @@
 //! order, and every refusal they produce is checked to name the host
 //! and the method.
 //!
+//! A line may carry one more field naming a control behind the gate,
+//! with the answer that control has to give for the line's call. Each
+//! is replayed by its own test below:
+//!
+//! - `resolves_to`, on an `http_request` line with `permissions`: the
+//!   addresses the host's name resolves to. `gate` is then answered by
+//!   `EgressClient::request` under a resolver that gives those
+//!   addresses, so a name that clears the allow-set and resolves
+//!   outside global unicast replays to `refused:egress`.
+//! - `card`: approval-card styles. The arguments line of the card, read
+//!   the way that channel displays it, has to be the arguments.
+//! - `ask`: `asked`, or `refused:arguments_too_long` for a call the
+//!   approval card could not show whole.
+//! - `container`: what the exec container is given under the named
+//!   egress mode: its network, the resolver and search domain its
+//!   `resolv.conf` is written with, and whether a seccomp profile is
+//!   named.
+//! - `egress_ask`: a request the egress proxy puts to the operator, and
+//!   the line the approval shows for it.
+//! - `seccomp_refuses`: syscalls the exec seccomp profile must refuse.
+//!
 //! A mismatch is a finding about the gate, not a stale expectation.
 //! The rule for this file is that a line is changed only when the
 //! classification it asserts was wrong to begin with, and never to
@@ -48,16 +69,26 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use wirken_agent::egress::{EgressClient, EgressEnforcement};
+use wirken_adapter_core::approval_card::{ApprovalCard, CardStyle, one_line, shown_whole};
+use wirken_agent::approval_gate::{ApprovalGate, ApprovalOutcome};
+use wirken_agent::egress::{
+    EgressClient, EgressDenyReason, EgressEnforcement, HostResolver, HttpAccessDenied,
+};
+use wirken_agent::error::PermissionDenialContext;
 use wirken_agent::http_tool;
+use wirken_agent::sandbox::{EgressDecision, SandboxConfig, build_host_config};
+use wirken_agent::sandbox_egress::{
+    ObservedSensitivity, SandboxEgressAttribution, SandboxEgressContext, SandboxEgressPolicy,
+};
 use wirken_agent::skill_perms::{
     EffectiveProfile, GateDecision, PermissionsBlock, PhasedEffective, resolve_block,
 };
-use wirken_agent::tool::{ToolConfig, ToolRegistry, tool_to_action};
+use wirken_agent::tool::{ReadSensitivity, ToolConfig, ToolRegistry, tool_to_action};
 use wirken_gateway::permissions::{
     Action, ApprovalScope, PermissionCheck, PermissionStore, PermissionTier,
 };
 use wirken_gateway::sender_registry::{InboundGate, SenderRegistry, Verdict};
+use wirken_sandbox::egress::{EgressDecider, RequestKind, RequestSeen};
 
 const CORPUS: &str = include_str!("../../../tests/hostile/corpus.jsonl");
 
@@ -246,6 +277,8 @@ struct Entry {
     /// The skill `permissions:` block and the gate answer under it,
     /// for an `http_request` line that carries them.
     gate: Option<(PermissionsBlock, GateExpect)>,
+    /// The line as written, for the fields one test reads.
+    raw: Value,
 }
 
 fn parse_corpus(fixtures: &Path) -> Vec<Entry> {
@@ -323,6 +356,7 @@ fn parse_corpus(fixtures: &Path) -> Vec<Entry> {
             key: text(&entry, "key", lineno),
             why,
             gate,
+            raw: entry.clone(),
         });
     }
     assert!(
@@ -617,7 +651,21 @@ fn hostile_corpus_replays_to_its_expected_outcome() {
 /// gate (method, POST endpoint, credential), then the egress
 /// allow-set. The answer is what the tool call would get with the
 /// line's block as the agent's whole effective profile.
-fn replay_gate(block: PermissionsBlock, args: &Value) -> GateExpect {
+/// A resolver that answers every name with the line's `resolves_to`.
+struct Resolves(Vec<std::net::IpAddr>);
+
+#[async_trait::async_trait]
+impl HostResolver for Resolves {
+    async fn resolve(&self, _host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        Ok(self
+            .0
+            .iter()
+            .map(|ip| std::net::SocketAddr::new(*ip, port))
+            .collect())
+    }
+}
+
+fn replay_gate(block: PermissionsBlock, args: &Value, resolves_to: Option<&Value>) -> GateExpect {
     let profile = resolve_block(block, Path::new("/skill"), None, None)
         .expect("corpus permissions block resolves");
     let effective = EffectiveProfile::Resolved(profile);
@@ -642,10 +690,47 @@ fn replay_gate(block: PermissionsBlock, args: &Value) -> GateExpect {
     let client = EgressClient::new();
     client.set_enforcement(EgressEnforcement::from_profile(&effective));
     let url = args["url"].as_str().unwrap_or_default();
-    if client.request_would_pass(url) {
-        GateExpect::Allowed
-    } else {
-        GateExpect::Refused("egress".into())
+    if !client.request_would_pass(url) {
+        return GateExpect::Refused("egress".into());
+    }
+    // The name cleared the allow-set. Where the line says what the name
+    // resolves to, the request is built the way the tool builds it, so
+    // the address check answers too.
+    let Some(resolves_to) = resolves_to else {
+        return GateExpect::Allowed;
+    };
+    let addresses = resolves_to
+        .as_array()
+        .expect("'resolves_to' is an array of addresses")
+        .iter()
+        .map(|a| {
+            a.as_str()
+                .and_then(|s| s.parse().ok())
+                .expect("'resolves_to' holds IP addresses")
+        })
+        .collect();
+    let client = client.with_resolver(std::sync::Arc::new(Resolves(addresses)));
+    let built = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(client.request(reqwest::Method::GET, url));
+    match built {
+        Ok(_) => GateExpect::Allowed,
+        Err(HttpAccessDenied::Egress(denied)) => {
+            // The refusal names the host and the address it was
+            // refused on.
+            let EgressDenyReason::NonGlobalAddress { address } = &denied.reason else {
+                panic!("a listed name is refused on its address: {denied:?}");
+            };
+            let shown = denied.to_string();
+            assert!(
+                shown.contains(&denied.host) && shown.contains(&address.to_string()),
+                "a refusal names the host and the address: {shown}"
+            );
+            GateExpect::Refused("egress".into())
+        }
+        Err(other) => panic!("unexpected refusal for {url}: {other}"),
     }
 }
 
@@ -661,7 +746,7 @@ fn http_request_lines_replay_through_the_skill_gates() {
         let Some((block, expect)) = entry.gate else {
             continue;
         };
-        let observed = replay_gate(block, &entry.args);
+        let observed = replay_gate(block, &entry.args, entry.raw.get("resolves_to"));
         assert_eq!(
             observed,
             expect,
@@ -841,4 +926,302 @@ fn every_gateable_action_and_built_in_tool_has_corpus_lines() {
             def.name
         );
     }
+}
+
+/// The arguments line of a card in `style`, as that channel displays
+/// it: the text after the label, with the style's own markup undone.
+fn displayed_arguments(card: &ApprovalCard, style: &str) -> String {
+    let (style, label) = match style {
+        "discord" => (CardStyle::Discord, "**arguments:** "),
+        "telegram" => (CardStyle::TelegramHtml, "<b>arguments:</b> "),
+        "plain" => (CardStyle::Plain, "arguments: "),
+        other => panic!("unknown card style '{other}'. One of: discord, telegram, plain."),
+    };
+    let text = card.render(style);
+    let line = text
+        .lines()
+        .find_map(|l| l.strip_prefix(label))
+        .unwrap_or_else(|| panic!("the card has an arguments line: {text}"));
+    match style {
+        CardStyle::Plain => line.to_string(),
+        // The value is escaped inside `<code>`.
+        CardStyle::TelegramHtml => line
+            .strip_prefix("<code>")
+            .and_then(|l| l.strip_suffix("</code>"))
+            .expect("arguments are a code element")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+        // A code span shows its content as written and cannot hold a
+        // backtick. Outside one, a backslash and the punctuation
+        // character after it display as that character, and an
+        // unescaped punctuation character would be read as markup.
+        CardStyle::Discord => match line.strip_prefix('`').and_then(|l| l.strip_suffix('`')) {
+            Some(inner) => {
+                assert!(!inner.contains('`'), "a code span cannot hold a backtick");
+                inner.to_string()
+            }
+            None => {
+                let mut shown = String::new();
+                let mut chars = line.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        shown.push(chars.next().expect("an escape is a pair"));
+                    } else {
+                        assert!(
+                            !c.is_ascii_punctuation(),
+                            "'{c}' is unescaped and would be read as markup: {line}"
+                        );
+                        shown.push(c);
+                    }
+                }
+                shown
+            }
+        },
+        _ => unreachable!("styles are matched above"),
+    }
+}
+
+/// Every line with `card`: on each style named, the card shows the
+/// arguments the model sent, character for character.
+#[test]
+fn approval_cards_show_the_arguments_as_sent() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixtures = build_fixtures(scratch.path());
+    let mut replayed = 0;
+    for entry in parse_corpus(&fixtures) {
+        let Some(styles) = entry.raw.get("card") else {
+            continue;
+        };
+        let arguments = entry.args.to_string();
+        let card = ApprovalCard {
+            agent: "default".into(),
+            tool_name: entry.tool.clone(),
+            tier: "tier3".into(),
+            action_key: entry.key.clone(),
+            arguments: Some(arguments.clone()),
+            ..ApprovalCard::default()
+        };
+        for style in styles.as_array().expect("'card' is an array of styles") {
+            let style = style.as_str().expect("a card style is a string");
+            assert_eq!(
+                displayed_arguments(&card, style),
+                one_line(&arguments),
+                "\n{CORPUS_PATH}:{}  id={}\n  the {style} card does not show the \
+                 arguments as sent\n  why       {}\n",
+                entry.lineno,
+                entry.id,
+                entry.why,
+            );
+            replayed += 1;
+        }
+    }
+    assert!(replayed > 0, "no line in {CORPUS_PATH} carries 'card'");
+}
+
+/// Every line with `ask`: whether the call can be put to an operator
+/// at all. The runtime refuses, before any surface renders it, a call
+/// whose arguments the card would cut.
+#[test]
+fn a_call_the_card_cannot_show_whole_is_not_asked() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixtures = build_fixtures(scratch.path());
+    let mut seen = BTreeSet::new();
+    for entry in parse_corpus(&fixtures) {
+        let Some(expect) = entry.raw.get("ask").and_then(|a| a.as_str()) else {
+            continue;
+        };
+        let observed = if shown_whole(&entry.args.to_string()) {
+            "asked"
+        } else {
+            "refused:arguments_too_long"
+        };
+        assert_eq!(
+            observed, expect,
+            "\n{CORPUS_PATH}:{}  id={}\n  why       {}\n",
+            entry.lineno, entry.id, entry.why,
+        );
+        seen.insert(observed);
+    }
+    assert!(
+        seen.contains("refused:arguments_too_long"),
+        "no line in {CORPUS_PATH} replays to a refused ask"
+    );
+}
+
+/// Every line with `container`: what the exec container is given under
+/// the named egress mode.
+#[test]
+fn exec_containers_are_given_what_the_line_says() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixtures = build_fixtures(scratch.path());
+    let mut replayed = 0;
+    for entry in parse_corpus(&fixtures) {
+        let Some(container) = entry.raw.get("container") else {
+            continue;
+        };
+        let want = |name: &str| {
+            container
+                .get(name)
+                .unwrap_or_else(|| panic!("{CORPUS_PATH}:{}: container.{name}", entry.lineno))
+        };
+        let decision = match want("egress").as_str() {
+            Some("none") => EgressDecision::Denied,
+            Some("proxied") => EgressDecision::Proxied("wirken-egress-corpus"),
+            other => panic!("unknown container.egress {other:?}. One of: none, proxied."),
+        };
+        let host = build_host_config(&SandboxConfig::default(), "/workspace", decision);
+        let at = format!("{CORPUS_PATH}:{}  id={}", entry.lineno, entry.id);
+        if decision == EgressDecision::Denied {
+            assert_eq!(
+                host.network_mode.as_deref(),
+                want("network").as_str(),
+                "{at}"
+            );
+        }
+        assert_eq!(
+            host.dns.as_deref(),
+            Some(&[want("nameserver").as_str().unwrap().to_string()][..]),
+            "{at}: the resolver written to resolv.conf"
+        );
+        assert_eq!(
+            host.dns_search.as_deref(),
+            Some(&[want("search").as_str().unwrap().to_string()][..]),
+            "{at}: the search list written to resolv.conf"
+        );
+        assert_eq!(
+            wirken_sandbox::seccomp::is_set(&host),
+            want("seccomp").as_bool().unwrap(),
+            "{at}: whether a seccomp profile is named"
+        );
+        replayed += 1;
+    }
+    assert!(replayed > 0, "no line in {CORPUS_PATH} carries 'container'");
+}
+
+/// Every line with `seccomp_refuses`: the exec profile allows none of
+/// the named syscalls on any rule that does not test its arguments.
+#[test]
+fn the_exec_seccomp_profile_refuses_what_the_line_names() {
+    let profile: Value = serde_json::from_str(wirken_sandbox::seccomp::PROFILE).unwrap();
+    assert_eq!(profile["defaultAction"], "SCMP_ACT_ERRNO");
+    let allowed: BTreeSet<&str> = profile["syscalls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|rule| rule["action"] == "SCMP_ACT_ALLOW")
+        .flat_map(|rule| rule["names"].as_array().unwrap())
+        .map(|name| name.as_str().unwrap())
+        .collect();
+    assert!(allowed.contains("read"), "the profile is an allowlist");
+    let scratch = tempfile::tempdir().unwrap();
+    let fixtures = build_fixtures(scratch.path());
+    let mut replayed = 0;
+    for entry in parse_corpus(&fixtures) {
+        let Some(names) = entry.raw.get("seccomp_refuses") else {
+            continue;
+        };
+        for name in names.as_array().expect("'seccomp_refuses' is an array") {
+            let name = name.as_str().expect("a syscall name");
+            assert!(
+                !allowed.contains(name),
+                "\n{CORPUS_PATH}:{}  id={}\n  the exec seccomp profile allows '{name}'\n  \
+                 why       {}\n",
+                entry.lineno,
+                entry.id,
+                entry.why,
+            );
+            replayed += 1;
+        }
+    }
+    assert!(
+        replayed > 0,
+        "no line in {CORPUS_PATH} carries 'seccomp_refuses'"
+    );
+}
+
+/// Records what the egress proxy asks an operator, and approves.
+#[derive(Default)]
+struct Asked(std::sync::Mutex<Vec<Option<String>>>);
+
+#[async_trait::async_trait]
+impl ApprovalGate for Asked {
+    async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+        self.0.lock().unwrap().push(ctx.arguments.clone());
+        ApprovalOutcome::Approved { actor: None }
+    }
+
+    fn source(&self) -> wirken_audit::ApprovalSource {
+        wirken_audit::ApprovalSource::Stdin
+    }
+}
+
+/// Every line with `egress_ask`: a request that clears the channel's
+/// allowlist, from a session that has read exec output, is put to the
+/// operator, and what the operator is shown is the line's `shown`.
+#[test]
+fn an_egress_ask_shows_the_request() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixtures = build_fixtures(scratch.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut replayed = 0;
+    for entry in parse_corpus(&fixtures) {
+        let Some(ask) = entry.raw.get("egress_ask") else {
+            continue;
+        };
+        let string = |name: &str| ask[name].as_str().expect("egress_ask field").to_string();
+        let domains: Vec<String> = ask["domains"]
+            .as_array()
+            .expect("egress_ask.domains")
+            .iter()
+            .map(|d| d.as_str().unwrap().to_string())
+            .collect();
+        let gate = std::sync::Arc::new(Asked::default());
+        let observed: ObservedSensitivity = Default::default();
+        observed
+            .write()
+            .unwrap()
+            .insert(ReadSensitivity::ExecOutput);
+        let ctx = SandboxEgressContext {
+            policy: SandboxEgressPolicy::from_config("allowlist", &domains),
+            attribution: SandboxEgressAttribution {
+                agent_id: "default".into(),
+                ..Default::default()
+            },
+            audit: None,
+            observed,
+            approval: Some(gate.clone()),
+        };
+        let port = u16::try_from(ask["port"].as_u64().expect("egress_ask.port")).unwrap();
+        let kind = if port == 443 {
+            RequestKind::Connect
+        } else {
+            RequestKind::Plain
+        };
+        let (method, path, host) = (string("method"), string("path"), string("host"));
+        let verdict = runtime.block_on(ctx.decide(
+            &host,
+            port,
+            kind,
+            RequestSeen {
+                method: &method,
+                path: &path,
+            },
+        ));
+        let at = format!("{CORPUS_PATH}:{}  id={}", entry.lineno, entry.id);
+        assert!(verdict.escalated, "{at}: the operator is asked");
+        assert_eq!(
+            gate.0.lock().unwrap().as_slice(),
+            [Some(string("shown"))],
+            "{at}: what the approval shows for the request"
+        );
+        replayed += 1;
+    }
+    assert!(
+        replayed > 0,
+        "no line in {CORPUS_PATH} carries 'egress_ask'"
+    );
 }

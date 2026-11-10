@@ -1,0 +1,1 @@
+unshare -Urm --propagation private sh -c 'mount -t tmpfs -o exec tmpfs /mnt'

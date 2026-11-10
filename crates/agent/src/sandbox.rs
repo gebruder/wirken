@@ -851,10 +851,7 @@ impl DockerSandbox {
 /// three-state type alone does not prevent the collapse; something has
 /// to assert that a deny policy is read as `Denied` rather than folded
 /// back into `Unset`, and that assertion needs a callable seam.
-pub(crate) fn egress_decision(
-    policy_present: bool,
-    proxy_network: Option<&str>,
-) -> EgressDecision<'_> {
+pub fn egress_decision(policy_present: bool, proxy_network: Option<&str>) -> EgressDecision<'_> {
     match (policy_present, proxy_network) {
         (_, Some(network)) => EgressDecision::Proxied(network),
         (true, None) => EgressDecision::Denied,
@@ -873,7 +870,7 @@ pub(crate) fn egress_decision(
 /// deny case joined Docker's default bridge: the strictest policy
 /// produced the widest network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EgressDecision<'a> {
+pub enum EgressDecision<'a> {
     /// No egress policy reached this exec. The legacy `network` flag
     /// decides, as it did before per-channel egress existed.
     Unset,
@@ -912,7 +909,7 @@ pub(crate) enum EgressDecision<'a> {
 ///   but one on Docker's default bridge gets the loopback resolver and
 ///   no search domain instead, so the file names nothing of the host's
 ///   network.
-pub(crate) fn build_host_config(
+pub fn build_host_config(
     config: &SandboxConfig,
     workspace_str: &str,
     egress: EgressDecision<'_>,

@@ -1,0 +1,1 @@
+curl -s -m 10 -o /tmp/put_probe -X PUT --data-binary PROBE_PAYLOAD_ABC123 http://bucket.oss.example/upload/test.bin

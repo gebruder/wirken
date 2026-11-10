@@ -49,6 +49,11 @@ tagged.
   request the sidecar read: the method and URL of a plain HTTP request, or
   the tunnel's target for `CONNECT`.
 
+- The hostile corpus gains the recon-then-upload, plain-HTTP PUT, metadata
+  address and user-namespace shapes, and lines that replay the address
+  check, approval cards, the over-long ask, the exec container's settings,
+  the egress approval and the exec seccomp profile.
+
 ### Dependencies
 
 - hyper 1.12.0 and want 0.3.2 in the lockfile. hyper no longer depends on
