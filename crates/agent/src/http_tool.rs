@@ -160,12 +160,16 @@ pub async fn execute(
     // before the credential is resolved, so an egress-denied host never
     // touches the vault (no decrypt, no last_used_at bump). A
     // non-allowlisted host returns EgressDenied, which the runtime
-    // records as SkillPermissionDenied (a refusal, not a prompt).
-    let mut builder = http
-        .request(method.clone(), url.as_str())
-        .await
-        .map_err(map_denied)?
-        .timeout(Duration::from_millis(timeout_ms));
+    // records as SkillPermissionDenied (a refusal, not a prompt). So
+    // does a listed host whose name resolves to no public address. A
+    // name that does not resolve at all is a failed request.
+    let mut builder = match http.request(method.clone(), url.as_str()).await {
+        Ok(b) => b.timeout(Duration::from_millis(timeout_ms)),
+        Err(e @ HttpAccessDenied::Resolution { .. }) => {
+            return Ok(fail(format!("request failed: {e}")));
+        }
+        Err(e) => return Err(map_denied(e)),
+    };
 
     for (k, v) in &header_pairs {
         builder = builder.header(k, v);
@@ -435,6 +439,7 @@ fn map_denied(e: HttpAccessDenied) -> AgentError {
     match e {
         HttpAccessDenied::Egress(d) => AgentError::EgressDenied(d),
         HttpAccessDenied::RateLimit(d) => AgentError::Tool(format!("{d}")),
+        e @ HttpAccessDenied::Resolution { .. } => AgentError::Tool(e.to_string()),
     }
 }
 

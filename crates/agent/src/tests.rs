@@ -16366,3 +16366,161 @@ mod provider_key_per_call {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// An `http_request` to a listed name that resolves to no public address
+// is not sent. The tool result and the denial row name the host and the
+// address.
+// ---------------------------------------------------------------------------
+mod http_request_to_a_non_global_address {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SkillDeniedReason, SqliteSessionLog};
+
+    use super::approved_unknown_tool::stub;
+    use crate::llm::LlmConfig;
+
+    struct Metadata;
+
+    #[async_trait::async_trait]
+    impl crate::egress::HostResolver for Metadata {
+        async fn resolve(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(vec![SocketAddr::new(
+                "169.254.169.254".parse().unwrap(),
+                port,
+            )])
+        }
+    }
+
+    #[tokio::test]
+    async fn the_refusal_names_host_and_address_on_the_result_and_the_row() {
+        let (base_url, server) = stub(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_http",
+                    "type": "function",
+                    "function": {
+                        "name": "http_request",
+                        "arguments": serde_json::json!({
+                            "method": "GET",
+                            "url": "https://rebind.example/latest/meta-data/",
+                        })
+                        .to_string(),
+                    },
+                }],
+            }),
+            serde_json::json!({"role": "assistant", "content": "Done."}),
+        ])
+        .await;
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let lane = log.handle_for(SessionId::new("fetcher".to_string()));
+        let mut agent = crate::runtime::Agent::from_session_log(
+            "fetcher".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            Default::default(),
+            crate::runtime::ToolGate::Store(crate::tests::test_permissions()),
+        )
+        .unwrap();
+        let profile = crate::skill_perms::parse_block(
+            "tools:\n  allow: [http_request]\negress:\n  mode: allowlist\n  domains: [rebind.example]\ninference:\n  allow: [\"*\"]\n",
+            tmp.path(),
+            None,
+            None,
+        )
+        .unwrap();
+        agent
+            .attach_skills(vec![crate::skill::Skill {
+                name: "fetcher".into(),
+                description: "fetches".into(),
+                required_bins: vec![],
+                body: "Fetch.".into(),
+                path: tmp.path().join("SKILL.md"),
+                available: true,
+                permissions: profile,
+                disable_model_invocation: false,
+                signature: crate::skill::LoadedSignature::Unsigned,
+            }])
+            .unwrap();
+        agent.set_http_resolver_for_test(Arc::new(Metadata));
+        agent
+            .process_message("fetch it", "msg-1".into())
+            .await
+            .expect("the turn ends with a reply");
+        server.await.unwrap();
+        let events: Vec<SessionEvent> = log
+            .get_since(&lane, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+
+        let denial = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::SkillPermissionDenied {
+                    axis,
+                    requested,
+                    denied_reason,
+                    method,
+                    host,
+                    ..
+                } => Some((axis, requested, denied_reason, method, host)),
+                _ => None,
+            })
+            .expect("a denial row landed");
+        assert_eq!(denial.0, "egress");
+        assert_eq!(denial.1, "rebind.example");
+        assert_eq!(
+            denial.2,
+            &SkillDeniedReason::NonGlobalAddress {
+                address: "169.254.169.254".to_string()
+            }
+        );
+        assert_eq!(denial.3.as_deref(), Some("GET"));
+        assert_eq!(denial.4.as_deref(), Some("rebind.example"));
+
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::ToolResult {
+                    tool_name,
+                    output,
+                    success,
+                    ..
+                } if tool_name == "http_request" => Some((output, success)),
+                _ => None,
+            })
+            .expect("a tool result row landed");
+        assert!(!result.1);
+        assert!(
+            result.0.contains("rebind.example") && result.0.contains("169.254.169.254"),
+            "{}",
+            result.0
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::HttpRequest { .. })),
+            "no request went out"
+        );
+    }
+}

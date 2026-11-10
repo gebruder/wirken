@@ -675,6 +675,12 @@ impl ToolRegistry {
         self.http.request_would_pass(url)
     }
 
+    /// Replace the resolver `http_request` asks for its host's
+    /// addresses. Tests use this to answer for a name without a network.
+    pub fn set_http_resolver(&self, resolver: Arc<dyn crate::egress::HostResolver>) {
+        self.http.set_resolver(resolver);
+    }
+
     pub fn set_egress_enforcement(&self, enforcement: crate::egress::EgressEnforcement) {
         self.http.set_enforcement(enforcement);
     }
@@ -1562,6 +1568,7 @@ fn map_http_access_denied(e: crate::egress::HttpAccessDenied) -> AgentError {
     match e {
         crate::egress::HttpAccessDenied::Egress(d) => AgentError::EgressDenied(d),
         crate::egress::HttpAccessDenied::RateLimit(d) => AgentError::Tool(format!("{d}")),
+        e @ crate::egress::HttpAccessDenied::Resolution { .. } => AgentError::Tool(e.to_string()),
     }
 }
 

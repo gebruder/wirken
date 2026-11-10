@@ -462,6 +462,10 @@ pub enum SkillDeniedReason {
     /// names which phase fired so SIEM consumers can correlate with
     /// the triggering `PhaseEntered` row for the same agent.
     Phase { phase_name: String },
+    /// The host is allowed by name and resolves to no global unicast
+    /// address, so the request was not sent. `address` is the first
+    /// address the name resolved to.
+    NonGlobalAddress { address: String },
 }
 
 /// Outcome of one HTTP fetch as recorded on

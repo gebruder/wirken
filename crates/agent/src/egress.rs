@@ -22,6 +22,14 @@
 //! through it: `web_search`, `generate_image`, and `http_request`
 //! (the last via [`EgressClient::request`], which additionally
 //! disables redirect following and applies a per-request timeout).
+//!
+//! `http_request` takes its host from the model, so
+//! [`EgressClient::request`] also resolves the name itself, drops every
+//! answer outside global unicast, and connects only to the addresses it
+//! checked: the rule the sandbox egress broker applies
+//! ([`wirken_sandbox::egress::is_global_unicast`]). A listed name that
+//! resolves to loopback, private, link-local or unique-local space is
+//! refused with the address named.
 //! The following outbound paths bypass `EgressClient` and do **not**
 //! consult the skill-set egress allowlist:
 //!
@@ -55,6 +63,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 
 use reqwest::RequestBuilder;
@@ -109,6 +118,15 @@ impl EgressEnforcement {
     }
 }
 
+/// The client settings every `http_request` is sent with: a 3xx is
+/// returned to the agent as-is rather than followed, so the injected
+/// auth header is never re-sent to a redirect target.
+fn request_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+}
+
 fn host_of(url: &str) -> Option<String> {
     url::Url::parse(url)
         .ok()
@@ -128,6 +146,40 @@ fn host_matches(host: &str, pattern: &str) -> bool {
         )]
         return &host[idx + 1..] == suffix;
     }
+    false
+}
+
+/// Turns a host name into addresses for [`EgressClient::request`]. The
+/// default asks the system resolver; a test hands in fixed answers.
+#[async_trait::async_trait]
+pub trait HostResolver: Send + Sync {
+    async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>>;
+}
+
+/// The system resolver, through tokio.
+struct SystemResolver;
+
+#[async_trait::async_trait]
+impl HostResolver for SystemResolver {
+    async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        Ok(tokio::net::lookup_host((host, port)).await?.collect())
+    }
+}
+
+/// Whether `request` may connect to `addr` for `host`: global unicast
+/// only, as the sandbox egress broker rules.
+fn address_permitted(host: &str, addr: IpAddr) -> bool {
+    if wirken_sandbox::egress::is_global_unicast(addr) {
+        return true;
+    }
+    // Test-only seam, the counterpart of `http_tool::scheme_permitted`:
+    // unit tests drive the request path against a loopback listener
+    // under the name `localhost`. Not compiled into the shipped binary.
+    #[cfg(test)]
+    if host == "localhost" && addr.is_loopback() {
+        return true;
+    }
+    let _ = host;
     false
 }
 
@@ -164,6 +216,9 @@ pub enum EgressDenyReason {
     /// flows into the audit event for SIEM correlation with the
     /// triggering `PhaseEntered` row.
     Phase { phase_name: String },
+    /// The host is allowed by name and resolves to no global unicast
+    /// address. `address` is the first answer that was dropped.
+    NonGlobalAddress { address: IpAddr },
 }
 
 /// Pre-flight host check around the inner [`RateLimitedClient`]. The
@@ -186,6 +241,8 @@ pub struct EgressClient {
     /// `web_search` / `generate_image` `get`/`post` paths keep the
     /// default redirect-following `inner` client unchanged.
     request_client: reqwest::Client,
+    /// Resolves the host of an `http_request` before it is checked.
+    resolver: Arc<RwLock<Arc<dyn HostResolver>>>,
 }
 
 impl EgressClient {
@@ -200,15 +257,11 @@ impl EgressClient {
     /// daily-fetch orchestrator (Zirkel's `wirken zirkel run`) so each
     /// source's per-day cap is honored at the transport layer.
     pub fn with_rate_limit(config: RateLimitConfig) -> Self {
-        // No-redirect client for `http_request`: a 3xx is returned to
-        // the agent as-is rather than followed, so the injected auth
-        // header is never re-sent to a redirect target.
-        let request_client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(10))
+        let request_client = request_client_builder()
             .build()
             .expect("build no-redirect reqwest client");
         Self {
+            resolver: Arc::new(RwLock::new(Arc::new(SystemResolver))),
             inner: RateLimitedClient::new(reqwest::Client::new(), config),
             enforcement: Arc::new(RwLock::new(EgressEnforcement::Unrestricted)),
             overlay_deny: Arc::new(RwLock::new(None)),
@@ -216,12 +269,27 @@ impl EgressClient {
         }
     }
 
+    /// Replace the resolver [`Self::request`] asks. Tests use this to
+    /// answer for a name without a network.
+    pub fn with_resolver(self, resolver: Arc<dyn HostResolver>) -> Self {
+        self.set_resolver(resolver);
+        self
+    }
+
+    /// [`Self::with_resolver`] on a client already in place.
+    pub fn set_resolver(&self, resolver: Arc<dyn HostResolver>) {
+        if let Ok(mut guard) = self.resolver.write() {
+            *guard = resolver;
+        }
+    }
+
     /// Egress-checked, rate-reserved request builder for `http_request`.
     /// Runs the same host allowlist check as [`Self::get`]/[`Self::post`],
-    /// reserves a rate-limit slot, then builds on the no-redirect
-    /// `request_client` for an arbitrary method. The caller sets headers
-    /// / body / per-request timeout on the returned builder and calls
-    /// `.send()`.
+    /// resolves the host and keeps only its global unicast addresses,
+    /// reserves a rate-limit slot, then builds a no-redirect client
+    /// pinned to those addresses for an arbitrary method. The caller
+    /// sets headers / body / per-request timeout on the returned builder
+    /// and calls `.send()`.
     pub async fn request(
         &self,
         method: reqwest::Method,
@@ -229,11 +297,77 @@ impl EgressClient {
     ) -> Result<RequestBuilder, HttpAccessDenied> {
         self.check_egress_declared(url)
             .map_err(HttpAccessDenied::Egress)?;
+        let client = self.client_for_checked_addresses(url).await?;
         self.inner
             .check_and_reserve(url)
             .await
             .map_err(HttpAccessDenied::RateLimit)?;
-        Ok(self.request_client.request(method, url))
+        Ok(client.request(method, url))
+    }
+
+    /// The client an `http_request` to `url` is sent on: one that
+    /// connects only to addresses this call resolved and checked, so
+    /// no later resolution can point the request anywhere else.
+    async fn client_for_checked_addresses(
+        &self,
+        url: &str,
+    ) -> Result<reqwest::Client, HttpAccessDenied> {
+        let parsed = url::Url::parse(url).ok();
+        let host = parsed
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .unwrap_or_default()
+            .to_string();
+        let denied = |address: IpAddr| {
+            HttpAccessDenied::Egress(EgressDenied {
+                host: host.clone(),
+                reason: EgressDenyReason::NonGlobalAddress { address },
+            })
+        };
+        // An address in place of a name is held to the same rule and
+        // needs no resolution.
+        let literal = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(&host);
+        if let Ok(address) = literal.parse::<IpAddr>() {
+            return if address_permitted(&host, address) {
+                Ok(self.request_client.clone())
+            } else {
+                Err(denied(address))
+            };
+        }
+        let port = parsed
+            .as_ref()
+            .and_then(|u| u.port_or_known_default())
+            .unwrap_or(443);
+        let unresolved = |cause: String| HttpAccessDenied::Resolution {
+            host: host.clone(),
+            cause,
+        };
+        // A poisoned lock leaves no resolver to trust: nothing is sent.
+        let resolver = self
+            .resolver
+            .read()
+            .map(|g| g.clone())
+            .map_err(|_| unresolved("the resolver is unavailable".to_string()))?;
+        let answers = resolver
+            .resolve(&host, port)
+            .await
+            .map_err(|e| unresolved(e.to_string()))?;
+        let (checked, dropped): (Vec<SocketAddr>, Vec<SocketAddr>) = answers
+            .into_iter()
+            .partition(|a| address_permitted(&host, a.ip()));
+        if checked.is_empty() {
+            return Err(match dropped.first() {
+                Some(a) => denied(a.ip()),
+                None => unresolved("the name has no address".to_string()),
+            });
+        }
+        request_client_builder()
+            .resolve_to_addrs(&host, &checked)
+            .build()
+            .map_err(|e| unresolved(e.to_string()))
     }
 
     /// Replace the enforcement policy. Called by the agent at
@@ -395,6 +529,11 @@ impl fmt::Display for EgressDenied {
                 "egress denied: host '{}' is denied by active phase '{}'",
                 self.host, phase_name,
             ),
+            EgressDenyReason::NonGlobalAddress { address } => write!(
+                f,
+                "egress denied: host '{}' resolves to {address}, which is not a public address",
+                self.host,
+            ),
         }
     }
 }
@@ -409,6 +548,10 @@ pub enum HttpAccessDenied {
     Egress(#[from] EgressDenied),
     #[error(transparent)]
     RateLimit(#[from] RateLimitDenied),
+    /// The host's name could not be resolved, so nothing was checked
+    /// and nothing was sent.
+    #[error("could not resolve host '{host}': {cause}")]
+    Resolution { host: String, cause: String },
 }
 
 #[cfg(test)]
@@ -514,8 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_honors_explicit_wildcard() {
-        let c = EgressClient::new();
-        c.set_enforcement(EgressEnforcement::AllowAll);
+        let (c, _) = resolving_to(&["93.184.216.34:443"]);
         assert!(
             c.request(reqwest::Method::GET, "https://mirror.example.net/")
                 .await
@@ -567,6 +709,179 @@ mod tests {
         assert!(c.get("https://allowed.example.com/b").await.is_ok());
         let err = c.get("https://allowed.example.com/c").await.unwrap_err();
         assert!(matches!(err, HttpAccessDenied::RateLimit(_)));
+    }
+
+    // ---------------------------------------------------------------
+    // Resolved-address check on `request`
+    // ---------------------------------------------------------------
+
+    /// Answers every name with the same addresses and counts the asks.
+    struct Fixed {
+        answers: Vec<SocketAddr>,
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl HostResolver for Fixed {
+        async fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.answers.clone())
+        }
+    }
+
+    fn resolving_to(answers: &[&str]) -> (EgressClient, Arc<Fixed>) {
+        let fixed = Arc::new(Fixed {
+            answers: answers.iter().map(|a| a.parse().unwrap()).collect(),
+            asked: Default::default(),
+        });
+        let c = EgressClient::new().with_resolver(fixed.clone());
+        c.set_enforcement(EgressEnforcement::AllowAll);
+        (c, fixed)
+    }
+
+    #[tokio::test]
+    async fn request_refuses_a_listed_name_on_a_non_global_address_and_names_it() {
+        for address in [
+            "169.254.169.254",
+            "100.100.100.200",
+            "10.0.0.5",
+            "192.168.1.1",
+            "172.16.0.1",
+            "127.0.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:169.254.169.254",
+        ] {
+            let ip: IpAddr = address.parse().unwrap();
+            let (c, _) = resolving_to(&[&SocketAddr::new(ip, 443).to_string()]);
+            let err = c
+                .request(reqwest::Method::GET, "https://rebind.example/latest/")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                HttpAccessDenied::Egress(EgressDenied {
+                    host: "rebind.example".to_string(),
+                    reason: EgressDenyReason::NonGlobalAddress { address: ip },
+                }),
+                "{address}"
+            );
+            let text = err.to_string();
+            assert!(
+                text.contains("rebind.example") && text.contains(&ip.to_string()),
+                "{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_keeps_the_global_answers_and_drops_the_rest() {
+        let (c, fixed) = resolving_to(&["10.0.0.5:443", "93.184.216.34:443"]);
+        assert!(
+            c.request(reqwest::Method::GET, "https://mixed.example/")
+                .await
+                .is_ok()
+        );
+        assert_eq!(fixed.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn request_refuses_a_non_global_address_literal() {
+        let (c, fixed) = resolving_to(&["93.184.216.34:443"]);
+        let err = c
+            .request(reqwest::Method::GET, "https://169.254.169.254/latest/")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HttpAccessDenied::Egress(EgressDenied {
+                reason: EgressDenyReason::NonGlobalAddress { .. },
+                ..
+            })
+        ));
+        assert_eq!(fixed.asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn request_reports_a_name_with_no_address_as_unresolved() {
+        let (c, _) = resolving_to(&[]);
+        let err = c
+            .request(reqwest::Method::GET, "https://nowhere.example/")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HttpAccessDenied::Resolution { ref host, .. } if host == "nowhere.example"),
+            "{err:?}"
+        );
+    }
+
+    /// A refused address costs nothing against the rate budget.
+    #[tokio::test]
+    async fn a_non_global_refusal_does_not_consume_rate_budget() {
+        let fixed = Arc::new(Fixed {
+            answers: vec!["10.0.0.5:443".parse().unwrap()],
+            asked: Default::default(),
+        });
+        let c = EgressClient::with_rate_limit(RateLimitConfig {
+            default_daily_cap: 1,
+            jitter_min: std::time::Duration::ZERO,
+            jitter_max: std::time::Duration::ZERO,
+            ..Default::default()
+        })
+        .with_resolver(fixed.clone());
+        c.set_enforcement(EgressEnforcement::AllowAll);
+        for _ in 0..3 {
+            let err = c
+                .request(reqwest::Method::GET, "https://rebind.example/")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, HttpAccessDenied::Egress(_)), "{err:?}");
+        }
+        let ok = Arc::new(Fixed {
+            answers: vec!["93.184.216.34:443".parse().unwrap()],
+            asked: Default::default(),
+        });
+        c.set_resolver(ok);
+        assert!(
+            c.request(reqwest::Method::GET, "https://rebind.example/")
+                .await
+                .is_ok()
+        );
+    }
+
+    /// The request goes to the address that was checked. The listener
+    /// is on 127.0.0.2, which the system resolver never gives for
+    /// `localhost`, so the request arrives only if the client connects
+    /// to the answer this call resolved.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn request_connects_to_the_address_it_checked() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf).await;
+            s.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let (c, fixed) = resolving_to(&[&addr.to_string()]);
+        let resp = c
+            .request(
+                reqwest::Method::GET,
+                &format!("http://localhost:{}/", addr.port()),
+            )
+            .await
+            .unwrap()
+            .send()
+            .await
+            .expect("the request reaches the checked address");
+        assert_eq!(resp.status().as_u16(), 204);
+        served.await.unwrap();
+        assert_eq!(fixed.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // ---------------------------------------------------------------

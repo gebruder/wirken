@@ -1272,6 +1272,16 @@ impl Agent {
         self.tools.set_credential_resolver(resolver);
     }
 
+    /// Replace the resolver `http_request` asks for its host's
+    /// addresses, for tests that answer for a name without a network.
+    #[cfg(test)]
+    pub(crate) fn set_http_resolver_for_test(
+        &self,
+        resolver: Arc<dyn crate::egress::HostResolver>,
+    ) {
+        self.tools.set_http_resolver(resolver);
+    }
+
     /// Check model-authored content against `matcher`. Set before
     /// [`Self::attach_skills`], which checks each skill as it loads.
     pub fn set_leak_matcher(&mut self, matcher: Arc<wirken_gateway::leak::LeakMatcher>) {
@@ -4409,6 +4419,16 @@ impl Agent {
                         format!(
                             "egress denied: {verb} to host '{}' is denied by active phase '{}'",
                             denied.host, phase_name,
+                        ),
+                    ),
+                    crate::egress::EgressDenyReason::NonGlobalAddress { address } => (
+                        SkillDeniedReason::NonGlobalAddress {
+                            address: address.to_string(),
+                        },
+                        format!(
+                            "egress denied: {verb} to host '{}' was not sent: the name \
+                             resolves to {address}, which is not a public address",
+                            denied.host,
                         ),
                     ),
                 };

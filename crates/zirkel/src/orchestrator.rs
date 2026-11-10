@@ -982,6 +982,10 @@ fn fetch_outcome_label(e: &FetchError) -> (HttpFetchOutcome, Option<u16>) {
             source: HttpAccessDenied::RateLimit(_),
             ..
         } => (HttpFetchOutcome::RateLimited, None),
+        FetchError::Denied {
+            source: HttpAccessDenied::Resolution { .. },
+            ..
+        } => (HttpFetchOutcome::NetworkError, None),
         FetchError::HttpStatus { status, .. } => (HttpFetchOutcome::HttpError, Some(*status)),
         FetchError::Network { .. } => (HttpFetchOutcome::NetworkError, None),
         FetchError::Parse { .. } => (HttpFetchOutcome::NetworkError, None),

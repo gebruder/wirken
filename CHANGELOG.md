@@ -10,6 +10,15 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- `http_request` resolves its host itself, refuses a listed name whose
+  addresses are all outside global unicast (loopback, private, link-local,
+  unique-local), and connects only to the addresses it checked. The tool
+  result names the host and the address. **For wirken-siem:**
+  `skill_permission_denied.denied_reason.kind` gains `non_global_address`,
+  with `address`.
+
 ## [3.2.1] - 2026-11-03
 
 ### Security

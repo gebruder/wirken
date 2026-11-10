@@ -54,6 +54,15 @@ the `SkillPermissionDenied` row carries them as `method` and `host` on the
 `http_method`, `http_post_path`, `credentials` and `egress` axes, so a
 refused publish reads as one from the row alone.
 
+A listed name is also checked by address. `EgressClient::request` resolves the
+host, drops every address outside global unicast (loopback, private,
+link-local, carrier-grade NAT, unique-local), and connects only to the
+addresses it kept, so a second resolution cannot move the request. A name
+with no address left is refused: the tool result names the host and the
+address, and the `SkillPermissionDenied` row on the `egress` axis carries
+`denied_reason` `non_global_address` with the address. This is the rule
+the sandbox egress broker applies to `exec`.
+
 Once the session has read something restricting, which is every read label but
 `aggregated_external` (workspace files, either channel's memory, an imported
 archive, `exec` output, MCP tool output, the response to an `http_request` that
