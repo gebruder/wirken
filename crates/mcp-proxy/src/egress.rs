@@ -17,7 +17,7 @@ use wirken_audit::{
     TrustLevel,
 };
 use wirken_sandbox::egress::{
-    EgressDecider, RequestKind, Verdict, check_shape, host_matches, is_ip_literal,
+    EgressDecider, RequestKind, RequestSeen, Verdict, check_shape, host_matches, is_ip_literal,
 };
 
 use crate::mcp_registry::MCP_SENTINEL_SESSION;
@@ -92,7 +92,13 @@ impl McpEgressPolicy {
 
 #[async_trait::async_trait]
 impl EgressDecider for McpEgressPolicy {
-    async fn decide(&self, host: &str, port: u16, kind: RequestKind) -> Verdict {
+    async fn decide(
+        &self,
+        host: &str,
+        port: u16,
+        kind: RequestKind,
+        _seen: RequestSeen<'_>,
+    ) -> Verdict {
         self.check(host, port, kind)
     }
 

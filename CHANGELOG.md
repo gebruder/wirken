@@ -32,6 +32,12 @@ tagged.
   host's resolver and search domains. With egress `none`, and on the
   proxied network, it holds a loopback nameserver and no search domain.
 
+### Changed
+
+- When sandboxed `exec` egress asks the operator, the approval shows the
+  request the sidecar read: the method and URL of a plain HTTP request, or
+  the tunnel's target for `CONNECT`.
+
 ### Dependencies
 
 - hyper 1.12.0 and want 0.3.2 in the lockfile. hyper no longer depends on

@@ -16694,3 +16694,136 @@ mod arguments_too_long_to_approve {
         assert_eq!(denial_reasons(&events), vec![Some("asked".to_string())]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// When sandbox egress escalates to the operator, the ask shows what the
+// sidecar could read of the request: the verb and URL of a plain HTTP
+// request, and for a tunnel that its contents are not visible.
+// ---------------------------------------------------------------------------
+#[cfg(unix)]
+mod sandbox_egress_escalation_shows_the_request {
+    use std::sync::{Arc, Mutex};
+
+    use wirken_sandbox::egress::{EgressDecider, RequestKind, RequestSeen};
+
+    use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
+    use crate::error::PermissionDenialContext;
+    use crate::sandbox_egress::{
+        SandboxEgressAttribution, SandboxEgressContext, SandboxEgressPolicy,
+    };
+    use crate::skill_perms::AllowSet;
+    use crate::tool::ReadSensitivity;
+
+    #[derive(Default)]
+    struct Asked(Mutex<Vec<PermissionDenialContext>>);
+
+    #[async_trait::async_trait]
+    impl ApprovalGate for Asked {
+        async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+            self.0.lock().unwrap().push(ctx.clone());
+            ApprovalOutcome::Approved { actor: None }
+        }
+
+        fn source(&self) -> wirken_audit::ApprovalSource {
+            wirken_audit::ApprovalSource::Stdin
+        }
+    }
+
+    /// An allowlist context for a session that has read exec output,
+    /// which is every session whose exec is asking.
+    fn context(gate: Arc<Asked>) -> SandboxEgressContext {
+        let observed: crate::sandbox_egress::ObservedSensitivity = Default::default();
+        observed
+            .write()
+            .unwrap()
+            .insert(ReadSensitivity::ExecOutput);
+        SandboxEgressContext {
+            policy: SandboxEgressPolicy::allowlist(AllowSet::Set(
+                ["files.example.net".to_string()].into_iter().collect(),
+            )),
+            attribution: SandboxEgressAttribution {
+                agent_id: "work".into(),
+                channel: Some("slack".into()),
+                adapter_id: Some("slack".into()),
+                sender_id: Some("U123".into()),
+            },
+            audit: None,
+            observed,
+            approval: Some(gate),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plain_http_put_is_shown_with_its_method_and_path() {
+        let gate = Arc::new(Asked::default());
+        let ctx = context(gate.clone());
+        let verdict = ctx
+            .decide(
+                "files.example.net",
+                80,
+                RequestKind::Plain,
+                RequestSeen {
+                    method: "PUT",
+                    path: "/upload/test.bin",
+                },
+            )
+            .await;
+        assert!(verdict.allowed && verdict.escalated, "{verdict:?}");
+        let asked = gate.0.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(
+            asked[0].arguments.as_deref(),
+            Some("PUT http://files.example.net/upload/test.bin")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_is_shown_as_one_whose_contents_are_not_visible() {
+        let gate = Arc::new(Asked::default());
+        let ctx = context(gate.clone());
+        ctx.decide(
+            "files.example.net",
+            443,
+            RequestKind::Connect,
+            RequestSeen {
+                method: "CONNECT",
+                path: "",
+            },
+        )
+        .await;
+        let asked = gate.0.lock().unwrap();
+        let shown = asked[0].arguments.as_deref().unwrap();
+        assert!(
+            shown.starts_with("CONNECT files.example.net:443") && shown.contains("not visible"),
+            "{shown}"
+        );
+    }
+
+    /// A request line the card cannot show whole is refused, not asked.
+    #[tokio::test]
+    async fn a_request_too_long_to_show_is_refused_without_asking() {
+        let gate = Arc::new(Asked::default());
+        let ctx = context(gate.clone());
+        let path = format!(
+            "/{}",
+            "a".repeat(wirken_adapter_core::approval_card::MAX_VALUE_CHARS)
+        );
+        let verdict = ctx
+            .decide(
+                "files.example.net",
+                80,
+                RequestKind::Plain,
+                RequestSeen {
+                    method: "PUT",
+                    path: &path,
+                },
+            )
+            .await;
+        assert!(!verdict.allowed && verdict.escalated, "{verdict:?}");
+        assert_eq!(
+            verdict.reason,
+            Some(wirken_audit::SandboxEgressDenyReason::SensitivityRefused)
+        );
+        assert!(gate.0.lock().unwrap().is_empty());
+    }
+}

@@ -71,7 +71,7 @@ use crate::tool::ReadSensitivity;
 #[cfg(unix)]
 pub use wirken_sandbox::egress::run_sidecar;
 pub use wirken_sandbox::egress::{
-    DecisionReply, DecisionRequest, RequestKind, SIDECAR_HELLO, Verdict, check_shape,
+    DecisionReply, DecisionRequest, RequestKind, RequestSeen, SIDECAR_HELLO, Verdict, check_shape,
     is_global_unicast, is_ip_literal,
 };
 
@@ -382,8 +382,20 @@ impl SandboxEgressContext {
     /// headless-subagent case, escalation refuses. Fail-closed is the
     /// right default for a tainted session asking for a destination
     /// with no operator present.
+    ///
+    /// The operator is shown what the sidecar could read of the
+    /// request: the verb and URL of a plain HTTP request, or, for a
+    /// tunnel, its target and that nothing inside it is visible. A
+    /// request too long for the approval card to show whole is refused
+    /// without asking.
     #[cfg(unix)]
-    async fn decide_with_sensitivity(&self, host: &str, port: u16) -> Verdict {
+    async fn decide_with_sensitivity(
+        &self,
+        host: &str,
+        port: u16,
+        kind: RequestKind,
+        seen: RequestSeen<'_>,
+    ) -> Verdict {
         let basis = self.restricting_basis();
         if basis.is_empty() {
             return Verdict {
@@ -412,6 +424,17 @@ impl SandboxEgressContext {
             };
         };
 
+        let refused = |basis: Vec<String>| Verdict {
+            allowed: false,
+            reason: Some(SandboxEgressDenyReason::SensitivityRefused),
+            escalated: true,
+            basis,
+        };
+        let shown = seen.shown(host, port, kind);
+        if !wirken_adapter_core::approval_card::shown_whole(&shown) {
+            return refused(basis);
+        }
+
         // The operator is asked about the destination, at the tier a
         // network request already carries.
         let ctx = crate::error::PermissionDenialContext {
@@ -430,9 +453,9 @@ impl SandboxEgressContext {
                 "sandbox egress to {host}:{port} after reading {}",
                 basis.join(", ")
             )),
-            // No tool call: what is being approved is the
-            // destination, which the action already names.
-            arguments: None,
+            // No tool call. What is being approved is the request, as
+            // far as the sidecar could read it.
+            arguments: Some(shown),
             assistant_text: None,
             exec_location: None,
         };
@@ -455,14 +478,20 @@ impl SandboxEgressContext {
 #[cfg(unix)]
 #[async_trait::async_trait]
 impl wirken_sandbox::egress::EgressDecider for SandboxEgressContext {
-    async fn decide(&self, host: &str, port: u16, kind: RequestKind) -> Verdict {
+    async fn decide(
+        &self,
+        host: &str,
+        port: u16,
+        kind: RequestKind,
+        seen: RequestSeen<'_>,
+    ) -> Verdict {
         if let Err(reason) = check_target(&self.policy, host, port, kind) {
             return Verdict {
                 basis: self.restricting_basis(),
                 ..Verdict::deny(reason)
             };
         }
-        self.decide_with_sensitivity(host, port).await
+        self.decide_with_sensitivity(host, port, kind, seen).await
     }
 
     fn record(&self, host: &str, port: u16, method: &str, verdict: &Verdict) -> Result<(), String> {

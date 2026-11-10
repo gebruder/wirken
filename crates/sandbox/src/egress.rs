@@ -194,6 +194,12 @@ pub struct DecisionRequest {
     /// inner requests are not visible here.
     #[serde(default)]
     pub method: String,
+    /// The path and query of a plain HTTP request, as the sidecar read
+    /// them off the request line. Empty for `CONNECT`, where the
+    /// tunnel hides them. Shown to an operator who is asked about the
+    /// request; no policy turns on it and no row carries it.
+    #[serde(default)]
+    pub path: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -247,13 +253,47 @@ impl Verdict {
     }
 }
 
+/// What the sidecar read of a request besides its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestSeen<'a> {
+    /// `CONNECT`, or the verb of a plain HTTP request.
+    pub method: &'a str,
+    /// The path and query of a plain HTTP request; empty for
+    /// `CONNECT`.
+    pub path: &'a str,
+}
+
+impl RequestSeen<'_> {
+    /// The request as one line an operator can read: the verb and the
+    /// URL of a plain HTTP request, or the tunnel's target and the
+    /// fact that nothing inside it is visible.
+    pub fn shown(&self, host: &str, port: u16, kind: RequestKind) -> String {
+        match kind {
+            RequestKind::Plain => format!("{} http://{host}{}", self.method, self.path),
+            RequestKind::Connect => format!(
+                "CONNECT {host}:{port} (TLS tunnel; the method and path inside it are not visible)"
+            ),
+        }
+    }
+}
+
 /// The policy and the audit sink behind one broker.
 #[async_trait::async_trait]
 pub trait EgressDecider: Send + Sync + 'static {
     /// Whether `host:port` may be reached. Called for every request
     /// the sidecar forwards; an allow is followed by resolution in
     /// the broker, which can still refuse.
-    async fn decide(&self, host: &str, port: u16, kind: RequestKind) -> Verdict;
+    ///
+    /// `seen` is the rest of what the sidecar read, for a decider that
+    /// asks someone: it is there to be shown, and no rule here or in
+    /// the broker reads it.
+    async fn decide(
+        &self,
+        host: &str,
+        port: u16,
+        kind: RequestKind,
+        seen: RequestSeen<'_>,
+    ) -> Verdict;
 
     /// Record a final verdict, allow or deny. `method` is `CONNECT`
     /// for a tunnel or the plain-HTTP verb, as the sidecar parsed it.
@@ -389,7 +429,11 @@ async fn serve_decision(
         RequestKind::Plain
     };
 
-    let verdict = decider.decide(&req.host, req.port, kind).await;
+    let seen = RequestSeen {
+        method: &req.method,
+        path: &req.path,
+    };
+    let verdict = decider.decide(&req.host, req.port, kind, seen).await;
     if !verdict.allowed {
         record_or_log(decider.as_ref(), &req.host, req.port, &req.method, &verdict);
         let reply = DecisionReply {
@@ -594,6 +638,7 @@ async fn sidecar_connection(
             port: request.port,
             connect: matches!(request.kind, RequestKind::Connect),
             method: request.method.clone(),
+            path: request.path.clone(),
         },
     )
     .await
@@ -682,6 +727,8 @@ struct ProxyRequest {
     port: u16,
     /// `CONNECT`, or the plain-HTTP verb.
     method: String,
+    /// Path and query of a plain request. Empty for CONNECT.
+    path: String,
     /// Origin-form request line to send upstream. Empty for CONNECT.
     rewritten_head: Vec<u8>,
 }
@@ -714,6 +761,7 @@ fn parse_request(head: &[u8]) -> Result<ProxyRequest, SandboxEgressDenyReason> {
             host,
             port,
             method: method.to_string(),
+            path: String::new(),
             rewritten_head: Vec::new(),
         });
     }
@@ -778,6 +826,7 @@ fn parse_request(head: &[u8]) -> Result<ProxyRequest, SandboxEgressDenyReason> {
         host,
         port,
         method: method.to_string(),
+        path,
         rewritten_head: rewritten,
     })
 }
@@ -961,6 +1010,27 @@ mod tests {
         assert_eq!(req.host, "api.example.com");
         assert_eq!(req.port, 443);
         assert_eq!(req.method, "CONNECT");
+        assert_eq!(req.path, "", "a tunnel shows no path");
+    }
+
+    #[test]
+    fn a_plain_request_is_shown_with_its_verb_and_url_and_a_tunnel_says_what_it_hides() {
+        let put = RequestSeen {
+            method: "PUT",
+            path: "/upload/test.bin?x=1",
+        };
+        assert_eq!(
+            put.shown("files.example.net", 80, RequestKind::Plain),
+            "PUT http://files.example.net/upload/test.bin?x=1"
+        );
+        let tunnel = RequestSeen {
+            method: "CONNECT",
+            path: "",
+        };
+        assert_eq!(
+            tunnel.shown("files.example.net", 443, RequestKind::Connect),
+            "CONNECT files.example.net:443 (TLS tunnel; the method and path inside it are not visible)"
+        );
     }
 
     #[cfg(unix)]
@@ -995,6 +1065,7 @@ mod tests {
         assert_eq!(req.host, "api.example.com");
         assert_eq!(req.port, 80);
         assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/v1/x?q=1");
         let rewritten = String::from_utf8(req.rewritten_head.clone()).unwrap();
         assert!(rewritten.starts_with("GET /v1/x?q=1 HTTP/1.1\r\n"));
         assert!(!rewritten.to_ascii_lowercase().contains("proxy-connection"));
@@ -1039,7 +1110,13 @@ mod tests {
     #[cfg(unix)]
     #[async_trait::async_trait]
     impl EgressDecider for Fixed {
-        async fn decide(&self, _host: &str, _port: u16, _kind: RequestKind) -> Verdict {
+        async fn decide(
+            &self,
+            _host: &str,
+            _port: u16,
+            _kind: RequestKind,
+            _seen: RequestSeen<'_>,
+        ) -> Verdict {
             self.verdict.clone()
         }
         fn record(
@@ -1068,7 +1145,13 @@ mod tests {
     #[cfg(unix)]
     #[async_trait::async_trait]
     impl EgressDecider for Unrecordable {
-        async fn decide(&self, _host: &str, _port: u16, _kind: RequestKind) -> Verdict {
+        async fn decide(
+            &self,
+            _host: &str,
+            _port: u16,
+            _kind: RequestKind,
+            _seen: RequestSeen<'_>,
+        ) -> Verdict {
             Verdict::allow()
         }
         fn record(
@@ -1138,6 +1221,7 @@ mod tests {
                 port: 443,
                 connect: true,
                 method: "CONNECT".into(),
+                path: String::new(),
             },
         )
         .await
