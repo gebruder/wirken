@@ -28,6 +28,7 @@ pub const PROFILE: &str = include_str!("seccomp.json");
 const OPTION_PREFIX: &str = "seccomp=";
 
 /// File name of the profile inside its directory.
+#[cfg(unix)]
 const FILE_NAME: &str = "seccomp.json";
 
 /// Which seccomp profile a container gets.
