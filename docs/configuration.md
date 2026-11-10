@@ -45,9 +45,9 @@ once at start; a change to any of them takes effect at the next start. It
 reads `permissions.db` and `senders.db` on every check, `cron.db` on every
 scheduler tick, and takes up changes to `vault.db`, `adapters.db` and
 `hooks.db` within seconds.
-| `agents/<id>/` | Per-agent `identity.{key,pub}`, `workspace/`, `skills/`, `mcp.json` | `wirken agents add` |
+| `agents/<id>/` | Per-agent `identity.{key,pub}`, `workspace/`, `skills/`, `mcp.json`. The `workspace/` is shared by all of that agent's channels and sessions | `wirken agents add` |
 | `sockets/` | Unix domain sockets for IPC. On Windows the gateway uses named pipes derived from these path stems and the directory holds no live files | `wirken run` |
-| `workspace/` | Default agent workspace | `wirken run` |
+| `workspace/` | Default agent workspace, shared by all of its channels and sessions | `wirken run` |
 
 The data directory is created at mode 0o700, and re-chmod'd on every start so
 a loose 0o755 left by an earlier run or a permissive umask converges back.

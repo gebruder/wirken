@@ -216,7 +216,11 @@ sub-agents. Owned by
 
 Each agent gets its own workspace directory, audit session ids, permission
 set and bound channels; `sessions.db` is shared and keyed on channel and
-conversation. Enforcement is runtime, not type-level: lookups key on the agent
+conversation. The workspace is one directory per agent, not per channel or
+session: every channel and session of an agent reads and writes the same
+files, through the file tools and at `/workspace` in each `exec` container,
+so a file one session writes is there for the next on any of the agent's
+channels. Enforcement is runtime, not type-level: lookups key on the agent
 id, audit session ids are prefixed by it, and the factory names each agent
 (`set_agent_id`) right after constructing it with its permission store, before
 any action is gated.
