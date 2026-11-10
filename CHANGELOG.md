@@ -66,6 +66,8 @@ tagged.
 
 - hyper 1.12.0 and want 0.3.2 in the lockfile. hyper no longer depends on
   pin-utils, which RUSTSEC-2026-0441 marks unmaintained.
+- capnp 0.27.3, aws-lc-rs 1.19.0 with aws-lc-sys 0.47.0, and unicode-width
+  0.2.3 in the lockfile, from #310.
 
 ## [3.2.1] - 2026-11-03
 
