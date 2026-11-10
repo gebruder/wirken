@@ -95,6 +95,11 @@ pub(crate) fn new_conversation_id() -> String {
     format!("c-{hex}")
 }
 
+/// What the transcript says when `y` is typed on a card that was not
+/// drawn whole.
+pub(crate) const CUT_CARD_NOTE: &str = "Not approved: the request is not shown in full on this \
+     screen. Refuse it, or enlarge the terminal and answer again.";
+
 pub(crate) struct App {
     /// The agent the header names: as asked for until the gateway says
     /// which agent the conversation is routed to.
@@ -134,6 +139,10 @@ pub(crate) struct App {
     pub quit: bool,
     /// The panel command waiting for the gateway's status answer.
     pub pending_panel: Option<super::slash::Command>,
+    /// Whether the card in front was last drawn with its arguments cut
+    /// or its bottom off the screen. Set by the view on each draw. A
+    /// card in that state takes a refusal and no approval.
+    pub card_cut: std::cell::Cell<bool>,
 }
 
 impl App {
@@ -150,6 +159,7 @@ impl App {
             show_sidebar: true,
             show_panels: true,
             pending_panel: None,
+            card_cut: std::cell::Cell::new(false),
             searching: false,
             search: String::new(),
             selected: 0,
@@ -511,8 +521,15 @@ impl App {
             }
             match key.code {
                 KeyCode::Enter => {
-                    let card = self.cards.pop_front().expect("a card is in front");
                     let answer = parse_answer(&std::mem::take(&mut self.answer));
+                    // An approval is of what was shown. A card drawn
+                    // with its arguments cut stays in front and takes a
+                    // refusal only.
+                    if answer == Answer::Approve && self.card_cut.get() {
+                        self.entries.push(Entry::Note(CUT_CARD_NOTE.to_string()));
+                        return None;
+                    }
+                    let card = self.cards.pop_front().expect("a card is in front");
                     let (approve, reason) = match answer {
                         Answer::Approve => (true, None),
                         Answer::Deny(reason) => (false, reason),

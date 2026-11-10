@@ -197,6 +197,14 @@ line above it or write a second line that reads as a label. A literal
 `approve? [y/N]:` inside the arguments survives, after `arguments:`,
 because it is part of the command being approved.
 
+The arguments are never approved from a cut card. A call whose arguments
+are past 2000 characters is refused before any surface is asked: the
+`PermissionDenied` row carries `denial_reason`
+`arguments too long to show for approval`, and the tool result tells the
+model that a shorter call can be asked. The chat screen gives the
+arguments every row they need, and a card that does not fit the terminal
+takes a refusal and no approval until it does.
+
 The surfaces, and what each adds after the card:
 
 - `wirken ask` on the CLI prints the card to stderr, then `approve?

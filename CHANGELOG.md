@@ -23,6 +23,11 @@ tagged.
   formatter, which removed backticks and rewrote emphasis and links.
   Discord escapes each value, so a backtick no longer ends the code span.
   The Slack and Matrix prompts, which no gate sends today, are plain text.
+- A call whose arguments an approval card would cut, past 2000 characters,
+  is refused without asking an operator, with `denial_reason`
+  `arguments too long to show for approval`. `wirken chat` draws the
+  arguments in full and takes no approval on a card that does not fit the
+  terminal.
 
 ### Dependencies
 

@@ -269,10 +269,7 @@ pub fn runtime_words(runtime: &str) -> String {
 /// it is shown after `arguments:` where the operator is looking. What
 /// it cannot do is occupy a line of its own.
 pub fn one_line(s: &str) -> String {
-    let folded = strip_control_sequences(s)
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
+    let folded = fold(s);
     if folded.chars().count() > MAX_VALUE_CHARS {
         let mut shown: String = folded.chars().take(MAX_VALUE_CHARS).collect();
         shown.push_str(CUT_MARKER);
@@ -282,9 +279,38 @@ pub fn one_line(s: &str) -> String {
     }
 }
 
+/// `s` with its escapes out and its line breaks folded, uncut.
+fn fold(s: &str) -> String {
+    strip_control_sequences(s)
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// Whether a card line shows `s` to its end, with no cut. The gateway
+/// asks this of a call's arguments before it asks an operator: a call
+/// the card would cut is refused, since an approval given on a cut
+/// card is an approval of text nobody was shown.
+pub fn shown_whole(s: &str) -> bool {
+    fold(s).chars().count() <= MAX_VALUE_CHARS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_is_shown_whole_up_to_the_cut_and_not_past_it() {
+        let fits = "a".repeat(MAX_VALUE_CHARS);
+        assert!(shown_whole(&fits));
+        assert!(!one_line(&fits).ends_with(CUT_MARKER));
+        let over = "a".repeat(MAX_VALUE_CHARS + 1);
+        assert!(!shown_whole(&over));
+        assert!(one_line(&over).ends_with(CUT_MARKER));
+        // A line break is two characters on the card.
+        let folded_over = format!("{}\n", "a".repeat(MAX_VALUE_CHARS - 1));
+        assert!(!shown_whole(&folded_over));
+    }
 
     fn exec_card() -> ApprovalCard {
         ApprovalCard {

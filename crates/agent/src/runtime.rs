@@ -65,6 +65,10 @@ const MCP_TOOLS_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_se
 /// The built-in tool name for spawning a child agent.
 pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 
+/// `denial_reason` on the `PermissionDenied` row of a call refused
+/// because the approval card could not show its arguments whole.
+pub const ARGUMENTS_TOO_LONG_TO_APPROVE: &str = "arguments too long to show for approval";
+
 /// What a `spawn_subagent` call returns on an agent with no factory: one
 /// built by `wirken ask`, which runs no gateway. Children are woken by the
 /// gateway's factory, so the route is a session the gateway runs.
@@ -4740,6 +4744,47 @@ impl Agent {
         ctx: PermissionDenialContext,
         denials: &mut Vec<PermissionDenialContext>,
     ) -> Result<crate::tool::ToolResult, AgentError> {
+        // A call whose arguments the approval card would cut is not
+        // put to an operator: they would be asked to approve text they
+        // were not shown. It is refused here, before any surface
+        // renders it, and the model is told the size that can be asked.
+        if let Some(arguments) = ctx.arguments.as_deref()
+            && !wirken_adapter_core::approval_card::shown_whole(arguments)
+        {
+            let limit = wirken_adapter_core::approval_card::MAX_VALUE_CHARS;
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::PermissionDenied {
+                    tool: ctx.tool_name.clone(),
+                    action_key: ctx.action.approval_key(),
+                    denial_source: wirken_audit::DenialSource::Tier,
+                    tier: Some(ctx.requested_tier.label().to_string()),
+                    agent_id: ctx.agent_id.clone(),
+                    trigger: ctx.trigger_message.clone(),
+                    denied_via: None,
+                    denial_reason: Some(ARGUMENTS_TOO_LONG_TO_APPROVE.to_string()),
+                    adapter_id: self.current_inbound.adapter_id.clone(),
+                    sender_id: self.current_inbound.sender_id.clone(),
+                    exec_location: ctx.exec_location.clone(),
+                    denied_by: None,
+                    denier_display: None,
+                },
+            )?;
+            let output = format!(
+                "Permission denied: '{}' requires {} approval, and its arguments are longer \
+                 than the {limit} characters an approval shows in full, so no operator was \
+                 asked. This action was not executed. A call with shorter arguments can be \
+                 asked.",
+                ctx.tool_name,
+                ctx.requested_tier.label(),
+            );
+            denials.push(ctx);
+            return Ok(crate::tool::ToolResult {
+                output,
+                success: false,
+                sandbox: None,
+            });
+        }
         let gate = self.approval_gate.clone();
         let outcome = match gate {
             Some(ref g) => Some(g.request_approval(&ctx).await),
