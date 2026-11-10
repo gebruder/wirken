@@ -1,0 +1,1 @@
+nohup python3 fetch_wheels.py &

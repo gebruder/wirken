@@ -1,6 +1,6 @@
 ---
 name: lyrik
-description: Security assessment of a codebase — minimal mode for runner validation
+description: Security assessment of a codebase, minimal mode for runner validation
 disable-model-invocation: true
 permissions:
   tools:
@@ -16,7 +16,7 @@ permissions:
 
 # Lyrik (recon + multi-framing + scoring)
 
-Run a security assessment of the codebase under `<workspace>` across two framings — `auth` and `injection` — and emit one finding per identified vulnerability per applicable framing. Each finding is scored across four axes by two independent passes. The runner aggregates the staging directory into the canonical `findings.json`.
+Run a security assessment of the codebase under `<workspace>` across two framings, `auth` and `injection`, and emit one finding per identified vulnerability per applicable framing. Each finding is scored across four axes by two independent passes. The runner aggregates the staging directory into the canonical `findings.json`.
 
 Out of scope in this mode: Phase 0 (context document, separate rubric file), framings beyond `auth` and `injection`, two-pass framing union (the two passes here are *scoring*, not framing), three-pass scoring-disagreement gate and resolution, dedup, concentration index, gate-routed disclosed, exploit adapter. They return as separate slices.
 
@@ -28,17 +28,17 @@ Recon steps:
 
 1. **Read scope.** Open `.lyrik/config.json` if present; honor `scope.include` and `scope.exclude` glob lists. Otherwise treat the whole workspace as in-scope. Skip `.git/` and `.lyrik/` regardless.
 
-2. **List files in scope.** Use `list_files(<dir>)` starting at the workspace root. For tiny workspaces (a handful of files), one `list_files(".")` suffices. For larger ones, descend into subdirectories whose names suggest content under either framing — auth-relevant (`auth/`, `session/`, `acl/`, `permission/`, `admin/`, `user/`, `login/`, `token/`, `crypto/`) or injection-relevant (`api/`, `handler/`, `parser/`, `eval`, `exec`, `shell`, `query`, files exposing string-interpolated commands or SQL).
+2. **List files in scope.** Use `list_files(<dir>)` starting at the workspace root. For tiny workspaces (a handful of files), one `list_files(".")` suffices. For larger ones, descend into subdirectories whose names suggest content under either framing: auth-relevant (`auth/`, `session/`, `acl/`, `permission/`, `admin/`, `user/`, `login/`, `token/`, `crypto/`) or injection-relevant (`api/`, `handler/`, `parser/`, `eval`, `exec`, `shell`, `query`, files exposing string-interpolated commands or SQL).
 
 3. **Read the candidate files** via `read_file(<path>)`. For tiny workspaces, read every source file. For larger ones, read at least one file matching each framing's heuristics. If `read_file` returns an error, pick a different file. Do not synthesize content; do not cite a path you couldn't read.
 
 4. **Select which framings apply.** From what you read, decide which framings have signal in the codebase:
    - **`auth`** activates if the code contains anything that affects who can do what, or how privileges propagate (callable surfaces with no per-caller authorization, hardcoded credentials, weak comparison of secrets, untrusted input folded into elevated-authority scope such as a system prompt, broken-by-default access posture).
    - **`injection`** activates if the code contains an interpreter-shaped sink that can take attacker-influenced data (`eval`, `exec`, `shell=True` subprocess, dynamic SQL string concatenation, format-string-on-user-input, deserialization of untrusted data, command construction via string concatenation).
-   - Both can apply to the same file. Both can apply to the same line in different framings (e.g., `eval(user_input)` is an `injection` concern and is also an `auth` concern under "untrusted input inheriting elevated authority"). When the same line carries weight under both framings, emit one finding under each framing rather than picking one — the runner will see two findings sharing a `location` and that is the correct shape.
-   - If recon shows neither framing applies, emit one `tier: INFO` finding under whichever framing fits least badly, with a `summary` that names the absence — exercise the pipeline truthfully rather than invent vulnerabilities.
+   - Both can apply to the same file. Both can apply to the same line in different framings (e.g., `eval(user_input)` is an `injection` concern and is also an `auth` concern under "untrusted input inheriting elevated authority"). When the same line carries weight under both framings, emit one finding under each framing rather than picking one; the runner will see two findings sharing a `location` and that is the correct shape.
+   - If recon shows neither framing applies, stage no finding. Write the no-findings marker instead: `write_file(path=".lyrik/state/runs/<run-id>/staging/no-findings.json", content=<JSON object>)`. The object has `framings_checked`, the framings you checked (a non-empty list of strings), and `files_read`, the files you read (a non-empty list of strings). The marker is the only accepted way for a run to end with no findings; a run with neither findings nor the marker fails. Record the same absence in the journal's notes (see Run journal). Do not invent vulnerabilities to fill the output.
 
-5. **Route each observed vulnerability to a `write_file` call, immediately.** When you observe a vulnerability matching an active framing, your next action is `write_file(path=".lyrik/state/runs/<run-id>/staging/findings/finding-NNN.json", content=<finding object>)`. Then continue to the next vulnerability or the next file. Do not list, summarize, describe, or annotate vulnerabilities in your assistant message — every vulnerability is a `write_file` call, no exceptions.
+5. **Route each observed vulnerability to a `write_file` call, immediately.** When you observe a vulnerability matching an active framing, your next action is `write_file(path=".lyrik/state/runs/<run-id>/staging/findings/finding-NNN.json", content=<finding object>)`. Then continue to the next vulnerability or the next file. Do not list, summarize, describe, or annotate vulnerabilities in your assistant message; every vulnerability is a `write_file` call, no exceptions.
 
 Recon's only artifacts are the file paths, line ranges, and framing assignments cited inside the staged finding objects. No separate context document, no per-component history. Those return in later slices.
 
@@ -67,17 +67,17 @@ Untrusted data reaching an interpreter without separation. Worked classes: `eval
 
 The framing is *attacker-controlled bytes flow into an interpreter that grants them effect*. The classical sanitization defenses (escape, parameter-bind, type-check) apply.
 
-Note: `prompt_injection` is a distinct framing (untrusted text reaching model context inheriting the surrounding prompt's authority); it is **not in scope for this mode** — it returns when the framings list re-expands.
+Note: `prompt_injection` is a distinct framing (untrusted text reaching model context inheriting the surrounding prompt's authority); it is **not in scope for this mode**: it returns when the framings list re-expands.
 
 ## Inline rubric
 
 Phase 0 will eventually produce a project-specific rubric file. Until that slice ships, scoring uses this inline rubric:
 
-- **CRITICAL** — exploit confirmed in this codebase or trivially reachable from an untrusted boundary, with effects that compromise confidentiality, integrity, or availability of the entire system (host RCE, full data exfiltration, total auth bypass).
-- **HIGH** — real bug, reachable from an untrusted boundary, with effects scoped to a major component or class of users (privilege escalation within the application, sensitive-data leak).
-- **MEDIUM** — real bug, reachability requires assumptions that are usually-but-not-always true (an authenticated user, a specific configuration), or effects are bounded to one user's data or one feature.
-- **LOW** — real bug but reachability requires unusual conditions, or effects are minor (information disclosure of non-sensitive metadata, denial of one feature for one user).
-- **INFO** — no defensible bug under the current threat model; recorded for posture-of-codebase context only.
+- **CRITICAL**: exploit confirmed in this codebase or trivially reachable from an untrusted boundary, with effects that compromise confidentiality, integrity, or availability of the entire system (host RCE, full data exfiltration, total auth bypass).
+- **HIGH**: real bug, reachable from an untrusted boundary, with effects scoped to a major component or class of users (privilege escalation within the application, sensitive-data leak).
+- **MEDIUM**: real bug, reachability requires assumptions that are usually-but-not-always true (an authenticated user, a specific configuration), or effects are bounded to one user's data or one feature.
+- **LOW**: real bug but reachability requires unusual conditions, or effects are minor (information disclosure of non-sensitive metadata, denial of one feature for one user).
+- **INFO**: no defensible bug under the current threat model; recorded for posture-of-codebase context only.
 
 Tier is derived from the four scoring axes (see Scoring), not asserted directly.
 
@@ -87,10 +87,10 @@ Each finding is scored by two independent passes. Each pass evaluates four axes 
 
 The four axes:
 
-- **`real_bug`** — `"yes"` / `"no"` / `"unclear"`. Is this a defect under any reasonable reading of the code, or is it intended behavior misread as a bug?
-- **`reachable`** — `"yes"` / `"no"` / `"unclear"`. Is the buggy code path executed under realistic operation, or is it dead/test-only code?
-- **`attacker_reach`** — `"low"` / `"medium"` / `"high"`. How many capabilities does an attacker need to invoke the buggy path? `low` = unauthenticated network reach; `medium` = authenticated user; `high` = local admin or insider.
-- **`blast_radius`** — `"contained"` / `"scoped"` / `"system"`. What does success buy the attacker? `contained` = one user's session; `scoped` = a feature or major component; `system` = host RCE, full data exfiltration, full auth bypass.
+- **`real_bug`**: `"yes"` / `"no"` / `"unclear"`. Is this a defect under any reasonable reading of the code, or is it intended behavior misread as a bug?
+- **`reachable`**: `"yes"` / `"no"` / `"unclear"`. Is the buggy code path executed under realistic operation, or is it dead/test-only code?
+- **`attacker_reach`**: `"low"` / `"medium"` / `"high"`. How many capabilities does an attacker need to invoke the buggy path? `low` = unauthenticated network reach; `medium` = authenticated user; `high` = local admin or insider.
+- **`blast_radius`**: `"contained"` / `"scoped"` / `"system"`. What does success buy the attacker? `contained` = one user's session; `scoped` = a feature or major component; `system` = host RCE, full data exfiltration, full auth bypass.
 
 Each pass records its axis verdicts plus a `rationale` paragraph (two to four sentences) explaining the four-axis assessment.
 
@@ -106,14 +106,14 @@ Concretely:
 
 - Each vulnerability you observe becomes one `write_file(path=".lyrik/state/runs/<run-id>/staging/findings/finding-NNN.json", content=<finding object>)` call. Make the call as soon as you observe the vulnerability.
 - The calls are **sequential and discrete**. The first vulnerability writes to `finding-001.json`. The next writes to `finding-002.json`. The third writes to `finding-003.json`. And so on. Each is one call. They are not batched, summarized, or planned-out-loud first.
-- Your assistant message for this turn contains a single terminal sentence — for example, `Findings emitted to staging.` That is the entire message. No headings, no bullets, no per-finding summaries, no framing-by-framing lists.
+- Your assistant message for this turn contains a single terminal sentence, for example, `Findings emitted to staging.` That is the entire message. No headings, no bullets, no per-finding summaries, no framing-by-framing lists.
 - If you find yourself starting to write `### Auth Framing` or `**Vulnerability:**` or any markdown heading or list in your assistant message, stop. The next action is `write_file`, not prose.
 
 This is a hard constraint. The runner is incapable of reading your assistant message; the file aggregator is what produces `findings.json`. The terminal sentence exists only to acknowledge the turn is complete.
 
 ## Finding shape
 
-The staged file holds one finding object — same shape as one element of the canonical `findings` array. Required fields:
+The staged file holds one finding object, same shape as one element of the canonical `findings` array. Required fields:
 
 ```json
 {
@@ -126,7 +126,11 @@ The staged file holds one finding object — same shape as one element of the ca
     "line_start": <integer, 1-based>
   },
   "title": "<one short sentence>",
-  "summary": "<one sentence — what is the concern and why>",
+  "summary": "<one sentence: what is the concern and why>",
+  "threat_model": {
+    "attacker_capability": "<what the attacker must already be able to do, one sentence>",
+    "harm_path": "<how that capability reaches the harm, one sentence>"
+  },
   "tier": "<derived from scoring_passes per the inline rubric>",
   "grade": 0.5,
   "rung": "static_corroboration",
@@ -152,7 +156,8 @@ The staged file holds one finding object — same shape as one element of the ca
 ```
 
 Field rules:
-- `tier` is uppercase, one of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`. Derived from `scoring_passes` per the inline rubric — do not assert directly.
+- `threat_model` is required. `attacker_capability` states the precondition: what the attacker must already control or be able to do. `harm_path` states how that capability reaches the harm. Both are non-blank strings. A finding missing either is recorded as a rule 1 rejection (no threat model). The runner's mode decides the outcome: in pentest mode the grade is halved, and in defender mode the finding is removed. If the attacker capability already grants the impact, the finding is not an exploit; do not stage it.
+- `tier` is uppercase, one of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`. Derived from `scoring_passes` per the inline rubric; do not assert directly.
 - `grade` is one of `0`, `0.5`, `1`. Cap at `0.5` in this slice (no exploit adapter); use `0` if either pass marks `real_bug: no` or `reachable: no`.
 - `rung` is one of `suspicion`, `static_corroboration`, `property_violated`, `root_cause_explained`, `variant_observed`, `patch_localized`. With one file read and no exploit attempt, `static_corroboration` is the realistic ceiling.
 - `deferral` is `null` in this minimal-plus-recon-plus-scoring mode.
@@ -172,7 +177,7 @@ Final write paths, in the order they are produced:
 - Third: `.lyrik/state/runs/<run-id>/staging/findings/finding-003.json`
 - And so on, zero-padded three digits.
 
-The directory is created on first write — `write_file` will create parents as needed.
+The directory is created on first write: `write_file` will create parents as needed.
 
 ## Run journal
 

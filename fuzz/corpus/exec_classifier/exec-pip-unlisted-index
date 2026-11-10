@@ -1,0 +1,1 @@
+pip install --index-url https://mirror.example.net/simple requests
