@@ -17099,6 +17099,100 @@ mod reasoning_beside_tool_calls {
 }
 
 // ---------------------------------------------------------------------------
+// The approval card under egress mode `allowlist` says each request is
+// asked of the operator. This is the decision that makes it true: a turn
+// that runs `exec` has read exec output by the time the command is
+// dispatched, and under `allowlist` the proxy asks about every request
+// from a session that has, and lets through only the ones approved.
+// ---------------------------------------------------------------------------
+#[cfg(unix)]
+#[tokio::test]
+async fn allowlist_egress_from_an_exec_asks_about_each_request() {
+    use std::sync::{Arc, Mutex};
+
+    use wirken_sandbox::egress::{EgressDecider, RequestKind, RequestSeen};
+
+    use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
+    use crate::error::PermissionDenialContext;
+    use crate::sandbox_egress::{
+        SandboxEgressAttribution, SandboxEgressContext, SandboxEgressPolicy,
+    };
+
+    /// Approves the first ask and refuses the rest.
+    #[derive(Default)]
+    struct Asked(Mutex<usize>);
+
+    #[async_trait::async_trait]
+    impl ApprovalGate for Asked {
+        async fn request_approval(&self, _ctx: &PermissionDenialContext) -> ApprovalOutcome {
+            let mut asked = self.0.lock().unwrap();
+            *asked += 1;
+            if *asked == 1 {
+                ApprovalOutcome::Approved { actor: None }
+            } else {
+                ApprovalOutcome::Denied {
+                    reason: None,
+                    actor: None,
+                }
+            }
+        }
+
+        fn source(&self) -> wirken_audit::ApprovalSource {
+            wirken_audit::ApprovalSource::Stdin
+        }
+    }
+
+    let label = crate::tool::tool_to_read_sensitivity("exec", &serde_json::json!({}))
+        .expect("an exec is a read");
+    let observed: crate::sandbox_egress::ObservedSensitivity = Default::default();
+    observed.write().unwrap().insert(label);
+
+    let gate = Arc::new(Asked::default());
+    let ctx = SandboxEgressContext {
+        policy: SandboxEgressPolicy::from_config("allowlist", &["files.example.net".to_string()]),
+        attribution: SandboxEgressAttribution::default(),
+        audit: None,
+        observed,
+        approval: Some(gate.clone()),
+    };
+    let mut allowed = Vec::new();
+    for _ in 0..3 {
+        let verdict = ctx
+            .decide(
+                "files.example.net",
+                443,
+                RequestKind::Connect,
+                RequestSeen {
+                    method: "CONNECT",
+                    path: "",
+                },
+            )
+            .await;
+        assert!(verdict.escalated, "{verdict:?}");
+        allowed.push(verdict.allowed);
+    }
+    assert_eq!(*gate.0.lock().unwrap(), 3, "one ask per request");
+    assert_eq!(
+        allowed,
+        [true, false, false],
+        "an approval covers the request it was given for, not the host"
+    );
+    // And the card says so.
+    let location = crate::exec_location::describe(
+        &crate::sandbox::SandboxConfig::default(),
+        Some(&ctx.policy),
+        "operator",
+    );
+    assert!(
+        location
+            .text
+            .ends_with(&format!(", {})", crate::exec_location::ALLOWLIST_ASKS)),
+        "{}",
+        location.text
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The approval card under egress mode `open` says the exec reaches
 // nothing. This is the decision that makes it true: a turn that runs
 // `exec` has read exec output by the time the command is dispatched, and

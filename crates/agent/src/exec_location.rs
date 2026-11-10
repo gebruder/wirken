@@ -15,7 +15,8 @@
 //! An `exec` is recorded as a read of `exec_output` before it is
 //! dispatched, so every request it makes meets the egress proxy's
 //! confidentiality stage (`sandbox_egress::decide_with_sensitivity`),
-//! and under `open` that stage refuses. The line for `open` says so.
+//! and under `open` that stage refuses, while under `allowlist` it
+//! asks the operator about each request. The line says which.
 
 use wirken_audit::{ExecLocation, SandboxModeLabel};
 
@@ -29,6 +30,12 @@ use crate::skill_perms::AllowSet;
 /// which a session running this command has.
 pub const OPEN_REACHES_NOTHING: &str =
     "no network: open egress is refused once a session has read exec output";
+
+/// What the line adds under egress mode `allowlist`: a listed host is
+/// where a request may go, not a request that goes. The proxy puts each
+/// one to the operator, because a session running this command has
+/// read exec output.
+pub const ALLOWLIST_ASKS: &str = "each request asked of the operator";
 
 /// Hosts named before the list is cut, so a long allowlist does not
 /// push the rest of the prompt off the screen.
@@ -73,7 +80,7 @@ fn network(config: &SandboxConfig, egress: Option<&SandboxEgressPolicy>) -> Stri
         (SandboxEgressMode::None, _) => "no network".to_string(),
         (SandboxEgressMode::Open, _) => OPEN_REACHES_NOTHING.to_string(),
         (SandboxEgressMode::Allowlist, AllowSet::Wildcard) => {
-            "network to any public host through the egress proxy".to_string()
+            format!("network to any public host through the egress proxy, {ALLOWLIST_ASKS}")
         }
         (SandboxEgressMode::Allowlist, AllowSet::Set(hosts)) if hosts.is_empty() => {
             "no network".to_string()
@@ -91,7 +98,7 @@ fn network(config: &SandboxConfig, egress: Option<&SandboxEgressPolicy>) -> Stri
                 String::new()
             };
             format!(
-                "network only to {}{tail} through the egress proxy",
+                "network only to {}{tail} through the egress proxy, {ALLOWLIST_ASKS}",
                 shown.join(", ")
             )
         }
@@ -205,7 +212,8 @@ mod tests {
         );
         assert!(
             loc.text.ends_with(
-                ", network only to files.pythonhosted.org, pypi.org through the egress proxy)"
+                ", network only to files.pythonhosted.org, pypi.org through the egress proxy, \
+                 each request asked of the operator)"
             ),
             "{}",
             loc.text
@@ -248,8 +256,10 @@ mod tests {
             "davi",
         );
         assert!(
-            loc.text
-                .ends_with(", network to any public host through the egress proxy)"),
+            loc.text.ends_with(
+                ", network to any public host through the egress proxy, \
+                 each request asked of the operator)"
+            ),
             "{}",
             loc.text
         );

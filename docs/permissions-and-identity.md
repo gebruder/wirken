@@ -167,10 +167,13 @@ model's claim (unverified): Just checking the build script so the summary is acc
   <user>` under `mode: off`. It is built from the settings the `exec`
   will use, the agent's loaded sandbox configuration and the channel's
   egress policy for the turn, not from `sandbox.json` as it reads now,
-  which can have been edited since. The network part is `no network`,
-  `network only to <hosts> through the egress proxy`, `network to any
-  public host through the egress proxy`, or `unrestricted network` when
-  `"network": true` is set and no channel policy applies.
+  which can have been edited since. The network part says what the
+  command reaches: `no network`; under an egress allowlist, `network
+  only to <hosts> through the egress proxy, each request asked of the
+  operator` (`any public host` for a `*` list); under egress mode
+  `open`, `no network: open egress is refused once a session has read
+  exec output`; or `unrestricted network` when `"network": true` is set
+  and no channel policy applies.
 - `runtime`: for an `exec`, the container runtime the gateway's sandbox
   settings give it, in words: `gVisor (runsc)` under `"mode": "gvisor"`,
   `Docker default runtime (runc)` under `exec-only`, `this host, no

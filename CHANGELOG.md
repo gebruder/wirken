@@ -45,6 +45,9 @@ tagged.
   what the command reaches: `no network: open egress is refused once a
   session has read exec output`. It said `network to any public host`.
   Behaviour is unchanged.
+- Under egress mode `allowlist` the same line ends `each request asked of
+  the operator`, which is what the proxy does for an `exec`. Behaviour is
+  unchanged.
 - `assistant_tool_calls` rows record the reasoning a provider returns with
   the message, beside the calls, as an optional `reasoning` field. No gate
   reads it. A row with none is unchanged, so existing chains verify as
