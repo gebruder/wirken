@@ -64,6 +64,10 @@ pub struct SidecarSpec {
     /// must let the sidecar's uid in.
     pub socket_dir_mode: u32,
     pub socket_mode: u32,
+    /// The seccomp profile the sidecar runs under: the one the sandbox
+    /// it serves runs under, handed over the way the runtime takes it
+    /// ([`crate::seccomp::for_runtime`]).
+    pub seccomp: crate::seccomp::Seccomp,
 }
 
 /// One sandbox's provisioned route out. Hold it for as long as the
@@ -287,7 +291,10 @@ pub async fn provision(
 
 /// The sidecar's create body: the binary and the socket directory
 /// mounted in, the internal network only until the egress network is
-/// connected, and the same floor as any sandbox container.
+/// connected, and the same floor as any sandbox container, the seccomp
+/// profile included. The sidecar is the one container here with a route
+/// to the internet, and what it runs is a forwarder: sockets, the
+/// broker's Unix socket and threads, none of which the profile refuses.
 fn sidecar_body(
     spec: &SidecarSpec,
     internal_network: &str,
@@ -316,7 +323,11 @@ fn sidecar_body(
             auto_remove: Some(false),
             cap_drop: Some(vec!["ALL".into()]),
             cap_add: Some(Vec::new()),
-            security_opt: Some(vec!["no-new-privileges:true".into()]),
+            security_opt: Some(
+                std::iter::once("no-new-privileges:true".to_string())
+                    .chain(spec.seccomp.security_opt())
+                    .collect(),
+            ),
             readonly_rootfs: Some(true),
             ..Default::default()
         }),
@@ -392,6 +403,7 @@ mod tests {
             socket_dir: "/run/x".into(),
             socket_dir_mode: 0o700,
             socket_mode: 0o600,
+            seccomp: crate::seccomp::Seccomp::Profile,
         }
     }
 
@@ -415,5 +427,32 @@ mod tests {
         assert_eq!(host.readonly_rootfs, Some(true));
         assert_eq!(host.memory, Some(MEMORY_LIMIT));
         assert_eq!(host.pids_limit, Some(PIDS_LIMIT));
+        assert_eq!(
+            host.security_opt,
+            Some(vec![
+                "no-new-privileges:true".to_string(),
+                format!("seccomp={}", crate::seccomp::PROFILE),
+            ])
+        );
+        // The resolver is the runtime's: the sidecar is handed
+        // addresses the broker resolved and resolves nothing itself.
+        assert_eq!(host.dns, None);
+        assert_eq!(host.dns_search, None);
+    }
+
+    /// Where the runtime reads a profile from a path, the sidecar names
+    /// the path, as the sandbox it serves does.
+    #[test]
+    fn the_sidecar_names_a_profile_given_by_path() {
+        let mut spec = spec();
+        spec.seccomp = crate::seccomp::Seccomp::ProfileAt("/run/profile/seccomp.json".into());
+        let host = sidecar_body(&spec, "net", None).host_config.unwrap();
+        assert_eq!(
+            host.security_opt,
+            Some(vec![
+                "no-new-privileges:true".to_string(),
+                "seccomp=/run/profile/seccomp.json".to_string(),
+            ])
+        );
     }
 }

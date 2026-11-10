@@ -189,7 +189,7 @@ for a newer build does not stop an older one from starting; the warning is
 what says the setting did nothing.
 
 `security_opt` names a seccomp profile for every `exec` and MCP server
-container:
+container, and for the egress sidecar of each:
 `crates/sandbox/src/seccomp.json`, passed to the runtime with the container
 (`crates/sandbox/src/seccomp.rs`). It is Docker's default allowlist
 ([upstream](https://docs.docker.com/engine/security/seccomp/)), as released

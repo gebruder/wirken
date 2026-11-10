@@ -787,6 +787,9 @@ impl DockerSandbox {
             rootless,
         );
         spec.labels = exec_labels(&self.config.instance);
+        // The profile the exec container gets, handed to this runtime
+        // the same way.
+        spec.seccomp = self.seccomp().await?;
         let route = wirken_sandbox::egress_net::provision(
             &self.client,
             spec,
@@ -983,6 +986,9 @@ pub(crate) fn exec_sidecar_spec(
         user: Some(wirken_sandbox::operator_user(rootless)),
         socket_dir_mode: 0o700,
         socket_mode: 0o600,
+        // As JSON, which is how Docker takes it; `provision_egress`
+        // replaces it with the runtime's own form.
+        seccomp: wirken_sandbox::seccomp::Seccomp::Profile,
     }
 }
 

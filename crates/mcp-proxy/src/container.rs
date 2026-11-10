@@ -803,6 +803,7 @@ pub async fn start_route(
         user: Some(plan.user.clone()),
         socket_dir_mode: 0o700,
         socket_mode: 0o600,
+        seccomp: plan.seccomp.clone(),
     };
     let policy = crate::egress::McpEgressPolicy {
         agent_id: plan.agent_id.clone(),

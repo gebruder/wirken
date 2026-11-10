@@ -60,6 +60,8 @@ tagged.
 - MCP server containers run under the same seccomp profile as `exec`
   containers, and their `/etc/resolv.conf` holds a loopback nameserver and
   no search domain instead of the host's.
+- Egress sidecar containers run under the same seccomp profile as the
+  `exec` or MCP server container they serve.
 - The hostile corpus gains the recon-then-upload, plain-HTTP PUT, metadata
   address and user-namespace shapes, and lines that replay the address
   check, approval cards, the over-long ask, the exec container's settings,

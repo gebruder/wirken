@@ -219,7 +219,7 @@ graph LR
     Sandbox -.->|"no route"| Internet
 ```
 
-The sidecar holds no policy. For each request it asks the gateway over a per-exec Unix socket bind-mounted into it, and receives either already-resolved addresses or a refusal. The sidecar runs as the operator's uid (uid 0 under a rootless runtime, which is the operator), so the socket is mode 0600 in a 0700 directory and no other local user can reach the broker. Policy, DNS resolution, the global-unicast filter, and the audit row all stay in the gateway process, so a compromised sidecar can misreport what it wants but cannot widen what it gets, and cannot forge attribution.
+The sidecar holds no policy. For each request it asks the gateway over a per-exec Unix socket bind-mounted into it, and receives either already-resolved addresses or a refusal. The sidecar runs as the operator's uid (uid 0 under a rootless runtime, which is the operator), so the socket is mode 0600 in a 0700 directory and no other local user can reach the broker. It runs with every capability dropped, `no-new-privileges`, a read-only root and the seccomp profile the sandbox it serves runs under ([sandbox-properties.md](sandbox-properties.md)). Policy, DNS resolution, the global-unicast filter, and the audit row all stay in the gateway process, so a compromised sidecar can misreport what it wants but cannot widen what it gets, and cannot forge attribution.
 
 **No host port is involved anywhere.** The gateway listens on a Unix socket, which is a filesystem object, so a default-deny host firewall has no bearing on the path. This is verified on a host running ufw with default-deny inbound.
 
