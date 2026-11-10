@@ -18,6 +18,11 @@ tagged.
   result names the host and the address. **For wirken-siem:**
   `skill_permission_denied.denied_reason.kind` gains `non_global_address`,
   with `address`.
+- An approval shows the arguments as the model sent them on every channel
+  that answers approvals. Signal sends the prompt without its reply
+  formatter, which removed backticks and rewrote emphasis and links.
+  Discord escapes each value, so a backtick no longer ends the code span.
+  The Slack and Matrix prompts, which no gate sends today, are plain text.
 
 ## [3.2.1] - 2026-11-03
 

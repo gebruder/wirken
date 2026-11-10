@@ -2132,6 +2132,7 @@ async fn approval_round_trip_via_text_command() {
             req.set_requested_tier("tier3");
             req.set_triggering_agent("default");
             req.set_trigger_message("clean old logs");
+            req.set_arguments(r#"{"command":"rm `ls **/*.log` [x](y)"}"#);
             req.set_target_conversation_id(signal_group_id);
         }
         gw.write_message(&req_msg).await.unwrap();
@@ -2217,6 +2218,13 @@ async fn approval_round_trip_via_text_command() {
     assert!(
         body.contains(&format!("!approve {expected_prefix}")),
         "body missing approve directive: {body:?}"
+    );
+    // The arguments reach signal-cli as the model sent them: the
+    // reply formatter, which removes backticks and rewrites emphasis
+    // and links, is not applied to an approval.
+    assert!(
+        body.contains(r#"arguments: {"command":"rm `ls **/*.log` [x](y)"}"#),
+        "the command shown is not the command that runs: {body:?}"
     );
 }
 

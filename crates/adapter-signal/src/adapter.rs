@@ -754,6 +754,18 @@ impl SignalAdapter {
     /// signal-cli rejects the RPC if both are present, so this
     /// branching is required for group sends to work at all.
     async fn send_message(&self, conversation_id: &str, text: &str) -> Result<i64, SignalError> {
+        // Agents emit markdown; Signal renders almost none of it.
+        // Run the reply through SignalFormatter here so every reply
+        // into signal-cli's send RPC shares the same rendering.
+        let rendered = self.formatter.format(text);
+        self.send_verbatim(conversation_id, &rendered).await
+    }
+
+    /// [`Self::send_message`] without the formatter: `text` is sent as
+    /// written. An approval prompt goes this way, because the formatter
+    /// removes backticks and rewrites emphasis and links, and the
+    /// command an operator reads has to be the command that runs.
+    async fn send_verbatim(&self, conversation_id: &str, text: &str) -> Result<i64, SignalError> {
         // Fast path: signal-cli is currently connected. Slow
         // path: park on `wait_for_connection` until reconnect
         // completes or the cap (default 30s) elapses. The slow
@@ -775,10 +787,7 @@ impl SignalAdapter {
             None => self.wait_for_connection(self.reconnect_wait).await?,
         };
 
-        // Agents emit markdown; Signal renders almost none of it.
-        // Run the reply through SignalFormatter here so every path
-        // into signal-cli's send RPC shares the same rendering.
-        let rendered = self.formatter.format(text);
+        let rendered = text;
 
         let params = if is_group_id(conversation_id) {
             json!({
@@ -1031,7 +1040,7 @@ async fn send_approval_request(
     let body = approval_body(&fields, &prefix);
 
     if let Err(e) = adapter
-        .send_message(&fields.target_conversation_id, &body)
+        .send_verbatim(&fields.target_conversation_id, &body)
         .await
     {
         tracing::warn!(

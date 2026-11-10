@@ -463,10 +463,13 @@ async fn handle_outbound(
 /// `ApprovalRequestFailed` frame back to the gateway with a
 /// snake_case reason label so the audit row records the failure
 /// distinctly from a generic timeout.
-/// The approval message body: the card every surface renders, in
-/// mrkdwn. The actions block under it carries the decision.
+/// The approval message body: the card every surface renders, plain.
+/// It is sent as a `plain_text` object, which Slack displays as
+/// written: mrkdwn has no escape for a backtick or an asterisk, so a
+/// value in it would be restyled. The actions block under it carries
+/// the decision.
 pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
-    fields.card().render(CardStyle::SlackMrkdwn)
+    fields.card().render(CardStyle::Plain)
 }
 
 async fn send_approval_request<C: SlackClientHttpConnector + Send + Sync>(
@@ -507,8 +510,8 @@ async fn send_approval_request<C: SlackClientHttpConnector + Send + Sync>(
 
     let prompt = approval_text(&fields);
 
-    let section = SlackSectionBlock::new().with_text(SlackBlockText::MarkDown(
-        SlackBlockMarkDownText::new(prompt),
+    let section = SlackSectionBlock::new().with_text(SlackBlockText::Plain(
+        SlackBlockPlainText::new(prompt).with_emoji(false),
     ));
     let approve_btn = SlackBlockButtonElement::new(SlackBlockPlainTextOnly::from("Approve"))
         .with_action_id(SlackActionId(allow_id))

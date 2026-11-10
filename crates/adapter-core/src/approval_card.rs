@@ -14,7 +14,9 @@
 //! that styles them itself (the chat screen, the webchat page).
 //! [`ApprovalCard::render`] is the same lines as text in one of the
 //! [`CardStyle`]s the text channels send, with the escaping each one
-//! needs. Every value goes through [`one_line`] first: escape
+//! needs, so the text a channel displays is the text of the value: a
+//! character the channel would read as markup is escaped, never
+//! dropped or left to restyle what follows it. Every value goes through [`one_line`] first: escape
 //! sequences stripped, line breaks folded and a long value cut with a
 //! marker, so an argument cannot repaint the surface it is judged on
 //! or write a second line that reads as part of the card.
@@ -96,13 +98,16 @@ pub struct CardLine {
 pub enum CardStyle {
     /// No markup and no escaping: Signal, WhatsApp, iMessage, Matrix.
     Plain,
-    /// Markdown as Discord, Teams and Google Chat render it: `**bold**`
-    /// labels, code spans and `_italic_`. Nothing is escaped, as those
-    /// adapters escape nothing today.
+    /// Markdown as Teams and Google Chat are sent it: `**bold**`
+    /// labels, code spans and `_italic_`. Nothing is escaped.
     Markdown,
-    /// Slack mrkdwn: `*bold*` labels, code spans and `_italic_`.
-    /// Nothing is escaped.
-    SlackMrkdwn,
+    /// Discord Markdown: `**bold**` labels and `_italic_`, with every
+    /// value escaped. The key and the arguments sit in a code span,
+    /// where Discord reads nothing as markup; a value holding a
+    /// backtick cannot sit in one, so it is shown outside it with each
+    /// punctuation character backslash-escaped, which Discord displays
+    /// as the character alone.
+    Discord,
     /// Telegram HTML: `<b>`, `<code>` and `<i>`, every value escaped.
     TelegramHtml,
 }
@@ -175,11 +180,16 @@ impl CardStyle {
                 line.label,
                 span(&line.value, code, line.is_model_claim)
             ),
-            CardStyle::SlackMrkdwn => format!(
-                "*{}:* {}",
-                line.label,
-                span(&line.value, code, line.is_model_claim)
-            ),
+            CardStyle::Discord => {
+                let value = if code && !line.value.contains('`') {
+                    format!("`{}`", line.value)
+                } else if line.is_model_claim {
+                    format!("_{}_", discord_escape(&line.value))
+                } else {
+                    discord_escape(&line.value)
+                };
+                format!("**{}:** {value}", line.label)
+            }
             CardStyle::TelegramHtml => {
                 let value = html_escape(&line.value);
                 let value = if code {
@@ -195,8 +205,22 @@ impl CardStyle {
     }
 }
 
-/// A value in the Markdown and mrkdwn dialects, which share their code
-/// span and italic markers.
+/// A value with every ASCII punctuation character backslash-escaped.
+/// Discord's Markdown takes a backslash before any punctuation
+/// character as that character, so nothing in the value opens a span,
+/// a spoiler, a mention or a link, and the text shown is the value.
+fn discord_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if c.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A value in the Markdown dialect: a code span or italics.
 fn span(value: &str, code: bool, claim: bool) -> String {
     if code {
         format!("`{value}`")
@@ -381,12 +405,63 @@ mod tests {
     }
 
     #[test]
-    fn slack_mrkdwn_uses_single_asterisk_bold() {
-        let text = exec_card().render(CardStyle::SlackMrkdwn);
-        assert!(text.starts_with("*request:* agent default requests exec (tier2)\n"));
-        assert!(text.contains("\n*arguments:* `{\"command\":\"ls -la\"}`\n"));
-        assert!(text.ends_with("\n*model's claim (unverified):* _I'll list them._"));
-        assert!(!text.contains("**"));
+    fn discord_shows_a_value_with_backticks_as_the_value() {
+        let mut card = exec_card();
+        card.arguments = Some(r#"{"command":"echo `id` **x** ||y|| <@1>"}"#.into());
+        card.assistant_text = Some("just `ls`, _honest_".into());
+        let text = card.render(CardStyle::Discord);
+        // No code span can hold a backtick, so the value is escaped
+        // character by character and no backtick is unescaped.
+        assert!(
+            text.contains(
+                "\n**arguments:** \\{\\\"command\\\"\\:\\\"echo \\`id\\` \\*\\*x\\*\\* \\|\\|y\\|\\| \\<\\@1\\>\\\"\\}\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("\n**model's claim (unverified):** _just \\`ls\\`\\, \\_honest\\__"),
+            "{text}"
+        );
+        // Removing each escape pair gives back the value.
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("**arguments:** "))
+            .unwrap();
+        let shown = unescape(line.trim_start_matches("**arguments:** "));
+        assert_eq!(shown, r#"{"command":"echo `id` **x** ||y|| <@1>"}"#);
+    }
+
+    /// What Discord displays for an escaped value: each backslash and
+    /// the punctuation character after it as that character.
+    fn unescape(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                out.push(chars.next().expect("an escape is a pair"));
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn discord_keeps_a_value_without_backticks_in_a_code_span() {
+        let text = exec_card().render(CardStyle::Discord);
+        assert!(text.contains("\n**action key:** `shell:ls`\n"), "{text}");
+        assert!(
+            text.contains("\n**arguments:** `{\"command\":\"ls -la\"}`\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n**runs:** runs on this host as davi\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("\n**model's claim (unverified):** _I\\'ll list them\\._"),
+            "{text}"
+        );
     }
 
     #[test]

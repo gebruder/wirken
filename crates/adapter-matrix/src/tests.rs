@@ -891,3 +891,15 @@ fn the_approval_message_is_the_shared_card() {
     assert!(!text.contains("runs:"), "{text}");
     assert!(!text.contains("runtime:"), "{text}");
 }
+
+/// The approval prompt is sent as a plain body with no HTML form, so a
+/// client displays `<`, `>` and `&` in the arguments as written.
+#[test]
+fn the_approval_content_has_no_html_body() {
+    let prompt = "arguments: {\"command\":\"cat <in >out & echo `id`\"}";
+    let content = crate::adapter::approval_content(prompt);
+    assert_eq!(content["msgtype"], "m.text");
+    assert_eq!(content["body"], prompt);
+    assert!(content.get("format").is_none(), "{content}");
+    assert!(content.get("formatted_body").is_none(), "{content}");
+}

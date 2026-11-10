@@ -551,6 +551,14 @@ pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
     )
 }
 
+/// The `m.room.message` content of an approval prompt.
+pub(crate) fn approval_content(prompt: &str) -> serde_json::Value {
+    serde_json::json!({
+        "msgtype": "m.text",
+        "body": prompt,
+    })
+}
+
 async fn send_approval_request(
     http: &reqwest::Client,
     homeserver: &str,
@@ -568,12 +576,10 @@ async fn send_approval_request(
         urlencoded(&fields.target_room_id),
         txn_id
     );
-    let content = serde_json::json!({
-        "msgtype": "m.text",
-        "body": prompt,
-        "format": "org.matrix.custom.html",
-        "formatted_body": prompt,
-    });
+    // No `formatted_body`: a client displays a plain `body` as
+    // written, and an HTML one would read `<`, `>` and `&` in the
+    // arguments as markup.
+    let content = approval_content(&prompt);
 
     let resp = http
         .put(&url)

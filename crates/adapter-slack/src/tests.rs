@@ -992,13 +992,13 @@ fn the_approval_message_is_the_shared_card() {
     let text = crate::adapter::approval_text(&fields);
     assert_eq!(
         text,
-        "*request:* agent default requests exec (tier2)\n\
-         *action key:* `shell:ls`\n\
-         *arguments:* `{\"command\":\"ls ~\"}`\n\
-         *runs:* runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\
-         *runtime:* Docker default runtime (runc)\n\
-         *in reply to:* run ls ~\n\
-         *model's claim (unverified):* _Listing your home directory._"
+        "request: agent default requests exec (tier2)\n\
+         action key: shell:ls\n\
+         arguments: {\"command\":\"ls ~\"}\n\
+         runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\
+         runtime: Docker default runtime (runc)\n\
+         in reply to: run ls ~\n\
+         model's claim (unverified): Listing your home directory."
     );
 
     let reader = serialize_and_read(&build("", ""));

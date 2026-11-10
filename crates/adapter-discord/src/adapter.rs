@@ -421,7 +421,7 @@ enum FrameAction {
 /// The approval message body: the card every surface renders, in the
 /// Markdown Discord draws. The buttons under it carry the decision.
 pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
-    fields.card().render(CardStyle::Markdown)
+    fields.card().render(CardStyle::Discord)
 }
 
 /// The Approve / Deny button row for one card. `disabled` is the
