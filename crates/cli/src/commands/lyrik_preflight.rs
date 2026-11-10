@@ -235,6 +235,7 @@ mod tests {
                 arguments: r#"{"marker": "ok"}"#.into(),
             }],
             text: None,
+            reasoning: None,
         };
         assert_eq!(classify(Ok((resp, None))).unwrap(), ProbeOutcome::Pass);
     }
@@ -244,6 +245,7 @@ mod tests {
         let resp = LlmResponse::ToolCalls {
             calls: vec![],
             text: None,
+            reasoning: None,
         };
         let out = classify(Ok((resp, None))).unwrap();
         match out {
@@ -261,6 +263,7 @@ mod tests {
                 arguments: r#"{marker: "ok"#.into(),
             }],
             text: None,
+            reasoning: None,
         };
         let out = classify(Ok((resp, None))).unwrap();
         match out {

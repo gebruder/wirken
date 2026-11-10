@@ -278,6 +278,11 @@ pub enum LlmResponse {
     ToolCalls {
         calls: Vec<ToolCallRequest>,
         text: Option<String>,
+        /// The reasoning the provider returned with the message, where
+        /// it returns any. Recorded beside the calls and used for
+        /// nothing else: it is not sent back to the model and no gate
+        /// reads it.
+        reasoning: Option<String>,
     },
     /// Empty response (shouldn't happen but handle gracefully).
     Empty,
@@ -1399,7 +1404,14 @@ pub fn parse_ollama_response(
                 .and_then(|c| c.as_str())
                 .map(str::to_string)
                 .filter(|t| !t.is_empty());
-            return Ok((LlmResponse::ToolCalls { calls, text }, usage));
+            return Ok((
+                LlmResponse::ToolCalls {
+                    calls,
+                    text,
+                    reasoning: message_reasoning(message),
+                },
+                usage,
+            ));
         }
     }
 
@@ -1410,6 +1422,22 @@ pub fn parse_ollama_response(
     }
 
     Ok((LlmResponse::Empty, usage))
+}
+
+/// The reasoning an OpenAI-compatible or Ollama message carries beside
+/// its content. Providers name the field differently: `reasoning_content`,
+/// `reasoning`, and `thinking` on Ollama's own API.
+pub(crate) fn message_reasoning(message: &serde_json::Value) -> Option<String> {
+    ["reasoning_content", "reasoning", "thinking"]
+        .iter()
+        .filter_map(|key| message.get(key).and_then(|v| v.as_str()))
+        .find(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// Reasoning collected in parts, as one string, or `None` for none.
+pub(crate) fn joined_reasoning(parts: &[String]) -> Option<String> {
+    Some(parts.join("")).filter(|t| !t.is_empty())
 }
 
 pub(crate) fn message_to_json(msg: &Message) -> serde_json::Value {
@@ -1506,7 +1534,14 @@ pub fn parse_completion_response(
                 .and_then(|c| c.as_str())
                 .map(str::to_string)
                 .filter(|t| !t.is_empty());
-            return Ok((LlmResponse::ToolCalls { calls, text }, usage));
+            return Ok((
+                LlmResponse::ToolCalls {
+                    calls,
+                    text,
+                    reasoning: message_reasoning(message),
+                },
+                usage,
+            ));
         }
     }
 
@@ -1530,6 +1565,7 @@ pub fn parse_anthropic_response(
         .ok_or_else(|| AgentError::Llm("no content array in Anthropic response".into()))?;
 
     let mut text_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
     for block in content {
@@ -1541,6 +1577,13 @@ pub fn parse_anthropic_response(
                     && !text.is_empty()
                 {
                     text_parts.push(text.to_string());
+                }
+            }
+            "thinking" => {
+                if let Some(text) = block.get("thinking").and_then(|t| t.as_str())
+                    && !text.is_empty()
+                {
+                    reasoning_parts.push(text.to_string());
                 }
             }
             "tool_use" => {
@@ -1576,6 +1619,7 @@ pub fn parse_anthropic_response(
             LlmResponse::ToolCalls {
                 calls: tool_calls,
                 text,
+                reasoning: joined_reasoning(&reasoning_parts),
             },
             usage,
         ));
@@ -1602,13 +1646,20 @@ pub fn parse_gemini_response(
         .ok_or_else(|| AgentError::Llm("no candidates/content/parts in Gemini response".into()))?;
 
     let mut text_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
     for part in parts {
         if let Some(text) = part.get("text").and_then(|t| t.as_str())
             && !text.is_empty()
         {
-            text_parts.push(text.to_string());
+            // A part marked `thought` is the model's reasoning, not
+            // its reply.
+            if part.get("thought").and_then(|t| t.as_bool()) == Some(true) {
+                reasoning_parts.push(text.to_string());
+            } else {
+                text_parts.push(text.to_string());
+            }
         }
 
         if let Some(fc) = part.get("functionCall") {
@@ -1638,6 +1689,7 @@ pub fn parse_gemini_response(
             LlmResponse::ToolCalls {
                 calls: tool_calls,
                 text,
+                reasoning: joined_reasoning(&reasoning_parts),
             },
             usage,
         ));
@@ -1662,6 +1714,7 @@ pub fn parse_bedrock_response(
         .ok_or_else(|| AgentError::Llm("no output/message/content in Bedrock response".into()))?;
 
     let mut text_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
     let mut tool_calls = Vec::new();
 
     for block in content {
@@ -1669,6 +1722,14 @@ pub fn parse_bedrock_response(
             && !text.is_empty()
         {
             text_parts.push(text.to_string());
+        }
+
+        if let Some(text) = block
+            .pointer("/reasoningContent/reasoningText/text")
+            .and_then(|t| t.as_str())
+            && !text.is_empty()
+        {
+            reasoning_parts.push(text.to_string());
         }
 
         if let Some(tu) = block.get("toolUse") {
@@ -1701,6 +1762,7 @@ pub fn parse_bedrock_response(
             LlmResponse::ToolCalls {
                 calls: tool_calls,
                 text,
+                reasoning: joined_reasoning(&reasoning_parts),
             },
             usage,
         ));

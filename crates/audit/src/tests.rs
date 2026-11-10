@@ -1088,6 +1088,7 @@ mod session {
                     adapter_id: None,
                     sender_id: None,
                     text: None,
+                    reasoning: None,
                 },
             ),
             (
@@ -3301,6 +3302,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             adapter_id: None,
             sender_id: None,
             text: None,
+            reasoning: None,
         },
         SessionEvent::ToolResult {
             call_id: String::new(),

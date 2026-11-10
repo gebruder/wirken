@@ -38,7 +38,7 @@ the same detail, targeting the job id; the firing is not deferred.
 |--------|-----------------|--------------|
 | `user_message` | `adapter_id`, `sender_id`, `inbound_id` | Inbound that triggered a turn. `None` for subagent recursion. |
 | `assistant_message` | `agent_id` | Final assistant text for a turn. |
-| `assistant_tool_calls` | `agent_id`, `adapter_id`, `sender_id` | Model requested one or more tool calls. Adapter and sender carry the originating channel so a SIEM need not join to the sibling `UserMessage`. `text` is what the model said in the same message as the calls; absent when it said nothing. |
+| `assistant_tool_calls` | `agent_id`, `adapter_id`, `sender_id` | Model requested one or more tool calls. Adapter and sender carry the originating channel so a SIEM need not join to the sibling `UserMessage`. `text` is what the model said in the same message as the calls; absent when it said nothing. `reasoning` is the reasoning the provider returned with that message; absent when it returned none. |
 | `tool_result` | `agent_id`, `adapter_id`, `sender_id` | Result of a tool call. `sandbox` says where an `exec` ran; absent for every tool that runs in the gateway's own process. |
 | `llm_request` | `agent_id`, `credential_id`, `sender_id` | Pre-call row carrying `messages_hash`, `tools_hash` and `tools_hash_version` for replay, and `request_bytes`, the size of the messages and tool definitions those hashes cover. `purpose` is absent for a turn of the conversation and names any other call: `compaction_summary` when trimmed messages are summarised, `tool_call_probe` for the Lyrik preflight; `sessions verify` replays turns only. `credential_id` is the vault entry name, never the secret. `sender_id` is the platform-side human the call is on behalf of; `None` for CLI, cron and subagent sessions. |
 | `llm_response` | `agent_id`, `credential_id`, `sender_id` | Token usage, latency, and per-call cost. See [cost monitoring](cost-monitoring.md). |
@@ -94,6 +94,15 @@ Zirkel pipeline variants (`CandidateScored`, `CandidateLlmScored`,
 ### Fields added in 1.24.0
 
 One row each, verbatim from a run.
+
+`assistant_tool_calls.reasoning` is the provider's reasoning field for the
+same message (`reasoning_content` or `reasoning` on OpenAI-compatible
+APIs, `thinking` on Ollama and Anthropic, thought parts on Gemini,
+`reasoningContent` on Bedrock, the reasoning summary on the Responses
+API). It is recorded and nothing reads it: no gate decides on it and it
+is not on the approval card. A row with none has no `reasoning` key and
+is the row earlier builds wrote, so chains written before the field
+verify unchanged.
 
 `assistant_tool_calls.text` is the assistant's own content from the
 message that carried the calls. Providers send it alongside them; it used

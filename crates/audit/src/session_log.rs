@@ -715,6 +715,19 @@ pub enum SessionEvent {
         /// text records.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        /// The reasoning the provider returned with the same message,
+        /// where it returns any: a reasoning or thinking field beside
+        /// the calls, as distinct from `text`, the reply the model
+        /// addressed to the user. Kept so a turn whose reasoning says
+        /// one thing while its calls do another can be read back.
+        /// Nothing decides on it.
+        ///
+        /// Additive and defaulted, as `text` is: a row written before
+        /// this field reads back with `None`, and a row with no
+        /// reasoning serializes without the key, so it is byte for byte
+        /// the row an earlier build wrote.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
         #[serde(default)]
         agent_id: String,
         /// Adapter that delivered the inbound message that drove

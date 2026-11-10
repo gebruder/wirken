@@ -3297,12 +3297,21 @@ impl Agent {
                         denials,
                     });
                 }
-                LlmResponse::ToolCalls { calls, text } => {
+                LlmResponse::ToolCalls {
+                    calls,
+                    text,
+                    reasoning,
+                } => {
                     // Before anything records them: a call whose
                     // arguments carry a stored secret is recorded with
                     // the refusal in their place and does not run.
                     let (calls, refused) = self.refuse_leaked_arguments(calls).await;
                     let text = text.map(|t| self.withhold_leaked_reply(t).0);
+                    // The provider's reasoning for the same message,
+                    // recorded beside the calls and read by nothing.
+                    // Held to the same rule as the reply: reasoning
+                    // that carries a stored secret is withheld.
+                    let reasoning = reasoning.map(|r| self.withhold_leaked_reply(r).0);
                     // What the model said alongside the calls, held
                     // for the row below and for any gate the calls
                     // reach: an operator asked to approve one of
@@ -3321,6 +3330,7 @@ impl Agent {
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
                             text: text.clone(),
+                            reasoning,
                             agent_id: self.audited_agent_id(),
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
@@ -3681,8 +3691,13 @@ impl Agent {
                         denials,
                     });
                 }
-                LlmResponse::ToolCalls { calls, text } => {
+                LlmResponse::ToolCalls {
+                    calls,
+                    text,
+                    reasoning,
+                } => {
                     let (calls, refused) = self.refuse_leaked_arguments(calls).await;
+                    let reasoning = reasoning.map(|r| self.withhold_leaked_reply(r).0);
                     let text = match text {
                         Some(t) => {
                             let (t, withheld) = self.withhold_leaked_reply(t);
@@ -3700,6 +3715,7 @@ impl Agent {
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
                             text: text.clone(),
+                            reasoning,
                             agent_id: self.audited_agent_id(),
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),

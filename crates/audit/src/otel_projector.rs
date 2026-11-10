@@ -1403,6 +1403,7 @@ mod tests {
             adapter_id: None,
             sender_id: None,
             text: None,
+            reasoning: None,
         }
     }
 

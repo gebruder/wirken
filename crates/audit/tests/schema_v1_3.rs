@@ -97,12 +97,17 @@ fn pre_1_2_0_assistant_tool_calls_deserializes_with_empty_agent_id() {
         SessionEvent::AssistantToolCalls {
             calls,
             text,
+            reasoning,
             agent_id,
             adapter_id,
             sender_id,
         } => {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, "c1");
+            assert!(
+                reasoning.is_none(),
+                "a row written before the field carries no reasoning"
+            );
             assert_eq!(agent_id, "");
             assert!(adapter_id.is_none(), "pre-A1 rows have no adapter_id");
             assert!(sender_id.is_none(), "pre-A1 rows have no sender_id");
@@ -173,6 +178,7 @@ fn a1_assistant_tool_calls_emitted_with_webchat_identity() {
         adapter_id: Some("webchat".into()),
         sender_id: Some("webchat-user".into()),
         text: None,
+        reasoning: None,
     };
     let v = serde_json::to_value(&ev).unwrap();
     assert_eq!(
@@ -983,4 +989,52 @@ fn webhook_signature_changes_when_body_changes() {
     let sig_a = compute_webhook_signature(secret.as_bytes(), body_a);
     let sig_b = compute_webhook_signature(secret.as_bytes(), body_b);
     assert_ne!(sig_a, sig_b);
+}
+
+/// The `reasoning` field on `assistant_tool_calls` is additive. A row
+/// with none is byte for byte the row a build without the field wrote,
+/// so its leaf hash is unchanged; a row with one carries it under
+/// `reasoning` and reads back.
+#[test]
+fn assistant_tool_calls_reasoning_is_additive() {
+    let calls = || {
+        vec![wirken_audit::ToolCallRecord {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: r#"{"command":"ls"}"#.into(),
+        }]
+    };
+    let without = SessionEvent::AssistantToolCalls {
+        calls: calls(),
+        text: Some("Listing.".into()),
+        reasoning: None,
+        agent_id: "default".into(),
+        adapter_id: None,
+        sender_id: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&without).unwrap(),
+        r#"{"kind":"assistant_tool_calls","calls":[{"id":"c1","name":"exec","arguments":"{\"command\":\"ls\"}"}],"text":"Listing.","agent_id":"default"}"#,
+        "the bytes a build without the field wrote"
+    );
+
+    let with = SessionEvent::AssistantToolCalls {
+        calls: calls(),
+        text: None,
+        reasoning: Some("No tool calls are needed.".into()),
+        agent_id: "default".into(),
+        adapter_id: None,
+        sender_id: None,
+    };
+    let wire = serde_json::to_string(&with).unwrap();
+    assert_eq!(
+        wire,
+        r#"{"kind":"assistant_tool_calls","calls":[{"id":"c1","name":"exec","arguments":"{\"command\":\"ls\"}"}],"reasoning":"No tool calls are needed.","agent_id":"default"}"#
+    );
+    match serde_json::from_str::<SessionEvent>(&wire).unwrap() {
+        SessionEvent::AssistantToolCalls { reasoning, .. } => {
+            assert_eq!(reasoning.as_deref(), Some("No tool calls are needed."));
+        }
+        other => panic!("expected AssistantToolCalls, got {other:?}"),
+    }
 }

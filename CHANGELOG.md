@@ -40,6 +40,11 @@ tagged.
 
 ### Changed
 
+- `assistant_tool_calls` rows record the reasoning a provider returns with
+  the message, beside the calls, as an optional `reasoning` field. No gate
+  reads it. A row with none is unchanged, so existing chains verify as
+  before. **For wirken-siem:** `assistant_tool_calls` gains optional
+  `reasoning`.
 - When sandboxed `exec` egress asks the operator, the approval shows the
   request the sidecar read: the method and URL of a plain HTTP request, or
   the tunnel's target for `CONNECT`.

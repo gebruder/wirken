@@ -238,7 +238,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\"
         .await
         .expect("completes");
     match response {
-        LlmResponse::ToolCalls { calls, text } => {
+        LlmResponse::ToolCalls { calls, text, .. } => {
             assert_eq!(text.as_deref(), Some("Reading two files."));
             let got: Vec<(&str, &str, &str)> = calls
                 .iter()

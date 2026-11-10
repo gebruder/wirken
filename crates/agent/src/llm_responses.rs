@@ -538,6 +538,7 @@ impl LlmClient {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut full_text = String::new();
+        let mut reasoning = String::new();
         let mut calls: Vec<PartialCall> = Vec::new();
         let mut usage: Option<Usage> = None;
         let mut completed = false;
@@ -587,6 +588,11 @@ impl LlmClient {
                                     let _ =
                                         tx.send(StreamEvent::TextDelta(delta.to_string())).await;
                                 }
+                            }
+                        }
+                        "response.reasoning_summary_text.delta" => {
+                            if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
+                                reasoning.push_str(delta);
                             }
                         }
                         "response.output_item.added" | "response.output_item.done" => {
@@ -706,6 +712,7 @@ impl LlmClient {
             LlmResponse::ToolCalls {
                 calls,
                 text: Some(full_text.clone()).filter(|t| !t.is_empty()),
+                reasoning: Some(reasoning).filter(|t| !t.is_empty()),
             }
         } else if !full_text.is_empty() {
             LlmResponse::Text(full_text)

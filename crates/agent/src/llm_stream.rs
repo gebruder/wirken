@@ -150,6 +150,7 @@ impl LlmClient {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut full_text = String::new();
+        let mut reasoning = String::new();
         let mut tool_calls: Vec<PartialToolCall> = Vec::new();
         // `usage` stays `None` until the final pre-`[DONE]` chunk
         // emits a `usage` block. When the server doesn't honor
@@ -199,6 +200,9 @@ impl LlmClient {
                             .and_then(|a| a.first())
                             .and_then(|c| c.get("delta"))
                         {
+                            if let Some(thought) = crate::llm::message_reasoning(delta) {
+                                reasoning.push_str(&thought);
+                            }
                             if let Some(content) = delta.get("content").and_then(|c| c.as_str())
                                 && !content.is_empty()
                             {
@@ -256,6 +260,7 @@ impl LlmClient {
                 // Deltas already streamed to the caller; the same
                 // text is kept here so the row and the gate see it.
                 text: Some(full_text.clone()).filter(|t| !t.is_empty()),
+                reasoning: Some(reasoning).filter(|t| !t.is_empty()),
             }
         } else if !full_text.is_empty() {
             LlmResponse::Text(full_text)
@@ -407,6 +412,7 @@ impl LlmClient {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut text_parts = Vec::new();
+        let mut reasoning_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
         let mut current_tool_input = String::new();
         let mut current_tool_id = String::new();
@@ -522,6 +528,10 @@ impl LlmClient {
                             {
                                 text_parts.push(text.to_string());
                                 let _ = tx.send(StreamEvent::TextDelta(text.to_string())).await;
+                            } else if dt == "thinking_delta"
+                                && let Some(text) = delta.get("thinking").and_then(|t| t.as_str())
+                            {
+                                reasoning_parts.push(text.to_string());
                             } else if dt == "input_json_delta"
                                 && let Some(partial) =
                                     delta.get("partial_json").and_then(|p| p.as_str())
@@ -548,6 +558,7 @@ impl LlmClient {
             LlmResponse::ToolCalls {
                 calls: tool_calls,
                 text: Some(text_parts.join("")).filter(|t| !t.is_empty()),
+                reasoning: crate::llm::joined_reasoning(&reasoning_parts),
             }
         } else if !text_parts.is_empty() {
             LlmResponse::Text(text_parts.join(""))

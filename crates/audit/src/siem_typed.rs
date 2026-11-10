@@ -775,6 +775,7 @@ mod tests {
             adapter_id: Some("slack".into()),
             sender_id: Some("U123".into()),
             text: None,
+            reasoning: None,
         }
     }
 
