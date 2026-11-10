@@ -331,9 +331,9 @@ pub struct ContainerPlan {
     pub pids: i64,
     pub nano_cpus: i64,
     pub runtime: Option<String>,
-    /// The seccomp profile the server runs under: the one `exec`
-    /// containers get, or the runtime's default on Podman, whose API
-    /// takes a profile as a path and not as JSON.
+    /// The seccomp profile the server runs under, the one `exec`
+    /// containers get, handed over the way the runtime takes it: as
+    /// JSON to Docker, as a file's path to Podman.
     pub seccomp: wirken_sandbox::seccomp::Seccomp,
     pub labels: HashMap<String, String>,
     /// Host directory to create before the container starts.
@@ -504,11 +504,8 @@ impl ContainerPlan {
             pids,
             nano_cpus,
             runtime: host.runtime.clone(),
-            seccomp: if host.facts.is_some_and(|f| f.podman) {
-                wirken_sandbox::seccomp::Seccomp::RuntimeDefault
-            } else {
-                wirken_sandbox::seccomp::Seccomp::Profile
-            },
+            seccomp: wirken_sandbox::seccomp::for_runtime(host.facts.is_some_and(|f| f.podman))
+                .map_err(PlanError::Unavailable)?,
             labels,
             scratch_dir,
         })
@@ -608,7 +605,7 @@ impl ContainerPlan {
                     pids: self.pids,
                     nano_cpus: Some(self.nano_cpus),
                     runtime: self.runtime.clone(),
-                    seccomp: self.seccomp,
+                    seccomp: self.seccomp.clone(),
                 },
             )),
             ..Default::default()
@@ -1467,8 +1464,9 @@ mod tests {
         }
     }
 
-    /// A server runs under the exec seccomp profile, and on Podman
-    /// under the runtime's default.
+    /// A server runs under the exec seccomp profile on either runtime:
+    /// sent as JSON to Docker, and as the path of a file holding it to
+    /// Podman.
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn the_seccomp_profile_follows_the_runtime() {
@@ -1484,9 +1482,21 @@ mod tests {
             ..Default::default()
         });
         let on_podman = plan(&host, &block(&dirs)).unwrap();
-        assert_eq!(on_podman.seccomp, Seccomp::RuntimeDefault);
+        let Seccomp::ProfileAt(path) = &on_podman.seccomp else {
+            panic!("Podman is given a path: {:?}", on_podman.seccomp);
+        };
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            wirken_sandbox::seccomp::PROFILE
+        );
         let body = on_podman.create_body(&HashMap::new(), None);
-        assert!(!wirken_sandbox::seccomp::is_set(&body.host_config.unwrap()));
+        assert!(
+            body.host_config
+                .unwrap()
+                .security_opt
+                .unwrap()
+                .contains(&format!("seccomp={}", path.display()))
+        );
     }
 
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]

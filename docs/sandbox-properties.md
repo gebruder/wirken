@@ -221,8 +221,14 @@ The profile blocks, among others:
 `crates/agent/src/tests.rs` runs `unshare -Urm` and `mount` through `exec`
 against a live daemon and expects both refused.
 
-One case runs under the runtime's own default profile instead. Podman's API
-takes a profile as a path and not as JSON, so an `exec` or MCP server container there names none.
+Docker's API takes the profile as JSON. Podman's takes a path and reads the
+file itself, so on Podman the profile is written to
+`<tmp>/wirken-seccomp-<uid>/seccomp.json`, in a directory only the operator
+can enter, and the container names that path. A directory already at that
+place that the operator does not own, or that others can enter, is not used,
+and the `exec` or the server is refused. Both runtimes run the container
+under the same profile. The Podman path is not exercised by a test against
+a live Podman.
 
 ## gVisor delta (`SandboxMode::GVisor`)
 

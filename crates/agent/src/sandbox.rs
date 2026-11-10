@@ -462,10 +462,10 @@ pub async fn sweep_leftovers(docker: &Docker, instance: &str) -> usize {
 pub struct DockerSandbox {
     client: Docker,
     config: SandboxConfig,
-    /// Whether the runtime is Podman, asked once. Its API takes a
-    /// seccomp profile as a path, not as JSON, so an `exec` there runs
-    /// under the runtime's default profile.
-    podman: tokio::sync::OnceCell<bool>,
+    /// How the exec seccomp profile is handed to this runtime, decided
+    /// once: as JSON to Docker, as the path of a file holding it to
+    /// Podman, whose API reads a path.
+    seccomp: tokio::sync::OnceCell<Result<wirken_sandbox::seccomp::Seccomp, String>>,
 }
 
 impl DockerSandbox {
@@ -476,22 +476,26 @@ impl DockerSandbox {
         Ok(Self {
             client,
             config,
-            podman: tokio::sync::OnceCell::new(),
+            seccomp: tokio::sync::OnceCell::new(),
         })
     }
 
-    /// Whether the runtime behind the socket is Podman. A runtime that
-    /// cannot be asked is taken as Docker: the profile is then sent,
-    /// and a runtime that cannot take it refuses the container.
-    async fn is_podman(&self) -> bool {
-        *self
-            .podman
+    /// The seccomp choice for the runtime behind the socket. A
+    /// runtime that cannot be asked is taken as Docker: the profile is
+    /// then sent as JSON, and a runtime that cannot take it refuses
+    /// the container. An `Err` is a profile file that could not be
+    /// written for Podman; the exec is refused on it.
+    async fn seccomp(&self) -> Result<wirken_sandbox::seccomp::Seccomp, AgentError> {
+        self.seccomp
             .get_or_init(|| async {
-                wirken_sandbox::RuntimeFacts::probe(&self.client)
+                let podman = wirken_sandbox::RuntimeFacts::probe(&self.client)
                     .await
-                    .is_ok_and(|f| f.podman)
+                    .is_ok_and(|f| f.podman);
+                wirken_sandbox::seccomp::for_runtime(podman)
             })
             .await
+            .clone()
+            .map_err(AgentError::Sandbox)
     }
 
     /// Execute a command inside an ephemeral container.
@@ -563,10 +567,10 @@ impl DockerSandbox {
         #[cfg(not(unix))]
         let env: Option<Vec<String>> = None;
 
-        let mut host_config = build_host_config(&self.config, &workspace_str, decision);
-        if self.is_podman().await {
-            wirken_sandbox::seccomp::use_runtime_default(&mut host_config);
-        }
+        // The same profile on either runtime, handed over the way that
+        // runtime takes it. Decided before anything is provisioned, so
+        // a refusal here leaves nothing behind.
+        let seccomp = self.seccomp().await?;
 
         let container_config = ContainerCreateBody {
             image: Some(self.config.image.clone()),
@@ -574,7 +578,11 @@ impl DockerSandbox {
             working_dir: Some("/workspace".into()),
             user: Some("1000:1000".into()),
             env,
-            host_config: Some(host_config),
+            host_config: Some({
+                let mut host = build_host_config(&self.config, &workspace_str, decision);
+                wirken_sandbox::seccomp::apply(&mut host, &seccomp);
+                host
+            }),
             labels: Some(exec_labels(&self.config.instance)),
             ..Default::default()
         };
