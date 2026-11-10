@@ -167,7 +167,7 @@ Sandboxed `exec` has its own egress axis, configured per channel on the agent's 
 | --- | --- | --- |
 | `none` | `--network none` | Nothing. No proxy is started. |
 | `allowlist` | Internal network, proxy only | Domains matching the channel's `domains` list. |
-| `open` | Internal network, proxy only | Any domain, still subject to the port and address rules below. |
+| `open` | Internal network, proxy only | Any domain, still subject to the port and address rules below, and to [what the session has read](#after-a-restricting-read): an `exec` run by an agent turn is refused every request. |
 
 `none` is the default and the posture every unresolved case lands on: a channel with no entry, a turn with no channel (cron, CLI `ask`), an unrecognized mode string, and a stored policy blob that no longer parses. `open` is reachable only by writing it explicitly.
 
@@ -248,7 +248,7 @@ Verified on rootful Docker, on a host with a default-deny inbound firewall. If t
 
 ### After a restricting read
 
-A request that clears the channel policy is then conditioned on what the session has read, by the same labels as `http_request` above. Under `allowlist` the operator is asked at Tier 3 (`NetworkRequest`, keyed by host), and with no operator reachable the request is refused; under `open` it is refused. The ask shows what the sidecar could read of the request: for plain HTTP the method and the URL with its path, for `CONNECT` the target and a note that the method and path inside the tunnel are not visible. A request line too long for the approval card is refused without asking. No rule reads the method or the path.
+A request that clears the channel policy is then conditioned on what the session has read, by the same labels as `http_request` above. Under `allowlist` the operator is asked at Tier 3 (`NetworkRequest`, keyed by host), and with no operator reachable the request is refused; under `open` it is refused. Running an `exec` is itself recorded as a read of `exec_output` before the command is dispatched, so every request an agent turn's `exec` makes meets this stage: each one is asked under `allowlist` and refused under `open`, and the `runs:` line of an `exec` approval under `open` says `no network: open egress is refused once a session has read exec output`. The ask shows what the sidecar could read of the request: for plain HTTP the method and the URL with its path, for `CONNECT` the target and a note that the method and path inside the tunnel are not visible. A request line too long for the approval card is refused without asking. No rule reads the method or the path.
 
 ### Audit
 

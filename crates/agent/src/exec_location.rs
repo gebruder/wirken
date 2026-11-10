@@ -10,12 +10,25 @@
 //! The network part follows the decision the sandbox makes at run
 //! time (`sandbox::egress_decision`): a channel policy, when there is
 //! one, decides; without one the legacy `network` flag does.
+//!
+//! It says what the command will reach, not which mode is configured.
+//! An `exec` is recorded as a read of `exec_output` before it is
+//! dispatched, so every request it makes meets the egress proxy's
+//! confidentiality stage (`sandbox_egress::decide_with_sensitivity`),
+//! and under `open` that stage refuses. The line for `open` says so.
 
 use wirken_audit::{ExecLocation, SandboxModeLabel};
 
 use crate::sandbox::{SandboxConfig, SandboxMode};
 use crate::sandbox_egress::{SandboxEgressMode, SandboxEgressPolicy};
 use crate::skill_perms::AllowSet;
+
+/// The network part of the line under egress mode `open`: the mode
+/// names no host an operator could be asked about, so the proxy
+/// refuses every request from a session that has read exec output,
+/// which a session running this command has.
+pub const OPEN_REACHES_NOTHING: &str =
+    "no network: open egress is refused once a session has read exec output";
 
 /// Hosts named before the list is cut, so a long allowlist does not
 /// push the rest of the prompt off the screen.
@@ -58,7 +71,8 @@ fn network(config: &SandboxConfig, egress: Option<&SandboxEgressPolicy>) -> Stri
     };
     match (policy.mode, &policy.domains) {
         (SandboxEgressMode::None, _) => "no network".to_string(),
-        (SandboxEgressMode::Open, _) | (SandboxEgressMode::Allowlist, AllowSet::Wildcard) => {
+        (SandboxEgressMode::Open, _) => OPEN_REACHES_NOTHING.to_string(),
+        (SandboxEgressMode::Allowlist, AllowSet::Wildcard) => {
             "network to any public host through the egress proxy".to_string()
         }
         (SandboxEgressMode::Allowlist, AllowSet::Set(hosts)) if hosts.is_empty() => {
@@ -226,20 +240,35 @@ mod tests {
     }
 
     #[test]
-    fn open_and_wildcard_reach_any_public_host() {
+    fn a_wildcard_allowlist_reaches_any_public_host() {
+        let wildcard = SandboxEgressPolicy::allowlist(AllowSet::Wildcard);
+        let loc = describe(
+            &config(SandboxMode::ExecOnly, false),
+            Some(&wildcard),
+            "davi",
+        );
+        assert!(
+            loc.text
+                .ends_with(", network to any public host through the egress proxy)"),
+            "{}",
+            loc.text
+        );
+    }
+
+    /// The line says what an exec under `open` reaches, which is
+    /// nothing. That it is nothing is asserted against the proxy's
+    /// decision in `tests::open_egress_from_an_exec_is_refused`.
+    #[test]
+    fn open_says_it_reaches_nothing() {
         let open = SandboxEgressPolicy {
             mode: SandboxEgressMode::Open,
             domains: AllowSet::Set(BTreeSet::new()),
         };
-        let wildcard = SandboxEgressPolicy::allowlist(AllowSet::Wildcard);
-        for policy in [open, wildcard] {
-            let loc = describe(&config(SandboxMode::ExecOnly, false), Some(&policy), "davi");
-            assert!(
-                loc.text
-                    .ends_with(", network to any public host through the egress proxy)"),
-                "{}",
-                loc.text
-            );
-        }
+        let loc = describe(&config(SandboxMode::ExecOnly, false), Some(&open), "davi");
+        assert_eq!(
+            loc.text,
+            "runs in sandbox container (exec_only, read-only root, workspace at /workspace, \
+             no network: open egress is refused once a session has read exec output)"
+        );
     }
 }

@@ -17097,3 +17097,87 @@ mod reasoning_beside_tool_calls {
         assert!(verified);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The approval card under egress mode `open` says the exec reaches
+// nothing. This is the decision that makes it true: a turn that runs
+// `exec` has read exec output by the time the command is dispatched, and
+// under `open` the proxy refuses a session that has, without asking.
+// ---------------------------------------------------------------------------
+#[cfg(unix)]
+#[tokio::test]
+async fn open_egress_from_an_exec_is_refused() {
+    use std::sync::{Arc, Mutex};
+
+    use wirken_sandbox::egress::{EgressDecider, RequestKind, RequestSeen};
+
+    use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
+    use crate::error::PermissionDenialContext;
+    use crate::sandbox_egress::{
+        SandboxEgressAttribution, SandboxEgressContext, SandboxEgressPolicy,
+    };
+
+    #[derive(Default)]
+    struct Asked(Mutex<usize>);
+
+    #[async_trait::async_trait]
+    impl ApprovalGate for Asked {
+        async fn request_approval(&self, _ctx: &PermissionDenialContext) -> ApprovalOutcome {
+            *self.0.lock().unwrap() += 1;
+            ApprovalOutcome::Approved { actor: None }
+        }
+
+        fn source(&self) -> wirken_audit::ApprovalSource {
+            wirken_audit::ApprovalSource::Stdin
+        }
+    }
+
+    // What the runtime records at the gate for an `exec` call, before
+    // it dispatches the command.
+    let label = crate::tool::tool_to_read_sensitivity("exec", &serde_json::json!({}))
+        .expect("an exec is a read");
+    assert!(label.restricts_egress());
+    let observed: crate::sandbox_egress::ObservedSensitivity = Default::default();
+    observed.write().unwrap().insert(label);
+
+    let gate = Arc::new(Asked::default());
+    let ctx = SandboxEgressContext {
+        policy: SandboxEgressPolicy::from_config("open", &[]),
+        attribution: SandboxEgressAttribution::default(),
+        audit: None,
+        observed,
+        approval: Some(gate.clone()),
+    };
+    for (port, kind, method) in [
+        (80, RequestKind::Plain, "GET"),
+        (443, RequestKind::Connect, "CONNECT"),
+    ] {
+        let verdict = ctx
+            .decide(
+                "anything.example.com",
+                port,
+                kind,
+                RequestSeen { method, path: "" },
+            )
+            .await;
+        assert!(!verdict.allowed, "{verdict:?}");
+        assert_eq!(
+            verdict.reason,
+            Some(wirken_audit::SandboxEgressDenyReason::SensitivityRefused)
+        );
+    }
+    assert_eq!(*gate.0.lock().unwrap(), 0, "the operator is not asked");
+    // And the card says so.
+    let location = crate::exec_location::describe(
+        &crate::sandbox::SandboxConfig::default(),
+        Some(&ctx.policy),
+        "operator",
+    );
+    assert!(
+        location
+            .text
+            .contains(crate::exec_location::OPEN_REACHES_NOTHING),
+        "{}",
+        location.text
+    );
+}
