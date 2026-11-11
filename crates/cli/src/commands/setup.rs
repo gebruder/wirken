@@ -353,7 +353,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     // --- Step 5: Sandbox mode ---
     //
     // Default is exec-only (0.7.5). If `runsc` is registered as a
-    // Docker runtime, offer the stricter gvisor mode. If the operator
+    // Docker runtime, offer the gvisor mode. If the operator
     // is setting up via --org and the org config already wrote
     // sandbox.json, don't prompt; org policy wins.
     println!();
@@ -365,7 +365,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         let accept_upgrade = runsc_detected
             && Confirm::new()
                 .with_prompt(
-                    "  gVisor (runsc) detected. Use stricter gvisor sandbox instead of exec-only?",
+                    "  gVisor (runsc) detected. Run exec under gVisor instead of Docker's default runtime?",
                 )
                 .default(true)
                 .interact()?;
@@ -376,13 +376,12 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             serde_json::to_string_pretty(&body)?.as_bytes(),
         )
         .context("Failed to write sandbox.json")?;
-        // Qualify the value so a security-relevant default does not
-        // go silent. `gvisor` is the stronger option; `exec-only`
-        // (the default when runsc is absent) needs the user to know
-        // they are not on the syscall-filtered path.
+        // Say what each mode puts under the command, so the choice
+        // is not silent: the seccomp profile is enforced under
+        // `exec-only` and not applied to the workload under `gvisor`.
         let qualifier = match mode {
-            "gvisor" => " (syscall-filtered)",
-            "exec-only" => " (install gVisor for syscall filtering)",
+            "gvisor" => " (syscalls served by gVisor's kernel; the seccomp profile is not applied)",
+            "exec-only" => " (host kernel, under the seccomp profile)",
             other => {
                 // Silent fallthrough would hide a degraded UX when a
                 // future mode is wired into the picker before the
