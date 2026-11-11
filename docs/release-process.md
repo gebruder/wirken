@@ -24,8 +24,9 @@ ssh-keygen -lf "$REPO"/KEYS   # must match the fingerprint in SECURITY.md
 
 Semver on `X.Y.Z`, currently in the `3.x` series. Patch for bug fixes and
 docs; minor for features and new adapters; major for a change to the CLI, the
-on-disk audit format or configuration that requires operator action, and never
-for a crate API change alone. Every workspace crate shares
+on-disk audit format or valid configuration that requires operator action, and
+never for a crate API change alone. Refusing a configuration value that was
+never valid is not a major. Every workspace crate shares
 `workspace.package.version`; the git tag is `v<version>`.
 
 The stability surface is the CLI outside `wirken lyrik` and the on-disk audit

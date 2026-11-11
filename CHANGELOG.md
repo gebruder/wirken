@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-11-11
+
 ### Security
 
 - `http_request` resolves its host itself, refuses a listed name whose
@@ -96,6 +98,10 @@ tagged.
 - zip 9.5.0, flate2 1.1.11, openssl 0.10.82 with openssl-sys 0.9.118, toml
   1.2.1, uuid 1.29.1 and serde-saphyr 2.1.1 in the lockfile, from #311.
 - rustix 1.1.6 in the lockfile, for RUSTSEC-2026-0486.
+- Deferred: Dependabot alerts #26, #27 and #28, on rustls 0.22.4, which
+  only the Discord adapter reaches, through serenity. The move off rustls
+  0.22 is held until the migrated adapter passes a live round-trip against
+  Discord; `deny.toml` records the reachability.
 
 ## [3.2.1] - 2026-11-03
 
