@@ -116,6 +116,47 @@ jobs:
           key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo test --workspace
 
+  gvisor:
+    name: Sandbox under runsc
+    runs-on: ubuntu-latest
+    env:
+      GVISOR_RELEASE: release-20261102.0
+      GVISOR_SHA256: 6f6b1a8f0f4665a403238135167d0d990bfaeaff5544abf68f5e0d822b35484a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
+      - name: Install Cap'n Proto
+        run: sudo apt-get install -y capnproto
+      - name: Install runsc and register it with Docker
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gvisor.tar.bz2" \
+            "https://github.com/google/gvisor/releases/download/${GVISOR_RELEASE}/gvisor-x86_64.tar.bz2"
+          echo "${GVISOR_SHA256}  $RUNNER_TEMP/gvisor.tar.bz2" | sha256sum -c -
+          sudo mkdir -p /opt/gvisor
+          sudo tar -xjf "$RUNNER_TEMP/gvisor.tar.bz2" -C /opt/gvisor
+          sudo /opt/gvisor/runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'
+          /opt/gvisor/runsc --version
+      - name: Pull the sandbox image
+        run: docker pull debian:bookworm-slim
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-gvisor-${{ hashFiles('**/Cargo.lock') }}
+      - name: Sandbox tests that run under runsc
+        env:
+          WIRKEN_TEST_REQUIRE_RUNSC: "1"
+        run: |
+          cargo test -p wirken-agent gvisor -- --nocapture 2>&1 | tee "$RUNNER_TEMP/gvisor.log"
+          grep -q 'a_gvisor_exec_records_gvisor \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
+          grep -q 'a_gvisor_exec_runs_on_the_runsc_kernel \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
+          ! grep -q '^skipping:' "$RUNNER_TEMP/gvisor.log"
+
   corpus:
     name: Hostile corpus
     runs-on: ubuntu-latest

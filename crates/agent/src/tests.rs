@@ -13023,24 +13023,70 @@ async fn a_docker_exec_records_docker_and_its_container() {
     );
 }
 
+/// Set to `1` where runsc is required: a test that needs it then fails
+/// on a host without it instead of skipping.
+const REQUIRE_RUNSC_ENV: &str = "WIRKEN_TEST_REQUIRE_RUNSC";
+
+/// Whether this host can run a `gvisor` exec. Where it cannot, the test
+/// skips, or fails when `WIRKEN_TEST_REQUIRE_RUNSC=1`.
+async fn gvisor_host_ready() -> bool {
+    use crate::sandbox::{detect_gvisor, detect_image, detect_runtime};
+
+    let missing = if detect_runtime().await.is_none() {
+        "Docker is not available on this host"
+    } else if !detect_gvisor().await {
+        "runsc is not registered as a Docker runtime on this host"
+    } else if !detect_image("debian:bookworm-slim").await {
+        "debian:bookworm-slim is not pulled on this host"
+    } else {
+        return true;
+    };
+    assert!(
+        std::env::var(REQUIRE_RUNSC_ENV).as_deref() != Ok("1"),
+        "{REQUIRE_RUNSC_ENV}=1 and {missing}"
+    );
+    eprintln!("skipping: {missing}");
+    false
+}
+
+/// A `gvisor` exec runs on the runsc kernel, not the host's: the kernel
+/// log the command reads is the one runsc starts with, and an ordinary
+/// command still runs.
+#[tokio::test]
+async fn a_gvisor_exec_runs_on_the_runsc_kernel() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode};
+
+    if !gvisor_host_ready().await {
+        return;
+    }
+    let sandbox = DockerSandbox::new(SandboxConfig {
+        mode: SandboxMode::GVisor,
+        ..Default::default()
+    })
+    .expect("sandbox");
+    let tmp = TempDir::new().unwrap();
+    let result = sandbox
+        .exec(
+            "dmesg 2>&1 | head -1; (sleep 0 & wait) && ls / >/dev/null && echo ordinary=ok",
+            tmp.path(),
+            None,
+        )
+        .await
+        .expect("exec runs under runsc");
+    let out = &result.output;
+    assert!(out.contains("Starting gVisor"), "{out}");
+    assert!(out.contains("ordinary=ok"), "{out}");
+}
+
 /// gVisor is a second container runtime, not a second mode of the
 /// first: the row separates `runtime` from `mode` so the two can be
 /// told apart.
 #[tokio::test]
 async fn a_gvisor_exec_records_gvisor() {
-    use crate::sandbox::{SandboxConfig, SandboxMode, detect_gvisor, detect_image, detect_runtime};
+    use crate::sandbox::{SandboxConfig, SandboxMode};
     use crate::tool::{ToolConfig, ToolRegistry};
 
-    if detect_runtime().await.is_none() {
-        eprintln!("skipping: Docker is not available on this host");
-        return;
-    }
-    if !detect_gvisor().await {
-        eprintln!("skipping: runsc is not registered as a Docker runtime on this host");
-        return;
-    }
-    if !detect_image("debian:bookworm-slim").await {
-        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+    if !gvisor_host_ready().await {
         return;
     }
 
