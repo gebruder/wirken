@@ -194,41 +194,26 @@ fn skills_from_dir(dir: &std::path::Path) -> anyhow::Result<Vec<wirken_agent::sk
     }
 }
 
-pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
-    SandboxConfig {
+/// The sandbox settings in `data_dir`'s `sandbox.json`. A missing file
+/// is the default settings. A file that cannot be read or parsed, or
+/// whose `mode` names none of the modes, is an error naming the file
+/// and the value: the command stops there, since which sandbox the
+/// operator asked for cannot be told and is not taken to be the default.
+pub fn load_sandbox_config(data_dir: &Path) -> anyhow::Result<SandboxConfig> {
+    Ok(SandboxConfig {
         instance: wirken_mcp_proxy::container::instance_id(data_dir),
-        ..sandbox_json_config(data_dir)
-    }
+        ..sandbox_json_config(data_dir).map_err(anyhow::Error::msg)?
+    })
 }
 
-fn sandbox_json_config(data_dir: &Path) -> SandboxConfig {
+fn sandbox_json_config(data_dir: &Path) -> Result<SandboxConfig, String> {
     let path = data_dir.join("sandbox.json");
-    if !path.exists() {
-        return SandboxConfig::default();
-    }
-    let body = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                "Could not read {}: {e}. Using default sandbox config.",
-                path.display()
-            );
-            return SandboxConfig::default();
-        }
+    let Some(val) = wirken_agent::sandbox::read_sandbox_json(data_dir)? else {
+        return Ok(SandboxConfig::default());
     };
-    let val: serde_json::Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                "Could not parse {}: {e}. Using default sandbox config.",
-                path.display()
-            );
-            return SandboxConfig::default();
-        }
-    };
-    // Warn, never refuse: a file written for a newer build must not
-    // stop an older one from starting, and the message names the key
-    // rather than failing the boot with a parse error.
+    // An unknown key warns and is ignored: a file written for a newer
+    // build must not stop an older one from starting. The mode is not
+    // such a key; a value it cannot place is refused above.
     let unknown = unknown_sandbox_keys(&val);
     if !unknown.is_empty() {
         tracing::warn!(
@@ -236,12 +221,8 @@ fn sandbox_json_config(data_dir: &Path) -> SandboxConfig {
             path.display()
         );
     }
-    let mode_str = val.get("mode").and_then(|v| v.as_str()).unwrap_or("");
-    let mode = if mode_str.is_empty() {
-        SandboxMode::default()
-    } else {
-        SandboxMode::from_str_config(mode_str)
-    };
+    let mode =
+        SandboxMode::from_sandbox_json(&val).map_err(|e| format!("{}: {e}", path.display()))?;
     let network = val
         .get("network")
         .and_then(|v| v.as_bool())
@@ -271,14 +252,14 @@ fn sandbox_json_config(data_dir: &Path) -> SandboxConfig {
     } else {
         ShellMode::from_str_config(shell_str)
     };
-    SandboxConfig {
+    Ok(SandboxConfig {
         mode,
         network,
         shell,
         sidecar_binary,
         image,
         ..Default::default()
-    }
+    })
 }
 
 /// Every key `open_permission_store` reads from `permissions.json`,
@@ -305,9 +286,9 @@ pub(crate) fn unknown_permission_keys(val: &serde_json::Value) -> Vec<String> {
 /// Absent file, unreadable file, unparseable file, or absent key all
 /// mean [`DEFAULT_GRANT_EXPIRY_DAYS`].
 ///
-/// Warn, never refuse, matching `load_sandbox_config`: a config
-/// written for a newer build must not stop an older one from
-/// starting.
+/// Warn, never refuse, as `load_sandbox_config` does for a key it
+/// does not read: a config written for a newer build must not stop an
+/// older one from starting.
 pub fn load_permission_expiry_days(data_dir: &Path) -> u32 {
     let path = data_dir.join("permissions.json");
     if !path.exists() {
@@ -1209,7 +1190,7 @@ mod tests {
     #[test]
     fn load_sandbox_config_missing_file_uses_default() {
         let tmp = TempDir::new().unwrap();
-        let cfg = load_sandbox_config(tmp.path());
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
         assert_eq!(cfg.mode, SandboxMode::default());
     }
 
@@ -1270,7 +1251,7 @@ mod tests {
             r#"{"mode":"exec-only","network":false}"#,
         )
         .unwrap();
-        let cfg = load_sandbox_config(tmp.path());
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
         assert_eq!(cfg.mode, SandboxMode::ExecOnly);
         assert!(!cfg.network);
     }
@@ -1286,7 +1267,7 @@ mod tests {
             r#"{"mode":"exec-only","image":"curlimages/curl:latest"}"#,
         )
         .unwrap();
-        let cfg = load_sandbox_config(tmp.path());
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
         assert_eq!(cfg.image, "curlimages/curl:latest");
     }
 
@@ -1296,7 +1277,7 @@ mod tests {
     fn load_sandbox_config_empty_image_uses_default() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("sandbox.json"), r#"{"image":"  "}"#).unwrap();
-        let cfg = load_sandbox_config(tmp.path());
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
         assert_eq!(cfg.image, SandboxConfig::default().image);
     }
 
@@ -1360,7 +1341,7 @@ mod tests {
         .unwrap();
 
         // Direction one: the loader reads every listed key.
-        let cfg = load_sandbox_config(tmp.path());
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
         let default = SandboxConfig::default();
         assert_eq!(cfg.mode, SandboxMode::GVisor, "mode is not read");
         assert_eq!(
@@ -1395,7 +1376,7 @@ mod tests {
     fn load_sandbox_config_reads_gvisor() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"gvisor"}"#).unwrap();
-        let cfg = load_sandbox_config(tmp.path());
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
         assert_eq!(cfg.mode, SandboxMode::GVisor);
     }
 
@@ -1403,24 +1384,57 @@ mod tests {
     fn load_sandbox_config_reads_off() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"off"}"#).unwrap();
-        let cfg = load_sandbox_config(tmp.path());
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
         assert_eq!(cfg.mode, SandboxMode::Off);
     }
 
+    /// A mode that names none of the modes stops the load with the
+    /// value in the error. It is not read as the default.
     #[test]
-    fn load_sandbox_config_unknown_mode_uses_default() {
+    fn load_sandbox_config_refuses_an_unknown_mode_and_names_it() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"chrooty"}"#).unwrap();
-        let cfg = load_sandbox_config(tmp.path());
-        assert_eq!(cfg.mode, SandboxMode::default());
+        for (body, named) in [
+            (r#"{"mode":"chrooty"}"#, "\"chrooty\""),
+            (r#"{"mode":"gvisr"}"#, "\"gvisr\""),
+            (r#"{"mode":""}"#, "\"\""),
+            (r#"{"mode":7}"#, "7"),
+        ] {
+            std::fs::write(tmp.path().join("sandbox.json"), body).unwrap();
+            let err = load_sandbox_config(tmp.path()).expect_err(body).to_string();
+            assert!(
+                err.contains("sandbox.json")
+                    && err.contains("unknown sandbox mode")
+                    && err.contains(named),
+                "{body}: {err}"
+            );
+        }
     }
 
+    /// A file that cannot be parsed states no mode that can be read,
+    /// and is refused the same way.
     #[test]
-    fn load_sandbox_config_malformed_json_uses_default() {
+    fn load_sandbox_config_refuses_a_file_it_cannot_parse() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("sandbox.json"), "not json").unwrap();
-        let cfg = load_sandbox_config(tmp.path());
+        let err = load_sandbox_config(tmp.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("sandbox.json") && err.contains("could not parse"),
+            "{err}"
+        );
+    }
+
+    /// A file that sets other keys and no mode keeps the default mode.
+    #[test]
+    fn load_sandbox_config_without_a_mode_key_keeps_the_default() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("sandbox.json"),
+            r#"{"image":"example.invalid/sandbox:test"}"#,
+        )
+        .unwrap();
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
         assert_eq!(cfg.mode, SandboxMode::default());
+        assert_eq!(cfg.image, "example.invalid/sandbox:test");
     }
 }
 

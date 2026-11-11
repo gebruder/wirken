@@ -27,7 +27,7 @@ moves every process at once.
 | `imported.db` | Imported assistant archives | `wirken import` |
 | `lyrik.json` | Lyrik settings. Key read: `walks_dir`, the walks directory for targets that do not set their own (default `lyrik/walks/`); see [lyrik.md](lyrik.md#lyrikconfigjson) | Manual |
 | `update.json` | `wirken update` settings. Key read: `mirror`, a local mirror of the release files used instead of GitHub; see [update.md](update.md#mirrors) | Manual |
-| `sandbox.json` | Sandbox settings. Keys read: `mode`, `image`, `network`, `shell`, `sidecar_binary`; any other key is named in a startup warning and ignored | `wirken setup` or manual |
+| `sandbox.json` | Sandbox settings. Keys read: `mode`, `image`, `network`, `shell`, `sidecar_binary`; any other key is named in a startup warning and ignored. `mode` is `exec-only`, `gvisor` or `off`. With no file, or no `mode` key, the mode is `exec-only`. A `mode` that is none of the three, or a file that cannot be read or parsed, is refused with an error naming the file and the value: `wirken run`, `wirken ask`, `wirken lyrik` and the MCP proxy do not start | `wirken setup` or manual |
 | `siem.json` | SIEM forwarding config | Manual or org config |
 | `budget.json` | Per-agent spend budgets | Manual |
 | `budget.db` | Durable per-agent spend ledger | `wirken run` |

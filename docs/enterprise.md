@@ -37,8 +37,8 @@ their own bot tokens. On every `wirken run` the org config refreshes.
 All fields are optional; only provided fields are applied.
 
 - `permissions.sandbox_mode` drives `sandbox.json`. Valid values `off`,
-  `exec-only`, `gvisor`; unknown values fall back to `exec-only` with a
-  warning. `wirken run` re-reads the file on every start, so an org policy
+  `exec-only`, `gvisor`. Any other value is written as given and refused
+  when it is loaded: `wirken run` does not start, and names the value. `wirken run` re-reads the file on every start, so an org policy
   change takes effect at the next gateway start.
 - `permissions.allowed_tools` and `permissions.blocked_tools` drive
   `tool_policy.json`, persisted when at least one list is non-empty.

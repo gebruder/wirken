@@ -116,17 +116,18 @@ pub struct SandboxHost {
 }
 
 impl SandboxHost {
-    /// The host for the proxy serving `data_dir`.
-    pub fn new(data_dir: &Path) -> Self {
-        Self {
+    /// The host for the proxy serving `data_dir`, or why its
+    /// `sandbox.json` does not say which runtime to use.
+    pub fn new(data_dir: &Path) -> Result<Self, String> {
+        Ok(Self {
             docker: Docker::connect_with_local_defaults().ok(),
             instance: instance_id(data_dir),
             data_dir: data_dir.to_path_buf(),
-            runtime: sandbox_runtime(data_dir),
+            runtime: sandbox_runtime(data_dir)?,
             secrets_base: ram_backed_dir(),
             facts: None,
             sidecar_binary: sidecar_binary(data_dir).or_else(|| std::env::current_exe().ok()),
-        }
+        })
     }
 
     /// Ask the runtime what it is. Without an answer, a server that
@@ -272,12 +273,13 @@ pub fn instance_id(data_dir: &Path) -> String {
 }
 
 /// The OCI runtime `sandbox.json`'s mode asks for. `gvisor` is `runsc`;
-/// anything else, including `off`, is Docker's default. `off` turns off
-/// the `exec` sandbox only; MCP servers stay contained.
-pub fn sandbox_runtime(data_dir: &Path) -> Option<String> {
-    let value = sandbox_json(data_dir)?;
-    let mode = value.get("mode").and_then(|m| m.as_str()).unwrap_or("");
-    wirken_sandbox::SandboxMode::from_str_config(mode).runtime_name()
+/// `exec-only` and `off` are Docker's default. `off` turns off the
+/// `exec` sandbox only; MCP servers stay contained. A missing file is
+/// the default mode. A file whose mode names none, or that cannot be
+/// read, is an error: no server is started under a runtime the file
+/// did not name.
+pub fn sandbox_runtime(data_dir: &Path) -> Result<Option<String>, String> {
+    Ok(wirken_sandbox::SandboxMode::from_data_dir(data_dir)?.runtime_name())
 }
 
 /// `sandbox.json`'s `sidecar_binary`, the override `exec` reads too.
@@ -1572,7 +1574,7 @@ mod tests {
     #[test]
     fn the_runtime_follows_the_sandbox_json_mode() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(sandbox_runtime(dir.path()), None);
+        assert_eq!(sandbox_runtime(dir.path()), Ok(None));
         for (mode, runtime) in [
             ("gvisor", Some("runsc")),
             ("exec-only", None),
@@ -1583,8 +1585,17 @@ mod tests {
                 format!(r#"{{"mode":"{mode}"}}"#),
             )
             .unwrap();
-            assert_eq!(sandbox_runtime(dir.path()).as_deref(), runtime, "{mode}");
+            assert_eq!(
+                sandbox_runtime(dir.path()).unwrap().as_deref(),
+                runtime,
+                "{mode}"
+            );
         }
+        // A mode that names no runtime is not read as the default one.
+        std::fs::write(dir.path().join("sandbox.json"), r#"{"mode":"gvisr"}"#).unwrap();
+        let err = sandbox_runtime(dir.path()).unwrap_err();
+        assert!(err.contains("\"gvisr\""), "{err}");
+        assert!(SandboxHost::new(dir.path()).is_err());
     }
 }
 

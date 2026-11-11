@@ -3766,26 +3766,33 @@ pub async fn status_snapshot(
     };
 
     // --- sandbox: the file as it is on disk right now ---
-    let sb = super::load_sandbox_config(&cfg.data_dir);
-    let (mode, runtime) = match sb.mode {
-        SandboxMode::Off => ("off", Value::Null),
-        SandboxMode::ExecOnly => ("exec-only", Value::from("runc")),
-        SandboxMode::GVisor => ("gvisor", Value::from("runsc")),
+    // A file that no longer states a mode the gateway can read is
+    // shown as that, with the loader's own message, and never as the
+    // default it would once have been read as.
+    let sandbox = match super::load_sandbox_config(&cfg.data_dir) {
+        Err(e) => json!({ "error": e.to_string() }),
+        Ok(sb) => {
+            let (mode, runtime) = match sb.mode {
+                SandboxMode::Off => ("off", Value::Null),
+                SandboxMode::ExecOnly => ("exec-only", Value::from("runc")),
+                SandboxMode::GVisor => ("gvisor", Value::from("runsc")),
+            };
+            json!({
+                "mode": mode,
+                "runtime": runtime,
+                "image": sb.image,
+                "legacy_network_flag": sb.network,
+                "limits": {
+                    "memory_mb": wirken_agent::sandbox::MEMORY_LIMIT / (1024 * 1024),
+                    "pids": wirken_agent::sandbox::PIDS_LIMIT,
+                    "timeout_secs": sb.timeout_secs,
+                },
+                "workspace_mount": "/workspace (rw)",
+                "docker_reachable": Value::Null,
+                "exec_refused": Value::Null,
+            })
+        }
     };
-    let sandbox = json!({
-        "mode": mode,
-        "runtime": runtime,
-        "image": sb.image,
-        "legacy_network_flag": sb.network,
-        "limits": {
-            "memory_mb": wirken_agent::sandbox::MEMORY_LIMIT / (1024 * 1024),
-            "pids": wirken_agent::sandbox::PIDS_LIMIT,
-            "timeout_secs": sb.timeout_secs,
-        },
-        "workspace_mount": "/workspace (rw)",
-        "docker_reachable": Value::Null,
-        "exec_refused": Value::Null,
-    });
 
     // --- budget: config + ledger, keyed by the base agent id ---
     let budget = match wirken_gateway::budget::load_budget_config(&cfg.budget_config_path())
@@ -3846,7 +3853,7 @@ pub async fn status_snapshot(
     };
     let posture = json!({
         "audit_verify_every_flushes": std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES").ok(),
-        "sandbox_mode_off": sb.mode == SandboxMode::Off,
+        "sandbox_mode_off": sandbox["mode"] == "off",
         // True for a usable root, the operator's or the compiled one.
         "skill_registry_root_pinned": skill_root["state"] == "pinned"
             || skill_root["state"] == "compiled",

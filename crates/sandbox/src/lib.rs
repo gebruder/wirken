@@ -60,24 +60,41 @@ pub enum SandboxMode {
 }
 
 impl SandboxMode {
-    /// Parse a sandbox mode from a config string. Unknown modes fall
-    /// back to [`SandboxMode::default`] rather than forcing `Off`, so
-    /// a config typo does not silently strip the sandbox; the
-    /// operator gets the secure default instead, with a warning.
-    pub fn from_str_config(s: &str) -> Self {
+    /// The mode a config string names, or an error naming the string.
+    /// A value that is none of the three is not read as any of them:
+    /// an operator who wrote `gvisr` asked for something, and running
+    /// under the default instead would be a runtime they did not choose.
+    pub fn parse(s: &str) -> Result<Self, String> {
         match s {
-            "exec-only" => Self::ExecOnly,
-            "gvisor" => Self::GVisor,
-            "off" => Self::Off,
-            "" => Self::default(),
-            _ => {
-                tracing::warn!(
-                    "Unknown sandbox_mode '{s}', falling back to default ({:?})",
-                    Self::default()
-                );
-                Self::default()
-            }
+            "exec-only" => Ok(Self::ExecOnly),
+            "gvisor" => Ok(Self::GVisor),
+            "off" => Ok(Self::Off),
+            other => Err(format!(
+                "unknown sandbox mode {other:?}: the modes are \"exec-only\", \"gvisor\" and \"off\""
+            )),
         }
+    }
+
+    /// The mode a parsed `sandbox.json` sets. A file with no `mode` key
+    /// sets none and keeps the default. A `mode` that is not a string
+    /// naming one of the three modes is an error naming the value.
+    pub fn from_sandbox_json(value: &serde_json::Value) -> Result<Self, String> {
+        match value.get("mode") {
+            None => Ok(Self::default()),
+            Some(serde_json::Value::String(mode)) => Self::parse(mode),
+            Some(other) => Err(format!(
+                "unknown sandbox mode {other}: the modes are \"exec-only\", \"gvisor\" and \"off\""
+            )),
+        }
+    }
+
+    /// The mode the `sandbox.json` in `data_dir` sets. A missing file
+    /// keeps the default. A file that cannot be read or parsed, or
+    /// whose `mode` names no mode, is an error naming the file and the
+    /// value: what the operator asked for cannot be told, and it is not
+    /// taken to be the default.
+    pub fn from_data_dir(data_dir: &std::path::Path) -> Result<Self, String> {
+        Self::from_sandbox_json(&read_sandbox_json(data_dir)?.unwrap_or(serde_json::Value::Null))
     }
 
     /// How this mode is named on an audit row.
@@ -96,6 +113,22 @@ impl SandboxMode {
             _ => None,
         }
     }
+}
+
+/// The parsed `sandbox.json` in `data_dir`, `None` where there is no
+/// such file. A file that is there and cannot be read or parsed is an
+/// error naming it.
+pub fn read_sandbox_json(data_dir: &std::path::Path) -> Result<Option<serde_json::Value>, String> {
+    let path = data_dir.join("sandbox.json");
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+    };
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("could not parse {}: {e}", path.display()))?;
+    SandboxMode::from_sandbox_json(&value).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(value))
 }
 
 /// The runtime an audit row names, from the OCI runtime on the
@@ -332,8 +365,66 @@ mod tests {
     fn modes_map_to_their_runtime() {
         assert_eq!(SandboxMode::GVisor.runtime_name().as_deref(), Some("runsc"));
         assert_eq!(SandboxMode::ExecOnly.runtime_name(), None);
-        assert_eq!(SandboxMode::from_str_config("gvisor"), SandboxMode::GVisor);
-        assert_eq!(SandboxMode::from_str_config("typo"), SandboxMode::ExecOnly);
+        assert_eq!(SandboxMode::parse("gvisor"), Ok(SandboxMode::GVisor));
+        assert_eq!(SandboxMode::parse("exec-only"), Ok(SandboxMode::ExecOnly));
+        assert_eq!(SandboxMode::parse("off"), Ok(SandboxMode::Off));
+    }
+
+    /// A mode that is none of the three is refused with the value in
+    /// the message, and is never read as the default.
+    #[test]
+    fn an_unknown_mode_is_an_error_naming_it() {
+        for raw in ["gvisr", "exec_only", "Off", "GVISOR", "", " ", "docker"] {
+            let err = SandboxMode::parse(raw).expect_err(raw);
+            assert!(err.contains(&format!("{raw:?}")), "{err}");
+        }
+        for value in [
+            serde_json::json!({"mode": "chrooty"}),
+            serde_json::json!({"mode": ""}),
+            serde_json::json!({"mode": 3}),
+            serde_json::json!({"mode": null}),
+            serde_json::json!({"mode": ["gvisor"]}),
+        ] {
+            let err = SandboxMode::from_sandbox_json(&value).expect_err(&value.to_string());
+            assert!(err.contains("unknown sandbox mode"), "{err}");
+        }
+    }
+
+    /// Only a file that sets no mode, or no file, keeps the default.
+    #[test]
+    fn a_file_with_no_mode_key_keeps_the_default() {
+        assert_eq!(
+            SandboxMode::from_sandbox_json(&serde_json::json!({"image": "x"})),
+            Ok(SandboxMode::ExecOnly)
+        );
+        assert_eq!(
+            SandboxMode::from_sandbox_json(&serde_json::json!({"mode": "gvisor"})),
+            Ok(SandboxMode::GVisor)
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn a_missing_file_keeps_the_default_and_an_unusable_one_is_refused() {
+        let dir = std::env::temp_dir().join(format!("wirken-sandbox-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(SandboxMode::from_data_dir(&dir), Ok(SandboxMode::ExecOnly));
+        let file = dir.join("sandbox.json");
+        std::fs::write(&file, r#"{"mode":"gvisor"}"#).unwrap();
+        assert_eq!(SandboxMode::from_data_dir(&dir), Ok(SandboxMode::GVisor));
+        for (body, names) in [
+            (r#"{"mode":"gvisr"}"#, "\"gvisr\""),
+            (r#"{"mode": "gvisor",}"#, "could not parse"),
+            ("not json", "could not parse"),
+        ] {
+            std::fs::write(&file, body).unwrap();
+            let err = SandboxMode::from_data_dir(&dir).expect_err(body);
+            assert!(
+                err.contains("sandbox.json") && err.contains(names),
+                "{body}: {err}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn reports(security: &[&str], components: &[&str], os: &str) -> (SystemInfo, SystemVersion) {

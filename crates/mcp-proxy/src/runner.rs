@@ -68,7 +68,9 @@ pub async fn run(credentials: ProxyCredentials) -> Result<(), ProxyError> {
     // Stdio servers with a `sandbox` block run in containers. Containers
     // an earlier proxy for this data directory left behind, for example
     // after the gateway killed it, are removed before any new one starts.
-    let mut sandbox = SandboxHost::new(&data_dir);
+    // A `sandbox.json` whose mode names no runtime stops the proxy
+    // here, before any server is started under one it did not name.
+    let mut sandbox = SandboxHost::new(&data_dir).map_err(ProxyError::Config)?;
     sandbox.probe().await;
     if let Some(docker) = &sandbox.docker {
         let removed = container::sweep(docker, &sandbox).await;

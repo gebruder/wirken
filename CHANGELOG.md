@@ -48,6 +48,12 @@ tagged.
 - Under egress mode `allowlist` the same line ends `each request asked of
   the operator`, which is what the proxy does for an `exec`. Behaviour is
   unchanged.
+- A `sandbox.json` whose `mode` is not `exec-only`, `gvisor` or `off`, or
+  that cannot be read or parsed, is refused when it is loaded, with an
+  error naming the file and the value. It was read as `exec-only` with a
+  warning. A missing file, or one with no `mode` key, is still `exec-only`.
+  **Operator action:** a gateway whose `sandbox.json` has such a value no
+  longer starts until the value is corrected.
 - `WIRKEN_LIVE_RELOAD_INTERVAL_S` sets how often `wirken run` looks at the
   vault, the adapter registry and the hook registry for changes made by
   another process. The default stays two seconds. A whole number of seconds

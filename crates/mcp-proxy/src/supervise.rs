@@ -832,7 +832,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let mut host = SandboxHost::new(dir.path());
+        let mut host = SandboxHost::new(dir.path()).unwrap();
         host.probe().await;
         let answer = r#"read a; printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"t","version":"1"}}}\n'; read b; read c; printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n'"#;
         // The first run marks its scratch dir and exits; the next stays.

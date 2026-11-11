@@ -182,7 +182,7 @@ pub async fn run(
     // Exec containers an earlier process left behind, swept as
     // `wirken run` sweeps them at start.
     let swept = wirken_agent::sandbox::sweep_local_leftovers(
-        &super::load_sandbox_config(&super::config().data_dir).instance,
+        &super::load_sandbox_config(&super::config().data_dir)?.instance,
     )
     .await;
     if swept > 0 {
@@ -274,7 +274,7 @@ pub async fn run(
         let walks = parse_walks_config(&config, &walks_dir)
             .context("parse walks config")?
             .map(|c| c.walks);
-        let exec_available = super::load_sandbox_config(&super::config().data_dir).mode
+        let exec_available = super::load_sandbox_config(&super::config().data_dir)?.mode
             != wirken_agent::sandbox::SandboxMode::Off;
         let summary = signoff_summary(
             run_id,
@@ -326,7 +326,7 @@ pub async fn run(
     // Said once for the run: without a terminal no walk step can be
     // approved, and each refused one is recorded with this reason.
     if !super::oauth_scope::stdin_is_tty()
-        && super::load_sandbox_config(&super::config().data_dir).mode
+        && super::load_sandbox_config(&super::config().data_dir)?.mode
             != wirken_agent::sandbox::SandboxMode::Off
     {
         eprintln!(
@@ -1191,7 +1191,7 @@ async fn dispatch_via_agent_runtime(
         api_key.clone(),
         api_key_credential.clone(),
         session_log.clone(),
-        super::load_sandbox_config(&cfg.data_dir),
+        super::load_sandbox_config(&cfg.data_dir)?,
         perms_arc.clone(),
     )?;
 
@@ -1225,7 +1225,7 @@ async fn dispatch_via_agent_runtime(
     // would run on the host with the host's network, so the run's
     // skills do not grant it and a call to it is refused.
     let exec_available =
-        super::load_sandbox_config(&cfg.data_dir).mode != wirken_agent::sandbox::SandboxMode::Off;
+        super::load_sandbox_config(&cfg.data_dir)?.mode != wirken_agent::sandbox::SandboxMode::Off;
     let lyrik_staged_dir = stage_lyrik_skill(&run_dir, run_id, scoring, exec_available)
         .context("stage Lyrik skill")?;
     let lyrik_staged_loaded = wirken_agent::SkillLoader::load_dir(&lyrik_staged_dir)
@@ -1350,7 +1350,7 @@ async fn dispatch_via_agent_runtime(
                 api_key.clone(),
                 api_key_credential.clone(),
                 session_log.clone(),
-                super::load_sandbox_config(&cfg.data_dir),
+                super::load_sandbox_config(&cfg.data_dir)?,
                 perms_arc.clone(),
                 leak_matcher.clone(),
                 lyrik_staged_dir.clone(),
@@ -1383,7 +1383,7 @@ async fn dispatch_via_agent_runtime(
                 api_key.clone(),
                 api_key_credential.clone(),
                 session_log.clone(),
-                super::load_sandbox_config(&cfg.data_dir),
+                super::load_sandbox_config(&cfg.data_dir)?,
                 perms_arc.clone(),
                 leak_matcher.clone(),
                 lyrik_staged_dir.clone(),
@@ -1589,7 +1589,7 @@ async fn dispatch_via_agent_runtime(
             api_key.clone(),
             api_key_credential.clone(),
             session_log.clone(),
-            super::load_sandbox_config(&cfg.data_dir),
+            super::load_sandbox_config(&cfg.data_dir)?,
             perms_arc.clone(),
             leak_matcher.clone(),
             lyrik_staged_dir.clone(),

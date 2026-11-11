@@ -4765,19 +4765,15 @@ mod subagent_bound_at_wake {
 fn sandbox_mode_from_str_config() {
     use crate::sandbox::SandboxMode;
 
-    assert_eq!(SandboxMode::from_str_config("off"), SandboxMode::Off);
-    // Empty and unknown both fall back to the current default
-    // (ExecOnly as of 0.7.5) rather than silently stripping the
-    // sandbox.
-    assert_eq!(SandboxMode::from_str_config(""), SandboxMode::default());
-    assert_eq!(
-        SandboxMode::from_str_config("exec-only"),
-        SandboxMode::ExecOnly
-    );
-    assert_eq!(SandboxMode::from_str_config("gvisor"), SandboxMode::GVisor);
-    assert_eq!(
-        SandboxMode::from_str_config("invalid"),
-        SandboxMode::default()
+    assert_eq!(SandboxMode::parse("off"), Ok(SandboxMode::Off));
+    assert_eq!(SandboxMode::parse("exec-only"), Ok(SandboxMode::ExecOnly));
+    assert_eq!(SandboxMode::parse("gvisor"), Ok(SandboxMode::GVisor));
+    // Empty and unknown are refused. Neither is read as the default.
+    assert!(SandboxMode::parse("").is_err());
+    assert!(
+        SandboxMode::parse("invalid")
+            .unwrap_err()
+            .contains("\"invalid\"")
     );
 }
 

@@ -181,7 +181,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         api_key,
         api_key_credential,
         session_log,
-        super::load_sandbox_config(&cfg.data_dir),
+        super::load_sandbox_config(&cfg.data_dir)?,
         Arc::new(Mutex::new(perms)),
     )?;
 
@@ -313,7 +313,7 @@ async fn send_with_agent_config(
         api_key,
         api_key_credential,
         session_log,
-        super::load_sandbox_config(&cfg.data_dir),
+        super::load_sandbox_config(&cfg.data_dir)?,
         Arc::new(Mutex::new(perms)),
     )?;
 
@@ -407,7 +407,7 @@ async fn send_on_plan(
         None,
         None,
         session_log,
-        super::load_sandbox_config(&cfg.data_dir),
+        super::load_sandbox_config(&cfg.data_dir)?,
         Arc::new(Mutex::new(perms)),
     )?;
     agent.set_agent_id(agent_id.to_string());

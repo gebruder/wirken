@@ -226,6 +226,9 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     let live_reload_interval = super::live_reload::interval().map_err(anyhow::Error::msg)?;
 
     let cfg = config();
+    // A `sandbox.json` that names no mode the gateway knows stops it
+    // here, with the file and the value named, before anything starts.
+    super::load_sandbox_config(&cfg.data_dir)?;
     cfg.ensure_dirs()?;
 
     if wirken_vault::CredentialStore::format_at(&cfg.vault_db_path())?
@@ -624,7 +627,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // skill authors writing for cross-platform portability can tell
     // at a glance whether their researcher's machine picked up sh
     // (Git for Windows installed) or fell back to powershell/cmd.
-    let host_exec_sandbox = super::load_sandbox_config(&cfg.data_dir);
+    let host_exec_sandbox = super::load_sandbox_config(&cfg.data_dir)?;
     match host_exec_sandbox.shell.resolve() {
         Some(resolved) => {
             // Happy path: shell is detected and exec will work.
@@ -917,7 +920,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     mcp_client: None, // populated below after the proxy starts
                     identity,
                     allowed_subagents: agent_cfg.allowed_subagents.clone(),
-                    sandbox: super::load_sandbox_config(&cfg.data_dir),
+                    sandbox: super::load_sandbox_config(&cfg.data_dir)?,
                     channel_egress: agent_cfg.channel_egress.clone(),
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
@@ -1021,7 +1024,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                 mcp_client: None,
                 identity: default_identity,
                 allowed_subagents: Default::default(),
-                sandbox: super::load_sandbox_config(&cfg.data_dir),
+                sandbox: super::load_sandbox_config(&cfg.data_dir)?,
                 // The implicit "default" agent has no registered
                 // AgentConfig row to carry a policy, so it gets none:
                 // sandboxed exec runs with no networking. Granting

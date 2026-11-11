@@ -38,6 +38,8 @@ pub const LABEL_INSTANCE: &str = "wirken.exec.instance";
 pub const LABEL_PID: &str = "wirken.exec.pid";
 /// Sandbox mode, shared with MCP server containers.
 pub use wirken_sandbox::SandboxMode;
+/// The `sandbox.json` reader both the gateway and the MCP proxy use.
+pub use wirken_sandbox::read_sandbox_json;
 pub(crate) use wirken_sandbox::runtime_label;
 /// Container memory and PID caps, shared with MCP server containers.
 /// Public so the webchat status route reports the value the sandbox
