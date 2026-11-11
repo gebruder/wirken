@@ -113,10 +113,34 @@ def summary(body):
         flat = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", flat)
         flat = flat.replace("**", "").replace("`", "")
         sentence = re.split(r"(?<=[.!?])\s", flat, maxsplit=1)[0]
-        if len(sentence) > MAX_SUMMARY:
-            sentence = sentence[: MAX_SUMMARY - 3].rstrip() + "..."
-        return sentence
+        return fit(sentence)
     return ""
+
+
+def fit(sentence):
+    """`sentence`, or where it is longer than MAX_SUMMARY its longest
+    prefix that ends between words and fits with an ellipsis. A cut
+    after a comma, semicolon or colon outside parentheses is taken
+    when one falls in the second half of the limit; a word is never
+    cut."""
+    if len(sentence) <= MAX_SUMMARY:
+        return sentence
+    room = MAX_SUMMARY - 3
+    clause = word = 0
+    depth = 0
+    for i, ch in enumerate(sentence[: room + 1]):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif ch == " " and i > 0:
+            word = i
+            if depth == 0 and sentence[i - 1] in ",;:":
+                clause = i
+    cut = clause if clause >= MAX_SUMMARY // 2 else word
+    if cut == 0:
+        cut = room
+    return sentence[:cut].rstrip(" ,;:") + "..."
 
 
 def parse_checksums(text, source):

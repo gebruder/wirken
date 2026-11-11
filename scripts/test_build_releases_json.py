@@ -40,6 +40,32 @@ class Changelog(unittest.TestCase):
         sections = module.changelog_sections(self.TEXT)
         self.assertEqual(module.summary(sections["1.7.2"][1]), "Bump wasmtime.")
 
+    def test_a_sentence_that_fits_is_kept_whole(self):
+        sentence = "word " * 39 + "end."
+        self.assertEqual(len(sentence), module.MAX_SUMMARY - 1)
+        self.assertEqual(module.fit(sentence), sentence)
+
+    def test_a_long_sentence_is_cut_between_words(self):
+        sentence = " ".join(["abcdefgh"] * 40) + "."
+        cut = module.fit(sentence)
+        self.assertLessEqual(len(cut), module.MAX_SUMMARY)
+        self.assertTrue(cut.endswith("abcdefgh..."), cut)
+        self.assertTrue(sentence.startswith(cut[:-3] + " "))
+
+    def test_a_long_sentence_is_cut_after_a_clause_where_one_is_near(self):
+        sentence = "a" * 120 + " bb, " + "word " * 30 + "end."
+        self.assertEqual(module.fit(sentence), "a" * 120 + " bb...")
+
+    def test_a_comma_inside_parentheses_is_not_a_clause_end(self):
+        sentence = "a" * 120 + " (one, two, three, " + "word " * 30 + "four) end."
+        cut = module.fit(sentence)
+        self.assertLessEqual(len(cut), module.MAX_SUMMARY)
+        self.assertTrue(cut.endswith("word..."), cut)
+
+    def test_one_word_longer_than_the_limit_is_cut_to_fit(self):
+        cut = module.fit("x" * 300)
+        self.assertEqual(cut, "x" * (module.MAX_SUMMARY - 3) + "...")
+
 
 if __name__ == "__main__":
     unittest.main()
