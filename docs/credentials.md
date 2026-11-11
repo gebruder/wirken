@@ -133,7 +133,9 @@ credentials added or changed since.
 
 ## Changes while the gateway runs
 
-Every two seconds `wirken run` compares each vault entry's sealed value and
+Every two seconds, or every `WIRKEN_LIVE_RELOAD_INTERVAL_S` seconds where
+that is set ([configuration.md](configuration.md#environment-variables)),
+`wirken run` compares each vault entry's sealed value and
 destinations, the adapter registry and the hook registry with what it last
 saw. A change made by `wirken credentials`, `channel remove` or `hooks
 unregister` takes effect without a restart:

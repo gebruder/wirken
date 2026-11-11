@@ -221,6 +221,10 @@ fn prompt_vault_passphrase(cache: &mut Option<String>) -> String {
 
 /// Run the gateway daemon.
 pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
+    // Settings that are refused rather than defaulted are read first,
+    // so a gateway that will not run with them has started nothing.
+    let live_reload_interval = super::live_reload::interval().map_err(anyhow::Error::msg)?;
+
     let cfg = config();
     cfg.ensure_dirs()?;
 
@@ -1627,8 +1631,18 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // --- Live reload ---
     //
     // A credential rotated or removed, an adapter removed or a hook
-    // unregistered by another process takes effect here within seconds,
-    // each with an `authority_reloaded` row.
+    // unregistered by another process takes effect here within the
+    // interval, two seconds unless set, each with an
+    // `authority_reloaded` row.
+    if live_reload_interval != super::live_reload::POLL {
+        tracing::warn!(
+            "{} is set: a change to the vault, the adapter registry or the hook registry \
+             takes effect here within {}s, not {}s",
+            super::live_reload::INTERVAL_ENV,
+            live_reload_interval.as_secs(),
+            super::live_reload::POLL.as_secs(),
+        );
+    }
     let live_reload_handle = tokio::spawn(
         super::live_reload::LiveReload {
             vault_db: cfg.vault_db_path(),
@@ -1641,6 +1655,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             mcp: mcp_refresh_service.clone(),
             provider_keys: provider_key_users,
             log: session_log.clone(),
+            interval: live_reload_interval,
         }
         .run(),
     );

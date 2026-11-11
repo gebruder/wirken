@@ -48,6 +48,11 @@ tagged.
 - Under egress mode `allowlist` the same line ends `each request asked of
   the operator`, which is what the proxy does for an `exec`. Behaviour is
   unchanged.
+- `WIRKEN_LIVE_RELOAD_INTERVAL_S` sets how often `wirken run` looks at the
+  vault, the adapter registry and the hook registry for changes made by
+  another process. The default stays two seconds. A whole number of seconds
+  from 1 to 3600 is taken, with a warning at startup; anything else stops
+  the gateway before it starts.
 - `assistant_tool_calls` rows record the reasoning a provider returns with
   the message, beside the calls, as an optional `reasoning` field. No gate
   reads it. A row with none is unchanged, so existing chains verify as

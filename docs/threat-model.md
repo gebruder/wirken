@@ -292,8 +292,8 @@ Severity is rated on the default configuration. What that is:
   default; `gvisor` is supported; `off` is opt-in and out of scope while set.
   With no container runtime `exec` is refused.
 - **Escape hatches unset.** Every `WIRKEN_ALLOW_*` variable,
-  `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN` and `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES`
-  absent, and no `mcp.json` entry with `"sandbox": "off"`.
+  `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN`, `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES` and
+  `WIRKEN_LIVE_RELOAD_INTERVAL_S` absent, and no `mcp.json` entry with `"sandbox": "off"`.
 - **One gateway per data dir, one operator.** Many chat users reach it through
   channels; there are no roles and no per-user permissions
   ([enterprise.md](enterprise.md)). Webhook adapters listen on 127.0.0.1
@@ -386,7 +386,7 @@ Not a vulnerability, whatever its shape:
   adapter, the MCP proxy or a hook process.
 - The documented escape hatches while set: the `WIRKEN_ALLOW_*` variables,
   `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN`, `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES`,
-  `sandbox.json` `mode: off`, and an `mcp.json` entry with `"sandbox": "off"`
+  `WIRKEN_LIVE_RELOAD_INTERVAL_S`, `sandbox.json` `mode: off`, and an `mcp.json` entry with `"sandbox": "off"`
   (table in [security-properties.md](security-properties.md)). A hatch whose effect is wider than
   that table states, or that engages without being set, is in scope.
 - Gaps the docs already state: the Gap columns in

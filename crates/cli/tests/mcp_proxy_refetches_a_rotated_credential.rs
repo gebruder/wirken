@@ -7,6 +7,14 @@
 //! the proxy asks the gateway for the token's current value, and the
 //! call after that succeeds, with the same gateway and proxy processes
 //! throughout. The gateway records the fetch by credential name.
+//!
+//! The gateway also looks at the vault on a timer and tells the proxy
+//! what changed. A look between the rotation and the next call would
+//! hand the proxy the new token before that call is refused, and a look
+//! after it would record a second fetch. This test is about the other
+//! path, the refusal, so its gateway is started with the timer set to
+//! [`LIVE_RELOAD_INTERVAL_S`], longer than the test can run: the first
+//! look would come after every deadline here has passed.
 #![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -17,6 +25,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wirken_audit::{MCP_CREDENTIAL_SESSION, SessionEvent, SessionId, SessionLog};
+
+/// The gateway's live-reload interval for this test, in seconds: the
+/// longest the gateway takes. Start-up is given 90 seconds and shutdown
+/// 30, so no look falls inside the test.
+const LIVE_RELOAD_INTERVAL_S: &str = "3600";
 
 const PASSPHRASE_ENV: &str = "WIRKEN_VAULT_PASSPHRASE";
 const PASSPHRASE: &str = "proxy-refetch-test-passphrase";
@@ -214,6 +227,7 @@ async fn a_rotated_bearer_token_reaches_the_proxy_after_one_refused_call() {
         .args(["run", "--port", &free_port().to_string()])
         .env("WIRKEN_DATA_DIR", data.path())
         .env(PASSPHRASE_ENV, PASSPHRASE)
+        .env("WIRKEN_LIVE_RELOAD_INTERVAL_S", LIVE_RELOAD_INTERVAL_S)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

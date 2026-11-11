@@ -1,7 +1,8 @@
 //! Changes another process makes, taken up by the running gateway.
 //!
-//! Every two seconds the gateway compares what it trusts with what is on
-//! disk: each vault entry's sealed value and binding, the adapter
+//! Every two seconds, or every `WIRKEN_LIVE_RELOAD_INTERVAL_S` seconds
+//! where that is set, the gateway compares what it trusts with what is
+//! on disk: each vault entry's sealed value and binding, the adapter
 //! registry and the hook registry. A changed credential is read again
 //! where it is used: a model key is already read per call, an adapter
 //! is respawned, and the MCP proxy is told. An adapter or hook removed
@@ -21,8 +22,48 @@ use wirken_vault::{CredentialStore, EntryFingerprint};
 
 use super::run::{AdapterLifeline, LifelineOrder};
 
-/// How often the gateway looks.
+/// How often the gateway looks, unless [`INTERVAL_ENV`] says otherwise.
 pub(crate) const POLL: Duration = Duration::from_secs(2);
+
+/// Sets how often the gateway looks, in whole seconds.
+pub(crate) const INTERVAL_ENV: &str = "WIRKEN_LIVE_RELOAD_INTERVAL_S";
+
+/// The longest interval taken. The interval is how long a credential
+/// rotated or removed, an adapter removed or a hook unregistered stays
+/// in force here after the change, so a gateway that looks less than
+/// once an hour is not taking changes up.
+pub(crate) const MAX_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// The interval for a value of [`INTERVAL_ENV`], or why the value is
+/// not one. Unset is the default. Anything else is a whole number of
+/// seconds from 1 to [`MAX_INTERVAL`]: zero would never sleep, and a
+/// value that does not parse is not quietly read as the default, since
+/// the operator who set it meant something by it.
+///
+/// Takes the value rather than reading the environment, so its tests
+/// write no process-global state.
+pub(crate) fn interval_from(raw: Option<&str>) -> Result<Duration, String> {
+    let Some(raw) = raw else {
+        return Ok(POLL);
+    };
+    let refused = || {
+        format!(
+            "{INTERVAL_ENV} must be a whole number of seconds from 1 to {}, got {raw:?}",
+            MAX_INTERVAL.as_secs()
+        )
+    };
+    let secs: u64 = raw.trim().parse().map_err(|_| refused())?;
+    if secs == 0 || secs > MAX_INTERVAL.as_secs() {
+        return Err(refused());
+    }
+    Ok(Duration::from_secs(secs))
+}
+
+/// The interval this process was started with. `wirken run` asks
+/// before it starts anything, and does not start on an `Err`.
+pub(crate) fn interval() -> Result<Duration, String> {
+    interval_from(std::env::var(INTERVAL_ENV).ok().as_deref())
+}
 
 /// A connection the registry no longer admits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,14 +124,16 @@ pub(crate) struct LiveReload {
     /// Model keys by vault entry, each with what it feeds.
     pub provider_keys: HashMap<String, Vec<String>>,
     pub log: Arc<dyn SessionLog>,
+    /// How long to wait between looks; see [`interval`].
+    pub interval: Duration,
 }
 
 impl LiveReload {
-    /// Look every [`POLL`] until the task is dropped.
+    /// Look every `interval` until the task is dropped.
     pub(crate) async fn run(self) {
         let mut seen = self.fingerprints().unwrap_or_default();
         loop {
-            tokio::time::sleep(POLL).await;
+            tokio::time::sleep(self.interval).await;
             // The registries first: an adapter removed with its
             // credentials is stopped, not respawned for them.
             self.reload_adapters().await;
@@ -274,6 +317,44 @@ fn changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_interval_is_two_seconds_unless_set() {
+        assert_eq!(interval_from(None), Ok(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_whole_number_of_seconds_up_to_an_hour_is_taken() {
+        assert_eq!(interval_from(Some("1")), Ok(Duration::from_secs(1)));
+        assert_eq!(interval_from(Some("30")), Ok(Duration::from_secs(30)));
+        assert_eq!(interval_from(Some(" 3600 ")), Ok(MAX_INTERVAL));
+    }
+
+    /// Zero, a value past the hour, and anything that is not a whole
+    /// number of seconds are refused with the variable and the value
+    /// named. None of them is read as the default.
+    #[test]
+    fn a_zero_or_nonsensical_interval_is_refused() {
+        for raw in [
+            "0",
+            "3601",
+            "86400",
+            "-2",
+            "2.5",
+            "2s",
+            "",
+            " ",
+            "two",
+            "0x10",
+            "18446744073709551616",
+        ] {
+            let err = interval_from(Some(raw)).expect_err(raw);
+            assert!(
+                err.contains(INTERVAL_ENV) && err.contains(&format!("{raw:?}")),
+                "{err}"
+            );
+        }
+    }
 
     fn print(value: u8, binding: u8) -> EntryFingerprint {
         EntryFingerprint {

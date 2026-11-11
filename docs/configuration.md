@@ -278,6 +278,7 @@ variable. See [mcp.md](mcp.md).
 | `WIRKEN_ASK_APPROVAL_TIMEOUT_S` | Deadline on the `wirken ask` approval prompt. Default: `60` |
 | `WIRKEN_VETO_BUDGET_MS` / `WIRKEN_EGRESS_BUDGET_MS` | Cumulative hook-dispatch budget. Default `1000` each, per-hook ceiling 500ms |
 | `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES` | Flush cycles between continuous verification passes. Default: `100` |
+| `WIRKEN_LIVE_RELOAD_INTERVAL_S` | Seconds between the gateway's looks at `vault.db`, `adapters.db` and `hooks.db` for changes made by another process. Default: `2`. A whole number from `1` to `3600`; `wirken run` does not start on anything else |
 | `RUST_LOG` | Log verbosity, e.g. `RUST_LOG=wirken=debug` |
 
 Per-adapter port and token overrides (`WIRKEN_TEAMS_PORT`,
