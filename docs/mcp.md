@@ -50,7 +50,7 @@ If the entry is signed, re-sign it after any change to it, the `sandbox` block i
 | `limits` | 512 MB, 256 processes, 1 CPU | `memory_mb`, `pids`, `cpus`. Each one given replaces its default; there is no ceiling. |
 | `secrets_in_env` | none | `vault:` variables to deliver in the environment instead of as files. See [Using vault secrets](#using-vault-secrets-in-mcp-config). |
 
-Every server container also gets: all Linux capabilities dropped, `no-new-privileges`, the seccomp profile `exec` containers run under ([sandbox-properties.md](sandbox-properties.md)), an `/etc/resolv.conf` that names a loopback resolver and no search domain, a read-only root with a 64 MB tmpfs at `/tmp`, and the operator's own uid and gid (container uid 0 under a rootless runtime, which is the operator). `sandbox.json`'s `mode` chooses the runtime: `gvisor` runs servers under `runsc`, anything else under Docker's default. `"mode": "off"` turns off the `exec` sandbox only. It does not run MCP servers on the host.
+Every server container also gets: all Linux capabilities dropped, `no-new-privileges`, the seccomp profile `exec` containers run under ([sandbox-properties.md](sandbox-properties.md)), an `/etc/resolv.conf` that names a loopback resolver and no search domain, a read-only root with a 64 MB tmpfs at `/tmp`, and the operator's own uid and gid (container uid 0 under a rootless runtime, which is the operator). `sandbox.json`'s `mode` chooses the runtime: `gvisor` runs servers under `runsc`, and refuses them where `runsc` is not registered; anything else runs them under Docker's default. `"mode": "off"` turns off the `exec` sandbox only. It does not run MCP servers on the host.
 
 ### Running one server on the host
 
@@ -67,7 +67,7 @@ The proxy refuses a stdio server, logs why and what to change, and writes `mcp_e
 | Reason | When |
 |---|---|
 | `sandbox_config_invalid` | No `sandbox` block. A block with no `image`. A path that is not absolute or does not exist. An `install_dir` or mount `source` inside the data directory or containing it. A reserved or repeated mount target. A limit of zero. An `egress.hosts` entry that is not a domain name. A `secrets_in_env` name that is not a `vault:` variable. |
-| `sandbox_unavailable` | No container runtime answers. A secret has to be delivered as a file and the host has no memory-backed directory for it. The egress sidecar's binary is missing. |
+| `sandbox_unavailable` | No container runtime answers. The mode is `gvisor` and `runsc` is not registered with the runtime. A secret has to be delivered as a file and the host has no memory-backed directory for it. The egress sidecar's binary is missing. |
 | `image_unavailable` | The image is not on the host. |
 | `egress_unsupported_runtime` | `egress.hosts` is set and the runtime is rootless Docker, Podman, or Windows. |
 
@@ -172,7 +172,7 @@ The proxy reaches each server through the container runtime's attach stream, not
 
 ### What containment does not cover
 
-- **The kernel.** Under Docker's default runtime the container shares the host kernel, bounded by namespaces, the seccomp profile and an empty capability set. `sandbox.json` `"mode": "gvisor"` puts it under `runsc` instead.
+- **The kernel.** Under Docker's default runtime the container shares the host kernel, bounded by namespaces, the seccomp profile and an empty capability set. `sandbox.json` `"mode": "gvisor"` puts it under `runsc` instead, where the seccomp profile is not applied to the workload ([sandbox-properties.md](sandbox-properties.md#gvisor-delta-sandboxmodegvisor)). The egress sidecar runs under Docker's default runtime in either mode.
 - **Writable mounts.** Files a server writes there are owned by the operator's uid on the host.
 - **Env-delivered secrets.** A variable in `secrets_in_env` is readable through `docker inspect` by anyone who can reach the Docker socket.
 - **The image.** The signature covers the entry, not the image's contents; a digest-pinned `image` fixes them.

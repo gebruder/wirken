@@ -12,19 +12,19 @@ adapters (one OS process per channel) and IPC boundary properties live in
 ## Modes
 
 `SandboxMode` is the operator-facing knob. Three values, one default
-([`crates/sandbox/src/lib.rs:31-51`](../crates/sandbox/src/lib.rs), re-exported
+([`crates/sandbox/src/lib.rs:42-60`](../crates/sandbox/src/lib.rs), re-exported
 at [`crates/agent/src/sandbox.rs:40`](../crates/agent/src/sandbox.rs)):
 
 | Mode | Default | Runtime | Meaning |
 |---|---|---|---|
 | `ExecOnly` | yes (since 0.7.5) | Docker `runc` | The `exec` tool runs in an ephemeral container with the hardening below. Other tools run on the host. |
-| `GVisor` | no | Docker `runsc` | Same container hardening; the OCI runtime is gVisor. Every guest syscall is intercepted by gVisor's userspace kernel (`Sentry`) instead of reaching the host kernel directly. |
+| `GVisor` | no | Docker `runsc` | Same container settings; the OCI runtime is gVisor. Every guest syscall is intercepted by gVisor's userspace kernel (`Sentry`) instead of reaching the host kernel directly. The seccomp profile is not applied to the workload; see [gVisor delta](#gvisor-delta-sandboxmodegvisor). |
 | `Off` | no | none | No sandboxing. Opt-in via `"mode":"off"` in `~/.wirken/sandbox.json`. The shell process runs as the agent's UID with the agent's privileges. |
 
-Unknown mode strings fall back to `ExecOnly`, not `Off`: a config typo gets
-the secure default with a warning, never the bypass
-(`SandboxMode::from_str_config`,
-[`crates/sandbox/src/lib.rs:58-72`](../crates/sandbox/src/lib.rs)).
+A `mode` that is none of the three is refused when `sandbox.json` is
+loaded, with an error naming the file and the value, and `wirken run` does
+not start. A missing file, or one with no `mode` key, is `ExecOnly`
+(`SandboxMode::from_sandbox_json`, `crates/sandbox/src/lib.rs`).
 
 ## No silent fallback
 
@@ -62,6 +62,14 @@ the host under `off` (`RuntimeStatus::resolve`,
   server is refused with an `mcp_entry_refused` row, reason
   `sandbox_unavailable` (`ContainerPlan::new`,
   `crates/mcp-proxy/src/container.rs`).
+
+- **Egress sidecars.** A sidecar container names no runtime, so it runs
+  under the daemon's default in every mode, `gvisor` included. Under
+  `gvisor` the startup output says so:
+
+  ```
+  Sandbox: egress sidecars run under the container runtime's default (runc), not gVisor
+  ```
 
 Operators who want host execution opt in by writing `"mode":"off"`.
 
@@ -236,6 +244,10 @@ The profile blocks, among others:
 `crates/agent/src/tests.rs` runs `unshare -Urm` and `mount` through `exec`
 against a live daemon and expects both refused.
 
+All of this is the profile under `runc`. Under `gvisor` the profile is sent
+and not applied to the workload; see
+[gVisor delta](#gvisor-delta-sandboxmodegvisor).
+
 Docker's API takes the profile as JSON. Podman's takes a path and reads the
 file itself, so on Podman the profile is written to
 `<tmp>/wirken-seccomp-<uid>/seccomp.json`, in a directory only the operator
@@ -248,8 +260,10 @@ a live Podman.
 ## gVisor delta (`SandboxMode::GVisor`)
 
 When mode is `GVisor`, `runtime_name()` returns `Some("runsc")`
-([`crates/sandbox/src/lib.rs:84-89`](../crates/sandbox/src/lib.rs)) and Docker
-launches the container under gVisor instead of `runc`.
+([`crates/sandbox/src/lib.rs:119-124`](../crates/sandbox/src/lib.rs)) and Docker
+launches the `exec` container, and each contained MCP server's container,
+under gVisor instead of `runc`. Egress sidecars stay on the daemon's
+default runtime.
 
 gVisor changes the threat model. Under `runc`, the guest's syscalls reach
 the host kernel directly, filtered by the seccomp profile above. Under
@@ -257,6 +271,19 @@ gVisor, **every** guest syscall is trapped by `runsc` and serviced by the
 Sentry, gVisor's userspace re-implementation of the Linux syscall surface
 in Go. The host kernel sees only a small, fixed set of syscalls from
 `runsc` itself.
+
+The seccomp profile above is still sent with the container, and `runsc`
+does not apply it to the workload: what a guest syscall does is the
+Sentry's decision. Through `exec` on runsc release 20230807:
+
+- `unshare -Ur id` succeeds and reports uid 0.
+- Inside a new user and mount namespace, `mount -t tmpfs -o exec` succeeds
+  and a binary copied onto it runs.
+- `mount` outside a new user namespace is refused; the container holds no
+  capability.
+
+Under `runc` on the same host each of the three is refused. The namespaces
+and the mount are the Sentry's, not the host kernel's.
 
 Practical consequences:
 
@@ -270,10 +297,17 @@ Practical consequences:
   inside it.
 
 Wirken does not require gVisor; `ExecOnly` is the default. `GVisor` is the
-opt-in for operators who want kernel attack surface reduction. Detection
-(`detect_gvisor`, [`sandbox.rs:957-971`](../crates/agent/src/sandbox.rs)) is automatic;
-the wizard refuses to enable `GVisor` mode if `runsc` is not registered as
-a Docker runtime.
+opt-in for operators who want kernel attack surface reduction. `wirken
+setup` offers `gvisor` only where `runsc` is registered with Docker
+(`detect_gvisor`, `crates/agent/src/sandbox.rs`); a `sandbox.json` written
+by hand is checked at start and at each `exec`, as
+[above](#no-silent-fallback).
+
+`a_gvisor_exec_records_gvisor` and `a_gvisor_exec_runs_on_the_runsc_kernel`
+in `crates/agent/src/tests.rs` run an `exec` under `runsc`. The CI job
+`Sandbox under runsc` installs runsc and sets `WIRKEN_TEST_REQUIRE_RUNSC=1`,
+under which they fail where `runsc` is missing. Without that variable they
+print `skipping:` and pass on a host with no `runsc`.
 
 ## What is not enforced
 
@@ -335,12 +369,16 @@ wirken run &
 # 5. GVisor: runsc is the runtime in use
 docker info --format '{{ json .Runtimes }}' | jq .
 # Expect a `runsc` key listed.
+wirken run
+# Expect: Sandbox: exec runs under gVisor (runsc) (sandbox mode gvisor)
 
 # 6. Sandbox refuses to fall back when its runtime is missing
 sudo systemctl stop docker      # disable the runtime
-wirken run                      # next exec request
-# Expected: AgentError::Sandbox("sandbox mode is ExecOnly but the
-# sandbox is unavailable; refusing to fall back to host execution. ...")
+wirken run
+# Expected at start: Sandbox: exec is refused: sandbox mode exec-only needs
+# Docker default runtime, and the container runtime is not reachable
+# Expected at the next exec request: an `exec_runtime_unavailable` row and
+# a failed tool result carrying the same sentence.
 ```
 
 If any of these checks return a different result, file an issue against

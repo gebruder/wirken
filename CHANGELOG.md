@@ -39,6 +39,15 @@ tagged.
   private to the operator and named by path. The allowlist is the one released as Moby profiles
   `seccomp/v0.3.0`, which allows `socket` per address family.
 
+- `wirken run` prints the runtime `exec` containers will run under and
+  records it as an `exec_runtime_at_start` row on the `gateway-sandbox`
+  session. An `exec` whose mode names a runtime that cannot run a container
+  is refused with an `exec_runtime_unavailable` row and a failed tool
+  result, and a contained MCP server under `gvisor` with no `runsc`
+  registered is refused with reason `sandbox_unavailable`. **For
+  wirken-siem:** new kinds `exec_runtime_at_start` and
+  `exec_runtime_unavailable`, forwarded by default.
+
 ### Changed
 
 - The `runs:` line of an `exec` approval under egress mode `open` says
