@@ -75,6 +75,7 @@ tagged.
   0.2.3 in the lockfile, from #310.
 - zip 9.5.0, flate2 1.1.11, openssl 0.10.82 with openssl-sys 0.9.118, toml
   1.2.1, uuid 1.29.1 and serde-saphyr 2.1.1 in the lockfile, from #311.
+- rustix 1.1.6 in the lockfile, for RUSTSEC-2026-0486.
 
 ## [3.2.1] - 2026-11-03
 
