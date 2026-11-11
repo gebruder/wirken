@@ -3735,6 +3735,21 @@ fn every_session_event() -> Vec<SessionEvent> {
             adapter_id: None,
             sender_id: None,
         },
+        SessionEvent::ExecRuntimeAtStart {
+            mode: crate::SandboxModeLabel::Gvisor,
+            runtime: Some("runsc".into()),
+            available: false,
+            reason: Some(String::new()),
+            sidecar_runtime: Some("runc".into()),
+        },
+        SessionEvent::ExecRuntimeUnavailable {
+            mode: crate::SandboxModeLabel::Gvisor,
+            runtime: Some("runsc".into()),
+            reason: String::new(),
+            agent_id: String::new(),
+            adapter_id: None,
+            sender_id: None,
+        },
         SessionEvent::HookCrashed {
             hook_id: String::new(),
             error: String::new(),
@@ -4038,6 +4053,8 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::CrossChannelMemoryRead { .. } => "CrossChannelMemoryRead",
         SessionEvent::SandboxEgressVerdict { .. } => "SandboxEgressVerdict",
         SessionEvent::SandboxEgressUnsupported { .. } => "SandboxEgressUnsupported",
+        SessionEvent::ExecRuntimeAtStart { .. } => "ExecRuntimeAtStart",
+        SessionEvent::ExecRuntimeUnavailable { .. } => "ExecRuntimeUnavailable",
         SessionEvent::HookCrashed { .. } => "HookCrashed",
         SessionEvent::McpEntryRefused { .. } => "McpEntryRefused",
         SessionEvent::McpServerSandboxed { .. } => "McpServerSandboxed",
@@ -4053,7 +4070,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 90;
+const SESSION_EVENT_VARIANTS: usize = 92;
 
 /// The list covers the enum.
 #[test]

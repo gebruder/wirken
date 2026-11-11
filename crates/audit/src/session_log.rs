@@ -2528,6 +2528,46 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// What `exec` containers will run under, as the gateway found it
+    /// when it started. One row per start, on
+    /// [`SANDBOX_RUNTIME_SESSION`].
+    ExecRuntimeAtStart {
+        /// The mode `sandbox.json` set.
+        mode: SandboxModeLabel,
+        /// The OCI runtime an `exec` container is started with: `runsc`
+        /// under `gvisor`, and under `exec-only` the daemon's default
+        /// runtime as the daemon names it. Absent under `off`, where
+        /// there is no container, and where the daemon could not be
+        /// asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+        /// Whether that runtime can run a container now. `false` means
+        /// every `exec` is refused until it can.
+        available: bool,
+        /// Why not, when it cannot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// The runtime egress sidecars run under: the daemon's default,
+        /// whatever the mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sidecar_runtime: Option<String>,
+    },
+    /// An `exec` was refused because the runtime its mode names could
+    /// not run it. The command did not run, under that runtime or any
+    /// other.
+    ExecRuntimeUnavailable {
+        mode: SandboxModeLabel,
+        /// The runtime the mode names; absent where the daemon could
+        /// not be asked which is its default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+        reason: String,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
 }
 
 /// What a search of imported archives came to.
@@ -2615,6 +2655,9 @@ pub const OPERATOR_SENDERS_SESSION: &str = "gateway-senders";
 
 /// Lane for [`SessionEvent::AuthorityReloaded`].
 pub const LIVE_RELOAD_SESSION: &str = "gateway-reloads";
+
+/// Lane for [`SessionEvent::ExecRuntimeAtStart`].
+pub const SANDBOX_RUNTIME_SESSION: &str = "gateway-sandbox";
 
 /// Lane for [`SessionEvent::OperatorCommand`]: the other `wirken`
 /// commands that change what the gateway trusts or runs.

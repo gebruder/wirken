@@ -28,27 +28,42 @@ the secure default with a warning, never the bypass
 
 ## No silent fallback
 
-[`crates/agent/src/tool.rs:741-762`](../crates/agent/src/tool.rs):
+The runtime an `exec` runs under is the one the mode names, and no other:
+`runsc` under `gvisor`, the container runtime's default under `exec-only`,
+the host under `off` (`RuntimeStatus::resolve`,
+`crates/sandbox/src/lib.rs`).
 
-```rust
-if let Some(sandbox) = self.sandbox().await {
-    let egress = self.sandbox_egress.read().ok().and_then(|g| g.clone());
-    return sandbox
-        .exec(&command, &self.workspace, egress.as_ref())
-        .await;
-}
-if self.sandbox_config.mode != SandboxMode::Off {
-    return Err(AgentError::Sandbox(format!(
-        "sandbox mode is {:?} but the sandbox is unavailable; \
-         refusing to fall back to host execution. ..."
-    )));
-}
-```
+- **At start.** `wirken run` asks the container runtime, prints what it
+  found, and records it as one `exec_runtime_at_start` row on the
+  `gateway-sandbox` session: the mode, the runtime's name as the daemon
+  gives it, whether it can run a container, the reason when it cannot, and
+  the runtime egress sidecars run under.
 
-If the configured sandbox runtime is missing (Docker not running; `runsc` not
-registered), the `exec` tool refuses to run rather than running the command
-on the host. Operators who want host execution must opt in by writing
-`"mode":"off"` explicitly.
+  ```
+  Sandbox: exec runs under Docker default runtime (runc) (sandbox mode exec-only)
+  ```
+
+  ```
+  Sandbox: exec is refused: sandbox mode gvisor needs gVisor (runsc), and runsc is not registered with the container runtime
+  ```
+
+- **At each `exec`.** If the runtime the mode names cannot run a container
+  (the daemon is not reachable; `gvisor` and no `runsc` registered), the
+  call is refused. It does not run on the host and it does not run under
+  the daemon's default in place of `runsc`. The refusal is an
+  `exec_runtime_unavailable` row naming the mode, the runtime and the
+  reason, and a failed tool result the model reads; the turn goes on. The
+  decision is made on the agent's first `exec` and holds until the gateway
+  restarts (`ToolRegistry::sandbox`, `crates/agent/src/tool.rs`;
+  `a_gvisor_exec_without_runsc_is_refused_with_a_row`,
+  `crates/agent/src/tests.rs`).
+
+- **MCP servers.** Under `gvisor` with no `runsc` registered, a contained
+  server is refused with an `mcp_entry_refused` row, reason
+  `sandbox_unavailable` (`ContainerPlan::new`,
+  `crates/mcp-proxy/src/container.rs`).
+
+Operators who want host execution opt in by writing `"mode":"off"`.
 
 ## Processes end with the call
 

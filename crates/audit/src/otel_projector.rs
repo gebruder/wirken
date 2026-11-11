@@ -607,6 +607,10 @@ impl OtelProjector {
             SessionEvent::SandboxEgressVerdict { .. } => Vec::new(),
             // A mode note, with no call to time.
             SessionEvent::SandboxEgressUnsupported { .. } => Vec::new(),
+            // What the gateway found at start, and a refusal on it:
+            // neither is a call that ran.
+            SessionEvent::ExecRuntimeAtStart { .. }
+            | SessionEvent::ExecRuntimeUnavailable { .. } => Vec::new(),
         }
     }
 

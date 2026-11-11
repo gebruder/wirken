@@ -1276,6 +1276,16 @@ impl Agent {
         self.tools.set_credential_resolver(resolver);
     }
 
+    /// Mark the `exec` runtime as found unavailable, as the first
+    /// `exec` would on a host that lacks it.
+    #[cfg(test)]
+    pub(crate) fn set_exec_runtime_unavailable_for_test(
+        &self,
+        status: crate::sandbox::RuntimeStatus,
+    ) {
+        self.tools.set_exec_runtime_unavailable(status);
+    }
+
     /// Replace the resolver `http_request` asks for its host's
     /// addresses, for tests that answer for a name without a network.
     #[cfg(test)]
@@ -4398,6 +4408,29 @@ impl Agent {
         // Otherwise, built-in tools.
         match self.tools.execute(name, arguments).await {
             Ok(r) => Ok(r),
+            // The runtime the sandbox mode names cannot run a
+            // container. The command ran nowhere: not on the host, not
+            // under another runtime. The refusal is a row of its own
+            // and a failed result the model reads, so the turn goes on
+            // and the chain says why this call did not run.
+            Err(AgentError::SandboxRuntimeUnavailable(status)) => {
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::ExecRuntimeUnavailable {
+                        mode: status.mode.label(),
+                        runtime: status.runtime.clone(),
+                        reason: status.reason.clone().unwrap_or_default(),
+                        agent_id: self.audited_agent_id(),
+                        adapter_id: self.current_inbound.adapter_id.clone(),
+                        sender_id: self.current_inbound.sender_id.clone(),
+                    },
+                )?;
+                Ok(crate::tool::ToolResult {
+                    output: format!("{status}. This command was not run."),
+                    success: false,
+                    sandbox: None,
+                })
+            }
             // Egress denial bubbles up from the wrapped HTTP
             // client. Emit the audit event here, then
             // surface a non-success ToolResult to the LLM rather

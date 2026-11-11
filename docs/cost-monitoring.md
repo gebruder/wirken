@@ -63,6 +63,8 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
         "budget_exceeded",
         "sandbox_egress_verdict",
         "sandbox_egress_unsupported",
+        "exec_runtime_at_start",
+        "exec_runtime_unavailable",
         "memory_entry_written",
         "cross_channel_memory_read",
         "import_started",

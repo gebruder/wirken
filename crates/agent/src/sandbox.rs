@@ -40,6 +40,25 @@ pub const LABEL_PID: &str = "wirken.exec.pid";
 pub use wirken_sandbox::SandboxMode;
 /// The `sandbox.json` reader both the gateway and the MCP proxy use.
 pub use wirken_sandbox::read_sandbox_json;
+/// What a sandbox mode runs under and whether it can; see
+/// [`runtime_status`].
+pub use wirken_sandbox::{DaemonRuntimes, RuntimeStatus};
+
+/// What `exec` under `mode` runs under on this host, asked of the local
+/// container runtime now. `off` asks nothing. A runtime that does not
+/// answer, and a `gvisor` mode whose `runsc` is not registered, come
+/// back unavailable with the reason; the caller refuses, and nothing
+/// here chooses another runtime.
+pub async fn runtime_status(mode: SandboxMode) -> RuntimeStatus {
+    if mode == SandboxMode::Off {
+        return RuntimeStatus::resolve(mode, None);
+    }
+    let daemon = match Docker::connect_with_local_defaults() {
+        Ok(docker) => DaemonRuntimes::probe(&docker).await,
+        Err(_) => None,
+    };
+    RuntimeStatus::resolve(mode, daemon.as_ref())
+}
 pub(crate) use wirken_sandbox::runtime_label;
 /// Container memory and PID caps, shared with MCP server containers.
 /// Public so the webchat status route reports the value the sandbox

@@ -97,6 +97,15 @@ impl SandboxMode {
         Self::from_sandbox_json(&read_sandbox_json(data_dir)?.unwrap_or(serde_json::Value::Null))
     }
 
+    /// How this mode is written in `sandbox.json`.
+    pub fn config_name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::ExecOnly => "exec-only",
+            Self::GVisor => "gvisor",
+        }
+    }
+
     /// How this mode is named on an audit row.
     pub fn label(self) -> wirken_audit::SandboxModeLabel {
         match self {
@@ -112,6 +121,146 @@ impl SandboxMode {
             Self::GVisor => Some("runsc".to_string()),
             _ => None,
         }
+    }
+}
+
+/// What the container runtime says it can run containers under.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DaemonRuntimes {
+    /// The runtime a container gets when none is named, as the daemon
+    /// names it. Usually `runc`.
+    pub default: Option<String>,
+    /// Every runtime registered with the daemon, by name.
+    pub registered: Vec<String>,
+}
+
+impl DaemonRuntimes {
+    /// Read the runtimes out of the daemon's `/info`.
+    pub fn from_info(info: &SystemInfo) -> Self {
+        let mut registered: Vec<String> = info
+            .runtimes
+            .iter()
+            .flat_map(|r| r.keys().cloned())
+            .collect();
+        registered.sort();
+        Self {
+            default: info.default_runtime.clone().filter(|d| !d.is_empty()),
+            registered,
+        }
+    }
+
+    /// Ask the daemon. `None` where it does not answer.
+    pub async fn probe(docker: &bollard::Docker) -> Option<Self> {
+        docker.info().await.ok().map(|info| Self::from_info(&info))
+    }
+}
+
+/// What containers under a sandbox mode run under, and whether that
+/// runtime can run one now.
+///
+/// The runtime is the one the mode names and no other: `gvisor` is
+/// `runsc`, `exec-only` is the daemon's default. Where the named
+/// runtime cannot run a container, `available` is false and the caller
+/// refuses. Nothing here picks a different runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStatus {
+    pub mode: SandboxMode,
+    /// The OCI runtime's name. `None` under `off`, where there is no
+    /// container, and where the daemon did not say what its default is.
+    pub runtime: Option<String>,
+    pub available: bool,
+    /// Why the runtime is not available, when it is not.
+    pub reason: Option<String>,
+    /// The daemon's default runtime, which egress sidecars run under in
+    /// every mode.
+    pub sidecar_runtime: Option<String>,
+}
+
+impl RuntimeStatus {
+    /// The status of `mode` against what the daemon reported; `None`
+    /// is a daemon that did not answer.
+    pub fn resolve(mode: SandboxMode, daemon: Option<&DaemonRuntimes>) -> Self {
+        let sidecar_runtime = daemon.and_then(|d| d.default.clone());
+        let unavailable = |runtime: Option<String>, reason: &str| Self {
+            mode,
+            runtime,
+            available: false,
+            reason: Some(reason.to_string()),
+            sidecar_runtime: sidecar_runtime.clone(),
+        };
+        match (mode, daemon) {
+            (SandboxMode::Off, _) => Self {
+                mode,
+                runtime: None,
+                available: true,
+                reason: None,
+                sidecar_runtime,
+            },
+            (SandboxMode::ExecOnly, None) => {
+                unavailable(None, "the container runtime is not reachable")
+            }
+            (SandboxMode::GVisor, None) => unavailable(
+                mode.runtime_name(),
+                "the container runtime is not reachable",
+            ),
+            (SandboxMode::ExecOnly, Some(d)) => Self {
+                mode,
+                runtime: d.default.clone(),
+                available: true,
+                reason: None,
+                sidecar_runtime,
+            },
+            (SandboxMode::GVisor, Some(d)) => {
+                let runtime = mode.runtime_name();
+                if d.registered.iter().any(|r| Some(r) == runtime.as_ref()) {
+                    Self {
+                        mode,
+                        runtime,
+                        available: true,
+                        reason: None,
+                        sidecar_runtime,
+                    }
+                } else {
+                    unavailable(
+                        runtime,
+                        "runsc is not registered with the container runtime",
+                    )
+                }
+            }
+        }
+    }
+
+    /// The runtime in words, as an approval card names it.
+    pub fn runtime_words(&self) -> String {
+        match (self.mode, self.runtime.as_deref()) {
+            (SandboxMode::Off, _) => "this host, no container".to_string(),
+            (SandboxMode::GVisor, _) => "gVisor (runsc)".to_string(),
+            (SandboxMode::ExecOnly, Some(name)) => format!("Docker default runtime ({name})"),
+            (SandboxMode::ExecOnly, None) => "Docker default runtime".to_string(),
+        }
+    }
+
+    /// One line saying what `exec` will run under, or that it will be
+    /// refused and why.
+    pub fn statement(&self) -> String {
+        match &self.reason {
+            Some(reason) if !self.available => format!(
+                "exec is refused: sandbox mode {} needs {}, and {reason}",
+                self.mode.config_name(),
+                self.runtime_words()
+            ),
+            _ => format!(
+                "exec runs under {} (sandbox mode {})",
+                self.runtime_words(),
+                self.mode.config_name()
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.statement())
     }
 }
 
@@ -259,6 +408,9 @@ pub struct RuntimeFacts {
     /// The daemon runs Windows containers, or this host has no Unix
     /// sockets for the broker.
     pub windows: bool,
+    /// `runsc` is registered with the daemon, so a container can be
+    /// started under gVisor.
+    pub runsc: bool,
 }
 
 impl RuntimeFacts {
@@ -293,10 +445,15 @@ impl RuntimeFacts {
             .flatten()
             .any(|o| o.split(',').any(|kv| kv == "name=rootless"));
         let windows = cfg!(not(unix)) || info.os_type.as_deref() == Some("windows");
+        let runsc = info
+            .runtimes
+            .as_ref()
+            .is_some_and(|r| r.contains_key("runsc"));
         Self {
             podman,
             rootless,
             windows,
+            runsc,
         }
     }
 
@@ -368,6 +525,81 @@ mod tests {
         assert_eq!(SandboxMode::parse("gvisor"), Ok(SandboxMode::GVisor));
         assert_eq!(SandboxMode::parse("exec-only"), Ok(SandboxMode::ExecOnly));
         assert_eq!(SandboxMode::parse("off"), Ok(SandboxMode::Off));
+    }
+
+    fn daemon(default: &str, registered: &[&str]) -> DaemonRuntimes {
+        DaemonRuntimes {
+            default: Some(default.to_string()),
+            registered: registered.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    /// Each mode runs under the runtime it names, and says so.
+    #[test]
+    fn a_mode_resolves_to_the_runtime_it_names() {
+        let both = daemon("runc", &["runc", "runsc"]);
+        let exec_only = RuntimeStatus::resolve(SandboxMode::ExecOnly, Some(&both));
+        assert_eq!(exec_only.runtime.as_deref(), Some("runc"));
+        assert!(exec_only.available);
+        assert_eq!(
+            exec_only.statement(),
+            "exec runs under Docker default runtime (runc) (sandbox mode exec-only)"
+        );
+        let gvisor = RuntimeStatus::resolve(SandboxMode::GVisor, Some(&both));
+        assert_eq!(gvisor.runtime.as_deref(), Some("runsc"));
+        assert!(gvisor.available);
+        assert_eq!(gvisor.sidecar_runtime.as_deref(), Some("runc"));
+        assert_eq!(
+            gvisor.statement(),
+            "exec runs under gVisor (runsc) (sandbox mode gvisor)"
+        );
+        let off = RuntimeStatus::resolve(SandboxMode::Off, None);
+        assert_eq!(off.runtime, None);
+        assert!(off.available);
+        assert_eq!(
+            off.statement(),
+            "exec runs under this host, no container (sandbox mode off)"
+        );
+    }
+
+    /// `exec-only` on a daemon whose default is not runc names what the
+    /// daemon will use.
+    #[test]
+    fn exec_only_names_the_daemons_own_default() {
+        let status = RuntimeStatus::resolve(
+            SandboxMode::ExecOnly,
+            Some(&daemon("runsc", &["runc", "runsc"])),
+        );
+        assert_eq!(status.runtime.as_deref(), Some("runsc"));
+        assert_eq!(
+            status.statement(),
+            "exec runs under Docker default runtime (runsc) (sandbox mode exec-only)"
+        );
+    }
+
+    /// `gvisor` without runsc, and any container mode without a daemon,
+    /// is unavailable with the reason. It is never the default runtime
+    /// in place of the one named.
+    #[test]
+    fn a_missing_runtime_is_unavailable_not_replaced() {
+        let no_runsc =
+            RuntimeStatus::resolve(SandboxMode::GVisor, Some(&daemon("runc", &["runc"])));
+        assert!(!no_runsc.available);
+        assert_eq!(no_runsc.runtime.as_deref(), Some("runsc"));
+        assert_eq!(
+            no_runsc.statement(),
+            "exec is refused: sandbox mode gvisor needs gVisor (runsc), and runsc is not \
+             registered with the container runtime"
+        );
+        for mode in [SandboxMode::ExecOnly, SandboxMode::GVisor] {
+            let status = RuntimeStatus::resolve(mode, None);
+            assert!(!status.available, "{mode:?}");
+            assert!(
+                status.statement().contains("is not reachable"),
+                "{}",
+                status.statement()
+            );
+        }
     }
 
     /// A mode that is none of the three is refused with the value in

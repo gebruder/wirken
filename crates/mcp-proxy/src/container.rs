@@ -470,6 +470,18 @@ impl ContainerPlan {
         }
         egress_hosts.sort();
         egress_hosts.dedup();
+        // The runtime `sandbox.json`'s mode names is the one the
+        // server runs under. Where it is `runsc` and the daemon has
+        // none registered, the server is refused here with that
+        // reason; it is not started under the daemon's default.
+        if host.runtime.as_deref() == Some("runsc") && host.facts.is_some_and(|f| !f.runsc) {
+            return Err(PlanError::Unavailable(
+                "sandbox mode gvisor needs the runsc runtime, which is not registered with \
+                 the container runtime. Install gVisor and register runsc, or change `mode` \
+                 in sandbox.json"
+                    .to_string(),
+            ));
+        }
         if !egress_hosts.is_empty()
             && let Some(why) = host.facts.and_then(|f| f.egress_unsupported())
         {
@@ -995,7 +1007,10 @@ mod tests {
             data_dir,
             runtime: Some("runsc".into()),
             secrets_base: Some(dirs.join("ram")),
-            facts: Some(RuntimeFacts::default()),
+            facts: Some(RuntimeFacts {
+                runsc: true,
+                ..Default::default()
+            }),
             sidecar_binary: None,
         }
     }
@@ -1482,6 +1497,7 @@ mod tests {
         );
         host.facts = Some(RuntimeFacts {
             podman: true,
+            runsc: true,
             ..Default::default()
         });
         let on_podman = plan(&host, &block(&dirs)).unwrap();
@@ -1502,6 +1518,23 @@ mod tests {
         );
     }
 
+    /// Under mode `gvisor` a server runs under runsc or not at all.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn a_gvisor_server_is_refused_where_runsc_is_not_registered() {
+        let dirs = tempfile::tempdir().unwrap();
+        let mut host = host(dirs.path());
+        assert_eq!(host.runtime.as_deref(), Some("runsc"));
+        host.facts = Some(RuntimeFacts::default());
+        match plan(&host, &block(&dirs)) {
+            Err(PlanError::Unavailable(why)) => assert!(why.contains("runsc"), "{why}"),
+            other => panic!("expected a refusal naming runsc, got {other:?}"),
+        }
+        // The daemon's default runtime is not asked for in its place.
+        host.runtime = None;
+        assert_eq!(plan(&host, &block(&dirs)).unwrap().runtime, None);
+    }
+
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn egress_hosts_are_refused_where_the_runtime_cannot_proxy_them() {
@@ -1510,14 +1543,17 @@ mod tests {
         for facts in [
             RuntimeFacts {
                 rootless: true,
+                runsc: true,
                 ..Default::default()
             },
             RuntimeFacts {
                 podman: true,
+                runsc: true,
                 ..Default::default()
             },
             RuntimeFacts {
                 windows: true,
+                runsc: true,
                 ..Default::default()
             },
         ] {
@@ -1543,6 +1579,7 @@ mod tests {
         );
         host.facts = Some(RuntimeFacts {
             rootless: true,
+            runsc: true,
             ..Default::default()
         });
         assert_eq!(plan(&host, &block(&dirs)).unwrap().user, "0:0");

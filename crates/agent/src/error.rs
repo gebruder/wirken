@@ -124,6 +124,11 @@ pub enum AgentError {
     #[error("sandbox error: {0}")]
     Sandbox(String),
 
+    /// The runtime the sandbox mode names cannot run a container, so
+    /// the `exec` was refused. The command ran nowhere.
+    #[error("{0}")]
+    SandboxRuntimeUnavailable(Box<wirken_sandbox::RuntimeStatus>),
+
     #[error("identity error: {0}")]
     Identity(String),
 

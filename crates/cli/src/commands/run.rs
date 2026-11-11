@@ -220,6 +220,50 @@ fn prompt_vault_passphrase(cache: &mut Option<String>) -> String {
 }
 
 /// Run the gateway daemon.
+/// The lines the gateway prints at start about where `exec` runs.
+fn exec_runtime_lines(status: &wirken_agent::sandbox::RuntimeStatus) -> Vec<String> {
+    let mut lines = vec![format!("Sandbox: {status}")];
+    if status.mode == wirken_agent::sandbox::SandboxMode::GVisor {
+        lines.push(format!(
+            "Sandbox: egress sidecars run under the container runtime's default ({}), not gVisor",
+            status.sidecar_runtime.as_deref().unwrap_or("unknown")
+        ));
+    }
+    lines
+}
+
+/// Say which runtime `exec` will use and record it on the chain, one
+/// [`SessionEvent::ExecRuntimeAtStart`] row per start. An unavailable
+/// runtime is said as a refusal and warned about; the row carries
+/// `available: false` and the reason.
+fn announce_exec_runtime(
+    status: &wirken_agent::sandbox::RuntimeStatus,
+    log: &dyn wirken_audit::SessionLog,
+) -> Result<()> {
+    for line in exec_runtime_lines(status) {
+        println!("  {line}");
+    }
+    if !status.available {
+        tracing::warn!("{status}");
+    }
+    let lane = log.handle_for(wirken_audit::SessionId::new(
+        wirken_audit::SANDBOX_RUNTIME_SESSION.to_string(),
+    ));
+    log.append(
+        &lane,
+        wirken_audit::TrustLevel::System,
+        wirken_audit::SessionEvent::ExecRuntimeAtStart {
+            mode: status.mode.label(),
+            runtime: status.runtime.clone(),
+            available: status.available,
+            reason: status.reason.clone(),
+            sidecar_runtime: status.sidecar_runtime.clone(),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("could not record the exec runtime at start: {e}"))?;
+    Ok(())
+}
+
 pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // Settings that are refused rather than defaulted are read first,
     // so a gateway that will not run with them has started nothing.
@@ -695,6 +739,16 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     };
     let session_log_for_shutdown = Arc::new(session_log_concrete);
     let session_log: Arc<dyn wirken_audit::SessionLog> = session_log_for_shutdown.clone();
+
+    // --- The runtime exec will use ---
+    //
+    // Asked of the container runtime now, said on the terminal and
+    // put on the chain, so what `exec` runs under is a recorded fact
+    // of this start and not something read off `sandbox.json` later.
+    // A runtime that cannot run a container does not stop the gateway:
+    // every `exec` is refused, each with its own row, until it can.
+    let exec_runtime = wirken_agent::sandbox::runtime_status(host_exec_sandbox.mode).await;
+    announce_exec_runtime(&exec_runtime, session_log.as_ref())?;
     for (credential, destination, named_by) in early_refusals {
         super::destinations::record_refused(
             session_log.as_ref(),
@@ -10696,5 +10750,92 @@ mod turn_error_reply_tests {
             "{reply}"
         );
         assert!(!reply.contains("/var/x"), "{reply}");
+    }
+}
+
+#[cfg(test)]
+mod exec_runtime_at_start_tests {
+    use super::{announce_exec_runtime, exec_runtime_lines};
+    use wirken_agent::sandbox::{DaemonRuntimes, RuntimeStatus, SandboxMode};
+    use wirken_audit::{
+        SANDBOX_RUNTIME_SESSION, SandboxModeLabel, SessionEvent, SessionId, SessionLog,
+        SqliteSessionLog,
+    };
+
+    fn daemon(registered: &[&str]) -> DaemonRuntimes {
+        DaemonRuntimes {
+            default: Some("runc".into()),
+            registered: registered.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    fn rows(log: &SqliteSessionLog) -> Vec<SessionEvent> {
+        let lane = log.handle_for(SessionId::new(SANDBOX_RUNTIME_SESSION.to_string()));
+        log.get_since(&lane, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .filter(|e| !matches!(e, SessionEvent::ChainHead { .. }))
+            .collect()
+    }
+
+    /// The start says which runtime exec will use and puts it on the
+    /// chain.
+    #[test]
+    fn the_runtime_exec_will_use_is_said_and_recorded() {
+        let log = SqliteSessionLog::open_in_memory().unwrap();
+        let status = RuntimeStatus::resolve(SandboxMode::GVisor, Some(&daemon(&["runc", "runsc"])));
+        assert_eq!(
+            exec_runtime_lines(&status),
+            [
+                "Sandbox: exec runs under gVisor (runsc) (sandbox mode gvisor)",
+                "Sandbox: egress sidecars run under the container runtime's default (runc), not gVisor",
+            ]
+        );
+        announce_exec_runtime(&status, &log).unwrap();
+        assert_eq!(
+            rows(&log),
+            [SessionEvent::ExecRuntimeAtStart {
+                mode: SandboxModeLabel::Gvisor,
+                runtime: Some("runsc".into()),
+                available: true,
+                reason: None,
+                sidecar_runtime: Some("runc".into()),
+            }]
+        );
+    }
+
+    /// A configured runtime the host lacks is said as a refusal, and
+    /// the row says it is unavailable and why. It is not recorded as
+    /// the runtime the daemon would use by default.
+    #[test]
+    fn an_unavailable_runtime_is_said_and_recorded_as_one() {
+        let log = SqliteSessionLog::open_in_memory().unwrap();
+        let status = RuntimeStatus::resolve(SandboxMode::GVisor, Some(&daemon(&["runc"])));
+        assert_eq!(
+            exec_runtime_lines(&status)[0],
+            "Sandbox: exec is refused: sandbox mode gvisor needs gVisor (runsc), and runsc is \
+             not registered with the container runtime"
+        );
+        announce_exec_runtime(&status, &log).unwrap();
+        assert_eq!(
+            rows(&log),
+            [SessionEvent::ExecRuntimeAtStart {
+                mode: SandboxModeLabel::Gvisor,
+                runtime: Some("runsc".into()),
+                available: false,
+                reason: Some("runsc is not registered with the container runtime".into()),
+                sidecar_runtime: Some("runc".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn exec_only_names_the_default_runtime_and_says_nothing_of_sidecars() {
+        let status = RuntimeStatus::resolve(SandboxMode::ExecOnly, Some(&daemon(&["runc"])));
+        assert_eq!(
+            exec_runtime_lines(&status),
+            ["Sandbox: exec runs under Docker default runtime (runc) (sandbox mode exec-only)"]
+        );
     }
 }

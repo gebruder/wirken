@@ -17271,3 +17271,140 @@ async fn open_egress_from_an_exec_is_refused() {
         location.text
     );
 }
+
+// ---------------------------------------------------------------------------
+// An `exec` whose configured runtime cannot run a container is refused
+// with a row that says so. It runs under no other runtime and not on
+// the host, and the turn goes on.
+// ---------------------------------------------------------------------------
+mod exec_runtime_unavailable {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{SandboxModeLabel, SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use super::approved_unknown_tool::stub;
+    use crate::approval_gate::ApprovalOutcome;
+    use crate::approval_gate::test_support::ScriptedGate;
+    use crate::llm::LlmConfig;
+    use crate::sandbox::{DaemonRuntimes, RuntimeStatus, SandboxConfig, SandboxMode};
+
+    #[tokio::test]
+    async fn a_gvisor_exec_without_runsc_is_refused_with_a_row() {
+        let (base_url, server) = stub(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_exec",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{\"command\":\"touch ran-anyway\"}"},
+                }],
+            }),
+            serde_json::json!({"role": "assistant", "content": "Done."}),
+        ])
+        .await;
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let lane = log.handle_for(SessionId::new("runner".to_string()));
+        let mut agent = crate::runtime::Agent::from_session_log(
+            "runner".into(),
+            workspace.clone(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            SandboxConfig {
+                mode: SandboxMode::GVisor,
+                ..Default::default()
+            },
+            crate::runtime::ToolGate::Store(crate::tests::test_permissions()),
+        )
+        .unwrap();
+        // What the first exec finds on a host whose daemon has runc
+        // and no runsc.
+        let status = RuntimeStatus::resolve(
+            SandboxMode::GVisor,
+            Some(&DaemonRuntimes {
+                default: Some("runc".into()),
+                registered: vec!["runc".into()],
+            }),
+        );
+        assert!(!status.available);
+        agent.set_exec_runtime_unavailable_for_test(status);
+        let gate = Arc::new(ScriptedGate::new(vec![ApprovalOutcome::Approved {
+            actor: None,
+        }]));
+        agent.set_approval_gate(gate);
+        let reply = agent
+            .process_message("make the file", "msg-1".into())
+            .await
+            .expect("the turn ends with a reply");
+        server.await.unwrap();
+        assert_eq!(reply.response, "Done.");
+
+        let events: Vec<SessionEvent> = log
+            .get_since(&lane, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        let refusal = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::ExecRuntimeUnavailable {
+                    mode,
+                    runtime,
+                    reason,
+                    ..
+                } => Some((*mode, runtime.clone(), reason.clone())),
+                _ => None,
+            })
+            .expect("the refusal is a row");
+        assert_eq!(refusal.0, SandboxModeLabel::Gvisor);
+        assert_eq!(refusal.1.as_deref(), Some("runsc"));
+        assert!(
+            refusal.2.contains("runsc is not registered"),
+            "{}",
+            refusal.2
+        );
+
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::ToolResult {
+                    output,
+                    success,
+                    sandbox,
+                    ..
+                } => Some((output.clone(), *success, sandbox.is_some())),
+                _ => None,
+            })
+            .expect("the call has a result row");
+        assert!(!result.1);
+        assert!(
+            result.0.contains("exec is refused") && result.0.contains("not run"),
+            "{}",
+            result.0
+        );
+        assert!(
+            !result.2,
+            "nothing ran, so no runtime is recorded as having run it"
+        );
+        assert!(
+            !workspace.join("ran-anyway").exists(),
+            "the command did not run on the host or under another runtime"
+        );
+    }
+}

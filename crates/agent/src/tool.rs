@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 
 use crate::error::AgentError;
-use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode};
+use crate::sandbox::{DockerSandbox, RuntimeStatus, SandboxConfig, SandboxMode};
 use wirken_gateway::permissions::Action;
 
 /// Maximum bytes a built-in tool will buffer from an HTTP response
@@ -65,6 +65,16 @@ pub struct ToolConfig {
     pub sandbox: SandboxConfig,
 }
 
+/// Where this registry's `exec` runs.
+enum ExecSandbox {
+    /// On the host: the operator set `"mode": "off"`.
+    Host,
+    /// In a container under the runtime the mode names.
+    Container(DockerSandbox),
+    /// Nowhere: the runtime the mode names cannot run a container.
+    Unavailable(RuntimeStatus),
+}
+
 /// Built-in tool implementations.
 pub struct ToolRegistry {
     /// Path form of the workspace. Kept for the `exec` tool's
@@ -97,7 +107,7 @@ pub struct ToolRegistry {
     /// `OnceCell` is set exactly once; the inner `Option` records whether
     /// provisioning succeeded. A failed first attempt stays failed for the
     /// lifetime of this registry — restart `wirken run` to retry.
-    sandbox: tokio::sync::OnceCell<Option<DockerSandbox>>,
+    sandbox: tokio::sync::OnceCell<ExecSandbox>,
     sandbox_config: SandboxConfig,
     /// Path to the zirkel aggregator SQLite database, set when the
     /// agent is configured for the librarian skill. `None` means the
@@ -588,72 +598,55 @@ impl ToolRegistry {
         self.sandbox.initialized()
     }
 
-    /// Provision the sandbox on first call, then return the cached result on
-    /// every subsequent call. Returns `None` when sandbox mode is `Off` or
-    /// when provisioning failed on the first attempt — failures are sticky
-    /// for the lifetime of this registry.
-    async fn sandbox(&self) -> Option<&DockerSandbox> {
+    /// Decide, on the first `exec`, where `exec` runs for the life of
+    /// this registry: on the host under `off`, in a container under the
+    /// runtime the mode names, or nowhere when that runtime cannot run
+    /// one. A runtime found unavailable stays unavailable until the
+    /// agent is restarted; it is never replaced by another.
+    async fn sandbox(&self) -> &ExecSandbox {
         self.sandbox
             .get_or_init(|| async {
                 if self.sandbox_config.mode == SandboxMode::Off {
-                    return None;
+                    return ExecSandbox::Host;
                 }
-
-                // Probe Docker first so the operator sees a specific
-                // message ("Docker not reachable") rather than a
-                // generic connect error. `detect_runtime` returns None
-                // if the Docker daemon is not reachable at the
-                // default local socket.
-                if crate::sandbox::detect_runtime().await.is_none() {
+                let status = crate::sandbox::runtime_status(self.sandbox_config.mode).await;
+                if !status.available {
                     tracing::warn!(
-                        "Sandbox mode {:?} is set but Docker is not reachable. \
-                         exec is refused (fail-closed) for the lifetime of this \
-                         agent. Install Docker and start the daemon, then restart; \
-                         or set `\"mode\":\"off\"` in sandbox.json to run exec on \
-                         the host.",
-                        self.sandbox_config.mode,
+                        "{status}. exec is refused for the lifetime of this agent; fix the \
+                         runtime and restart, or change `mode` in sandbox.json."
                     );
-                    return None;
+                    return ExecSandbox::Unavailable(status);
                 }
-
-                // gVisor requested but runsc not registered as a
-                // Docker runtime. Distinct from Docker-absent so the
-                // operator knows which dependency to install.
-                if self.sandbox_config.mode == SandboxMode::GVisor
-                    && !crate::sandbox::detect_gvisor().await
-                {
-                    tracing::warn!(
-                        "Sandbox mode gvisor is set but the `runsc` runtime is \
-                         not registered with Docker. exec is refused (fail-closed) \
-                         for the lifetime of this agent. Install gVisor and add \
-                         `runsc` to Docker's runtimes, then restart; or set \
-                         `\"mode\":\"exec-only\"` in sandbox.json."
-                    );
-                    return None;
-                }
-
                 match DockerSandbox::new(self.sandbox_config.clone()) {
                     Ok(s) => {
                         tracing::info!(
-                            "sandbox provisioned: mode={:?} image={}",
-                            self.sandbox_config.mode,
+                            "sandbox provisioned: {status}, image={}",
                             self.sandbox_config.image,
                         );
-                        Some(s)
+                        ExecSandbox::Container(s)
                     }
                     Err(e) => {
+                        let status = RuntimeStatus {
+                            available: false,
+                            reason: Some(e.to_string()),
+                            ..status
+                        };
                         tracing::warn!(
-                            "Sandbox unavailable: {e}. exec is refused (fail-closed) \
-                             for the lifetime of this agent. Fix the sandbox runtime \
-                             (Docker / gVisor) and restart, or set `\"mode\":\"off\"` \
-                             in sandbox.json to run exec on the host."
+                            "{status}. exec is refused for the lifetime of this agent; fix the \
+                             runtime and restart, or change `mode` in sandbox.json."
                         );
-                        None
+                        ExecSandbox::Unavailable(status)
                     }
                 }
             })
             .await
-            .as_ref()
+    }
+
+    /// Mark this registry's `exec` runtime as found unavailable, as the
+    /// first `exec` would on a host that lacks it.
+    #[cfg(test)]
+    pub(crate) fn set_exec_runtime_unavailable(&self, status: RuntimeStatus) {
+        let _ = self.sandbox.set(ExecSandbox::Unavailable(status));
     }
 
     /// Get all tool definitions (for sending to the LLM).
@@ -752,30 +745,26 @@ impl ToolRegistry {
     async fn exec_command(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
         let command = extract_exec_command(args)?;
 
-        // Use sandbox if available (provisioned lazily on first call)
-        if let Some(sandbox) = self.sandbox().await {
-            let egress = self.sandbox_egress.read().ok().and_then(|g| g.clone());
-            return sandbox
-                .exec(&command, &self.workspace, egress.as_ref())
-                .await;
+        // Decided on the first call: a container under the runtime the
+        // mode names, a refusal when that runtime cannot run one, or
+        // the host when the operator set `off`.
+        match self.sandbox().await {
+            ExecSandbox::Container(sandbox) => {
+                let egress = self.sandbox_egress.read().ok().and_then(|g| g.clone());
+                return sandbox
+                    .exec(&command, &self.workspace, egress.as_ref())
+                    .await;
+            }
+            ExecSandbox::Unavailable(status) => {
+                return Err(AgentError::SandboxRuntimeUnavailable(Box::new(
+                    status.clone(),
+                )));
+            }
+            ExecSandbox::Host => {}
         }
 
-        // No sandbox. Host execution is only permitted when the
-        // operator explicitly set SandboxMode::Off. Any other mode
-        // means the requested sandbox runtime failed to provision;
-        // silently running on the host would violate the configured
-        // trust boundary. Refuse with a clear message so the operator
-        // either fixes the runtime or opts in explicitly.
-        if self.sandbox_config.mode != SandboxMode::Off {
-            return Err(AgentError::Sandbox(format!(
-                "sandbox mode is {:?} but the sandbox is unavailable; \
-                 refusing to fall back to host execution. Set \
-                 `\"mode\":\"off\"` in sandbox.json to opt into host execution, \
-                 or fix the sandbox runtime (Docker / gVisor) and restart.",
-                self.sandbox_config.mode
-            )));
-        }
-
+        // Host execution: reached only under `off`, which the match
+        // above is the one way into.
         let resolved = self.sandbox_config.shell.resolve().ok_or_else(|| {
             AgentError::Tool(format!(
                 "exec: no shell found for shell mode {:?}; install one of sh / powershell / cmd, or set `\"shell\"` in sandbox.json explicitly",

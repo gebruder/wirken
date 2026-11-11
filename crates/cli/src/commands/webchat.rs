@@ -4673,6 +4673,10 @@ pub fn session_events(
             SessionEvent::CrossChannelMemoryRead { .. } => None,
             // A mode note, not a verdict on a request.
             SessionEvent::SandboxEgressUnsupported { .. } => None,
+            // The gateway's own row at start. A refused exec's
+            // tool_result row is what the turn shows.
+            SessionEvent::ExecRuntimeAtStart { .. }
+            | SessionEvent::ExecRuntimeUnavailable { .. } => None,
         };
         if let Some(mut v) = projected
             && after.is_none_or(|a| row.seq > a)

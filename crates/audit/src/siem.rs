@@ -664,6 +664,18 @@ fn extract_identity_for_sentinel(
             sender_id.clone(),
             Some(agent_id.clone()),
         ),
+        SessionEvent::ExecRuntimeUnavailable {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        // The gateway's own finding at start: no agent, no sender.
+        SessionEvent::ExecRuntimeAtStart { .. } => (None, None, None),
         SessionEvent::SandboxEgressVerdict {
             agent_id,
             adapter_id,
@@ -1010,6 +1022,19 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::SandboxEgressUnsupported { mode, .. } => {
             format!("sandbox_egress_unsupported mode={mode:?}")
         }
+        SessionEvent::ExecRuntimeAtStart {
+            mode,
+            runtime,
+            available,
+            ..
+        } => format!(
+            "exec_runtime_at_start mode={mode:?} runtime={} available={available}",
+            runtime.as_deref().unwrap_or("none")
+        ),
+        SessionEvent::ExecRuntimeUnavailable { mode, runtime, .. } => format!(
+            "exec_runtime_unavailable mode={mode:?} runtime={}",
+            runtime.as_deref().unwrap_or("none")
+        ),
         SessionEvent::PermissionDenied {
             tool,
             denial_source,
