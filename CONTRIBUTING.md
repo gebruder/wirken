@@ -6,7 +6,9 @@ MSRV is set by CI's `clippy::incompatible_msrv` lint, not by authorial claim. If
 
 ## Local gate
 
-`scripts/gate.sh` runs, before a push, the checks CI runs on one that a workstation can run: the `cargo deny` check, `cargo fmt --check`, both clippy passes, `cargo test --workspace`, the source lints, the names check, the commit-msg hook tests and the script tests. Every step runs and prints its own exit status and the log it wrote; the gate exits non-zero if any step did.
+A commit is one logical concern. A push carries the commits of one round of work, and `scripts/gate.sh` runs once per push, on the tip, covering every commit in it. When it fails, the commit at fault is found and fixed and the gate runs again before anything is pushed. After the push every workflow is checked once; nothing waits on a workflow between commits.
+
+`scripts/gate.sh` runs the checks CI runs on a push that a workstation can run: the `cargo deny` check, `cargo fmt --check`, both clippy passes, `cargo test --workspace`, the source lints, the names check, the commit-msg hook tests and the script tests. Every step runs and prints its own exit status and the log it wrote; the gate exits non-zero if any step did.
 
 The `cargo deny` step is the Deny job's command, word for word, and the gate fails if `.github/workflows/ci.yml` no longer runs that command or pins a different cargo-deny from the one installed. It runs first because it is the step that can fail with no change to the tree: an advisory published since the last green run fails it against the lockfile already on main, and it should fail here before it fails in CI.
 
