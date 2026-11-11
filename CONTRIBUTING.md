@@ -12,6 +12,8 @@ A commit is one logical concern. A push carries the commits of one round of work
 
 The `cargo deny` step is the Deny job's command, word for word, and the gate fails if `.github/workflows/ci.yml` no longer runs that command or pins a different cargo-deny from the one installed. It runs first because it is the step that can fail with no change to the tree: an advisory published since the last green run fails it against the lockfile already on main, and it should fail here before it fails in CI.
 
+Where every commit in the push, and the working tree, touches documentation only, the gate skips the `cargo` steps and runs the source lints, the names check, the hook tests and the script tests. Documentation is a Markdown file at the root or under `docs/` that no crate takes in with `include_str!`. Any other file in the range runs every step. The gate's first line says which it ran and why, and its last line how long it took.
+
 Fuzz, Miri, MSRV and the Windows-target clippy are not run by the gate. CI runs them.
 
 ## False green
