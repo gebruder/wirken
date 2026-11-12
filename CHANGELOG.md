@@ -10,6 +10,14 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- Plain `http://` is accepted only where the URL's host is exactly
+  `localhost`, `127.0.0.1` or `[::1]`: for an MCP server's HTTP endpoint, a
+  Matrix homeserver, a SIEM endpoint and a model provider's base URL. The
+  check compared the start of the URL, so `http://localhost.example.com`
+  passed. The Matrix adapter also accepts `http://[::1]`.
+
 ## [3.3.0] - 2026-11-11
 
 ### Security

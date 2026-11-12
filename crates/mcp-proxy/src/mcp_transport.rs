@@ -467,9 +467,7 @@ impl HttpTransport {
     /// provider. The reqwest client is configured with HTTPS-only
     /// for non-localhost URLs and a 30s request timeout.
     pub fn new(url: String, auth: Box<dyn crate::auth::AuthProvider>) -> Result<Self, ProxyError> {
-        let is_localhost = url.starts_with("http://localhost")
-            || url.starts_with("http://127.0.0.1")
-            || url.starts_with("http://[::1]");
+        let is_localhost = plain_http_to_loopback(&url);
         if !url.starts_with("https://") && !is_localhost {
             return Err(ProxyError::Mcp(format!(
                 "MCP HTTP endpoint must use HTTPS (got {url}); only localhost may use http://"
@@ -878,5 +876,46 @@ mod refused_credential_tests {
             &HeaderMap::new()
         ));
         assert!(!credential_refused(StatusCode::OK, &HeaderMap::new()));
+    }
+}
+
+/// Whether `url` is plain HTTP to this host, the one case reached
+/// without TLS. The host is parsed out and compared whole, so a name
+/// that only starts like a loopback one is not one.
+pub(crate) fn plain_http_to_loopback(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "http" && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+    })
+}
+
+#[cfg(test)]
+mod plain_http_tests {
+    use super::HttpTransport;
+    use crate::auth::NoAuth;
+
+    fn accepted(url: &str) -> bool {
+        HttpTransport::new(url.to_string(), Box::new(NoAuth)).is_ok()
+    }
+
+    /// Plain HTTP reaches this host and no other: a name that only
+    /// starts like a loopback one is some other host.
+    #[test]
+    fn plain_http_is_for_a_loopback_host_and_no_name_that_starts_like_one() {
+        for url in [
+            "http://localhost:3000/mcp",
+            "http://127.0.0.1:3000/mcp",
+            "http://[::1]:3000/mcp",
+            "https://mcp.example.com/mcp",
+        ] {
+            assert!(accepted(url), "{url}");
+        }
+        for url in [
+            "http://localhost.example.com/mcp",
+            "http://127.0.0.1.example.com/mcp",
+            "http://localhost@example.com/mcp",
+            "http://example.com/mcp",
+        ] {
+            assert!(!accepted(url), "{url}");
+        }
     }
 }

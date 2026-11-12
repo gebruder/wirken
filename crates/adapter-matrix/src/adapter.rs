@@ -73,8 +73,7 @@ impl MatrixAdapter {
         let writer = Arc::new(Mutex::new(writer));
 
         // Validate HTTPS — refuse to send credentials over plaintext HTTP
-        let is_localhost = self.homeserver_url.starts_with("http://localhost")
-            || self.homeserver_url.starts_with("http://127.0.0.1");
+        let is_localhost = plain_http_to_loopback(&self.homeserver_url);
 
         if !self.homeserver_url.starts_with("https://") && !is_localhost {
             return Err(MatrixError::Matrix(format!(
@@ -702,4 +701,13 @@ async fn heartbeat_loop(writer: Arc<Mutex<IpcFrameWriter>>) {
             break;
         }
     }
+}
+
+/// Whether `url` is plain HTTP to this host, the one case reached
+/// without TLS. The host is parsed out and compared whole, so a name
+/// that only starts like a loopback one is not one.
+pub(crate) fn plain_http_to_loopback(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "http" && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+    })
 }

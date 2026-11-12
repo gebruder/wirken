@@ -347,9 +347,7 @@ impl LlmClient {
     /// Create a new LLM client.
     /// Enforces HTTPS for non-localhost endpoints to prevent API key leakage.
     pub fn new(config: LlmConfig) -> Result<Self, AgentError> {
-        let is_localhost = config.base_url.starts_with("http://localhost")
-            || config.base_url.starts_with("http://127.0.0.1")
-            || config.base_url.starts_with("http://[::1]");
+        let is_localhost = plain_http_to_loopback(&config.base_url);
 
         if !config.base_url.starts_with("https://") && !is_localhost {
             return Err(AgentError::Http(format!(
@@ -1863,4 +1861,44 @@ pub fn tools_to_json(tools: &[ToolDef]) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// Whether `url` is plain HTTP to this host, the one case reached
+/// without TLS. The host is parsed out and compared whole, so a name
+/// that only starts like a loopback one is not one.
+pub(crate) fn plain_http_to_loopback(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "http" && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+    })
+}
+
+#[cfg(test)]
+mod plain_http_tests {
+    use super::{LlmClient, LlmConfig};
+
+    fn accepted(base_url: &str) -> bool {
+        LlmClient::new(LlmConfig::custom(base_url, "m")).is_ok()
+    }
+
+    /// Plain HTTP reaches this host and no other: a name that only
+    /// starts like a loopback one is some other host.
+    #[test]
+    fn plain_http_is_for_a_loopback_host_and_no_name_that_starts_like_one() {
+        for url in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:11434/v1",
+            "https://llm.example.com/v1",
+        ] {
+            assert!(accepted(url), "{url}");
+        }
+        for url in [
+            "http://localhost.example.com/v1",
+            "http://127.0.0.1.example.com/v1",
+            "http://localhost@example.com/v1",
+            "http://example.com/v1",
+        ] {
+            assert!(!accepted(url), "{url}");
+        }
+    }
 }

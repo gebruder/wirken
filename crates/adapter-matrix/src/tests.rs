@@ -903,3 +903,31 @@ fn the_approval_content_has_no_html_body() {
     assert!(content.get("format").is_none(), "{content}");
     assert!(content.get("formatted_body").is_none(), "{content}");
 }
+
+// ---------------------------------------------------------------------------
+// Plain HTTP is for this host only
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plain_http_is_for_a_loopback_host_and_no_name_that_starts_like_one() {
+    use crate::adapter::plain_http_to_loopback;
+
+    for url in [
+        "http://localhost:8008",
+        "http://127.0.0.1:8008",
+        "http://[::1]:8008",
+        "http://localhost",
+    ] {
+        assert!(plain_http_to_loopback(url), "{url}");
+    }
+    for url in [
+        "http://localhost.example.com",
+        "http://127.0.0.1.example.com:8008",
+        "http://localhost@example.com",
+        "http://example.com",
+        "https://localhost",
+        "localhost",
+    ] {
+        assert!(!plain_http_to_loopback(url), "{url}");
+    }
+}

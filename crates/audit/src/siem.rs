@@ -150,14 +150,21 @@ pub struct SiemForwarder {
     http: reqwest::Client,
 }
 
+/// Whether `url` is plain HTTP to this host, the one case reached
+/// without TLS. The host is parsed out and compared whole, so a name
+/// that only starts like a loopback one is not one.
+pub(crate) fn plain_http_to_loopback(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "http" && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+    })
+}
+
 impl SiemForwarder {
     /// Create a new SIEM forwarder.
     /// Returns an error if the endpoint uses plaintext HTTP (credential leakage risk).
     /// Localhost endpoints are exempt for development use.
     pub fn new(config: SiemConfig) -> Result<Self, String> {
-        let is_localhost = config.endpoint.starts_with("http://localhost")
-            || config.endpoint.starts_with("http://127.0.0.1")
-            || config.endpoint.starts_with("http://[::1]");
+        let is_localhost = plain_http_to_loopback(&config.endpoint);
 
         if !config.endpoint.starts_with("https://") && !is_localhost {
             return Err(format!(
@@ -1515,6 +1522,35 @@ mod adapter_lifecycle_tests {
             typed_exclude_variants: None,
             typed_forwarding_enabled: None,
             typed_poll_interval_ms: None,
+        }
+    }
+
+    /// Plain HTTP reaches this host and no other: a name that only
+    /// starts like a loopback one is some other host.
+    #[test]
+    fn plain_http_is_for_a_loopback_host_and_no_name_that_starts_like_one() {
+        let accepted = |endpoint: &str| {
+            SiemForwarder::new(SiemConfig {
+                endpoint: endpoint.into(),
+                ..config(SiemTarget::Webhook)
+            })
+            .is_ok()
+        };
+        for url in [
+            "http://localhost:8088/x",
+            "http://127.0.0.1:8088/x",
+            "http://[::1]:8088/x",
+            "https://siem.example.com/x",
+        ] {
+            assert!(accepted(url), "{url}");
+        }
+        for url in [
+            "http://localhost.example.com/x",
+            "http://127.0.0.1.example.com/x",
+            "http://localhost@example.com/x",
+            "http://example.com/x",
+        ] {
+            assert!(!accepted(url), "{url}");
         }
     }
 
