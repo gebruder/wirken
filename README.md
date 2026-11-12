@@ -19,8 +19,9 @@ require: a locked-down workstation, a server inside your network, or an
 air-gapped host. Its model connection is provider-agnostic: frontier APIs,
 local weights through Ollama, TEEs for encrypted processing, Swiss- and
 EU-hosted endpoints, or a ChatGPT plan the operator has, all
-interchangeable. Each agent runs the model you assign
-it, capped by a per-agent spend budget. MIT licensed.
+interchangeable. Each agent runs the model you assign it. A per-agent spend
+budget can alert on or refuse calls past a ceiling; it is off until
+configured. MIT licensed.
 
 ## How it works
 
@@ -34,9 +35,10 @@ first.
 - **Credentials never reach the model.** Tokens and keys stay in an
   [encrypted vault](docs/credentials.md). Wirken supplies them at the edge; the
   agent and the LLM never see them.
-- **Every action is logged before it runs, and attributed.** Each step is
-  written to a [signed, hash-chained audit log](docs/audit-cli.md) as a typed
-  event, tagged with the person who triggered it, before it executes.
+- **Every action is logged and attributed.** Each tool call is written to a
+  [hash-chained audit log with signed chain heads](docs/audit-cli.md) as a
+  typed event, tagged with the sender who triggered it, before it executes.
+  Its outcome is written after it.
 - **Least privilege by default.** A [three-tier permission
   model](docs/permissions-and-identity.md), and any sub-agent an agent spawns
   is boxed by limits you set.
@@ -211,51 +213,29 @@ graph TD
 ```
 
 The reasoning behind each boundary is in
-[docs/architecture.md](docs/architecture.md); which guarantees the compiler
-enforces and which are runtime policy is in
+[docs/architecture.md](docs/architecture.md); which controls are checked at
+compile time and which at run time is in
 [docs/enforcement-model.md](docs/enforcement-model.md).
 
-## Known limitations
+## What Wirken contains
 
-Wirken contains the blast radius of a compromised agent; it does not make
-compromise impossible. The honest edges:
+- **Channels.** Each channel adapter is a separate OS process that is handed
+  only its own credentials. Agents run inside the gateway process.
+- **Shell.** `exec` runs in a container with no network, the agent workspace
+  as its only mount, no capabilities and a seccomp profile. If the container
+  runtime the sandbox mode names is not available, `exec` is refused.
+- **Approvals.** The tier of a tool call is computed from the tool name and
+  arguments, not by the model. Workspace file access does not prompt.
+  Twenty-three inspection commands prompt unless the operator has recorded a
+  grant. Every other command and every MCP call prompts each time.
+- **Audit.** Each session is a hash-chained log with signed chain heads.
+  `wirken audit verify --require-signed --anchor <key>` checks it against a
+  key kept off the machine.
 
-- **Egress is not fully contained.** Sandboxed `exec` and contained stdio MCP
-  servers are bounded, but HTTP MCP servers are reached by the proxy directly,
-  a stdio server with `"sandbox": "off"` runs on the host, and the LLM client
-  opens its own outbound connections. Those need a network namespace, a
-  restricted-egress container, or firewall rules. See
-  [docs/egress.md](docs/egress.md).
-- **The sandbox can be turned off.** With `sandbox.json` set to `mode: off`,
-  `exec` runs at the Wirken UID with no container, and the host shell can then
-  read or rewrite trust files under the data directory. The gateway warns at
-  startup.
-- **Audit tamper-evidence assumes an out-of-band anchor.** The hash chain and
-  signature detect modification, but a same-UID attacker who rewrites both the
-  log and the local public key is only caught if you verify against a key kept
-  off the machine.
-- **Injection detection flags, it does not block.** Suspicious inbound
-  messages are marked and forwarded to your SIEM, not stopped. The permission
-  tiers and the sandbox are what limit what an injected agent can do.
-- **Type-level channel isolation is not in the hot path.** Channel separation
-  is enforced at the process level; the compile-time `SessionHandle<Channel>`
-  API exists and is tested but is not threaded through the production message
-  path.
-- **Not verified against the live service:**
-  - **iMessage.** The API calls and webhook check follow BlueBubbles Server's
-    source; no run against a running server has confirmed them. See
-    [docs/channels.md](docs/channels.md#imessage-bluebubbles).
-  - **Discord approvals.** Unit-tested only; no run against a live Discord bot
-    has posted the card or taken a press. See
-    [docs/channels.md](docs/channels.md#discord).
-- **Agents share the gateway's address space.** Channel adapters are separate
-  processes; agents are not.
-- **Permissions are per agent and channel, not per user.** A Tier 2 approval
-  granted by one sender applies to every sender on that agent and channel
-  until it expires.
-- **Escape hatches exist.** A handful of environment flags relax defaults.
-  Each is documented and warns when engaged; the full inventory is in
-  [docs/security-properties.md](docs/security-properties.md#documented-escape-hatches).
+What is outside these controls, and under which settings, is stated once in
+[docs/threat-model.md](docs/threat-model.md#boundaries). The environment
+flags that relax a default are listed in
+[docs/security-properties.md](docs/security-properties.md#documented-escape-hatches).
 
 ## Lyrik
 
