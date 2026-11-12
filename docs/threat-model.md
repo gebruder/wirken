@@ -349,8 +349,10 @@ What each control leaves outside it, stated once. Other pages link here.
   validates it unless an egress hook is registered.
 - Leak detection matches the exact bytes of a secret the vault holds, 8
   bytes or longer. An encoded form, a split value, a shorter secret and a
-  secret the vault does not hold pass. The matcher keeps copies of the
-  secrets in memory for the life of the process.
+  secret the vault does not hold pass. The matcher has no operation that
+  forgets a secret: each one it learns stays in memory, in a zeroizing
+  buffer and in the search automaton built from it, until the matcher is
+  dropped (`LeakMatcher`, `crates/gateway/src/leak.rs`).
 
 ### Shell
 
@@ -450,21 +452,35 @@ What each control leaves outside it, stated once. Other pages link here.
   refreshes its token; the Google Chat adapter sends a static one.
 - A budget is off until configured. It is checked before a call and charged
   after it, and a model missing from the pricing table is not charged.
-- Tinfoil attestation is checked by the Tinfoil SDK inside the gateway
-  process. Privatemode attestation is checked by the Privatemode proxy;
-  Wirken does not check it.
+- Wirken has no attestation code of its own. For Tinfoil the gateway calls
+  the Tinfoil SDK, which performs the attestation, and fails the model call
+  when the SDK reports an attestation error (`tinfoil_client`,
+  `crates/agent/src/llm.rs`). For Privatemode the gateway talks to the
+  Privatemode proxy on localhost as an OpenAI-compatible endpoint and checks
+  nothing about it (`LlmConfig::privatemode`).
 
 ### Organisation policy
 
-- Policy is written into the user's data directory at gateway start and
-  applies from the next start. A failed refresh leaves the previous files.
-  `allowed_tools` and `blocked_tools` do not apply to `spawn_subagent` or the
+- Organisation policy is fetched by `wirken setup --org` and once at each
+  `wirken run` start, not while the gateway runs, and is written to files in
+  the user's data directory. `provider.json`, `mcp.json`, `sandbox.json` and
+  `tool_policy.json` written at a start are read later in that start;
+  `siem.json` is read before the fetch, so it applies from the next start.
+  When the fetch fails the gateway logs a warning, records
+  `org-config.apply-failed` and starts on the files already there. When a
+  write fails part-way, the sections written before it are the new ones and
+  the rest are the old (`crates/cli/src/commands/run.rs`, the org-config
+  block; `apply_org_config`, `crates/gateway/src/org.rs`).
+- `allowed_tools` and `blocked_tools` do not apply to `spawn_subagent` or the
   phase tools.
 
 ### Updates and release signing
 
-- `wirken update` detects a substituted release, not a withheld one: a
-  source that keeps serving the last manifest is not detected.
+- `wirken update` refuses a manifest issued earlier than the newest one this
+  install has verified. It accepts one with the same issue time and compares
+  nothing against the clock, so a source that keeps serving the last manifest
+  is not detected (`check_and_record_freshness`,
+  `crates/cli/src/commands/update/manifest.rs`).
 - Release binaries carry an offline Ed25519 signature over their checksums
   and SLSA provenance. They carry no Authenticode or Apple notarization
   signature.
