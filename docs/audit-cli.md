@@ -349,6 +349,8 @@ timestamped sibling before the next `wirken run` will start.
 - `--actor <name>`, `--channel <name>`, `--session <id>` filters.
 - `--since <iso8601>`, `--until <iso8601>` time bounds.
 - `-n` / `--limit <n>` cap the events returned (default 50).
+- `--all` returns every event the filters match. It cannot be combined with
+  `-n`.
 - `--format human|json` (default `human`).
 
 With `--session <id>` the human output decomposes the id:
@@ -632,7 +634,7 @@ enabling the flag.
 ## Citing a session
 
 1. Run `wirken audit verify --format json` and record the result.
-2. Run `wirken audit log --session <id> --format json` and archive it.
+2. Run `wirken audit log --session <id> --all --format json` and archive it.
 3. Cite the session by its `full` id. The `wirken_version` and
    `schema_version` fields let a future reader reproduce the output format.
 

@@ -380,6 +380,9 @@ enum AuditCommands {
         /// Number of events to show
         #[arg(short = 'n', long, default_value = "50")]
         limit: usize,
+        /// Show every event the filters match, with no limit
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
         /// Output format: human (default) or json
         #[arg(long, default_value = "human")]
         format: String,
@@ -1783,8 +1786,10 @@ async fn main() -> Result<()> {
                 since,
                 until,
                 limit,
+                all,
                 format,
             } => {
+                let limit = (!all).then_some(limit);
                 commands::audit::log(
                     action, channel, actor, session, since, until, limit, &format,
                 )

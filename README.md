@@ -129,7 +129,7 @@ Removing the data directory destroys the audit log with it. Export first if
 any retention need applies:
 
 ```bash
-wirken audit log --format json > wirken-audit-export.json
+wirken audit log --all --format json > wirken-audit-export.json
 cp ~/.wirken/audit.db wirken-audit-backup.db
 ```
 

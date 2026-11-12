@@ -74,7 +74,7 @@ pub async fn log(
     session: Option<String>,
     since: Option<String>,
     until: Option<String>,
-    limit: usize,
+    limit: Option<usize>,
     format: &str,
 ) -> Result<()> {
     let cfg = config();
@@ -98,7 +98,7 @@ pub async fn log(
         session: session.clone(),
         since: since_dt,
         until: until_dt,
-        limit: Some(limit),
+        limit,
     };
 
     let events = audit.query(&query).context("Failed to query audit log")?;

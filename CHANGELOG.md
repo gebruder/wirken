@@ -23,6 +23,12 @@ tagged.
   forwarder keeps its cursor and sends the rows again on the next pass. Any
   response counted as delivered before.
 
+### Added
+
+- `wirken audit log --all` returns every event the filters match. The default
+  stays the newest 50. The README's uninstall step and the session-citation
+  step in `docs/audit-cli.md` use it.
+
 ## [3.3.0] - 2026-11-11
 
 ### Security
