@@ -283,7 +283,7 @@ pub async fn close(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// `wirken session verify <session_id> [--strict]`.
+/// `wirken sessions verify <session_id> [--strict]`.
 ///
 /// Walks the session log for `session_id` and verifies what can be
 /// verified: chain integrity, LlmRequest input hashes (against the
@@ -499,7 +499,7 @@ pub async fn verify(
     let agent = agent_arc.lock().await;
 
     println!();
-    println!("  wirken session verify {session_id}");
+    println!("  wirken sessions verify {session_id}");
     println!("  ──────────────────────");
     println!("  agent: {agent_id}");
     println!("  Note: deterministic tools (read_file, list_files) are re-executed against the");

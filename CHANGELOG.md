@@ -29,6 +29,8 @@ tagged.
 
 ### Changed
 
+- `wirken sessions verify` heads its report with the command as typed,
+  `wirken sessions verify <id>`. It printed `wirken session verify`.
 - Correction to the 3.3.0 entries on the seccomp profile: under `gvisor` the
   profile is sent with the container and `runsc` does not apply it to the
   workload (`a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it`,

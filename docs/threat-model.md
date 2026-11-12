@@ -428,7 +428,7 @@ What each control leaves outside it, stated once. Other pages link here.
 - Removing the last rows of a session after its last signed head is not
   detected. Removing a whole session, `audit.db` or the data directory
   removes the evidence; an empty log verifies.
-- `wirken session verify` does not check head signatures; `wirken audit
+- `wirken sessions verify` does not check head signatures; `wirken audit
   verify` does. Verification re-executes `read_file` and `list_files` only,
   against the current workspace.
 - The audit library can redact a row: it rewrites the payload and signs a

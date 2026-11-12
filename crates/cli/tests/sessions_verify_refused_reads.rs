@@ -77,6 +77,18 @@ fn a_recorded_refusal_agrees_with_todays_refusal() {
 /// Allowed when recorded, refused today: the read is not run again.
 /// The file changed since, so a re-execution would surface as a
 /// divergence; the row is unverifiable with the reason instead.
+/// The report is headed by the command that produced it, as typed.
+#[test]
+fn the_report_is_headed_by_the_command_as_typed() {
+    let data = tempfile::tempdir().unwrap();
+    let model = reads_secret();
+    setup(data.path(), "narrow", &model, &["<workspace>/open"]);
+
+    let report = text(&verify(data.path(), "narrow"));
+    assert!(report.contains("wirken sessions verify narrow"), "{report}");
+    assert!(!report.contains("wirken session verify"), "{report}");
+}
+
 #[test]
 fn a_recorded_read_policy_now_refuses_is_unverifiable() {
     let data = tempfile::tempdir().unwrap();
