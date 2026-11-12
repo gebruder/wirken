@@ -19,9 +19,13 @@ not for high-volume scraping of credentialed sources.
 **The threat model is the keyword file itself.** The list of things you watch
 reveals what you are working on, who you are tracking, what enforcement action
 you are preparing for, what scholar you are following before your paper cites
-them. Zirkel runs locally so that file, your kept set and your queries never
-leave the machine. Outbound traffic is restricted to a fixed allowlist of
-named public sources.
+them. The keyword file and the kept set stay under `<data_dir>/zirkel/`, and
+`wirken zirkel run` scores with a model on this host. Fetches go only to the
+named public sources on the allowlist. The digest, which carries each item's
+title, source, theme and the model's reason for surfacing it, is sent to the
+bound channel's platform, and `/librarian` questions and answers travel over
+that channel and through the model provider of the agent that answers
+([threat-model.md](threat-model.md#lyrik-and-zirkel)).
 
 ## What it is not
 

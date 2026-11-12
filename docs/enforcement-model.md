@@ -27,13 +27,13 @@ pub struct SessionHandle<C: Channel> {
 
 Markers are zero-sized structs (`Telegram`, `Discord`, `Slack`, `Matrix`,
 `Teams`, `Signal`, `IMessage`, `GoogleChat`, `Generic`) implementing the
-sealed `Channel` trait, which can only be implemented inside `wirken-ipc`.
+`Channel` trait. The trait is public and has no sealing supertrait, and
+`SessionHandle::new` is public and generic, so any crate can build a handle
+for any marker.
 
-The compiler prevents a Telegram adapter constructing a
-`SessionHandle<Discord>`, and prevents a function taking
-`SessionHandle<Telegram>` being called with the wrong one. Cross-channel
-routing mistakes are caught at compile time **in code that uses
-`SessionHandle<C>`**.
+A function that takes `SessionHandle<Telegram>` does not compile when called
+with a `SessionHandle<Discord>`. That holds **in code that uses
+`SessionHandle<C>`**, which outside tests is none.
 
 **The production message path does not.** Production frames carry a
 `String`-typed channel discriminator on the `AuthenticatedChannel` value
@@ -124,12 +124,13 @@ recompiling.
 
 `crates/gateway/src/rate_limit.rs`. Two limiters, both in memory:
 
-- `AuthRateLimiter`: per-source, 5 failures / 60s / 10-minute lockout, with no
-  loopback exemption.
-- `ControlPlaneRateLimiter`: global GCRA via `governor`, lock-free atomics.
+- `AuthRateLimiter`: per-source, 5 failures / 60s / 10-minute lockout. It is
+  constructed only in tests, so no authentication path is rate limited
+  ([threat-model.md](threat-model.md#processes)).
+- `ControlPlaneRateLimiter`: global GCRA via `governor`, lock-free atomics,
+  used by WebChat.
 
-State resets on gateway restart; thresholds are set at startup from
-`GatewayConfig`.
+State resets on gateway restart.
 
 ### Model governance
 

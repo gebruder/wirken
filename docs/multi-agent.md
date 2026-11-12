@@ -4,8 +4,10 @@ Route different channels to different agents, each with its own model, API
 key, workspace and skills. A work agent on Slack using an Anthropic model
 with GitHub and Datadog MCP servers; a personal agent on Telegram using GPT
 with notes and calendar skills; a coding agent on Discord on a local Ollama model. Each has
-its own conversation history, workspace directory and credentials, and they
-share no state.
+its own conversation history, workspace directory, model credential and
+grants. All agents run in one gateway process and share the vault, the audit
+log, the permission store and the MCP proxy
+([threat-model.md](threat-model.md#processes)).
 
 Command syntax is in [cli.md](cli.md#wirken-agents).
 

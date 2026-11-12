@@ -128,7 +128,7 @@ skill injection, so customization means writing skills.
 |----------|--------|
 | TypeScript, Node.js runtime | Rust, single static binary |
 | Single process, all channels in-process | Separate process per channel |
-| Plaintext credentials on disk | Encrypted vault, OS keychain |
+| Plaintext credentials on disk | Encrypted vault; its key is a passphrase-wrapped file in the data directory |
 | No audit trail | Tamper-evident hash-chained audit log |
 | `npm install -g openclaw` | `curl -fsSL .../install.sh \| sh` |
 | `openclaw onboard` | `wirken setup` |

@@ -9,7 +9,7 @@ How Wirken maps platform user identity to authorization decisions.
 Every tool action falls into one of three tiers:
 
 - **Tier 1, always allowed.** Workspace file access, channel converse, web search, and the `http_request` built-in. Tier 1 on `http_request` means it adds no prompt; authorization is the skill's own `permissions` block, enforced as hard refusals at the gate and by `EgressClient`.
-- **Tier 2, first-use approval with a 30-day expiry.** External file access (per path), cross-conversation message, and a small curated allowlist of shell-inspection verbs (see below). Everything else that would have been Tier 2 under a denylist model is Tier 3 instead.
+- **Tier 2, prompts unless the operator has recorded a grant.** The 23 shell-inspection verbs on the allowlist (see below). An approval answered at a prompt covers that one call. A grant is recorded with `wirken permissions approve`, for a channel (30 days by default) or for one session. The action types for external file access and cross-conversation messages are also Tier 2; no built-in tool produces them. Every other shell verb is Tier 3.
 - **Tier 3, always prompt.** Destructive file operations, network requests (per domain), credential access, cron create, MCP tool calls, cross-channel memory reads, imported-archive reads and searches, any unregistered tool name, and every shell verb outside the Tier 2 allowlist. Skill installation is not on this list and is not tier-gated: `Action::SkillInstall` was removed because the CLI install path never reached it, and installs gate on signature verification instead.
 
 ### Shell exec allowlist
@@ -258,12 +258,7 @@ Before anything else, the gateway checks the sender id, and the conversation id,
 
 For an admitted message, the gateway writes this to the audit log as the `actor_id` of the `message.inbound` event, with `actor_kind: user` (`AuditEvent` in `crates/audit/src/event.rs`, written by `handle_action` in `crates/cli/src/commands/run.rs`). The full event carries actor kind and id, action, target, channel, conversation id (as session), and a detail payload.
 
-Past admission, the sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id, channel)`. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:cat` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, until that grant's window closes. Only Tier 2 keys are stored, so this covers the allowlisted inspection verbs, `file:<path>` and `cross-conversation`; a Tier 3 verb such as `terraform` prompts on every call whoever ran it first.
-
-This is a real gap if the deployment uses one shared agent across a team. Workarounds today:
-
-- Run separate agents per sensitive user and bind them to per-user conversations (requires manual routing, not intended as a primary model).
-- Keep high-blast-radius actions at Tier 3 so every invocation prompts, regardless of prior approval.
+Past admission, the sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id, channel)`. An approval answered at a prompt covers that one call. A grant recorded with `wirken permissions approve --session` ends with the session. A grant recorded with `wirken permissions approve --channel` covers every admitted sender on that agent and channel until it expires or is revoked ([threat-model.md](threat-model.md#senders-and-approvals)). Only Tier 2 keys are stored; a Tier 3 verb such as `terraform` prompts on every call.
 
 ### Sub-agent ceilings
 

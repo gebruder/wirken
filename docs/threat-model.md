@@ -12,8 +12,9 @@ Wirken is a local agent gateway written in Rust. One `wirken` binary runs the
 gateway, which hosts the agents in its own process, and is started again as
 each chat channel's adapter process and as the MCP proxy. Agents call LLM
 providers over HTTPS and act through tools. A permission gate decides every
-tool call before it runs, `exec` runs in a container, and every action is
-written to a per-session hash chain in SQLite before it executes.
+tool call before it runs, `exec` runs in a container, and every tool call is
+written to a per-session hash chain in SQLite before it executes, its outcome
+after.
 
 The design is in [architecture.md](architecture.md), the compile-time and
 runtime controls in [enforcement-model.md](enforcement-model.md), and the

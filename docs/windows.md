@@ -6,7 +6,7 @@ Wirken runs natively on Windows 11 (x86_64). The Windows binary uses named pipes
 
 Wirken targets a researcher / single-user-workstation profile on Windows. The Linux/macOS builds support more deployment shapes; the Windows build deliberately scopes down to what a single user actually needs:
 
-- **`mode: off` is a viable default.** The host-exec path runs through a configured shell (see [Shell choice](#shell-choice) below). Docker Desktop is supported but not required; the configurable sandbox is on the same code path as Linux/macOS.
+- **The default sandbox mode is `exec-only`, as on every platform.** It needs Docker Desktop; without a container runtime `exec` is refused. `"mode": "off"` in `sandbox.json` runs `exec` on the host through a configured shell (see [Shell choice](#shell-choice) below), with no container ([threat-model.md](threat-model.md#shell)).
 - **Vault uses an age-encrypted file.** Keys are stored in `%USERPROFILE%\.wirken\keychain\` and unlocked with a passphrase. The age-file backend is portable across machines if you keep the passphrase.
 - **Zirkel's orchestrator digest push is Linux/macOS only.** After a successful `wirken zirkel run`, the digest is delivered to the bound channel over the orchestrator push socket, a same-user JSON-line trust boundary that has no analog on Windows. On Windows the run completes and reports the push as skipped; the rest of zirkel works.
 - **The Signal adapter is Linux/macOS only.** It connects to `signal-cli`'s unix-domain socket, which doesn't exist on Windows. The other channel adapters (Telegram, Discord, Slack, Teams, Matrix, WhatsApp, Google Chat) work.
@@ -17,9 +17,9 @@ These are not bugs to file; they are deliberate scope cuts. The Linux/macOS docs
 
 ## Why audit log, not sandbox
 
-The Wirken differentiator on Windows is the **hash-chained audit log**, not sandboxing. Every tool call, every refusal, every session is recorded in `%USERPROFILE%\.wirken\audit.db` under a per-session hash chain. `wirken audit verify` proves the chain is intact; `wirken audit log --session <id> --format json` produces a citable artifact. See [`audit-cli.md`](audit-cli.md) for the schema.
+The Wirken differentiator on Windows is the **hash-chained audit log**, not sandboxing. Every tool call, every refusal, every session is recorded in `%USERPROFILE%\.wirken\audit.db` under a per-session hash chain. `wirken audit verify` checks the hash chain and the chain-head signatures; `wirken audit log --session <id> --all --format json` writes the session's events. See [`audit-cli.md`](audit-cli.md) for the schema.
 
-For research work where reproducibility and auditability matter more than container isolation, this is the load-bearing claim. A peer reviewer can verify a session's integrity months later without trusting the binary that produced it.
+Against a rewrite by a process of the same user, verification needs `--require-signed --anchor` with a key kept off the machine ([threat-model.md](threat-model.md#audit)). A reviewer holding that key can check a session's chain later.
 
 ## Install
 

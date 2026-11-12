@@ -236,13 +236,16 @@ pipes because the body shapes differ, so verify per pipe. Source:
 
 ### Retries
 
-There are none. A forward failure logs a `tracing::warn!` and drops the batch;
-the next flush carries new events forward. Operators own retry at the receiver
-(Splunk HEC indexer acknowledgement, Datadog backlog).
+A delivery fails on a transport error or on any response whose status is not
+a success. The legacy pipe does not retry: it logs a `tracing::warn!` naming
+the status and drops the batch; the next flush carries new events forward.
+Operators own retry at the receiver (Splunk HEC indexer acknowledgement,
+Datadog backlog).
 
-The typed pipe is the exception, and only partly: its global cursor advances
-**only** after a successful POST, so a transport error means the next pass
-re-reads every row since. Because a pass batches across sessions, that replay
+The typed pipe's global cursor advances **only** after a POST the endpoint
+answered with a success status, so a failed delivery means the next pass
+re-reads every row since. The cursor is not persisted: each gateway start
+sends every forwardable row again. Because a pass batches across sessions, that replay
 spans sessions. This gives bounded duplicate delivery during transient failure
 rather than silent loss.
 
@@ -309,10 +312,12 @@ constant.
 
 ## OpenTelemetry projection
 
-Wirken projects the chain to OpenTelemetry GenAI semantic conventions over
-OTLP/HTTP+JSON. The same spans land in Datadog, Honeycomb, Jaeger, Splunk
-Observability, Microsoft Agent 365, or any OTel-aware backend with no change
-beyond endpoint and bearer auth.
+The `wirken-audit` crate holds a projector from the chain to OpenTelemetry
+GenAI semantic conventions over OTLP/HTTP+JSON, with an exporter and a
+forwarder (`otel_projector.rs`, `otel_exporter.rs`, `otel_forwarder.rs`). It
+is library code: no `wirken` command starts it and no configuration file
+turns it on. The rest of this section describes what that code emits when a
+program built on the crate runs it.
 
 Encoding choices the exporter makes, several of which are the difference
 between landing and being silently filtered:
@@ -329,7 +334,7 @@ between landing and being silently filtered:
 - Lowercase operation-name literals: `invoke_agent`, `chat`, `execute_tool`,
   `output_messages`. Spans carrying anything else are filtered at ingestion.
 - Batches split when a response indicates the 1 MB body limit is exceeded;
-  single spans above 1 MB after split are dropped with an audit row noting it.
+  a single span above 1 MB after split is dropped with a warning in the log.
 - `Retry-After` honored on 429 with jittered exponential backoff.
 
 Run-wide attributes stamped on every span: `microsoft.tenant.id`,
@@ -379,35 +384,23 @@ value. The other eight adapters emit their own name (`telegram`, `discord`,
 `slack`, `matrix`, `whatsapp`, `signal`, `googlechat`, `imessage`), which is
 accepted but appears in raw channel data rather than the default filter.
 
-**Identity.** The per-agent Ed25519 keypair stays the local attestation root;
-federation is additive. A pluggable `FederatedIdentity` trait covers Entra and
-Keycloak, differing only in claim validation and the run-wide attributes
-stamped. `EntraFederatedIdentity` validates the
-`Agent365.Observability.OtelWrite` role and stamps Microsoft-namespaced
-attributes; `KeycloakFederatedIdentity` does OIDC client credentials against a
-realm and stamps vendor-neutral ones.
+**Identity.** The exporter takes its bearer token from a `FederatedIdentity`
+implementation. Two exist: `KeycloakFederatedIdentity`
+(`crates/agent/src/keycloak_identity.rs`), OIDC client credentials against a
+realm, and `StaticFederatedIdentity`, a fixed token for tests. There is no
+Microsoft Entra implementation.
 
-**User identity.** Chat-platform callers have no Entra identity by
-construction; Teams is the exception, carrying `from.aadObjectId` natively. A
-standalone `UserResolver` consults sources in order: an adapter-supplied real
-Entra object id, then an operator-supplied `user_map.json` overlay (a
-Slack-email-to-Entra mapping is the canonical case), then a keyed synthetic
-GUID derived from a vault-held salt over `(tenant_id, adapter_id, sender_id)`.
-The synthetic is shaped like an Entra object id and pivots stably per
-channel-and-sender pair while remaining non-reversible to a phone number or
-handle by anyone outside the deployment. **The salt is
-per-deployment-forever:** rotating it re-pseudonymizes every external caller
-and breaks longitudinal pivot in Defender across the rotation.
+**User identity.** `user.id` comes from a `UserResolver`. The one
+implementation, `DeterministicUserResolver` (`crates/audit/src/user_resolver.rs`),
+is an unkeyed SHA-256 of the adapter id and the sender id, shaped like a
+UUID. Anyone who knows the adapter and the sender's phone number or handle
+can recompute it. There is no `user_map.json` overlay and no salt.
 
 **What this does not cover.** Conditional Access policy evaluation, content
 classification, Defender XDR correlation across user, device and network
-signals, and lifecycle workflows are Microsoft's data plane. Wirken honors a
-denial arriving as a 403 and projects it onto the chain as a
-`PermissionDenied` row; it does not evaluate the policy. The `egress` hook
-delivers tool output to whatever classifier the operator wires up; wirken does
-not classify content. `wirken setup --org` invokes the documented Agent 365
-registration flow for operators who want the agent in the M365 admin center
-inventory, but the telemetry path does not require a Graph-registered agent.
+signals, and lifecycle workflows. Wirken does not evaluate a policy and does
+not classify content. `wirken setup --org` has no Agent 365 registration
+step.
 
 This page describes the integration surface against Microsoft Learn
 documentation verified on 2026-05-22. It is not evidence that emissions

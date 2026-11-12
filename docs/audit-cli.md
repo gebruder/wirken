@@ -1,8 +1,10 @@
 # Audit
 
 Wirken's audit surface is a per-session, hash-chained SQLite table of typed
-`SessionEvent` rows at `<data_dir>/audit.db`. Every row is appended before the
-action it records runs, every row's payload is SHA-256-hashed, and the
+`SessionEvent` rows at `<data_dir>/audit.db`. A request row (a tool call, a
+model request) is appended before the action it records runs, and an outcome
+row (`tool_result`, `llm_response`, `http_request`) after it. Every row's
+payload is SHA-256-hashed, and the
 integrity of any one session is provable independently of every other.
 
 This page owns the chain, the event surface, and the CLI. Other pages link

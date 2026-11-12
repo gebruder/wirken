@@ -274,16 +274,17 @@ in Go. The host kernel sees only a small, fixed set of syscalls from
 
 The seccomp profile above is still sent with the container, and `runsc`
 does not apply it to the workload: what a guest syscall does is the
-Sentry's decision. Through `exec` on runsc release 20230807:
+Sentry's decision. `a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it`
+in `crates/agent/src/tests.rs` pins the outcome through `exec`, in CI, under
+the runsc release `.github/workflows/ci.yml` installs:
 
-- `unshare -Ur id` succeeds and reports uid 0.
-- Inside a new user and mount namespace, `mount -t tmpfs -o exec` succeeds
-  and a binary copied onto it runs.
-- `mount` outside a new user namespace is refused; the container holds no
-  capability.
+- `unshare -Ur id -u` succeeds and prints 0.
+- Inside a new user and mount namespace, `mount -t tmpfs -o exec` succeeds.
+- `mount` outside a new user namespace is refused.
 
-Under `runc` on the same host each of the three is refused. The namespaces
-and the mount are the Sentry's, not the host kernel's.
+`sandbox_refuses_user_namespaces_and_mounts` runs the same calls under
+`exec-only`, where each is refused. The boundary is stated in
+[threat-model.md](threat-model.md#shell).
 
 Practical consequences:
 

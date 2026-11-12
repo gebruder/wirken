@@ -4,9 +4,7 @@
 
 **"Failed to open credential store"**
 
-The vault database or keychain is inaccessible. On Linux, this usually means the Secret Service (GNOME Keyring or KDE Wallet) is not running. Wirken falls back to an age-encrypted file keychain and prompts for a passphrase.
-
-If you're on a headless server, the passphrase prompt is expected. Enter a passphrase you'll remember.
+The vault database or its key file cannot be opened. The vault key is a file under `<data_dir>/keychain/`, wrapped by a passphrase, and `wirken setup` prompts for that passphrase. The OS keychain is used only by a build with the `keychain-macos` or `keychain-linux` feature, which no release enables.
 
 **"Homeserver URL must use HTTPS"**
 
