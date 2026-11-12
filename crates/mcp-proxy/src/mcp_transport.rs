@@ -897,9 +897,35 @@ mod plain_http_tests {
         HttpTransport::new(url.to_string(), Box::new(NoAuth)).is_ok()
     }
 
+    /// The host is compared whole, whatever follows it in the name.
+    #[test]
+    fn a_loopback_host_is_matched_whole() {
+        use super::plain_http_to_loopback;
+        for url in [
+            "http://localhost:3000/mcp",
+            "http://127.0.0.1/mcp",
+            "http://[::1]:3000/mcp",
+        ] {
+            assert!(plain_http_to_loopback(url), "{url}");
+        }
+        for url in [
+            "http://localhost.example.com/mcp",
+            "http://127.0.0.1.example.com/mcp",
+            "http://localhost@example.com/mcp",
+            "https://localhost/mcp",
+            "localhost",
+        ] {
+            assert!(!plain_http_to_loopback(url), "{url}");
+        }
+    }
+
     /// Plain HTTP reaches this host and no other: a name that only
     /// starts like a loopback one is some other host.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds an HTTP client, which reads the filesystem; miri has none"
+    )]
     fn plain_http_is_for_a_loopback_host_and_no_name_that_starts_like_one() {
         for url in [
             "http://localhost:3000/mcp",
