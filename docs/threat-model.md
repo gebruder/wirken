@@ -42,8 +42,8 @@ What the controls protect, in the order a loss matters:
   the operator answers. A call that runs without the gate deciding it, or with
   a decision for a different call, is the loss.
 - **The audit chain and its signing key.** `audit.db` rows, per-session hash
-  chains and signed heads. A row for every action before it runs, and
-  verification that fails on an edit.
+  chains and signed heads. A request row before each action, an outcome row
+  after it, and verification that fails on an edit.
 - **Signing anchors:** the skill registry root, the org-config anchor, and the
   keys MCP entries are signed with. An artifact the anchor did not sign,
   accepted, is the loss.
@@ -127,7 +127,8 @@ What the controls protect, in the order a loss matters:
    `crates/agent/src/sandbox.rs`) with all capabilities dropped,
    `no-new-privileges`, a read-only root, a non-root user, 512 MB, 256 PIDs,
    300 s, the workspace as its only mount, and no network unless the channel's
-   egress grant routes it through the egress proxy (`crates/sandbox/src/`). The
+   egress grant routes it through the egress proxy (`crates/sandbox/src/`) or
+   `sandbox.json` sets `"network": true` ([Boundaries](#shell)). The
    exec perimeter in [security-properties.md](security-properties.md) states what the process must
    not reach: any gateway socket, the data dir around its workspace, a `wirken`
    binary, anything key-like in its environment. With no container runtime,
@@ -142,9 +143,11 @@ What the controls protect, in the order a loss matters:
    and hostname forms, rebinding). Response bodies are untrusted input.
 
 6. **MCP servers.** Reached through the proxy process (`crates/mcp-proxy`).
-   `mcp.json` entries carry an Ed25519 signature over a canonical hash
-   (`mcp_signing.rs`). Each stdio server runs in its own container with no
-   network unless its signed entry lists hosts (`container.rs`, `egress.rs`).
+   An `mcp.json` entry may carry an Ed25519 signature over a canonical hash
+   (`mcp_signing.rs`); the released build has no anchor, so an unsigned entry
+   loads ([Boundaries](#mcp-servers)). Each stdio server runs in its own
+   container with no network unless its entry lists hosts (`container.rs`,
+   `egress.rs`).
    Every MCP tool call is Tier 3. The proxy receives only the credentials its
    configs reference, on stdin, OAuth ones without their refresh token. It
    asks the gateway over `mcp-refresh.sock`, mode 0600, for two things: an
@@ -163,7 +166,8 @@ What the controls protect, in the order a loss matters:
 7. **Signed artifacts.** Skill bundles (`verify_skill_signature`,
    `crates/agent/src/skill.rs`; `crates/gateway/src/skill_registry.rs`), the
    org-config bundle fetched from the policy URL (`crates/gateway/src/org.rs`,
-   signature plus freshness), and MCP entries. Every Ed25519 check uses
+   signature plus freshness), and MCP entries in a build with an MCP anchor.
+   Every Ed25519 check uses
    `verify_strict`. In scope: an artifact the anchor did not sign accepted,
    a signature checked over bytes other than the ones used, and a bypass
    engaging without its variable set.
@@ -213,11 +217,9 @@ What the controls protect, in the order a loss matters:
     reads it offline. In scope: an edit, deletion or reorder that
     verification passes, a head signature accepted from a key it should not
     accept, and a row that misattributes its actor, channel, agent or key id.
-    Truncation from the end of a session is a known limit: the rows that
-    remain still verify, signed heads included. Detection today is comparison
-    with the SIEM forwarder's copy, where a forwarded row the chain no longer
-    holds shows the cut. A signed session-close row or an exported head is the
-    planned closure.
+    Truncation from the end of a session is not detected: the rows that
+    remain still verify, signed heads included. A forwarded row the chain no
+    longer holds shows the cut in the SIEM forwarder's copy.
     What the hash covers is in [audit-cli.md](audit-cli.md), "Hash chain
     construction": the leaf hash is over the row's canonical-JSON payload,
     chained per session.
@@ -255,10 +257,9 @@ Who holds what, so a precondition can be compared with an impact:
   them, by their own platform id or by a group entry for the conversation they
   write in; anyone else's messages are dropped at the gateway before they
   reach a session. An admitted chat user can send messages and attachments on
-  their channel. They hold no permission authority. Permissions key on `(action_key, agent_id, channel)`,
-  not on the sender: a Tier 2 grant one user's prompt earned applies to every
-  user of that agent on that channel until it expires
-  ([permissions-and-identity.md](permissions-and-identity.md)). Approvals on
+  their channel. They hold no permission authority. A stored grant is keyed
+  on `(action_key, agent_id, channel)`, not on the sender
+  ([Boundaries](#senders-and-approvals)). Approvals on
   Slack, Teams, WhatsApp, Google Chat, Matrix and iMessage sessions
   prompt on the operator's CLI, not in the channel.
 - **The model** holds nothing. Every tool call is classified and gated: Tier 1
@@ -273,10 +274,223 @@ Who holds what, so a precondition can be compared with an impact:
 - **A command under `exec`** holds a container with every capability dropped,
   `no-new-privileges`, a read-only root, a non-root user, the workspace as its
   only mount, and no network unless the channel's egress grant routes it
-  through the egress proxy.
+  through the egress proxy or `sandbox.json` sets `"network": true`.
 - **A skill** holds what its signed permission block grants: tools, egress
   allow-set, read and write paths. A bundle the anchor did not sign does not
   load.
+
+## Boundaries
+
+What each control leaves outside it, stated once. Other pages link here.
+
+### The operating-system user
+
+- A process running as the Wirken OS user is outside every control below. It
+  can read the vault key file, the audit signing key and the operator key,
+  and rewrite any file in the data directory. Adapters, the MCP proxy and
+  hook processes run as that user.
+- Wirken ships no AppArmor or SELinux policy. Container isolation is that of
+  the container runtime.
+
+### Processes
+
+- Agents, sub-agents, WebChat and the terminal channel run in the gateway
+  process and share its address space, the vault, the audit writer, the
+  permission store and the MCP proxy.
+- Channel adapters and the MCP proxy are separate processes. They are not
+  sandboxed. The gateway hands an adapter its own channel's credentials on
+  stdin and no others.
+- Channel separation is the process boundary, an Ed25519 handshake and a
+  per-frame check of declared against authenticated channel. The typed
+  `SessionHandle<Channel>` API is not on the production message path, and the
+  `Channel` trait is not sealed.
+- On Windows the named-pipe peer check is not called when a connection is
+  accepted; the handshake is the only IPC check. Key files are written
+  without ACL tightening.
+- No authentication path is rate limited: `AuthRateLimiter` is not
+  constructed outside tests.
+- A heartbeat is echoed, not timed. An adapter that keeps its connection
+  open and stops forwarding is not detected.
+
+### Senders and approvals
+
+- Wirken does not authenticate people. It admits the sender id the platform
+  reports, from an allowlist per channel. A channel with no entries admits
+  nobody. A group entry admits every member of that conversation.
+- An approval answered at a prompt covers that one call.
+- A grant recorded with `wirken permissions approve --session` ends with the
+  session.
+- A grant recorded with `wirken permissions approve --channel` is keyed by
+  action, agent and channel. It covers every admitted sender on that agent
+  and channel until it expires, 30 days by default, or is revoked.
+- A shell grant is keyed by the command's first word and covers any
+  arguments.
+- Tier 2 is 23 inspection commands (`TIER2_ALLOWLIST`,
+  `crates/gateway/src/permissions.rs`). A command containing `|`, `;`, `&`,
+  `$(`, a backtick, `>`, `<` or a newline is Tier 3. Tier 3 prompts on every
+  call and is never stored.
+- Workspace file reads and writes, and the agent's own memory entries, are
+  Tier 1 and do not prompt. The workspace is per agent and shared by all of
+  the agent's channels and conversations.
+- Telegram, Signal, Discord, WebChat and the terminal answer approvals in
+  the channel. Approvals on Slack, Teams, WhatsApp, Google Chat, Matrix and
+  iMessage are answered on the operator CLI. Discord approval cards are
+  unit-tested and have not been run against Discord. The iMessage adapter
+  has not been run against a BlueBubbles server.
+- A call whose arguments exceed 2000 characters on the approval card is
+  refused without asking.
+
+### Model input
+
+- Injection detection marks an inbound channel message and forwards the
+  mark. It does not block the message, and it does not scan tool results.
+- A tool result enters the conversation after a leak match. Nothing else
+  validates it unless an egress hook is registered.
+- Leak detection matches the exact bytes of a secret the vault holds, 8
+  bytes or longer. An encoded form, a split value, a shorter secret and a
+  secret the vault does not hold pass. The matcher keeps copies of the
+  secrets in memory for the life of the process.
+
+### Shell
+
+- Under `exec-only` the container shares the host kernel, with no
+  capabilities, `no-new-privileges`, a read-only root, 512 MB, 256 PIDs and
+  the shipped seccomp profile.
+- Under `gvisor` the container runs under `runsc`. The seccomp profile is
+  sent with the container and `runsc` does not apply it to the workload:
+  `unshare -Ur` succeeds, and so does a tmpfs mount inside a new user and
+  mount namespace. A mount outside a new user namespace is refused
+  (`a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it`,
+  `crates/agent/src/tests.rs`, run in CI under the runsc release
+  `.github/workflows/ci.yml` pins). Egress sidecars run under the daemon's
+  default runtime in every mode.
+- Under `off`, `exec` runs on the host as the Wirken user with no container.
+  The command can read and rewrite every file in the data directory,
+  including keys and policy files. A child that calls `setsid` outlives the
+  call.
+- `"network": true` in `sandbox.json`, with no channel egress policy, puts
+  the `exec` container on Docker's default bridge with no allowlist.
+- The workspace is mounted read-write. A command can change a workspace
+  file between a host check and its use.
+- The Podman path is not tested against Podman. Under an `allowlist` or
+  `open` egress policy, `exec` is refused on Windows.
+
+### Network
+
+- Bounded by egress policy: sandboxed `exec` and contained stdio MCP
+  servers.
+- Not bounded by egress policy: the model-provider client, HTTP MCP servers,
+  a stdio MCP server with `"sandbox": "off"`, and `exec` under `mode: off`.
+  These connect from the gateway process, the proxy process or the host.
+- A skill's `egress.domains` governs `http_request`, `web_search` and the
+  Zirkel fetch. `http_request` reaches no host without it and refuses a host
+  that resolves to no global address. `web_search` is not restricted without
+  it. `generate_image` is Tier 3.
+- The egress proxy decides on the CONNECT target and does not inspect the
+  tunnel. It forwards HTTPS to port 443 and plain HTTP to port 80 only.
+- MCP server egress does not depend on what the session has read.
+- Plain `http://` is accepted only for a URL whose host is exactly
+  `localhost`, `127.0.0.1` or `[::1]`, for an MCP endpoint, a Matrix
+  homeserver, a SIEM endpoint and a model provider.
+
+### MCP servers
+
+- The released build has no MCP trust anchor
+  (`crates/mcp-proxy/src/wirken-mcp-pubkey.pub` is empty). An unsigned
+  `mcp.json` entry loads. A signed entry is checked against the key it
+  carries.
+- A signature covers the entry's configuration, not the binary at `command`
+  or the contents of an image tag.
+- A stdio server with `"sandbox": "off"` runs as a child of the proxy as the
+  operator, with no container, seccomp profile or limit. Secrets in its
+  `env` are plaintext in its environment. Secrets delivered to a contained
+  server through `secrets_in_env` are readable by anyone with the Docker
+  socket.
+
+### Skills
+
+- A skill is Markdown. It is not sandboxed; it is confined by its permission
+  block and by the tools it drives. There is no runtime for compiled skills.
+
+### Audit
+
+- A request row is appended before the action. An outcome row is appended
+  after it. If the outcome row of an `http_request` or a memory write fails
+  to land, the call returns `ToolEffectUnrecorded`.
+- The signing key is held by the process that writes the chain and is
+  readable by any process of the same user. A holder can write and sign any
+  sequence of rows.
+- `wirken audit verify` without `--anchor` checks against a public key
+  stored beside the chain. A same-user process can replace both.
+- Removing the last rows of a session after its last signed head is not
+  detected. Removing a whole session, `audit.db` or the data directory
+  removes the evidence; an empty log verifies.
+- `wirken session verify` does not check head signatures; `wirken audit
+  verify` does. Verification re-executes `read_file` and `list_files` only,
+  against the current workspace.
+- The audit library can redact a row: it rewrites the payload and signs a
+  head recording the superseded one. No `wirken` command performs it.
+- A SIEM batch the endpoint answers with a non-success status is not
+  delivered. The legacy forwarder drops it; the typed forwarder sends it
+  again on its next pass. The typed forwarder's position is not persisted,
+  so each gateway start sends every forwardable row again.
+- With typed forwarding on, the default feed carries tool arguments, tool
+  output and assistant text. `siem.json` holds its API key and HMAC secret
+  in plaintext.
+- The OpenTelemetry projector is library code and is not started by the
+  `wirken` binary.
+
+### Credentials and cost
+
+- In the released build the vault key is a passphrase-wrapped file in the
+  data directory. The OS keychain backends are build features no release
+  enables.
+- `rotation_due_at` is recorded and triggers nothing. The Teams adapter
+  refreshes its token; the Google Chat adapter sends a static one.
+- A budget is off until configured. It is checked before a call and charged
+  after it, and a model missing from the pricing table is not charged.
+- Tinfoil attestation is checked by the Tinfoil SDK inside the gateway
+  process. Privatemode attestation is checked by the Privatemode proxy;
+  Wirken does not check it.
+
+### Organisation policy
+
+- Policy is written into the user's data directory at gateway start and
+  applies from the next start. A failed refresh leaves the previous files.
+  `allowed_tools` and `blocked_tools` do not apply to `spawn_subagent` or the
+  phase tools.
+
+### Updates and release signing
+
+- `wirken update` detects a substituted release, not a withheld one: a
+  source that keeps serving the last manifest is not detected.
+- Release binaries carry an offline Ed25519 signature over their checksums
+  and SLSA provenance. They carry no Authenticode or Apple notarization
+  signature.
+- Signatures are Ed25519. No post-quantum algorithm is used.
+- Only the latest release receives fixes.
+
+### Lyrik and Zirkel
+
+- Lyrik findings are model output. The citation gate checks that the cited
+  file and line exist, not that the finding is correct.
+- Only `--bench` on the command line skips the Lyrik sign-off. Nothing in
+  the assessed repository does.
+- A Lyrik run continues on an unsigned chain when the audit signing key
+  cannot be loaded, with a warning.
+- An approved `exec` in a Lyrik run mounts the target read-write. A change
+  to the three team files is detected at the end of the run, not prevented.
+- Zirkel's keyword file and kept set stay under `<data_dir>/zirkel/`, and
+  `wirken zirkel run` scores with a model on this host. The digest, which
+  carries each item's title, source, theme and the model's reason for
+  surfacing it, is sent to the bound channel's platform. `/librarian`
+  questions and answers travel over that channel and through the model
+  provider of the agent that answers.
+
+### Assurance
+
+- No third party has assessed Wirken. No SBOM is produced. It holds no
+  certification.
 
 ## Supported configurations
 
@@ -299,7 +513,8 @@ Severity is rated on the default configuration. What that is:
   ([enterprise.md](enterprise.md)). Webhook adapters listen on 127.0.0.1
   behind the operator's ingress; webchat is served on 127.0.0.1.
 - **Signed artifacts verified:** skills against the registry root, the
-  org-config bundle against its anchor, MCP entries against their signatures.
+  org-config bundle against its anchor, and a signed MCP entry against the
+  key it carries.
 - **Offline test image:** `docker/audit.Dockerfile`, where the proof runs.
 
 A path that exists only under a non-default profile, feature flag or escape
@@ -394,8 +609,8 @@ Not a vulnerability, whatever its shape:
   cover" notes in [enforcement-model.md](enforcement-model.md). Showing that a gap is wider than stated is in
   scope.
 - Prompt injection that changes what the model asks for. Injection detection
-  flags and does not block, by design. What the gate lets the request do is in
-  scope.
+  flags and does not block ([Boundaries](#model-input)). What the gate lets
+  the request do is in scope.
 - LLM token and cost exhaustion.
 - Reading stored secrets out of the leak matcher's memory. Its search
   automaton keeps unzeroized copies of them for the life of the process, which
@@ -424,8 +639,9 @@ inputs above.
   - A vault secret disclosed anywhere listed in boundary 11.
   - A tool call that runs without the gate deciding it, or before its row is
     on the chain.
-  - A skill, MCP entry or org-config bundle the anchor did not sign, accepted
-    with no bypass set.
+  - A skill or org-config bundle the anchor did not sign, accepted with no
+    bypass set; an MCP entry the anchor did not sign, accepted in a build
+    that has an MCP anchor.
 - **High**
   - Tier escalation: a call classified below its effect, the metacharacter
     sentinel bypassed, a Tier 3 action answered from storage, a grant stored
