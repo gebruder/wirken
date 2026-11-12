@@ -10,50 +10,82 @@ tagged.
 
 ## [Unreleased]
 
+## [3.3.1] - 2026-11-12
+
 ### Security
 
 - Plain `http://` is accepted only where the URL's host is exactly
-  `localhost`, `127.0.0.1` or `[::1]`: for an MCP server's HTTP endpoint, a
-  Matrix homeserver, a SIEM endpoint and a model provider's base URL. The
-  check compared the start of the URL, so `http://localhost.example.com`
-  passed. The Matrix adapter also accepts `http://[::1]`.
+  `localhost`, `127.0.0.1` or `[::1]`, for an MCP server's HTTP endpoint, a
+  Matrix homeserver, a SIEM endpoint and a model provider's base URL.
+  `http://localhost.example.com` is refused
+  (`plain_http_is_for_a_loopback_host_and_no_name_that_starts_like_one` in
+  `wirken-mcp-proxy`, `wirken-adapter-matrix`, `wirken-audit` and
+  `wirken-agent`).
 - A SIEM batch the endpoint answers with anything but a success status is a
   failed delivery, on both forwarders and every target. The legacy forwarder
   logs it and drops the batch, as it does for a transport error; the typed
-  forwarder keeps its cursor and sends the rows again on the next pass. Any
-  response counted as delivered before.
-- `wirken lyrik run` skips the operator sign-off only with the new `--bench`
-  flag. `bench_mode` in the assessed repository's `.lyrik/config.json` is no
-  longer read, and the run says so when the key is set. **Operator action:**
+  forwarder keeps its cursor and sends the rows again on the next pass
+  (`a_batch_the_endpoint_refused_is_not_delivered`,
+  `crates/audit/src/siem.rs`;
+  `a_typed_batch_the_endpoint_refused_is_not_delivered`,
+  `crates/audit/src/siem_typed.rs`).
+- `wirken lyrik run` skips the operator sign-off only with the `--bench`
+  flag. `bench_mode` in the assessed repository's `.lyrik/config.json` is
+  not read, and the run says so when the key is set
+  (`a_target_that_sets_bench_mode_does_not_skip_the_sign_off`,
+  `crates/cli/tests/lyrik_signoff.rs`). **Operator action:**
   a benchmark harness that set `bench_mode: true` passes `--bench`.
-
-### Changed
-
-- `wirken sessions verify` heads its report with the command as typed,
-  `wirken sessions verify <id>`. It printed `wirken session verify`.
-- Correction to the 3.3.0 entries on the seccomp profile: under `gvisor` the
-  profile is sent with the container and `runsc` does not apply it to the
-  workload (`a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it`,
-  `crates/agent/src/tests.rs`).
-- `docs/threat-model.md` states each boundary once, in a Boundaries section.
-  The README's limits list, and the restatements in the other pages, link
-  to it. Statements the code did not bear out are corrected: MCP entry
-  signatures in the released build, authentication rate limiting, the sealed
-  channel trait, rows written before an action, the spend budget default,
-  remembered approvals, the OpenTelemetry forwarder, what Zirkel sends off
-  the host, and agents sharing state.
 
 ### Added
 
 - `wirken audit log --all` returns every event the filters match. The default
-  stays the newest 50. The README's uninstall step and the session-citation
-  step in `docs/audit-cli.md` use it.
+  stays the newest 50
+  (`all_exports_every_row_and_the_default_stays_fifty`,
+  `crates/cli/tests/audit_log_all_exports_every_row.rs`). The README's
+  uninstall step and the session-citation step in `docs/audit-cli.md` use
+  it.
+
+### Changed
+
+- `wirken sessions verify` heads its report `wirken sessions verify <id>`
+  (`the_report_is_headed_by_the_command_as_typed`,
+  `crates/cli/tests/sessions_verify_refused_reads.rs`).
+- Correction to the 3.3.0 entries on the seccomp profile: under `gvisor` the
+  profile is sent with the container and `runsc` does not apply it to the
+  workload (`a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it`,
+  `crates/agent/src/tests.rs`).
+- `docs/threat-model.md` has a Boundaries section that states each boundary
+  once. The README section "What Wirken contains" and the other pages link
+  to it.
+- The docs state these as the code has them:
+  - an unsigned `mcp.json` entry loads in the released build, which has no
+    MCP anchor (`crates/mcp-proxy/src/mcp_signing.rs`);
+  - no authentication path is rate limited (`AuthRateLimiter`,
+    `crates/gateway/src/rate_limit.rs`, is constructed only in tests);
+  - the `Channel` trait is not sealed and the typed session handle is not on
+    the production message path (`crates/ipc/src/channel.rs`);
+  - a request row is appended before the action and an outcome row after it
+    (`crates/agent/src/runtime.rs`);
+  - a spend budget is off until configured (`BudgetMode`,
+    `crates/gateway/src/budget.rs`);
+  - an approval answered at a prompt covers that one call, and a grant is
+    recorded only by `wirken permissions approve`
+    (`crates/cli/src/commands/permission.rs`);
+  - the OpenTelemetry projector is library code that no `wirken` command
+    starts (`crates/audit/src/otel_forwarder.rs`);
+  - the Zirkel digest is sent to the bound channel's platform
+    (`crates/zirkel/src/push_client.rs`);
+  - all agents run in one gateway process (`crates/cli/src/commands/run.rs`).
 
 ### Dependencies
 
 - GitHub Actions: `softprops/action-gh-release` v3.0.4 in the release
   workflow and `github/codeql-action/upload-sarif` v4.39.3 in the Scorecard
   workflow, from #312.
+- Deferred: Dependabot alerts #26, #27 and #28, on rustls 0.22.4, which
+  only the Discord adapter reaches, through serenity. The move off rustls
+  0.22 is held until the migrated adapter passes a live round-trip against
+  Discord; `deny.toml` records the reachability.
 
 ## [3.3.0] - 2026-11-11
 
