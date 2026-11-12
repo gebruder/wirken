@@ -155,6 +155,7 @@ jobs:
           cargo test -p wirken-agent gvisor -- --nocapture 2>&1 | tee "$RUNNER_TEMP/gvisor.log"
           grep -q 'a_gvisor_exec_records_gvisor \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
           grep -q 'a_gvisor_exec_runs_on_the_runsc_kernel \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
+          grep -q 'a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
           ! grep -q '^skipping:' "$RUNNER_TEMP/gvisor.log"
 
   corpus:

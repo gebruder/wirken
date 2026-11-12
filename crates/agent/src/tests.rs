@@ -13078,6 +13078,42 @@ async fn a_gvisor_exec_runs_on_the_runsc_kernel() {
     assert!(out.contains("ordinary=ok"), "{out}");
 }
 
+/// Under `gvisor` the seccomp profile is sent with the container and
+/// runsc does not apply it to the workload: the two things the profile
+/// refuses under the daemon's default runtime, a user namespace and a
+/// mount inside one, both succeed. `sandbox_refuses_user_namespaces_and_mounts`
+/// is the same command under `exec-only`, refused.
+#[tokio::test]
+async fn a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode};
+
+    if !gvisor_host_ready().await {
+        return;
+    }
+    let sandbox = DockerSandbox::new(SandboxConfig {
+        mode: SandboxMode::GVisor,
+        ..Default::default()
+    })
+    .expect("sandbox");
+    let tmp = TempDir::new().unwrap();
+    let result = sandbox
+        .exec(
+            "echo userns_uid=$(unshare -Ur id -u 2>&1); \
+             mkdir -p /tmp/m; \
+             unshare -Urm --propagation unchanged sh -c \
+               'mount -t tmpfs -o exec tmpfs /tmp/m && echo MOUNT_OK' 2>&1; \
+             mount -t tmpfs tmpfs /tmp/m 2>&1; echo plain_mount_rc=$?",
+            tmp.path(),
+            None,
+        )
+        .await
+        .expect("exec runs under runsc");
+    let out = &result.output;
+    assert!(out.contains("userns_uid=0"), "{out}");
+    assert!(out.contains("MOUNT_OK"), "{out}");
+    assert!(!out.contains("plain_mount_rc=0"), "{out}");
+}
+
 /// gVisor is a second container runtime, not a second mode of the
 /// first: the row separates `runtime` from `mode` so the two can be
 /// told apart.
