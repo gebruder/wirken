@@ -27,6 +27,16 @@ tagged.
   longer read, and the run says so when the key is set. **Operator action:**
   a benchmark harness that set `bench_mode: true` passes `--bench`.
 
+### Changed
+
+- `docs/threat-model.md` states each boundary once, in a Boundaries section.
+  The README's limits list, and the restatements in the other pages, link
+  to it. Statements the code did not bear out are corrected: MCP entry
+  signatures in the released build, authentication rate limiting, the sealed
+  channel trait, rows written before an action, the spend budget default,
+  remembered approvals, the OpenTelemetry forwarder, what Zirkel sends off
+  the host, and agents sharing state.
+
 ### Added
 
 - `wirken audit log --all` returns every event the filters match. The default
@@ -62,7 +72,8 @@ tagged.
   and a namespace-making `clone` are refused whatever the daemon's default
   is. On Podman, whose API takes a path, the profile is written to a file
   private to the operator and named by path. The allowlist is the one released as Moby profiles
-  `seccomp/v0.3.0`, which allows `socket` per address family.
+  `seccomp/v0.3.0`, which allows `socket` per address family. Under
+  `gvisor` the profile is sent and `runsc` does not apply it to the workload.
 
 - `wirken run` prints the runtime `exec` containers will run under and
   records it as an `exec_runtime_at_start` row on the `gateway-sandbox`

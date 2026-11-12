@@ -232,11 +232,8 @@ The signing key lives at `<data_dir>/audit/audit-signing.key` (Ed25519 raw
 from the IPC handshake keypair and from per-agent attestation identities. See
 [signing.md](signing.md#chain-head-signing).
 
-**What the signature does not protect against:** a malicious gateway that
-signs a fabricated chain in real time. The key is held by the same process
-that writes the chain, so a compromised gateway can record any sequence of
-events and sign it. The signature is meaningful for offline replay and for
-tamper detection by a third party reading the database.
+What the signature does not cover is stated in
+[threat-model.md](threat-model.md#audit).
 
 Source: `build_signed_message()` at `crates/audit/src/signing.rs:189-208`;
 constants at `:38` and `:44`; `load_or_create` / `load_from` at `:78-110`.
@@ -313,8 +310,9 @@ load-bearing record; the in-chain `audit.chain_broken` row is best-effort.
 The dispatch is best-effort because the rest of the chain is compromised by
 definition: an attacker who tampered the SQLite chain can also tamper any
 follow-up row, so the alarm log (independent file, separate inode) is the
-surviving channel. The independence is inode-level only; a same-UID attacker
-can rewrite both files. Detection against that attacker rests on SIEM
+surviving channel. The independence is inode-level only
+([threat-model.md](threat-model.md#the-operating-system-user)). Detection
+against a process of the same user rests on SIEM
 corroboration of the alarm log plus the writer's `tracing::error!` halt event.
 
 **Halt boundaries.** The writer halts on three conditions: three failed
@@ -336,9 +334,9 @@ halt boundary.
 verification passes or 3 consecutive failed alarm-log writes. Both counters
 live in the in-process flush loop and reset on every gateway restart, so an
 attacker with restart authority can drain the counter between failures. That
-attacker already has UID-equivalent control of the host, at which point the
-chain is no longer a defended boundary. A persistent state file was rejected
-for the same reason: it would be writable at the same UID.
+attacker runs as the Wirken user
+([threat-model.md](threat-model.md#the-operating-system-user)); a persistent
+state file would be writable by the same user.
 
 After a halt, `wirken audit acknowledge --all` archives the alarm log to a
 timestamped sibling before the next `wirken run` will start.
@@ -395,12 +393,11 @@ The output identifies which case fired and the session and seq involved.
 **The default anchor is co-resident and says so.** When no `--anchor` is
 given, the local `<data_dir>/audit/audit-signing.pub` is used when present,
 and the verifier emits a `WARNING (audit anchor)` line to stderr and in human
-output, plus an `anchor_warning` field in JSON, stating that a same-UID
-attacker can swap that anchor together with the chain. Without
-`--require-signed`, report-only verification carries an analogous note that no
-operator trust anchor was consulted. The exit code is unchanged; this removes
-a silent false assurance rather than changing behaviour. Tamper-evident
-verification requires an out-of-band `--anchor`.
+output, plus an `anchor_warning` field in JSON
+([threat-model.md](threat-model.md#audit)). Without `--require-signed`,
+report-only verification carries a note that no operator trust anchor was
+consulted. The exit code is unchanged. Tamper-evident verification requires
+an out-of-band `--anchor`.
 
 `SignatureInvalid` is always a hard fail. Reasons: claimed
 `current_chain_hash` does not match the stored hash at `sequence_range_end`;

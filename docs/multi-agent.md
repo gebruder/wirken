@@ -156,4 +156,5 @@ means a caller building an agent directly must name it (`set_agent_id`) right
 after constructing it with its permission store, before any action is gated.
 The factory does this at wake for every agent it produces, sub-agents included.
 
-Sub-agents run in the parent's process.
+Sub-agents run in the parent's process
+([threat-model.md](threat-model.md#processes)).

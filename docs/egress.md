@@ -1,6 +1,6 @@
 # Egress
 
-The skill-set `egress.domains` allowlist is a defense-in-depth control on a specific set of agent built-in tools, not a network boundary. This page documents what `egress.domains` covers, what it does not, and where operators bound the gaps.
+The skill-set `egress.domains` allowlist is a control on a specific set of agent built-in tools, not a network boundary ([threat-model.md](threat-model.md#network)). This page documents what `egress.domains` covers, what it does not, and where operators bound the gaps.
 
 ## What `egress.domains` covers
 
@@ -136,7 +136,7 @@ Three outbound paths bypass `EgressClient` entirely and are not constrained by s
 
 When the agent invokes the `exec` tool, the shell runs the command inside the sandbox container. Anything that command does (`curl https://attacker.example.com`, `wget`, `nc`, and so on) goes through the container's network namespace, not through `EgressClient`. The skill-side `egress.domains` allowlist is not consulted for this path; sandbox egress is a separate axis, described under [Sandbox egress](#sandbox-egress) below.
 
-Under `mode: off` the shell runs on the host directly and has no network bound at all. That mode is opt-in and requires explicit operator firewalling (`iptables`, `nftables`, `pf`) if the shell must be constrained.
+Under `mode: off` the shell runs on the host and no egress policy bounds it ([threat-model.md](threat-model.md#shell)). Constraining it takes operator firewalling (`iptables`, `nftables`, `pf`).
 
 ### MCP servers
 

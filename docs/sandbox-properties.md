@@ -312,7 +312,8 @@ print `skipping:` and pass on a host with no `runsc`.
 
 ## What is not enforced
 
-Honest about the gaps:
+Each boundary is stated in [threat-model.md](threat-model.md#shell). The
+detail for the sandbox:
 
 - **Container-escape CVEs in Docker, runc, or gVisor.** Wirken assumes
   the chosen OCI runtime is sound. Operators on outdated Docker versions

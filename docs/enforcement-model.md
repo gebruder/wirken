@@ -35,7 +35,8 @@ A function that takes `SessionHandle<Telegram>` does not compile when called
 with a `SessionHandle<Discord>`. That holds **in code that uses
 `SessionHandle<C>`**, which outside tests is none.
 
-**The production message path does not.** Production frames carry a
+**The production message path does not**
+([threat-model.md](threat-model.md#processes)). Production frames carry a
 `String`-typed channel discriminator on the `AuthenticatedChannel` value
 resolved at handshake, and a cross-channel mismatch is rejected at runtime via
 the `adapter.channel_mismatch` audit event rather than at compile time. The
@@ -154,10 +155,9 @@ messages for role-switching attempts, instruction-override markers,
 base64-encoded commands, tool-call injection structures and system-prompt
 extraction attempts.
 
-**Detection does not block.** It tags the audit event with a `threat` detail
-object and emits a separate `message.threat_flagged` event for SIEM
-visibility. The permission tiers and the sandbox are what limit what an
-injected agent can actually do.
+**Detection does not block** ([threat-model.md](threat-model.md#model-input)).
+It tags the audit event with a `threat` detail object and emits a separate
+`message.threat_flagged` event.
 
 **The scan is caught.** The detector is pattern matching over attacker-chosen
 text, so a message can break it; when one did, the panic unwound the

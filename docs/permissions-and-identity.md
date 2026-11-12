@@ -369,7 +369,8 @@ string. Nothing on the wire to the provider carries it.
 
 ## Identity scope
 
-Wirken is not an identity provider. It issues no identities, manages no user
+Wirken is not an identity provider
+([threat-model.md](threat-model.md#senders-and-approvals)). It issues no identities, manages no user
 accounts, and has no login flow. There is no SAML, no OIDC, no SCIM. Platform
 sender identity is checked against the inbound sender allowlist and recorded
 on every inbound audit event; it is not an identity Wirken authenticates.

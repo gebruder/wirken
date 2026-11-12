@@ -24,11 +24,10 @@ Pick the hook for a same-UID consumer that wants Ed25519 authentication,
 pull-based backpressure and cursor-driven replay. Pick the webhook for a cloud
 SIEM that cannot run a local connector at the wirken UID.
 
-**Neither defends against a same-UID attacker.** The hook's secret key is a
-file on disk at the wirken UID and the HMAC secret lives in `siem.json` at the
-same UID; whoever can read those can produce indistinguishable subscription
-clients. Detecting mid-stream tampering means verifying the chain offline, not
-trusting the wire.
+**Neither defends against a process of the same user**
+([threat-model.md](threat-model.md#the-operating-system-user)): the hook's
+secret key and the HMAC secret in `siem.json` are files that user can read.
+Detecting mid-stream tampering means verifying the chain offline.
 
 ## The two SIEM pipes
 

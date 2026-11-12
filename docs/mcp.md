@@ -172,7 +172,9 @@ The proxy reaches each server through the container runtime's attach stream, not
 
 ### What containment does not cover
 
-- **The kernel.** Under Docker's default runtime the container shares the host kernel, bounded by namespaces, the seccomp profile and an empty capability set. `sandbox.json` `"mode": "gvisor"` puts it under `runsc` instead, where the seccomp profile is not applied to the workload ([sandbox-properties.md](sandbox-properties.md#gvisor-delta-sandboxmodegvisor)). The egress sidecar runs under Docker's default runtime in either mode.
+The boundaries are stated in [threat-model.md](threat-model.md#mcp-servers) and [threat-model.md](threat-model.md#shell). What an operator sees of them here:
+
+- **The kernel.** Under Docker's default runtime the container shares the host kernel, bounded by namespaces, the seccomp profile and an empty capability set. `sandbox.json` `"mode": "gvisor"` puts it under `runsc` instead. The egress sidecar runs under Docker's default runtime in either mode.
 - **Writable mounts.** Files a server writes there are owned by the operator's uid on the host.
 - **Env-delivered secrets.** A variable in `secrets_in_env` is readable through `docker inspect` by anyone who can reach the Docker socket.
 - **The image.** The signature covers the entry, not the image's contents; a digest-pinned `image` fixes them.
@@ -204,7 +206,7 @@ Treat such a server like a third-party CLI: audit the source and the package pro
 - **Http:** `sha256("http\0" || name_len_le || name || url_len_le || url || auth_kind_le || costs)` where `auth_kind_le` is `u8`: 0 = none, 1 = bearer, 2 = oauth2. The credential ref is not in the payload for the same reason.
 - **`costs`,** on both: nothing when the entry declares no `tool_costs`, so an entry signed before the field existed hashes unchanged; otherwise `"costs\0"`, a little-endian `u32` count, then each tool name length-prefixed followed by its cost as a little-endian `u64`, sorted by name.
 
-**What the signature attests.** "This is the entry config the publisher intended," the sandbox block included: the image reference, what the server may reach, and how its secrets are delivered. It does not attest to the binary at `command` resolving to a specific artifact on disk, nor to an image tag resolving to specific contents; a digest-pinned `image` does that: a signed entry whose `command` is `/usr/local/bin/foo` verifies the same on two operator machines where `foo` is built differently. Per-binary attestation is a separate concern (operator's package manager, sandbox posture).
+**What the signature attests.** "This is the entry config the publisher intended," the sandbox block included: the image reference, what the server may reach, and how its secrets are delivered. It does not attest to the binary at `command` or to the contents of an image tag ([threat-model.md](threat-model.md#mcp-servers)); a digest-pinned `image` fixes the contents.
 
 **CLI.** `wirken mcp sign <server>` signs one entry against `~/.wirken/signing-key.hex` (shared with `wirken skills sign`; generated on first use). `wirken mcp verify [<server>]` reports `valid` / `invalid` / `unsigned` per entry, applying the delegation gate when an anchor is configured.
 

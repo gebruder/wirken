@@ -154,8 +154,8 @@ rules collapse to a blank line.
 
 ### Approvals
 
-**Unit-tested only.** No run against a live Discord bot has posted the card or
-taken a press.
+**Unit-tested only**
+([threat-model.md](threat-model.md#senders-and-approvals)).
 
 Tool calls that need approval on a Discord session post a card with Approve
 and Deny buttons in the approval channel:
@@ -551,7 +551,8 @@ adapter), the restarted adapter forwards it again.
 
 ## iMessage (BlueBubbles)
 
-**Not verified against a live BlueBubbles server.** The adapter's API calls
+**Not verified against a live BlueBubbles server**
+([threat-model.md](threat-model.md#senders-and-approvals)). The adapter's API calls
 (the webhook route, the password as a query parameter, the message send) and
 its webhook check follow BlueBubbles Server's source, cited below; no run
 against a running server has confirmed them. Treat this channel as untested

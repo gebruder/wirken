@@ -68,6 +68,7 @@ The following are in scope for security reports:
 
 The following are out of scope:
 
-- Prompt injection (application-layer LLM behavior, not a wirken vulnerability)
+- Prompt injection. Injection detection flags and does not block
+  ([docs/threat-model.md](docs/threat-model.md#model-input)).
 - Denial of service via LLM token exhaustion (rate-limited by the LLM provider)
 - Vulnerabilities in third-party dependencies (report upstream, but let us know)

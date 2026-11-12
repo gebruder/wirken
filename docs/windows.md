@@ -102,7 +102,7 @@ wirken audit log --session "assistant/webchat/550e..." --format json > session.j
 
 If your research involves data subject to IRB review, FERPA, HIPAA, or institutional data-handling policies, two facts about Wirken are relevant:
 
-1. **Where data goes.** The model provider's API. Wirken sends user messages and tool results to the configured provider (OpenAI, Anthropic, Gemini, Bedrock, Tinfoil, Privatemode, Ollama, or a custom endpoint). The provider's data-handling policy governs what happens to that data; check it against your institutional requirements.
+1. **Where data goes.** To the configured model provider, and to whatever the agent's tools reach ([threat-model.md](threat-model.md#network)). Wirken sends user messages and tool results to the configured provider (OpenAI, Anthropic, Gemini, Bedrock, Tinfoil, Privatemode, Ollama, or a custom endpoint). The provider's data-handling policy governs what happens to that data; check it against your institutional requirements.
 2. **What's logged locally.** The hash-chained audit log records every tool call, message, and refusal locally at `%USERPROFILE%\.wirken\audit.db`. The audit log is not transmitted anywhere unless you've configured SIEM forwarding. Local provider (Ollama) keeps everything on your machine.
 
 The audit log is the artifact that makes a Wirken-driven research workflow auditable. The provider's logs are governed by the provider's policy, not Wirken's.

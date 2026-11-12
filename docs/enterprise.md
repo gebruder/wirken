@@ -140,10 +140,9 @@ channel and session fields; see [siem-forwarder.md](siem-forwarder.md).
 If a team requirement lands on one of these, either defer the requirement or
 build on top.
 
-- **Wirken is not an IdP and does not replace SSO.** No identities issued, no
-  user accounts, no login flow, no SAML, no OIDC, no SCIM. Platform sender
-  identity is checked against the inbound sender allowlist and recorded on
-  every inbound audit event; it is not an identity Wirken authenticates.
+- **Wirken is not an IdP and does not replace SSO**
+  ([threat-model.md](threat-model.md#senders-and-approvals),
+  [permissions-and-identity.md](permissions-and-identity.md)).
 - **Permissions are scoped per agent and channel, not per user.** A grant
   the operator records for a channel covers every admitted sender on that
   agent and channel

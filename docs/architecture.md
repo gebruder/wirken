@@ -55,7 +55,8 @@ trait with no sealing supertrait (`crates/ipc/src/channel.rs`). Within code that
 carries `SessionHandle<C>`, cross-channel access is a compile error rather
 than a runtime check.
 
-**That API is not on the production message path.** Production frames carry a
+**That API is not on the production message path**
+([threat-model.md](threat-model.md#processes)). Production frames carry a
 `String` channel discriminator on the `AuthenticatedChannel` value resolved at
 handshake, and a cross-channel frame is rejected at runtime with an
 `adapter.channel_mismatch` audit event. The live control is the runtime match;
@@ -308,14 +309,11 @@ lifetime.
 **Process boundary, current state.** The agent runs as a library inside the
 gateway process. `crates/cli` pulls `wirken-agent` as a path dependency and
 `run.rs` constructs `Agent` values via `AgentFactory::wake` and calls
-`process_message` directly. There is no UDS between agent and gateway; **they
-share an address space.** Channel adapters are separate processes; agents are
-not. The in-memory provider keys are therefore held by the same process that
-holds the vault unwrap key, the audit writer and the session log, so splitting
-a proxy out today would not change the threat model, because the proxy and the
-consumer would live in the same address space. The vault's encryption protects
-keys at rest regardless, and the agent-process-compromise threat model only
-activates once there is a process boundary between agent and gateway.
+`process_message` directly. There is no UDS between agent and gateway: they
+share an address space ([threat-model.md](threat-model.md#processes)). The
+in-memory provider keys are held by the same process that holds the vault
+unwrap key, the audit writer and the session log. The vault's encryption
+protects keys at rest.
 
 **Usage tracking.** Every call logs an `LlmRequest` / `LlmResponse` pair with
 token counts, model ID, latency and cost estimate. Neither row carries prompt
