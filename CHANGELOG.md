@@ -49,6 +49,12 @@ tagged.
   stays the newest 50. The README's uninstall step and the session-citation
   step in `docs/audit-cli.md` use it.
 
+### Dependencies
+
+- GitHub Actions: `softprops/action-gh-release` v3.0.4 in the release
+  workflow and `github/codeql-action/upload-sarif` v4.39.3 in the Scorecard
+  workflow, from #312.
+
 ## [3.3.0] - 2026-11-11
 
 ### Security
