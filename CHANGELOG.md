@@ -17,6 +17,11 @@ tagged.
   Matrix homeserver, a SIEM endpoint and a model provider's base URL. The
   check compared the start of the URL, so `http://localhost.example.com`
   passed. The Matrix adapter also accepts `http://[::1]`.
+- A SIEM batch the endpoint answers with anything but a success status is a
+  failed delivery, on both forwarders and every target. The legacy forwarder
+  logs it and drops the batch, as it does for a transport error; the typed
+  forwarder keeps its cursor and sends the rows again on the next pass. Any
+  response counted as delivered before.
 
 ## [3.3.0] - 2026-11-11
 

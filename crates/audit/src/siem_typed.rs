@@ -432,40 +432,40 @@ impl TypedSink for HttpTypedSink {
             }
             Some(TypedTransport::SentinelSeparate { endpoint, api_key }) => {
                 let payload = crate::siem::build_sentinel_typed_payload(&stored_refs);
-                self.http
-                    .post(endpoint)
-                    .header("Authorization", format!("Bearer {api_key}"))
-                    .header("Content-Type", "application/json")
-                    .json(&payload)
-                    .send()
-                    .await
-                    .map_err(|e| format!("Sentinel typed: {e}"))?;
-                Ok(())
+                crate::siem::delivered(
+                    self.http
+                        .post(endpoint)
+                        .header("Authorization", format!("Bearer {api_key}"))
+                        .header("Content-Type", "application/json")
+                        .json(&payload),
+                    "Sentinel typed",
+                )
+                .await
             }
             Some(TypedTransport::Shared { target, config }) => match target {
                 SiemTarget::Datadog => {
                     let payload = crate::siem::build_datadog_typed_payload(&stored_refs, config);
-                    self.http
-                        .post(&config.endpoint)
-                        .header("DD-API-KEY", &config.api_key)
-                        .header("Content-Type", "application/json")
-                        .json(&payload)
-                        .send()
-                        .await
-                        .map_err(|e| format!("Datadog typed: {e}"))?;
-                    Ok(())
+                    crate::siem::delivered(
+                        self.http
+                            .post(&config.endpoint)
+                            .header("DD-API-KEY", &config.api_key)
+                            .header("Content-Type", "application/json")
+                            .json(&payload),
+                        "Datadog typed",
+                    )
+                    .await
                 }
                 SiemTarget::Splunk => {
                     let body = crate::siem::build_splunk_typed_body(&stored_refs);
-                    self.http
-                        .post(&config.endpoint)
-                        .header("Authorization", format!("Splunk {}", config.api_key))
-                        .header("Content-Type", "application/json")
-                        .body(body)
-                        .send()
-                        .await
-                        .map_err(|e| format!("Splunk typed: {e}"))?;
-                    Ok(())
+                    crate::siem::delivered(
+                        self.http
+                            .post(&config.endpoint)
+                            .header("Authorization", format!("Splunk {}", config.api_key))
+                            .header("Content-Type", "application/json")
+                            .body(body),
+                        "Splunk typed",
+                    )
+                    .await
                 }
                 SiemTarget::Webhook => {
                     let (body, signature) =
@@ -480,11 +480,7 @@ impl TypedSink for HttpTypedSink {
                     if let Some(sig) = signature {
                         req = req.header("X-Wirken-Signature", format!("sha256={sig}"));
                     }
-                    req.body(body)
-                        .send()
-                        .await
-                        .map_err(|e| format!("Webhook typed: {e}"))?;
-                    Ok(())
+                    crate::siem::delivered(req.body(body), "Webhook typed").await
                 }
                 SiemTarget::Sentinel => {
                     // Unreachable under `TypedTransport::Shared`; the
@@ -780,6 +776,65 @@ mod tests {
             sender_id: Some("U123".into()),
             text: None,
             reasoning: None,
+        }
+    }
+
+    fn stored_tool_calls(id: i64) -> StoredSessionEvent {
+        StoredSessionEvent {
+            id,
+            session_id: SessionId::new("s1"),
+            seq: 0,
+            ts: chrono::Utc::now(),
+            trust: crate::session_log::TrustLevel::System,
+            event: sample_tool_calls(),
+            leaf_hash: HashHex("aa".repeat(32)),
+            prev_hash: HashHex("bb".repeat(32)),
+            hash: HashHex("cc".repeat(32)),
+        }
+    }
+
+    async fn deliver_typed(target: &SiemTarget, status: u16) -> Result<(), String> {
+        let endpoint = crate::siem::endpoint_answering(status).await;
+        let config = SiemConfig {
+            target: target.clone(),
+            endpoint: endpoint.clone(),
+            api_key: "k".into(),
+            typed_forwarding_enabled: Some(true),
+            sentinel_typed: matches!(target, SiemTarget::Sentinel).then(|| {
+                crate::siem::SentinelTypedEndpoint {
+                    endpoint,
+                    api_key: None,
+                }
+            }),
+            ..config_default()
+        };
+        HttpTypedSink::new(config)
+            .forward(&[stored_tool_calls(1)])
+            .await
+    }
+
+    /// A typed batch the endpoint answered with anything but a success
+    /// status was not delivered, so the pass keeps its cursor.
+    #[tokio::test]
+    async fn a_typed_batch_the_endpoint_refused_is_not_delivered() {
+        for target in [
+            SiemTarget::Datadog,
+            SiemTarget::Splunk,
+            SiemTarget::Sentinel,
+            SiemTarget::Webhook,
+        ] {
+            for status in [200, 204] {
+                assert!(
+                    deliver_typed(&target, status).await.is_ok(),
+                    "{target:?} {status}"
+                );
+            }
+            for status in [401, 403, 429, 500, 503] {
+                let err = deliver_typed(&target, status)
+                    .await
+                    .expect_err(&format!("{target:?} {status}"));
+                assert!(err.contains(&status.to_string()), "{err}");
+            }
         }
     }
 

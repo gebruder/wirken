@@ -228,28 +228,28 @@ impl SiemForwarder {
     }
 
     async fn post_datadog(&self, logs: &[serde_json::Value]) -> Result<(), String> {
-        self.http
-            .post(&self.config.endpoint)
-            .header("DD-API-KEY", &self.config.api_key)
-            .header("Content-Type", "application/json")
-            .json(logs)
-            .send()
-            .await
-            .map_err(|e| format!("Datadog: {e}"))?;
-        Ok(())
+        delivered(
+            self.http
+                .post(&self.config.endpoint)
+                .header("DD-API-KEY", &self.config.api_key)
+                .header("Content-Type", "application/json")
+                .json(logs),
+            "Datadog",
+        )
+        .await
     }
 
     async fn forward_splunk(&self, events: &[AuditEvent]) -> Result<(), String> {
         let body = build_splunk_body(events);
-        self.http
-            .post(&self.config.endpoint)
-            .header("Authorization", format!("Splunk {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| format!("Splunk: {e}"))?;
-        Ok(())
+        delivered(
+            self.http
+                .post(&self.config.endpoint)
+                .header("Authorization", format!("Splunk {}", self.config.api_key))
+                .header("Content-Type", "application/json")
+                .body(body),
+            "Splunk",
+        )
+        .await
     }
 
     async fn forward_sentinel(&self, events: &[AuditEvent]) -> Result<(), String> {
@@ -259,15 +259,15 @@ impl SiemForwarder {
             );
         }
         let payload = build_sentinel_payload(events, &self.config);
-        self.http
-            .post(&self.config.endpoint)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| format!("Sentinel: {e}"))?;
-        Ok(())
+        delivered(
+            self.http
+                .post(&self.config.endpoint)
+                .header("Authorization", format!("Bearer {}", self.config.api_key))
+                .header("Content-Type", "application/json")
+                .json(&payload),
+            "Sentinel",
+        )
+        .await
     }
 
     async fn forward_webhook(&self, events: &[AuditEvent]) -> Result<(), String> {
@@ -285,13 +285,20 @@ impl SiemForwarder {
             request = request.header("X-Wirken-Signature", format!("sha256={sig}"));
         }
 
-        request
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| format!("Webhook: {e}"))?;
+        delivered(request.body(body), "Webhook").await
+    }
+}
 
+/// Send `request` and take the batch as delivered only on a success
+/// status. An endpoint that answers 401, 429 or 503 has not taken the
+/// batch, and the error names the status.
+pub(crate) async fn delivered(request: reqwest::RequestBuilder, what: &str) -> Result<(), String> {
+    let response = request.send().await.map_err(|e| format!("{what}: {e}"))?;
+    let status = response.status();
+    if status.is_success() {
         Ok(())
+    } else {
+        Err(format!("{what}: the endpoint answered {status}"))
     }
 }
 
@@ -2850,5 +2857,103 @@ mod identity_tests {
         };
         let wire = serde_json::to_string(&host).expect("serializes");
         assert!(!wire.contains("container_id"), "{wire}");
+    }
+}
+
+/// A loopback HTTP endpoint that answers every request with one status.
+#[cfg(test)]
+pub(crate) async fn endpoint_answering(status: u16) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/in", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = socket.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            let reply =
+                format!("HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = socket.write_all(reply.as_bytes()).await;
+        }
+    });
+    endpoint
+}
+
+#[cfg(test)]
+mod delivery_status_tests {
+    use super::*;
+    use crate::event::ActorKind;
+
+    fn forwarder(target: SiemTarget, endpoint: String) -> SiemForwarder {
+        SiemForwarder::new(SiemConfig {
+            target,
+            endpoint,
+            api_key: "k".into(),
+            service: "wirken".into(),
+            environment: "test".into(),
+            hmac_secret: None,
+            sentinel_typed: None,
+            typed_include_variants: None,
+            typed_exclude_variants: None,
+            typed_forwarding_enabled: None,
+            typed_poll_interval_ms: None,
+        })
+        .unwrap()
+    }
+
+    async fn deliver(target: &SiemTarget, status: u16) -> Result<(), String> {
+        let f = forwarder(target.clone(), endpoint_answering(status).await);
+        let events = [AuditEvent::new(ActorKind::User, "u", "exec", "ls")];
+        match target {
+            SiemTarget::Datadog => f.forward_datadog(&events).await,
+            SiemTarget::Splunk => f.forward_splunk(&events).await,
+            SiemTarget::Sentinel => f.forward_sentinel(&events).await,
+            SiemTarget::Webhook => f.forward_webhook(&events).await,
+        }
+    }
+
+    /// A batch the endpoint answered with anything but a success
+    /// status was not delivered, on every target.
+    #[tokio::test]
+    async fn a_batch_the_endpoint_refused_is_not_delivered() {
+        for target in [
+            SiemTarget::Datadog,
+            SiemTarget::Splunk,
+            SiemTarget::Sentinel,
+            SiemTarget::Webhook,
+        ] {
+            for status in [200, 202, 204] {
+                assert!(
+                    deliver(&target, status).await.is_ok(),
+                    "{target:?} {status}"
+                );
+            }
+            for status in [400, 401, 403, 413, 429, 500, 503] {
+                let err = deliver(&target, status)
+                    .await
+                    .expect_err(&format!("{target:?} {status}"));
+                assert!(err.contains(&status.to_string()), "{err}");
+            }
+        }
     }
 }
