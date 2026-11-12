@@ -98,7 +98,7 @@ fn scenario(walk: bool, sandbox_off: bool) {
 
     let out = wirken(&data)
         .env("HOME", &home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(&target)
         .args(["--run", &run])
         .output()

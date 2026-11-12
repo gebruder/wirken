@@ -173,6 +173,7 @@ pub async fn run(
     use_fixture: Option<&Path>,
     rubric_flag: Option<&Path>,
     context_flag: Option<&Path>,
+    bench: bool,
 ) -> Result<()> {
     if !target.is_dir() {
         anyhow::bail!("target is not a directory: {}", target.display());
@@ -205,10 +206,21 @@ pub async fn run(
     let config: serde_json::Value = serde_json::from_str(&config_body)
         .with_context(|| format!("parse {}", config_path.display()))?;
     super::lyrik_walks::refuse_target_walks_dir(&config, &super::config().data_dir)?;
-    let bench_mode = config
-        .get("bench_mode")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // Whether the sign-off is skipped is the operator's to say, on the
+    // command line. The config is a file in the assessed repository,
+    // so a `bench_mode` there decides nothing.
+    let bench_mode = bench;
+    if !bench
+        && config
+            .get("bench_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        eprintln!(
+            "  bench_mode in {} is not read: only `--bench` skips the sign-off",
+            config_path.display()
+        );
+    }
 
     let run_dir = target
         .join(".lyrik")
@@ -265,8 +277,7 @@ pub async fn run(
         )?;
         anyhow::bail!(
             "a run is signed off at a terminal and stdin is not one; run it from a \
-             terminal, or set `bench_mode: true` in {} on a benchmark target",
-            config_path.display()
+             terminal, or pass `--bench` on a benchmark target"
         );
     } else {
         let pin = resolve_phase_pin(&config)?;

@@ -22,6 +22,10 @@ tagged.
   logs it and drops the batch, as it does for a transport error; the typed
   forwarder keeps its cursor and sends the rows again on the next pass. Any
   response counted as delivered before.
+- `wirken lyrik run` skips the operator sign-off only with the new `--bench`
+  flag. `bench_mode` in the assessed repository's `.lyrik/config.json` is no
+  longer read, and the run says so when the key is set. **Operator action:**
+  a benchmark harness that set `bench_mode: true` passes `--bench`.
 
 ### Added
 

@@ -254,6 +254,10 @@ enum LyrikCommands {
         /// `.lyrik/context.md`.
         #[arg(long)]
         context: Option<std::path::PathBuf>,
+        /// Skip the operator sign-off, for a benchmark or batch
+        /// target. Nothing in the target's files skips it.
+        #[arg(long)]
+        bench: bool,
     },
     /// Emit a Lyrik report in the requested format.
     Report {
@@ -2237,6 +2241,7 @@ async fn main() -> Result<()> {
                 use_fixture,
                 rubric,
                 context,
+                bench,
             } => {
                 commands::lyrik::run(
                     &target,
@@ -2244,6 +2249,7 @@ async fn main() -> Result<()> {
                     use_fixture.as_deref(),
                     rubric.as_deref(),
                     context.as_deref(),
+                    bench,
                 )
                 .await
             }

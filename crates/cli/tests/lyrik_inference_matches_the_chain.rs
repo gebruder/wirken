@@ -89,7 +89,7 @@ fn run_once(home: &Path, data: &Path, target: &Path) -> (serde_json::Value, Stri
     .unwrap();
     let out = wirken(data)
         .env("HOME", home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(target)
         .args(["--run", RUN])
         .output()

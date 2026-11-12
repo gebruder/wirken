@@ -69,7 +69,7 @@ fn accepted(run: &str) {
 
     let out = wirken(&data)
         .env("HOME", &home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(&target)
         .args(["--run", run])
         .output()
@@ -151,7 +151,7 @@ fn unsafe_run_ids_are_refused_before_anything_is_created() {
     ] {
         let out = wirken(&data)
             .env("HOME", &home)
-            .args(["lyrik", "run", "--target"])
+            .args(["lyrik", "run", "--bench", "--target"])
             .arg(&target)
             .args(["--run", run])
             .output()

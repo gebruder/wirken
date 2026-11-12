@@ -78,7 +78,7 @@ fn run_with(script: Vec<serde_json::Value>) -> (bool, String, std::path::PathBuf
     write_target(&target, &model);
     let out = wirken(&data)
         .env("HOME", &home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(&target)
         .args(["--run", RUN])
         .output()

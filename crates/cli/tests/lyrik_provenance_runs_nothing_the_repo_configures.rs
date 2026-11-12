@@ -118,7 +118,7 @@ fn provenance_is_recorded_and_no_repo_configured_program_runs() {
 
     let out = wirken(&data)
         .env("HOME", &home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(&target)
         .args(["--run", RUN])
         .output()
@@ -229,7 +229,7 @@ fn a_non_git_target_records_why_provenance_is_missing() {
     .unwrap();
     let out = wirken(&data)
         .env("HOME", &home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(&target)
         .args(["--run", RUN])
         .output()

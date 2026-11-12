@@ -51,7 +51,7 @@ fn a_sessions_opening_head_names_the_build() {
     .unwrap();
     let out = wirken(&data)
         .env("HOME", &home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(&target)
         .args(["--run", RUN])
         .output()

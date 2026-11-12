@@ -76,7 +76,7 @@ fn write_results(data: &Path) -> Vec<(String, bool)> {
 fn run(data: &Path, home: &Path, target: &Path, run: &str) -> (bool, String) {
     let out = wirken(data)
         .env("HOME", home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(target)
         .args(["--run", run])
         .output()

@@ -107,8 +107,9 @@ scorers into a consensus, and does not send findings to any delivery channel.
   `lyrik.model.tool_calls_supported`; fail aborts before scanner dispatch with
   the case named. The probe is on the run's signed chain like every other
   model call.
-- **Operator sign-off.** Outside `bench_mode` a run starts only on a yes at
-  the terminal, recorded on the signed chain. See [Setup](#setup).
+- **Operator sign-off.** A run starts only on a yes at the terminal, recorded
+  on the signed chain, unless the operator passes `--bench`. Nothing in the
+  assessed repository skips it. See [Setup](#setup).
 - **Bundled skill staged per run**, signed under a root the run's process
   holds in memory, so the loader accepts it in that process only, which is why `/lyrik` resolves to the
   staged copy regardless of operator state under `<data_dir>/skills/`.
@@ -137,8 +138,7 @@ scorers into a consensus, and does not send findings to any delivery channel.
 
 1. Install Wirken and configure the provider that `phases.framing` names.
    See [getting-started.md](getting-started.md).
-2. Write `.lyrik/config.json` in the assessed repo. Leave `bench_mode` false;
-   it is for benchmark targets only.
+2. Write `.lyrik/config.json` in the assessed repo.
 3. Commit the team's rubric as `.lyrik/rubric.md`, and project context as
    `.lyrik/context.md` if you have one, or pass files outside the repo with
    `--rubric` and `--context`. See
@@ -194,7 +194,7 @@ never sees a credential.
 A sample is at [`lyrik.example.json`](lyrik.example.json).
 
 **`scope`**: `include` and `exclude` glob lists. The runner does not read
-them; the keys it reads are `bench_mode`, `phases`, `mode`, `scanner`, `walks`,
+them; the keys it reads are `phases`, `mode`, `scanner`, `walks`,
 `max_concurrent_walks` and `walks_dir`. The single-call skill text tells the
 model to honour them, to treat the whole workspace as in scope when they are
 absent, and to skip `.git/` and `.lyrik/` regardless (`skills/lyrik/SKILL.md`);
@@ -381,13 +381,15 @@ finding from `findings.json`; its rejection record stays. The funnel counts
 removed candidates as `brocard_removed`. A Semgrep seed whose only candidate was
 removed counts as `brocard_rejected` in the scanner funnel, not `accepted`.
 
-**`bench_mode`**: defaults false. Set it only on benchmark or
-batch-evaluation targets: when true, the run does not ask for a sign-off and
+**`--bench`**: a flag on `wirken lyrik run`, for benchmark and
+batch-evaluation targets. With it the run does not ask for a sign-off and
 writes a `lyrik.phase_0.signoff` row before dispatch and a
 `lyrik.high_severity_review.signoff` row after the walks and the locked-file
 check succeed, both with `decision: "auto_bench"`, so bench runs are
 distinguishable after the
-fact. When false, the run asks at the terminal (see [Setup](#setup)); without
+fact. A `bench_mode` key in `.lyrik/config.json` is not read: the config is a
+file in the assessed repository, and the run says so when it finds the key set.
+Without the flag, the run asks at the terminal (see [Setup](#setup)); without
 a terminal it writes a `lyrik.phase_0.signoff` row with `decision:
 "pending_adapter_route"` and exits non-zero before dispatch. `scoring_disagreement` has no bench handling and no routing; a
 disagreement is recorded on the finding as `scoring_disagreement: true`.
@@ -677,9 +679,10 @@ binary with a scripted model doing what a steered model would.
 - **`exec` only in the sandbox.** With sandbox `mode: off` a run's agents get
   no `exec`. With the sandbox on, each command goes to the operator first.
   `lyrik_exec_sandbox_only.rs`.
-- **Operator sign-off on the chain.** Outside `bench_mode` nothing reaches the
+- **Operator sign-off on the chain.** Without `--bench` nothing reaches the
   model until the operator signs off at a terminal; the answer is on the
-  signed chain, bound to the summary shown. `lyrik_signoff.rs`.
+  signed chain, bound to the summary shown. A `bench_mode` key in the assessed
+  repository's config does not skip it. `lyrik_signoff.rs`.
 - **Every model call on the chain.** The probe, every turn and every
   compaction summary is an `llm_request` row with provider, model and size, and
   `inference` is read back from those rows. `lyrik_inference_matches_the_chain.rs`.

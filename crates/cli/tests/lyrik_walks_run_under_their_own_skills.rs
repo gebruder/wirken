@@ -107,7 +107,7 @@ fn a_refused_exec_is_skipped_and_writes_stay_under_lyrik() {
 
     let out = wirken(&data)
         .env("HOME", &home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(&target)
         .args(["--run", RUN])
         .output()

@@ -235,13 +235,35 @@ fn without_a_terminal_a_run_outside_bench_mode_is_refused() {
     assert!(s.model.received().is_empty());
 }
 
+/// `bench_mode` in the assessed repository's own config is a file the
+/// target controls. It does not skip the sign-off.
+#[test]
+fn a_target_that_sets_bench_mode_does_not_skip_the_sign_off() {
+    const RUN: &str = "target-says-bench";
+    let s = scene(RUN, true);
+    let out = wirken(&s.data)
+        .env("HOME", &s.home)
+        .args(["lyrik", "run", "--target"])
+        .arg(&s.target)
+        .args(["--run", RUN])
+        .output()
+        .unwrap();
+    let shown = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("signed off at a terminal"), "{shown}");
+    let rows = audit_rows(&s.target, RUN, "lyrik.phase_0.signoff");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["decision"], "pending_adapter_route");
+    assert!(s.model.received().is_empty());
+}
+
 #[test]
 fn bench_mode_auto_approves_without_asking() {
     const RUN: &str = "bench";
     let s = scene(RUN, true);
     let out = wirken(&s.data)
         .env("HOME", &s.home)
-        .args(["lyrik", "run", "--target"])
+        .args(["lyrik", "run", "--bench", "--target"])
         .arg(&s.target)
         .args(["--run", RUN])
         .output()

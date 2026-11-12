@@ -535,7 +535,7 @@ See [zirkel.md](zirkel.md).
 ## wirken lyrik
 
 ```bash
-wirken lyrik run --target DIR --run RUN_ID [--use-fixture FINDINGS_JSON]
+wirken lyrik run --target DIR --run RUN_ID [--bench] [--use-fixture FINDINGS_JSON]
 wirken lyrik report [--format sarif] (--findings PATH | --run RUN_ID) --output PATH
 wirken lyrik validate --path PATH
 ```
