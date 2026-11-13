@@ -775,11 +775,12 @@ enum SkillCommands {
         url_prefix: String,
     },
     /// Install an operator registry root public key to anchor skill
-    /// identity. Once set, the loader requires every skill's signer to
-    /// be delegated by this root (strict): self-signed-only bundles no
-    /// longer load. The matching root private key never ships and
-    /// signs delegations offline. Without a root set, loading keeps the
-    /// self-signed floor unchanged.
+    /// identity. It replaces the compiled project root: the loader then
+    /// requires every skill's signer to be delegated by this root, and
+    /// a skill delegated under the project root no longer loads until
+    /// it is re-signed. The matching root private key never ships and
+    /// signs delegations offline. Without an operator root, loading
+    /// requires delegation by the compiled project root.
     ///
     /// Installed skills that load now and would not under this root are
     /// listed first, and the root is installed only once that is
