@@ -451,7 +451,9 @@ What each control leaves outside it, stated once. Other pages link here.
 - `rotation_due_at` is recorded and triggers nothing. The Teams adapter
   refreshes its token; the Google Chat adapter sends a static one.
 - A budget is off until configured. It is checked before a call and charged
-  after it, and a model missing from the pricing table is not charged.
+  after it, so the call in flight at a ceiling completes. A model missing
+  from the pricing table is not charged against the USD ceiling; the
+  model-time ceiling, where set, charges every call.
 - Wirken has no attestation code of its own. For Tinfoil the gateway calls
   the Tinfoil SDK, which performs the attestation, and fails the model call
   when the SDK reports an attestation error (`tinfoil_client`,

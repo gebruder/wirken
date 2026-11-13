@@ -112,15 +112,26 @@ The `/ 1000000` converts USD micros to USD.
 
 ## Enforcement
 
-Metering answers "what did each agent spend"; enforcement caps it. A per-agent budget sets a ceiling over a fixed calendar window and, on breach, alerts or blocks the next call. Enforcement is off by default and never activates on upgrade; alert is the recommended starting posture.
+Metering answers "what did each agent spend"; enforcement caps it. A per-agent budget sets a ceiling over a fixed calendar window and, on breach, alerts or blocks the next call. A budget can hold two ceilings: one in USD, and one in [model time](#model-time), which bounds an agent on a provider with no price. Enforcement is off by default and never activates on upgrade; alert is the recommended starting posture.
 
 ### Modes
 
 - **off** (the default): no enforcement.
-- **alert**: when the window's spend reaches the ceiling, emit a `budget_exceeded` audit event once per window and let the call proceed.
-- **block**: when the window's spend reaches the ceiling, emit a `budget_exceeded` event and refuse the call. The refusal returns a plain channel message (that the agent has reached its spending limit for the window), not a silent failure. The check runs before the `LlmRequest` is written, so a block never leaves an orphaned request on the chain: every `LlmRequest` has a paired `LlmResponse` or a call error, never a budget block between them.
+- **alert**: when the window reaches a ceiling, emit a `budget_exceeded` audit event once per window for that ceiling and let the call proceed.
+- **block**: when the window reaches a ceiling, emit a `budget_exceeded` event and refuse the call. The refusal returns a plain channel message (that the agent has reached its spending limit, or its model-time limit, for the window), not a silent failure. A block can end a turn midway: the check runs before every model call, so a turn that reaches the ceiling between two tool rounds stops there with that message. The check runs before the `LlmRequest` is written, so a block never leaves an orphaned request on the chain: every `LlmRequest` has a paired `LlmResponse` or a call error, never a budget block between them.
 
-Spend is read from `total_cost_usd_micros` (the same precomputed field the metering queries use) and accumulated in a durable per-agent ledger (`budget.db`) keyed by the base agent id, so it aggregates across an agent's channels and conversations and survives a gateway restart. A sub-agent's calls are checked and charged against the budget of the agent at the top of its spawn chain, at any depth; the child's own `budget.json` entry applies only when that agent is addressed directly.
+Spend is read from `total_cost_usd_micros` (the same precomputed field the metering queries use) and accumulated, with model time beside it, in a durable per-agent ledger (`budget.db`) keyed by the base agent id, so it aggregates across an agent's channels and conversations and survives a gateway restart. A sub-agent's calls are checked and charged against the budget of the agent at the top of its spawn chain, at any depth; the child's own `budget.json` entry applies only when that agent is addressed directly.
+
+### Model time
+
+`ceiling_model_seconds` caps the wall-clock seconds an agent's model calls take in the window. The gateway times each call itself, from sending the request to the end of the response, the interval the `llm_response` row records as `latency_ms`. Nothing is needed from the provider: a model with no price, or one that reports no token usage, is timed like any other. This is the ceiling to set for a local model.
+
+- **What is charged.** Every model call the agent makes while its budget sets this ceiling: a turn's calls, a compaction summary, a call that failed or timed out (for the time it took to fail), and a call cut off with its turn, as a sub-agent's wall-clock limit does. Under a budget with no model-time ceiling nothing is timed into the ledger, so adding the ceiling starts the count from that point.
+- **What it gates.** Model calls. A costed MCP tool call spends USD and no model time, and is not refused by this ceiling.
+- **Overshoot.** The check runs before a call and the charge lands after it, so the call in flight when the window crosses the ceiling completes. One call can run up to the 300-second request timeout.
+- **What the number includes.** Wall-clock time as the gateway sees it: time the provider spent loading the model and time the request waited behind other clients of the same server count. On a shared model server, contention is charged to the agent that waited.
+- **Plan sign-in.** A plan call can be timed, so a budget that sets only `ceiling_model_seconds` holds for an agent in plan mode. A block-mode budget with a USD ceiling still refuses a plan agent's calls outright, as below.
+- **On the record.** A `budget_exceeded` row for this ceiling carries `model_time` with `window_model_seconds` and `ceiling_model_seconds`. Its USD fields hold the window's USD spend and the USD ceiling, `0` where the budget sets none, and are not what was reached. A row for the USD ceiling has no `model_time` and is written as it was before this ceiling existed. When both ceilings are reached under block mode, the one row written is the USD row. A query or detection that reads `budget_exceeded` as a USD breach should leave out rows that carry `model_time`.
 
 ### Configuration
 
@@ -131,12 +142,13 @@ Budgets live in `budget.json` in the data directory: a global `default` applied 
     "default": { "mode": "alert", "ceiling_usd_micros": 5000000, "window": "day" },
     "agents": {
         "work": { "mode": "block", "ceiling_usd_micros": 10000000, "window": "day" },
+        "local": { "mode": "block", "ceiling_model_seconds": 3600, "window": "day" },
         "scratch": { "mode": "off", "ceiling_usd_micros": 0, "window": "day" }
     }
 }
 ```
 
-`window` is `hour`, `day` (the default), or `week`; `ceiling_usd_micros` is USD micros (1 USD = 1,000,000). A per-agent entry overrides the default, and an explicit per-agent `"mode": "off"` opts a single agent out even when a global default is set. An absent `budget.json` means no enforcement.
+`window` is `hour`, `day` (the default), or `week`; `ceiling_usd_micros` is USD micros (1 USD = 1,000,000); `ceiling_model_seconds` is whole seconds of model time. An entry may set either ceiling or both, and each is checked on its own. An entry that omits `ceiling_usd_micros` has no USD ceiling; an `alert` or `block` entry that sets neither ceiling is refused at gateway start, by name. A per-agent entry overrides the default, and an explicit per-agent `"mode": "off"` opts a single agent out even when a global default is set. An absent `budget.json` means no enforcement.
 
 ### Fail-closed and the uncosted-provider gap
 
@@ -144,9 +156,9 @@ In block mode, a ledger error (the spend ledger cannot be read) fails closed: th
 
 At gateway start the posture is the same. If `budget.db` cannot be opened while any block-mode budget is configured, the gateway refuses to start, so a wedged ledger file cannot silently convert block into off. If only alert-mode budgets are configured, startup continues but emits a `budget.control_offline` audit event (on the audit chain, so a SIEM or dashboard sees the control is down), not just a stderr warning. A present-but-malformed `budget.json` is a hard startup error for the same reason.
 
-A call whose (provider, model) pair is absent from the pricing table records no cost, so it does not advance the ledger. This is a blind spot: block mode plus a costless provider is no protection. The first uncosted call in a session with an active budget logs a warning so an operator sees the control is pass-through for that provider. Keep the pricing table current for the models you meter.
+A call whose (provider, model) pair is absent from the pricing table records no cost, so it does not advance the USD ledger. The USD ceiling is blind to it: a USD block plus a costless provider is no protection. Set `ceiling_model_seconds` for such an agent; that ceiling does not depend on a price. The first uncosted call in a session whose budget sets a USD ceiling logs a warning that the USD ceiling is pass-through for that provider, and says whether a model-time ceiling still applies or names the key to set. Keep the pricing table current for the models you meter in USD.
 
-An agent in plan mode (`"auth": "plan"`, see [configuration.md](configuration.md#providerjson)) is never priced: its `llm_response` rows carry token counts and null cost fields, whatever the pricing table lists for the same model at the API. A block-mode budget therefore refuses each of its calls before the request row, writes a `budget_exceeded` row with action `blocked`, and returns an error that names the budget (`budget.json` `agents.<id>` or the default) and says plan requests cannot be priced. An alert-mode budget does not refuse it. The plan's own usage limits are set and shown at https://chatgpt.com/settings/usage.
+An agent in plan mode (`"auth": "plan"`, see [configuration.md](configuration.md#providerjson)) is never priced: its `llm_response` rows carry token counts and null cost fields, whatever the pricing table lists for the same model at the API. A block-mode budget with a USD ceiling therefore refuses each of its calls before the request row, writes a `budget_exceeded` row with action `blocked`, and returns an error that names the budget (`budget.json` `agents.<id>` or the default) and says plan requests cannot be priced. An alert-mode budget does not refuse it, and neither does a block-mode budget that sets only `ceiling_model_seconds`. The plan's own usage limits are set and shown at https://chatgpt.com/settings/usage.
 
 ## Boundary
 

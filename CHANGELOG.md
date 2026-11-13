@@ -10,6 +10,33 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- A model-time ceiling on the per-agent budget. `ceiling_model_seconds` on a
+  `budget.json` entry caps the wall-clock seconds the agent's model calls
+  take in the window, under the entry's `alert` or `block` mode. The gateway
+  times each call itself, so the ceiling holds for a provider with no price,
+  where a USD block never trips. Failed, timed-out and abandoned calls are
+  charged for their elapsed time. A block refuses the next model call before
+  its request row, mid-turn included, with a message naming the model-time
+  limit. The `budget_exceeded` row for this ceiling carries an optional
+  `model_time` object; a USD row is unchanged. An entry may omit
+  `ceiling_usd_micros` when it sets `ceiling_model_seconds`, and an `alert` or
+  `block` entry that sets neither is refused at gateway start. Existing
+  `budget.json` files, the USD ceiling and its rows behave as before; a
+  `budget.db` from an earlier release is migrated in place. The chat and
+  WebChat status show the ceiling
+  (`a_block_on_model_time_refuses_a_call_to_an_unpriced_provider`,
+  `an_unpriced_call_is_charged_its_time_and_the_next_is_refused`,
+  `a_budget_with_both_ceilings_reports_the_one_reached`,
+  `crates/agent/src/tests.rs`; [docs/cost-monitoring.md](docs/cost-monitoring.md#model-time)).
+
+### Changed
+
+- The uncosted-call warning names the USD ceiling as the one that is
+  pass-through, says whether a model-time ceiling still applies, and is not
+  logged under a budget with no USD ceiling.
+
 ### Fixed
 
 - Budget enforcement: a sub-agent's model calls are checked and charged

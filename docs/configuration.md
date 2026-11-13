@@ -29,8 +29,8 @@ moves every process at once.
 | `update.json` | `wirken update` settings. Key read: `mirror`, a local mirror of the release files used instead of GitHub; see [update.md](update.md#mirrors) | Manual |
 | `sandbox.json` | Sandbox settings. Keys read: `mode`, `image`, `network`, `shell`, `sidecar_binary`; any other key is named in a startup warning and ignored. `mode` is `exec-only`, `gvisor` or `off`. With no file, or no `mode` key, the mode is `exec-only`. A `mode` that is none of the three, or a file that cannot be read or parsed, is refused with an error naming the file and the value: `wirken run`, `wirken ask`, `wirken lyrik` and the MCP proxy do not start | `wirken setup` or manual |
 | `siem.json` | SIEM forwarding config | Manual or org config |
-| `budget.json` | Per-agent spend budgets | Manual |
-| `budget.db` | Durable per-agent spend ledger | `wirken run` |
+| `budget.json` | Per-agent budgets: USD and model-time ceilings | Manual |
+| `budget.db` | Durable per-agent ledger of spend and model time | `wirken run` |
 | `mcp.json` | MCP server config | Manual or org config |
 | `tool_policy.json` | Org allow and deny tool lists | `wirken setup --org` |
 | `org.url` | Organization config endpoint | `wirken setup --org` |
@@ -218,19 +218,26 @@ opt-in keys, HMAC, and the Sentinel two-stream split:
 {
     "default": { "mode": "alert", "ceiling_usd_micros": 5000000, "window": "day" },
     "agents": {
-        "work": { "mode": "block", "ceiling_usd_micros": 10000000, "window": "day" }
+        "work": { "mode": "block", "ceiling_usd_micros": 10000000, "window": "day" },
+        "local": { "mode": "block", "ceiling_model_seconds": 3600, "window": "day" }
     }
 }
 ```
 
 `mode` is `off` (the default), `alert` or `block`; `window` is `hour`, `day`
-or `week`; `ceiling_usd_micros` is USD micros (1 USD = 1,000,000). Resolution
+or `week`; `ceiling_usd_micros` is USD micros (1 USD = 1,000,000);
+`ceiling_model_seconds` is seconds of model time, the wall-clock time the
+agent's model calls take, which the gateway measures itself and so holds for
+a local model with no price. An entry sets either ceiling or both. An `alert`
+or `block` entry that sets neither is refused at gateway start. Resolution
 for an agent is its per-agent entry, else the global `default`, else off. A
 per-agent entry fully replaces the default rather than merging, and an
 explicit per-agent `"mode": "off"` opts that agent out even under a global
-default. A block-mode budget refuses every call of an agent in plan mode,
-since plan requests carry no per-token price. Enforcement behaviour,
-fail-closed handling and the uncosted-provider gap:
+default. A sub-agent runs on the budget of the agent at the top of its spawn
+chain, not on its own entry. A block-mode budget with a USD ceiling refuses
+every call of an agent in plan mode, since plan requests carry no per-token
+price; one that sets only `ceiling_model_seconds` does not. Enforcement
+behaviour, model time, fail-closed handling and the uncosted-provider gap:
 [cost-monitoring.md](cost-monitoring.md#enforcement).
 
 ## mcp.json

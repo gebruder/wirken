@@ -19,9 +19,10 @@ require: a locked-down workstation, a server inside your network, or an
 air-gapped host. Its model connection is provider-agnostic: frontier APIs,
 local weights through Ollama, TEEs for encrypted processing, Swiss- and
 EU-hosted endpoints, or a ChatGPT plan the operator has, all
-interchangeable. Each agent runs the model you assign it. A per-agent spend
-budget can alert on or refuse calls past a ceiling; it is off until
-configured. MIT licensed.
+interchangeable. Each agent runs the model you assign it. A per-agent budget
+can alert on or refuse calls past a ceiling, in USD or, for a local model
+with no price, in seconds of model time; it is off until configured. MIT
+licensed.
 
 ## How it works
 
