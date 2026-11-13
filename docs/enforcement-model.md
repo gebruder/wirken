@@ -140,9 +140,13 @@ is no user-facing model selector: an end user talking to an agent over any
 channel cannot choose or change the model, and no chat command switches it.
 The global default is pinned in `provider.json`; a per-agent override is
 pinned in `AgentConfigStore` and takes precedence when a record exists.
-Because both are admin-side files applied at gateway start, pinning a model
-version is an operator control: changing it means editing one of them and
-restarting, which is auditable rather than user-driven.
+Two more operator settings choose the model for the `provider.json` default
+agent: `wirken run --provider`, `--model` and `--base-url` replace its values
+for that run, and a `channel_overrides` entry in `provider.json` gives one
+channel its own provider and model. All of these are set on the admin side and
+applied at gateway start, so pinning a model version is an operator control:
+changing it means editing a file or the command line and restarting, which is
+auditable rather than user-driven.
 
 Model pinning pairs with cost metering: the pinned pair is what per-call cost
 is priced against and what per-agent spend attributes to. See
