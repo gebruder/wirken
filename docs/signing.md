@@ -59,7 +59,7 @@ a signature on the host. See [skills.md](skills.md) for the operator side.
 `verify_skill_with_expected_key_and_delegation` on the downloaded bytes against
 the registry-supplied `signer_key`, which must carry a `signer_key_delegation`
 by the same root the loader uses (below). A download over the
-`SKILL.md` size limit (below) is refused. `skill_registry.rs:415-510`.
+`SKILL.md` size limit (below) is refused. `skill_registry.rs:533`.
 
 **Signing the registry index.** `scripts/sign-skills-index.sh`, which runs
 `wirken skills sign-index`, signs the index offline under the registry root.
