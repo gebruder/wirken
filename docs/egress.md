@@ -13,14 +13,20 @@ The skill-set `egress.domains` allowlist is a control on a specific set of agent
 
 Each call resolves the request host against the agent's effective `egress.domains` allowset (the union of every loaded skill's `egress.domains` declaration). Hosts not in the allowset are denied pre-flight, before any TCP connection and without consuming the rate-limit budget. Wildcard `"*"` is supported on the allowset; `"*.example.com"` style suffix patterns are also supported.
 
-With no skill allow-set declared, which is an agent with no skills attached
-and the state of a fresh install, `http_request` reaches no host: every
-request is refused pre-flight and recorded as `SkillPermissionDenied`. A host
-becomes reachable only when a loaded skill names it, or when a skill declares
-`egress.domains: ["*"]`. `web_search` and `generate_image` do not take a host
-from the model: `web_search` posts to DuckDuckGo and `generate_image` to the
-configured provider's image endpoint. With no skills attached those two are
-not restricted.
+A fresh install attaches the 16 bundled skills. Each declares
+`egress: mode: deny`, and none lists `web_search`, `generate_image` or
+`http_request` in `tools.allow`, so all three are refused there and recorded
+as `SkillPermissionDenied`. A host becomes reachable only when a loaded skill
+names it, or when a skill declares `egress.domains: ["*"]`.
+
+An agent with no skills attached is a different state: nothing loads from
+`<data_dir>/skills/` or the agent's own skills directory, and it has no
+preset. No allow-set is declared, so `http_request` reaches no host: every
+request is refused pre-flight and recorded as `SkillPermissionDenied`.
+`web_search` and `generate_image` do not take a host from the model:
+`web_search` posts to DuckDuckGo and `generate_image` to the configured
+provider's image endpoint. With no skills attached those two are not
+restricted.
 
 Source: `EgressClient::check_egress` (host-based check) and `EgressClient::check_egress_declared` (the no-allow-set refusal for `http_request`) in `crates/agent/src/egress.rs`; `merge` in `crates/agent/src/skill_perms.rs` (allowset resolution).
 
