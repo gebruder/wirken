@@ -1,8 +1,9 @@
 # Skills
 
 A skill is an operator-installable behavior bundle: a directory whose basename
-is the skill name, containing `SKILL.md` and optionally a `SKILL.sig` /
-`SKILL.pub` pair.
+is the skill name, containing `SKILL.md` and the signature files the loader
+requires: a `SKILL.sig` / `SKILL.pub` pair and the `SKILL.deleg` that delegates
+the signer under the registry root.
 
 ```
 my-skill/
