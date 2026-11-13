@@ -3818,7 +3818,7 @@ pub async fn status_snapshot(
                 "window_start": chrono::DateTime::from_timestamp(window_start, 0).map(|d| d.to_rfc3339()),
                 "ceiling_usd_micros": b.ceiling_usd_micros,
                 "spent_usd_micros": micros_to_json(spent),
-                "remaining_usd_micros": micros_to_json(spent.map(|s| b.ceiling_usd_micros.saturating_sub(s))),
+                "remaining_usd_micros": micros_to_json(spent.zip(b.ceiling_usd_micros).map(|(s, ceiling)| ceiling.saturating_sub(s))),
             })
         }
         None => json!({ "mode": "off" }),

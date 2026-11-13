@@ -4777,7 +4777,8 @@ mod subagent_bound_at_wake {
             "parent".to_string(),
             AgentBudget {
                 mode: BudgetMode::Block,
-                ceiling_usd_micros: 500_000,
+                ceiling_usd_micros: Some(500_000),
+                ceiling_model_seconds: None,
                 window: BudgetWindow::Day,
             },
         )]);
@@ -4830,6 +4831,61 @@ mod subagent_bound_at_wake {
         assert_eq!(blocked_rows(&*log, &session), 1);
     }
 
+    /// Model time follows the same rule: a child's calls are held to
+    /// the model-time ceiling of the agent at the top of its chain, and
+    /// timed against that agent's ledger row.
+    #[tokio::test]
+    async fn a_child_is_refused_at_the_parents_model_time_ceiling() {
+        use wirken_gateway::budget::{
+            AgentBudget, BudgetConfig, BudgetMode, BudgetStore, BudgetWindow, now_unix_secs,
+        };
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let factory = live_factory(&tmp, &LlmConfig::ollama("test"), log.clone());
+        let store = BudgetStore::open_in_memory().unwrap();
+        store
+            .add_model_millis(
+                "parent",
+                BudgetWindow::Day.window_start(now_unix_secs()),
+                61_000,
+            )
+            .unwrap();
+        factory.attach_budget(
+            Arc::new(std::sync::Mutex::new(store)),
+            BudgetConfig {
+                default: None,
+                agents: HashMap::from([(
+                    "parent".to_string(),
+                    AgentBudget {
+                        mode: BudgetMode::Block,
+                        ceiling_usd_micros: None,
+                        ceiling_model_seconds: Some(60),
+                        window: BudgetWindow::Day,
+                    },
+                )]),
+            },
+        );
+        let session = child_session(0);
+
+        let child = factory
+            .wake_subagent("child", &session, binding())
+            .await
+            .unwrap();
+        let refusal = child.lock().await.test_check_budget_for_tool(None).unwrap();
+
+        assert!(
+            refusal.is_some_and(|m| m.contains("model-time limit")),
+            "the child's call went ahead"
+        );
+        assert!(rows(&*log, &session).iter().any(|e| matches!(
+            e,
+            SessionEvent::BudgetExceeded {
+                model_time: Some(_),
+                ..
+            }
+        )));
+    }
+
     /// The child's own entry is not what a sub-agent session runs on:
     /// an `off` there does not take the child out of its parent's
     /// budget. Addressed directly, the same agent runs on its own
@@ -4844,7 +4900,8 @@ mod subagent_bound_at_wake {
             &factory,
             Some(AgentBudget {
                 mode: BudgetMode::Off,
-                ceiling_usd_micros: 0,
+                ceiling_usd_micros: Some(0),
+                ceiling_model_seconds: None,
                 window: BudgetWindow::Day,
             }),
         );
@@ -11072,7 +11129,8 @@ mod budget_enforcement {
     fn budget(mode: BudgetMode, ceiling: u64) -> AgentBudget {
         AgentBudget {
             mode,
-            ceiling_usd_micros: ceiling,
+            ceiling_usd_micros: Some(ceiling),
+            ceiling_model_seconds: None,
             window: BudgetWindow::Day,
         }
     }
@@ -11471,6 +11529,572 @@ mod budget_enforcement {
                 ..
             }
         )));
+    }
+
+    // --- The model-time ceiling ---------------------------------------
+
+    use wirken_audit::BudgetModelTime;
+
+    const MODEL_TIME_REFUSAL: &str = "has reached its configured model-time limit";
+
+    fn model_time_budget(mode: BudgetMode, seconds: u64) -> AgentBudget {
+        AgentBudget {
+            mode,
+            ceiling_usd_micros: None,
+            ceiling_model_seconds: Some(seconds),
+            window: BudgetWindow::Day,
+        }
+    }
+
+    fn model_millis(store: &Arc<Mutex<BudgetStore>>, id: &str) -> u64 {
+        store
+            .lock()
+            .unwrap()
+            .window_model_millis(id, day_window_start())
+            .unwrap()
+    }
+
+    fn budget_rows(
+        log: &Arc<dyn SessionLog>,
+        id: &str,
+    ) -> Vec<(BudgetAction, u64, u64, Option<BudgetModelTime>)> {
+        events(log, id)
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::BudgetExceeded {
+                    action,
+                    window_spend_usd_micros,
+                    ceiling_usd_micros,
+                    model_time,
+                    ..
+                } => Some((
+                    action,
+                    window_spend_usd_micros,
+                    ceiling_usd_micros,
+                    model_time,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the slow model does with one request, after it has read it
+    /// and waited.
+    enum Slow {
+        Answer,
+        Fail,
+        Hang,
+    }
+
+    /// A chat-completions endpoint that takes `delay` over each
+    /// request, so a call's model time has a floor the test knows.
+    async fn slow_model(delay: std::time::Duration, script: Vec<Slow>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for step in script {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                let (status, body) = match step {
+                    Slow::Answer => (
+                        "200 OK",
+                        serde_json::json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion",
+                            "created": 0,
+                            "model": "stub",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "done"},
+                                "finish_reason": "stop",
+                            }],
+                        })
+                        .to_string(),
+                    ),
+                    Slow::Fail => ("500 Internal Server Error", "{\"error\":\"down\"}".into()),
+                    Slow::Hang => {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        continue;
+                    }
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    /// An agent on a provider with no price, at `base_url`, under a
+    /// model-time budget.
+    fn unpriced_agent(
+        id: &str,
+        base_url: &str,
+        b: AgentBudget,
+        store: Arc<Mutex<BudgetStore>>,
+    ) -> (Agent, Arc<dyn SessionLog>) {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut agent = Agent::new(
+            id.into(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url: base_url.to_string(),
+                max_tokens: 64,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: false,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone(),
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        agent.set_budget(Some(b), Some(store));
+        (agent, log)
+    }
+
+    /// The case the USD ceiling cannot hold: a provider with no price.
+    /// Its calls cost nothing, so a USD block never trips; the
+    /// model-time ceiling refuses the next call once the window's
+    /// model time reaches it, before any request row.
+    #[tokio::test]
+    async fn a_block_on_model_time_refuses_a_call_to_an_unpriced_provider() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_model_millis("local", day_window_start(), 60_500)
+            .unwrap();
+        // `LlmConfig::ollama`: absent from the pricing table.
+        let (mut agent, log) = agent_with_budget(
+            "local",
+            model_time_budget(BudgetMode::Block, 60),
+            store.clone(),
+        );
+
+        let reply = agent.process_message("hi", "in-1".into()).await.unwrap();
+
+        assert!(
+            reply.response.contains(MODEL_TIME_REFUSAL),
+            "{}",
+            reply.response
+        );
+        assert_eq!(
+            budget_rows(&log, "local"),
+            [(
+                BudgetAction::Blocked,
+                0,
+                0,
+                Some(BudgetModelTime {
+                    window_model_seconds: 60,
+                    ceiling_model_seconds: 60,
+                })
+            )]
+        );
+        assert!(
+            !events(&log, "local")
+                .iter()
+                .any(|e| matches!(e, SessionEvent::LlmRequest { .. })),
+            "a refused call writes no request row"
+        );
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .window_spend("local", day_window_start())
+                .unwrap(),
+            0,
+            "nothing was spent in USD, which is why that ceiling could not hold"
+        );
+    }
+
+    /// End to end on an unpriced provider: a call is charged the time
+    /// it took, measured here and not reported by the provider, and the
+    /// call after the ceiling is refused.
+    #[tokio::test]
+    async fn an_unpriced_call_is_charged_its_time_and_the_next_is_refused() {
+        let delay = std::time::Duration::from_millis(40);
+        let base_url = slow_model(delay, vec![Slow::Answer]).await;
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_model_millis("local", day_window_start(), 970)
+            .unwrap();
+        let (mut agent, log) = unpriced_agent(
+            "local",
+            &base_url,
+            model_time_budget(BudgetMode::Block, 1),
+            store.clone(),
+        );
+
+        let first = agent.process_message("hi", "in-1".into()).await.unwrap();
+        assert_eq!(first.response, "done");
+        assert!(
+            model_millis(&store, "local") >= 1_010,
+            "the call's {delay:?} was charged: {}",
+            model_millis(&store, "local")
+        );
+        assert!(budget_rows(&log, "local").is_empty());
+
+        // The model is not asked again: the stub would not answer.
+        let second = agent.process_message("again", "in-2".into()).await.unwrap();
+        assert!(
+            second.response.contains(MODEL_TIME_REFUSAL),
+            "{}",
+            second.response
+        );
+        let rows = budget_rows(&log, "local");
+        assert_eq!(rows.len(), 1);
+        assert!(
+            matches!(
+                rows[0],
+                (
+                    BudgetAction::Blocked,
+                    0,
+                    0,
+                    Some(BudgetModelTime {
+                        window_model_seconds: 1,
+                        ceiling_model_seconds: 1
+                    })
+                )
+            ),
+            "{rows:?}"
+        );
+        assert_eq!(
+            events(&log, "local")
+                .iter()
+                .filter(|e| matches!(e, SessionEvent::LlmRequest { .. }))
+                .count(),
+            1
+        );
+    }
+
+    /// A call that fails is charged for the time it took to fail.
+    #[tokio::test]
+    async fn a_failed_call_is_charged_its_elapsed_time() {
+        let base_url = slow_model(std::time::Duration::from_millis(40), vec![Slow::Fail]).await;
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let (mut agent, log) = unpriced_agent(
+            "local",
+            &base_url,
+            model_time_budget(BudgetMode::Block, 3_600),
+            store.clone(),
+        );
+
+        assert!(
+            agent.process_message("hi", "in-1".into()).await.is_err(),
+            "the provider failed"
+        );
+
+        assert!(
+            events(&log, "local")
+                .iter()
+                .any(|e| matches!(e, SessionEvent::LlmRequestFailed { .. }))
+        );
+        assert!(
+            model_millis(&store, "local") >= 40,
+            "{}",
+            model_millis(&store, "local")
+        );
+    }
+
+    /// A call cut off with its turn, as a sub-agent's wall-clock limit
+    /// or a stop does, writes no response or failure row. Its time is
+    /// charged all the same.
+    #[tokio::test]
+    async fn a_call_abandoned_with_its_turn_is_charged_its_elapsed_time() {
+        let base_url = slow_model(std::time::Duration::from_millis(1), vec![Slow::Hang]).await;
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let (mut agent, _log) = unpriced_agent(
+            "local",
+            &base_url,
+            model_time_budget(BudgetMode::Block, 3_600),
+            store.clone(),
+        );
+
+        let cut = tokio::time::timeout(
+            std::time::Duration::from_millis(80),
+            agent.process_message("hi", "in-1".into()),
+        )
+        .await;
+
+        assert!(cut.is_err(), "the turn was cut off");
+        assert!(
+            model_millis(&store, "local") >= 60,
+            "{}",
+            model_millis(&store, "local")
+        );
+    }
+
+    /// The streaming path, which is what a channel turn takes, meters
+    /// its call and refuses at the ceiling like the other.
+    #[tokio::test]
+    async fn a_streamed_call_is_metered_and_refused_at_the_ceiling() {
+        let base_url = slow_model(std::time::Duration::from_millis(1), vec![Slow::Hang]).await;
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_model_millis("local", day_window_start(), 950)
+            .unwrap();
+        let (mut agent, log) = unpriced_agent(
+            "local",
+            &base_url,
+            model_time_budget(BudgetMode::Block, 1),
+            store.clone(),
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let cut = tokio::time::timeout(
+            std::time::Duration::from_millis(80),
+            agent.process_message_stream("hi", "in-1".into(), tx),
+        )
+        .await;
+        assert!(cut.is_err(), "the turn was cut off");
+        assert!(
+            model_millis(&store, "local") >= 1_010,
+            "{}",
+            model_millis(&store, "local")
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let refused = agent
+            .process_message_stream("again", "in-2".into(), tx)
+            .await
+            .unwrap();
+        assert!(
+            refused.response.contains(MODEL_TIME_REFUSAL),
+            "{}",
+            refused.response
+        );
+        let mut streamed = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::Done(LlmResponse::Text(text)) = event {
+                streamed = text;
+            }
+        }
+        assert!(streamed.contains(MODEL_TIME_REFUSAL), "{streamed}");
+        assert_eq!(budget_rows(&log, "local").len(), 1);
+    }
+
+    /// Alert mode on model time: one row for the window, and the call
+    /// goes ahead.
+    #[tokio::test]
+    async fn alert_on_model_time_fires_once_per_window_and_proceeds() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_model_millis("local", day_window_start(), 7_200_000)
+            .unwrap();
+        let (agent, log) =
+            agent_with_budget("local", model_time_budget(BudgetMode::Alert, 3_600), store);
+
+        for _ in 0..3 {
+            assert!(agent.test_check_budget_for_tool(None).unwrap().is_none());
+        }
+        assert_eq!(
+            budget_rows(&log, "local"),
+            [(
+                BudgetAction::Alerted,
+                0,
+                0,
+                Some(BudgetModelTime {
+                    window_model_seconds: 7_200,
+                    ceiling_model_seconds: 3_600,
+                })
+            )]
+        );
+    }
+
+    /// A budget with both ceilings. The USD ceiling reads as it did
+    /// when it was the only one: its row carries no model time, and it
+    /// is the row written when both are reached. Each alerts once on
+    /// its own.
+    #[tokio::test]
+    async fn a_budget_with_both_ceilings_reports_the_one_reached() {
+        let both = |mode| AgentBudget {
+            mode,
+            ceiling_usd_micros: Some(500_000),
+            ceiling_model_seconds: Some(60),
+            window: BudgetWindow::Day,
+        };
+        let seeded = |spend: u64, millis: u64| {
+            let store = BudgetStore::open_in_memory().unwrap();
+            store.add_spend("two", day_window_start(), spend).unwrap();
+            store
+                .add_model_millis("two", day_window_start(), millis)
+                .unwrap();
+            Arc::new(Mutex::new(store))
+        };
+        let time = Some(BudgetModelTime {
+            window_model_seconds: 90,
+            ceiling_model_seconds: 60,
+        });
+
+        // Model time only.
+        let (agent, log) = agent_with_budget("two", both(BudgetMode::Block), seeded(100, 90_000));
+        let refusal = agent.test_check_budget_for_tool(None).unwrap().unwrap();
+        assert!(refusal.contains(MODEL_TIME_REFUSAL), "{refusal}");
+        assert_eq!(
+            budget_rows(&log, "two"),
+            [(BudgetAction::Blocked, 100, 500_000, time)]
+        );
+
+        // USD only, and both: the USD row, as before.
+        for millis in [0, 90_000] {
+            let (agent, log) =
+                agent_with_budget("two", both(BudgetMode::Block), seeded(600_000, millis));
+            let refusal = agent.test_check_budget_for_tool(None).unwrap().unwrap();
+            assert!(refusal.contains("spending limit"), "{refusal}");
+            assert_eq!(
+                budget_rows(&log, "two"),
+                [(BudgetAction::Blocked, 600_000, 500_000, None)]
+            );
+        }
+
+        // Alert: one row for each ceiling, once.
+        let (agent, log) =
+            agent_with_budget("two", both(BudgetMode::Alert), seeded(600_000, 90_000));
+        for _ in 0..2 {
+            assert!(agent.test_check_budget_for_tool(None).unwrap().is_none());
+        }
+        assert_eq!(
+            budget_rows(&log, "two"),
+            [
+                (BudgetAction::Alerted, 600_000, 500_000, None),
+                (BudgetAction::Alerted, 600_000, 500_000, time),
+            ]
+        );
+    }
+
+    /// Model time gates model calls. A costed tool call spends USD and
+    /// no model time, so the model-time ceiling does not refuse it.
+    #[tokio::test]
+    async fn model_time_does_not_gate_a_costed_tool_call() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_model_millis("local", day_window_start(), 90_000)
+            .unwrap();
+        let (agent, log) =
+            agent_with_budget("local", model_time_budget(BudgetMode::Block, 60), store);
+
+        assert!(
+            agent
+                .test_check_budget_for_tool(Some("mcp_billing_charge"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(budget_rows(&log, "local").is_empty());
+        assert!(agent.test_check_budget_for_tool(None).unwrap().is_some());
+    }
+
+    /// Under a budget with no model-time ceiling nothing is metered:
+    /// an existing USD budget writes what it wrote before.
+    #[tokio::test]
+    async fn a_usd_only_budget_meters_no_model_time() {
+        let base_url = slow_model(std::time::Duration::from_millis(20), vec![Slow::Answer]).await;
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let (mut agent, _log) = unpriced_agent(
+            "local",
+            &base_url,
+            budget(BudgetMode::Block, 1_000_000),
+            store.clone(),
+        );
+
+        agent.process_message("hi", "in-1".into()).await.unwrap();
+
+        assert_eq!(model_millis(&store, "local"), 0);
+    }
+
+    /// The uncosted-call warning is about the USD ceiling. A budget
+    /// that sets none has nothing an uncosted call passes through.
+    #[tokio::test]
+    async fn an_uncosted_call_warns_only_where_a_usd_ceiling_is_set() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let (mut time_only, _log) = agent_with_budget(
+            "local",
+            model_time_budget(BudgetMode::Block, 60),
+            store.clone(),
+        );
+        time_only.test_charge_budget(None);
+        assert!(!time_only.test_budget_uncosted_warned());
+
+        let (mut usd, _log) =
+            agent_with_budget("priced", budget(BudgetMode::Block, 1_000_000), store);
+        usd.test_charge_budget(None);
+        assert!(usd.test_budget_uncosted_warned());
+    }
+
+    /// A plan sign-in cannot be priced, so a USD block refuses it
+    /// outright. Its model time can be measured like any other call's,
+    /// so a budget with only that ceiling lets it run until the
+    /// ceiling.
+    #[tokio::test]
+    async fn a_model_time_block_does_not_refuse_a_plan_call_outright() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let mut agent = Agent::new(
+            "planned".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::plan("m"),
+            None,
+            None,
+            log.clone(),
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        agent.set_budget(
+            Some(model_time_budget(BudgetMode::Block, 60)),
+            Some(store.clone()),
+        );
+
+        assert!(agent.test_check_budget_for_tool(None).unwrap().is_none());
+        store
+            .lock()
+            .unwrap()
+            .add_model_millis("planned", day_window_start(), 60_000)
+            .unwrap();
+        let refusal = agent.test_check_budget_for_tool(None).unwrap().unwrap();
+        assert!(refusal.contains(MODEL_TIME_REFUSAL), "{refusal}");
     }
 }
 

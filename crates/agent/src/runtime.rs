@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use wirken_audit::{
-    BudgetAction, LeakSurface, OwnSession, PhaseExitReason, SessionEvent, SessionHandle, SessionId,
-    SessionLog, SkillDeniedReason, ToolCallRecord, TrustLevel,
+    BudgetAction, BudgetModelTime, LeakSurface, OwnSession, PhaseExitReason, SessionEvent,
+    SessionHandle, SessionId, SessionLog, SkillDeniedReason, ToolCallRecord, TrustLevel,
 };
 
 use crate::context::ContextEngine;
@@ -29,6 +29,42 @@ const MAX_TOOL_ROUNDS: usize = 20;
 /// `BudgetExceeded` audit row for the operator.
 const BUDGET_BLOCK_MESSAGE: &str = "This agent has reached its configured spending limit for the current window and cannot make \
      further model calls until the window resets.";
+
+/// [`BUDGET_BLOCK_MESSAGE`] for the model-time ceiling. As generic: no
+/// figures, which ride the `BudgetExceeded` row.
+const BUDGET_MODEL_TIME_BLOCK_MESSAGE: &str = "This agent has reached its configured model-time limit for the current window and cannot \
+     make further model calls until the window resets.";
+
+/// Times one model call and charges it to the model-time ledger when
+/// dropped. See [`Agent::meter_model_time`].
+struct ModelTimeMeter {
+    ledger: Option<(Arc<std::sync::Mutex<BudgetStore>>, String, BudgetWindow)>,
+    agent: String,
+    started: std::time::Instant,
+}
+
+impl Drop for ModelTimeMeter {
+    fn drop(&mut self) {
+        let Some((store, key, window)) = self.ledger.take() else {
+            return;
+        };
+        let millis = self.started.elapsed().as_millis() as u64;
+        let window_start = window.window_start(now_unix_secs());
+        match store.lock() {
+            Ok(guard) => {
+                if let Err(e) = guard.add_model_millis(&key, window_start, millis) {
+                    tracing::error!("agent {} budget ledger write failed: {e}", self.agent);
+                }
+            }
+            Err(_) => {
+                tracing::error!(
+                    "agent {} budget ledger mutex poisoned on charge",
+                    self.agent
+                );
+            }
+        }
+    }
+}
 
 /// Which side of the filesystem axis a built-in tool call exercises.
 /// Used by [`Agent::fs_axis_for_call`] and the dispatch gate.
@@ -1858,14 +1894,32 @@ impl Agent {
                     "agent {} budget ledger unavailable ({reason}); failing closed",
                     self.id
                 );
+                // A budget with only a model-time ceiling says so on
+                // the row; one with a USD ceiling reads as it always
+                // has.
+                let model_time = match (budget.ceiling_usd_micros, budget.ceiling_model_seconds) {
+                    (None, Some(ceiling_model_seconds)) => Some(BudgetModelTime {
+                        window_model_seconds: 0,
+                        ceiling_model_seconds,
+                    }),
+                    _ => None,
+                };
                 self.emit_budget_exceeded(
                     0,
-                    budget.ceiling_usd_micros,
+                    budget.ceiling_usd_micros.unwrap_or(0),
                     window.label(),
                     BudgetAction::Blocked,
                     tool,
+                    model_time,
                 )?;
-                Ok(Some(BUDGET_BLOCK_MESSAGE.to_string()))
+                Ok(Some(
+                    if model_time.is_some() {
+                        BUDGET_MODEL_TIME_BLOCK_MESSAGE
+                    } else {
+                        BUDGET_BLOCK_MESSAGE
+                    }
+                    .to_string(),
+                ))
             }
             _ => {
                 tracing::error!(
@@ -1885,6 +1939,11 @@ impl Agent {
     /// (block mode at/over ceiling, or a ledger error under block mode
     /// = fail closed); `None` to proceed. Emits `BudgetExceeded` as a
     /// side effect: on every block, and once per window in alert mode.
+    ///
+    /// A budget holds up to two ceilings. The USD one is checked first
+    /// and behaves as it did when it was the only one. The model-time
+    /// one gates model calls only: `tool` names a costed tool call,
+    /// which spends USD and no model time.
     fn check_budget(&self, tool: Option<&str>) -> Result<Option<String>, AgentError> {
         let Some(budget) = self.budget else {
             return Ok(None);
@@ -1893,15 +1952,21 @@ impl Agent {
             return Ok(None);
         }
         // A plan-mode request carries no per-token price, so a block
-        // budget could never stop one: every call would pass as
-        // uncosted. Refused instead, before the request row.
-        if budget.mode == BudgetMode::Block && self.llm.config().auth.is_plan() {
+        // on the USD ceiling could never stop one: every call would
+        // pass as uncosted. Refused instead, before the request row. A
+        // budget with only a model-time ceiling holds for a plan call
+        // as for any other, and is not refused.
+        if budget.mode == BudgetMode::Block
+            && let Some(ceiling_usd_micros) = budget.ceiling_usd_micros
+            && self.llm.config().auth.is_plan()
+        {
             self.emit_budget_exceeded(
                 0,
-                budget.ceiling_usd_micros,
+                ceiling_usd_micros,
                 budget.window.label(),
                 BudgetAction::Blocked,
                 tool,
+                None,
             )?;
             let name = self
                 .budget_name
@@ -1935,38 +2000,100 @@ impl Agent {
                 );
             }
         };
+        // Model time is read only where a ceiling on it is set and the
+        // call is a model call.
+        let model_time = match budget.ceiling_model_seconds.filter(|_| tool.is_none()) {
+            None => None,
+            Some(ceiling_model_seconds) => {
+                match guard.window_model_millis(self.budget_key(), window_start) {
+                    Ok(millis) => Some((millis, ceiling_model_seconds)),
+                    Err(e) => {
+                        drop(guard);
+                        return self.budget_unavailable(
+                            tool,
+                            budget,
+                            window,
+                            &format!("ledger read failed: {e}"),
+                        );
+                    }
+                }
+            }
+        };
 
-        if spend < budget.ceiling_usd_micros {
+        let usd_reached = budget
+            .ceiling_usd_micros
+            .filter(|ceiling| spend >= *ceiling);
+        let model_time_reached = model_time
+            .filter(|(millis, ceiling)| *millis >= ceiling.saturating_mul(1_000))
+            .map(|(millis, ceiling_model_seconds)| BudgetModelTime {
+                window_model_seconds: millis / 1_000,
+                ceiling_model_seconds,
+            });
+        if usd_reached.is_none() && model_time_reached.is_none() {
             return Ok(None);
         }
+        let ceiling_usd_micros = budget.ceiling_usd_micros.unwrap_or(0);
 
-        // At or over the ceiling.
+        // At or over a ceiling.
         match budget.mode {
             BudgetMode::Block => {
                 drop(guard);
+                // One refusal, one row. The USD ceiling is named when
+                // it was reached, as before; otherwise the row is the
+                // model-time one.
+                let model_time = if usd_reached.is_some() {
+                    None
+                } else {
+                    model_time_reached
+                };
                 self.emit_budget_exceeded(
                     spend,
-                    budget.ceiling_usd_micros,
+                    ceiling_usd_micros,
                     window.label(),
                     BudgetAction::Blocked,
                     tool,
+                    model_time,
                 )?;
-                Ok(Some(BUDGET_BLOCK_MESSAGE.to_string()))
+                Ok(Some(
+                    if model_time.is_some() {
+                        BUDGET_MODEL_TIME_BLOCK_MESSAGE
+                    } else {
+                        BUDGET_BLOCK_MESSAGE
+                    }
+                    .to_string(),
+                ))
             }
             BudgetMode::Alert => {
-                // Emit once per window; the flag lives in the ledger
-                // so a restart does not re-alert.
-                let first = guard
-                    .try_mark_alerted(self.budget_key(), window_start)
-                    .unwrap_or(true);
+                // Emit once per window and per ceiling; the flags live
+                // in the ledger so a restart does not re-alert.
+                let usd_first = usd_reached.is_some()
+                    && guard
+                        .try_mark_alerted(self.budget_key(), window_start)
+                        .unwrap_or(true);
+                let model_time_first = model_time_reached.filter(|_| {
+                    guard
+                        .try_mark_model_time_alerted(self.budget_key(), window_start)
+                        .unwrap_or(true)
+                });
                 drop(guard);
-                if first {
+                if usd_first {
                     self.emit_budget_exceeded(
                         spend,
-                        budget.ceiling_usd_micros,
+                        ceiling_usd_micros,
                         window.label(),
                         BudgetAction::Alerted,
                         tool,
+                        None,
+                    )?;
+                }
+                if model_time_first.is_some() {
+                    self.emit_budget_exceeded(
+                        spend,
+                        ceiling_usd_micros,
+                        window.label(),
+                        BudgetAction::Alerted,
+                        tool,
+                        model_time_first,
                     )?;
                 }
                 Ok(None)
@@ -1976,7 +2103,8 @@ impl Agent {
     }
 
     /// Append a `BudgetExceeded` audit row. Trust level `System`, same
-    /// as permission-denial rows.
+    /// as permission-denial rows. `model_time` is set when the ceiling
+    /// the row reports is the model-time one.
     fn emit_budget_exceeded(
         &self,
         window_spend_usd_micros: u64,
@@ -1984,6 +2112,7 @@ impl Agent {
         window: &str,
         action: BudgetAction,
         tool: Option<&str>,
+        model_time: Option<BudgetModelTime>,
     ) -> Result<(), AgentError> {
         self.log_event(
             TrustLevel::System,
@@ -1995,17 +2124,38 @@ impl Agent {
                 window: window.to_string(),
                 action,
                 tool: tool.map(str::to_string),
-                model_time: None,
+                model_time,
             },
         )
+    }
+
+    /// Start timing a model call against the model-time ceiling. The
+    /// meter charges the ledger when it is dropped, so the time is
+    /// counted however the call ends: answered, failed, timed out, or
+    /// abandoned with the turn, as when a sub-agent's wall-clock limit
+    /// or a stop cuts it off. Inert unless the budget in force sets
+    /// that ceiling.
+    fn meter_model_time(&self) -> ModelTimeMeter {
+        let ledger = self
+            .budget
+            .filter(|b| b.is_active() && b.ceiling_model_seconds.is_some())
+            .zip(self.budget_ledger.clone())
+            .map(|(budget, store)| (store, self.budget_key().to_string(), budget.window));
+        ModelTimeMeter {
+            ledger,
+            agent: self.id.clone(),
+            started: std::time::Instant::now(),
+        }
     }
 
     /// Post-LLM-response budget charge. Adds the call's cost to the
     /// ledger for the current window when a budget is active. An
     /// uncosted call (provider/model absent from the pricing table,
-    /// `None` total) charges nothing; the first such call in a session
-    /// with an active budget logs one warning so the operator sees the
-    /// control is pass-through for that provider.
+    /// `None` total) charges nothing against the USD ceiling; the
+    /// first such call in a session whose budget sets one logs one
+    /// warning so the operator sees that ceiling is pass-through for
+    /// that provider. Model time is charged apart from this, by
+    /// [`Self::meter_model_time`].
     fn charge_budget(&mut self, total_cost_usd_micros: Option<u64>) {
         let Some(budget) = self.budget else {
             return;
@@ -2030,13 +2180,24 @@ impl Agent {
                     }
                 }
             }
+            // A budget with no USD ceiling has nothing an uncosted
+            // call passes through.
+            None if budget.ceiling_usd_micros.is_none() => {}
             None => {
                 if !self.budget_uncosted_warned {
                     self.budget_uncosted_warned = true;
+                    let model_time = match budget.ceiling_model_seconds {
+                        Some(seconds) => format!(
+                            "The budget's model-time ceiling ({seconds}s) still applies to them."
+                        ),
+                        None => "Set `ceiling_model_seconds` on the budget to bound a provider \
+                                 with no price."
+                            .to_string(),
+                    };
                     tracing::warn!(
                         "agent {} has an active budget ({:?}) but the provider/model emitted no \
-                         cost; budget enforcement is pass-through for uncosted calls this session. \
-                         Block mode plus a costless provider is no protection.",
+                         cost; the USD ceiling is pass-through for uncosted calls this session. \
+                         {model_time}",
                         self.id,
                         budget.mode,
                     );
@@ -2521,11 +2682,13 @@ impl Agent {
                 self.current_inbound.sender_id.clone(),
             ),
         )?;
+        let meter = self.meter_model_time();
         let started = std::time::Instant::now();
         let result = match self.provider_key() {
             Ok(key) => self.llm.complete(&messages, &[], key.as_deref()).await,
             Err(e) => Err(e),
         };
+        drop(meter);
         let result = match result {
             Ok((response, usage)) => {
                 let (row, total_cost_usd_micros) = side_call_response(
@@ -3248,6 +3411,7 @@ impl Agent {
             )?;
 
             self.check_inference_or_deny()?;
+            let meter = self.meter_model_time();
             let started = std::time::Instant::now();
             let provider_key = self
                 .provider_key()
@@ -3262,6 +3426,7 @@ impl Agent {
                 .await
                 .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let latency_ms = started.elapsed().as_millis() as u64;
+            drop(meter);
             let LlmResponseAttribution {
                 input_tokens,
                 output_tokens,
@@ -3614,6 +3779,7 @@ impl Agent {
 
             self.check_inference_or_deny()?;
             // Spawn streaming in background, forward text deltas to caller
+            let meter = self.meter_model_time();
             let started = std::time::Instant::now();
             let provider_key = self
                 .provider_key()
@@ -3648,6 +3814,7 @@ impl Agent {
                 result.map_err(|e| self.fail_llm_request(&request_id, started, e))?
             };
             let latency_ms = started.elapsed().as_millis() as u64;
+            drop(meter);
             let LlmResponseAttribution {
                 input_tokens,
                 output_tokens,

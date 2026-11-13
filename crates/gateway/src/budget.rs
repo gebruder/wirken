@@ -9,6 +9,11 @@
 //! same unit as the `*_cost_usd_micros` fields on
 //! `SessionEvent::LlmResponse`.
 //!
+//! A budget may also, or instead, cap model time: the wall-clock
+//! seconds the agent's model calls took in the window, as the runtime
+//! measured them. That needs nothing from the provider, so it holds
+//! for a provider with no price, where the USD ceiling never moves.
+//!
 //! Budgets are configured in `budget.json` (a global default plus
 //! per-agent overrides, [`BudgetConfig`]); the durable ledger lives in
 //! `budget.db` ([`BudgetStore`]). The effective budget for an agent is
@@ -87,7 +92,15 @@ pub struct AgentBudget {
     #[serde(default)]
     pub mode: BudgetMode,
     /// Window ceiling in USD micros. Ignored when `mode` is `Off`.
-    pub ceiling_usd_micros: u64,
+    /// Absent means no USD ceiling, which an active budget may be
+    /// only when it sets [`Self::ceiling_model_seconds`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling_usd_micros: Option<u64>,
+    /// Window ceiling on model time: the wall-clock seconds the
+    /// agent's model calls took, failed calls included. Absent means
+    /// no model-time ceiling. Ignored when `mode` is `Off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling_model_seconds: Option<u64>,
     #[serde(default)]
     pub window: BudgetWindow,
 }
@@ -96,6 +109,31 @@ impl AgentBudget {
     /// True when the budget enforces (alert or block).
     pub fn is_active(&self) -> bool {
         self.mode != BudgetMode::Off
+    }
+
+    /// The model-time ceiling in milliseconds, the unit the ledger
+    /// keeps.
+    pub fn ceiling_model_millis(&self) -> Option<u64> {
+        self.ceiling_model_seconds.map(|s| s.saturating_mul(1_000))
+    }
+
+    /// An active budget has to cap something. One with neither ceiling
+    /// would read as enforcement and enforce nothing.
+    fn check(&self, name: &str) -> Result<(), GatewayError> {
+        if self.is_active()
+            && self.ceiling_usd_micros.is_none()
+            && self.ceiling_model_seconds.is_none()
+        {
+            return Err(GatewayError::Config(format!(
+                "{name} is in {} mode and sets neither ceiling_usd_micros nor \
+                 ceiling_model_seconds",
+                match self.mode {
+                    BudgetMode::Alert => "alert",
+                    _ => "block",
+                }
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -128,6 +166,19 @@ impl BudgetConfig {
         resolve(self.agents.get(agent_id).copied(), self.default)
     }
 
+    /// Refuse an active entry that sets no ceiling, naming it.
+    pub fn validate(&self) -> Result<(), GatewayError> {
+        if let Some(default) = &self.default {
+            default.check("the default budget")?;
+        }
+        let mut ids: Vec<&String> = self.agents.keys().collect();
+        ids.sort();
+        for id in ids {
+            self.agents[id].check(&format!("the budget agents.{id}"))?;
+        }
+        Ok(())
+    }
+
     /// True if any configured budget (the default or a per-agent
     /// entry) uses block mode. Used at startup: if the spend ledger
     /// cannot be opened while a block budget is configured, the
@@ -157,8 +208,14 @@ pub fn load_budget_config(path: &Path) -> Result<BudgetConfig, GatewayError> {
             "read {}: {e}",
             path.display()
         ))),
-        Ok(s) => serde_json::from_str(&s)
-            .map_err(|e| GatewayError::Config(format!("parse {}: {e}", path.display()))),
+        Ok(s) => {
+            let config: BudgetConfig = serde_json::from_str(&s)
+                .map_err(|e| GatewayError::Config(format!("parse {}: {e}", path.display())))?;
+            config
+                .validate()
+                .map_err(|e| GatewayError::Config(format!("{}: {e}", path.display())))?;
+            Ok(config)
+        }
     }
 }
 
@@ -189,11 +246,20 @@ const SCHEMA: &str = "
     );
 ";
 
+/// Columns added after the first release of the ledger: model time
+/// in the window, in milliseconds, and its own once-per-window alert
+/// flag.
+const ADDED_COLUMNS: &[&str] = &[
+    "model_millis INTEGER NOT NULL DEFAULT 0",
+    "model_time_alerted INTEGER NOT NULL DEFAULT 0",
+];
+
 impl BudgetStore {
     /// Open (creating if absent) the ledger database.
     pub fn open(db_path: &Path) -> Result<Self, GatewayError> {
         let conn = Connection::open(db_path)?;
         conn.execute_batch(&format!("PRAGMA journal_mode=WAL;{SCHEMA}"))?;
+        Self::add_columns(&conn)?;
         Ok(Self { conn })
     }
 
@@ -201,7 +267,83 @@ impl BudgetStore {
     pub fn open_in_memory() -> Result<Self, GatewayError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        Self::add_columns(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Additive migration. SQLite has no IF NOT EXISTS for ALTER
+    /// TABLE, so a column already there is told from a real failure by
+    /// the error text; anything else propagates.
+    fn add_columns(conn: &Connection) -> Result<(), GatewayError> {
+        for column in ADDED_COLUMNS {
+            if let Err(e) =
+                conn.execute(&format!("ALTER TABLE agent_spend ADD COLUMN {column}"), [])
+                && !e.to_string().contains("duplicate column name")
+            {
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Model time (milliseconds) the agent's calls took in the window.
+    /// Absent row reads as 0.
+    pub fn window_model_millis(
+        &self,
+        agent_id: &str,
+        window_start: i64,
+    ) -> Result<u64, GatewayError> {
+        let millis: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT model_millis FROM agent_spend WHERE agent_id = ?1 AND window_start = ?2",
+                params![agent_id, window_start],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(millis.unwrap_or(0).max(0) as u64)
+    }
+
+    /// Add `millis` of model time to the agent's window, creating the
+    /// row if absent.
+    pub fn add_model_millis(
+        &self,
+        agent_id: &str,
+        window_start: i64,
+        millis: u64,
+    ) -> Result<(), GatewayError> {
+        self.conn.execute(
+            "INSERT INTO agent_spend (agent_id, window_start, model_millis)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(agent_id, window_start)
+             DO UPDATE SET model_millis = model_millis + excluded.model_millis",
+            params![
+                agent_id,
+                window_start,
+                i64::try_from(millis).unwrap_or(i64::MAX)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// [`Self::try_mark_alerted`] for the model-time ceiling, which
+    /// alerts once per window on its own flag.
+    pub fn try_mark_model_time_alerted(
+        &self,
+        agent_id: &str,
+        window_start: i64,
+    ) -> Result<bool, GatewayError> {
+        self.conn.execute(
+            "INSERT INTO agent_spend (agent_id, window_start) VALUES (?1, ?2)
+             ON CONFLICT(agent_id, window_start) DO NOTHING",
+            params![agent_id, window_start],
+        )?;
+        let changed = self.conn.execute(
+            "UPDATE agent_spend SET model_time_alerted = 1
+             WHERE agent_id = ?1 AND window_start = ?2 AND model_time_alerted = 0",
+            params![agent_id, window_start],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Accumulated spend (USD micros) for the agent in the window.
@@ -266,9 +408,116 @@ mod tests {
     fn budget(mode: BudgetMode, ceiling: u64) -> AgentBudget {
         AgentBudget {
             mode,
-            ceiling_usd_micros: ceiling,
+            ceiling_usd_micros: Some(ceiling),
+            ceiling_model_seconds: None,
             window: BudgetWindow::Day,
         }
+    }
+
+    /// An entry with only a model-time ceiling parses, and an existing
+    /// entry reads as it did: a USD ceiling and no model-time one.
+    #[test]
+    fn an_entry_may_set_either_ceiling_or_both() {
+        let cfg: BudgetConfig = serde_json::from_str(
+            r#"{
+                "default": { "mode": "alert", "ceiling_usd_micros": 5000000, "window": "day" },
+                "agents": {
+                    "local": { "mode": "block", "ceiling_model_seconds": 3600, "window": "hour" },
+                    "both": { "mode": "block", "ceiling_usd_micros": 1, "ceiling_model_seconds": 60 }
+                }
+            }"#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let local = cfg.resolve("local").unwrap();
+        assert_eq!(local.ceiling_usd_micros, None);
+        assert_eq!(local.ceiling_model_seconds, Some(3_600));
+        assert_eq!(local.ceiling_model_millis(), Some(3_600_000));
+        let both = cfg.resolve("both").unwrap();
+        assert_eq!(
+            (both.ceiling_usd_micros, both.ceiling_model_seconds),
+            (Some(1), Some(60))
+        );
+        let existing = cfg.resolve("other").unwrap();
+        assert_eq!(
+            (existing.ceiling_usd_micros, existing.ceiling_model_seconds),
+            (Some(5_000_000), None)
+        );
+        // An existing entry serializes without the new key.
+        assert!(
+            !serde_json::to_string(&existing)
+                .unwrap()
+                .contains("ceiling_model_seconds")
+        );
+    }
+
+    /// An active entry with no ceiling is refused when the file is
+    /// loaded, by name. An `off` entry needs none.
+    #[test]
+    fn an_active_entry_with_neither_ceiling_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("budget.json");
+        std::fs::write(
+            &path,
+            r#"{ "agents": { "work": { "mode": "block", "window": "day" } } }"#,
+        )
+        .unwrap();
+        let err = load_budget_config(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("agents.work") && err.contains("ceiling_model_seconds"),
+            "{err}"
+        );
+
+        std::fs::write(&path, r#"{ "default": { "mode": "alert" } }"#).unwrap();
+        let err = load_budget_config(&path).unwrap_err().to_string();
+        assert!(err.contains("the default budget"), "{err}");
+
+        std::fs::write(&path, r#"{ "agents": { "idle": { "mode": "off" } } }"#).unwrap();
+        assert_eq!(load_budget_config(&path).unwrap().resolve("idle"), None);
+    }
+
+    #[test]
+    fn model_time_accumulates_beside_spend_and_alerts_on_its_own_flag() {
+        let s = BudgetStore::open_in_memory().unwrap();
+        assert_eq!(s.window_model_millis("a", 0).unwrap(), 0);
+        s.add_model_millis("a", 0, 1_500).unwrap();
+        s.add_spend("a", 0, 7).unwrap();
+        s.add_model_millis("a", 0, 500).unwrap();
+        assert_eq!(s.window_model_millis("a", 0).unwrap(), 2_000);
+        assert_eq!(s.window_spend("a", 0).unwrap(), 7);
+        assert_eq!(s.window_model_millis("a", 86_400).unwrap(), 0);
+        assert_eq!(s.window_model_millis("b", 0).unwrap(), 0);
+
+        assert!(s.try_mark_alerted("a", 0).unwrap());
+        assert!(s.try_mark_model_time_alerted("a", 0).unwrap());
+        assert!(!s.try_mark_model_time_alerted("a", 0).unwrap());
+        assert_eq!(s.window_model_millis("a", 0).unwrap(), 2_000);
+    }
+
+    /// A ledger written before model time was kept opens, keeps its
+    /// spend, and takes model time.
+    #[test]
+    fn a_ledger_from_before_model_time_is_migrated_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("budget.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO agent_spend (agent_id, window_start, spend_micros, alerted)
+                 VALUES ('a', 0, 42, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            let s = BudgetStore::open(&path).unwrap();
+            assert_eq!(s.window_spend("a", 0).unwrap(), 42);
+            assert!(!s.try_mark_alerted("a", 0).unwrap());
+            s.add_model_millis("a", 0, 10).unwrap();
+        }
+        let s = BudgetStore::open(&path).unwrap();
+        assert_eq!(s.window_model_millis("a", 0).unwrap(), 20);
     }
 
     #[test]
