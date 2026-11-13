@@ -131,7 +131,7 @@ Spend is read from `total_cost_usd_micros` (the same precomputed field the meter
 - **Overshoot.** The check runs before a call and the charge lands after it, so the call in flight when the window crosses the ceiling completes. One call can run up to the 300-second request timeout.
 - **What the number includes.** Wall-clock time as the gateway sees it: time the provider spent loading the model and time the request waited behind other clients of the same server count. On a shared model server, contention is charged to the agent that waited.
 - **Plan sign-in.** A plan call can be timed, so a budget that sets only `ceiling_model_seconds` holds for an agent in plan mode. A block-mode budget with a USD ceiling still refuses a plan agent's calls outright, as below.
-- **On the record.** A `budget_exceeded` row for this ceiling carries `model_time` with `window_model_seconds` and `ceiling_model_seconds`. Its USD fields hold the window's USD spend and the USD ceiling, `0` where the budget sets none, and are not what was reached. A row for the USD ceiling has no `model_time` and is written as it was before this ceiling existed. When both ceilings are reached under block mode, the one row written is the USD row. A query or detection that reads `budget_exceeded` as a USD breach should leave out rows that carry `model_time`.
+- **On the record.** A `budget_exceeded` row for this ceiling carries `model_time` with `window_model_seconds` and `ceiling_model_seconds`. Its USD fields hold the window's USD spend and the USD ceiling, `0` where the budget sets none, and are not what was reached. A row for the USD ceiling has no `model_time` and is written as it was before this ceiling existed. When both ceilings are reached under block mode, the one row written is the USD row. A query or detection that reads `budget_exceeded` as a USD breach should leave out rows that carry `model_time`; the reference detection in the wirken-siem repo (detection 10) tells the two apart by that field.
 
 ### Configuration
 
@@ -167,5 +167,5 @@ Wirken meters the LLM traffic it routes through Wirken. It does not meter a vend
 ## Related
 
 - Pinning the model that cost is metered against is operator config, not a chat setting. See [Model governance](enforcement-model.md#model-governance); model pinning and these cost rows are one control pair.
-- The per-agent cost-anomaly detection built on these fields ships in the wirken-siem repo as detection 9; the per-agent budget-breach detection ships as detection 10.
+- The per-agent cost-anomaly detection built on these fields ships in the wirken-siem repo as detection 9; the per-agent budget-breach detection ships as detection 10, which reports a row with `model_time` as a model-time breach with its seconds used and ceiling, and a row without it as a USD breach.
 - Variant forward and exclude policy: [SIEM forwarder](siem-forwarder.md).
