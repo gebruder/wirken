@@ -2320,8 +2320,11 @@ function renderAbout() {
   const budget = status.budget || {};
   if (budget.mode === 'off') {
     kvRow(grid, 'budget', el('span', null, 'off'));
-  } else if (budget.mode && isSet(budget.ceiling_usd_micros)) {
-    kvRow(grid, 'budget', el('span', null, usd(budget.ceiling_usd_micros) + ' / ' + budget.window + ' · agent, all channels'));
+  } else if (budget.mode && (isSet(budget.ceiling_usd_micros) || isSet(budget.ceiling_model_seconds))) {
+    const ceilings = [];
+    if (isSet(budget.ceiling_usd_micros)) ceilings.push(usd(budget.ceiling_usd_micros));
+    if (isSet(budget.ceiling_model_seconds)) ceilings.push(budget.ceiling_model_seconds + ' s model time');
+    kvRow(grid, 'budget', el('span', null, ceilings.join(' + ') + ' / ' + budget.window + ' · agent, all channels'));
   } else {
     kvRow(grid, 'budget', unknownNode());
   }
@@ -3809,9 +3812,14 @@ pub async fn status_snapshot(
         Some(b) => {
             let now = chrono::Utc::now().timestamp();
             let window_start = b.window.window_start(now);
-            let spent = wirken_gateway::budget::BudgetStore::open(&cfg.budget_db_path())
-                .ok()
+            let store = wirken_gateway::budget::BudgetStore::open(&cfg.budget_db_path()).ok();
+            let spent = store
+                .as_ref()
                 .and_then(|store| store.window_spend("default", window_start).ok());
+            let model_seconds = store
+                .as_ref()
+                .and_then(|store| store.window_model_millis("default", window_start).ok())
+                .map(|ms| ms / 1_000);
             json!({
                 "mode": format!("{:?}", b.mode).to_ascii_lowercase(),
                 "window": b.window.label(),
@@ -3819,6 +3827,8 @@ pub async fn status_snapshot(
                 "ceiling_usd_micros": b.ceiling_usd_micros,
                 "spent_usd_micros": micros_to_json(spent),
                 "remaining_usd_micros": micros_to_json(spent.zip(b.ceiling_usd_micros).map(|(s, ceiling)| ceiling.saturating_sub(s))),
+                "ceiling_model_seconds": b.ceiling_model_seconds,
+                "model_seconds": b.ceiling_model_seconds.and(model_seconds),
             })
         }
         None => json!({ "mode": "off" }),

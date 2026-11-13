@@ -112,11 +112,13 @@ pub(crate) async fn status(
 
     let budget = match factory.budget_state(agent) {
         None => json!({ "mode": "off" }),
-        Some((b, spent)) => json!({
+        Some((b, spent, model_millis)) => json!({
             "mode": serde_json::to_value(b.mode).unwrap_or(Value::Null),
             "window": b.window.label(),
             "ceiling_usd_micros": b.ceiling_usd_micros,
             "spent_usd_micros": spent,
+            "ceiling_model_seconds": b.ceiling_model_seconds,
+            "model_seconds": model_millis.map(|ms| ms / 1_000),
         }),
     };
     let grants = factory.stored_grants(agent).map(|grants| {

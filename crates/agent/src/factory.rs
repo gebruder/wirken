@@ -742,24 +742,31 @@ impl AgentFactory {
     }
 
     /// The budget in force for `agent_id`, with what it has spent in the
-    /// current window when the ledger can be read. `None` when no budget
+    /// current window, in USD micros and then in milliseconds of model
+    /// time, each when the ledger can be read. `None` when no budget
     /// applies.
     pub fn budget_state(
         &self,
         agent_id: &str,
-    ) -> Option<(wirken_gateway::budget::AgentBudget, Option<u64>)> {
+    ) -> Option<(
+        wirken_gateway::budget::AgentBudget,
+        Option<u64>,
+        Option<u64>,
+    )> {
         let wiring = self.budget_wiring.read().ok()?;
         let wiring = wiring.as_ref()?;
         let budget = wiring.config.resolve(agent_id)?;
         let start = budget
             .window
             .window_start(wirken_gateway::budget::now_unix_secs());
-        let spent = wiring
-            .store
-            .lock()
-            .ok()
+        let store = wiring.store.lock().ok();
+        let spent = store
+            .as_ref()
             .and_then(|s| s.window_spend(agent_id, start).ok());
-        Some((budget, spent))
+        let model_millis = store
+            .as_ref()
+            .and_then(|s| s.window_model_millis(agent_id, start).ok());
+        Some((budget, spent, model_millis))
     }
 
     /// The grants the permission store holds for `agent_id`. `None` when

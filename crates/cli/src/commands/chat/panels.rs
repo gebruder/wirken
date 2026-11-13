@@ -64,6 +64,8 @@ pub(crate) struct Budget {
     pub window: String,
     pub ceiling_usd_micros: Option<u64>,
     pub spent_usd_micros: Option<u64>,
+    pub ceiling_model_seconds: Option<u64>,
+    pub model_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -219,12 +221,27 @@ pub(crate) fn panels(status: &Status, verified: Option<&Verified>) -> Vec<Panel>
     let b = &c.budget;
     let budget = match b.mode.as_str() {
         "" | "off" => "budget off".to_string(),
-        mode => format!(
-            "budget {mode}: {} of {} per {}",
-            b.spent_usd_micros.map_or_else(|| "?".to_string(), usd),
-            b.ceiling_usd_micros.map_or_else(|| "?".to_string(), usd),
-            b.window
-        ),
+        mode => {
+            // Each ceiling the budget sets, in the order the gate
+            // checks them. A budget from before model time has only
+            // the first and reads as it did.
+            let mut ceilings = Vec::new();
+            if b.ceiling_usd_micros.is_some() || b.ceiling_model_seconds.is_none() {
+                ceilings.push(format!(
+                    "{} of {}",
+                    b.spent_usd_micros.map_or_else(|| "?".to_string(), usd),
+                    b.ceiling_usd_micros.map_or_else(|| "?".to_string(), usd),
+                ));
+            }
+            if let Some(ceiling) = b.ceiling_model_seconds {
+                ceilings.push(format!(
+                    "{} of {ceiling} s model time",
+                    b.model_seconds
+                        .map_or_else(|| "?".to_string(), |s| format!("{s} s")),
+                ));
+            }
+            format!("budget {mode}: {} per {}", ceilings.join(", "), b.window)
+        }
     };
     let cost = vec![
         format!(
@@ -400,6 +417,45 @@ mod tests {
             .find(|p| p.title == title)
             .map(|p| p.lines.join("\n"))
             .unwrap()
+    }
+
+    /// The budget line names each ceiling the budget sets. A budget
+    /// with a USD ceiling alone reads as it did before model time.
+    #[test]
+    fn the_budget_line_names_each_ceiling_set() {
+        let line = |budget: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "cost": { "calls": 0, "budget": budget }
+            });
+            value["agent"] = "default".into();
+            let status: Status = serde_json::from_value(value).unwrap();
+            text(&panels(&status, None), "Cost and tokens")
+        };
+        let usd_only = line(serde_json::json!({
+            "mode": "block", "window": "day",
+            "ceiling_usd_micros": 5_000_000, "spent_usd_micros": 1_250_000
+        }));
+        assert!(
+            usd_only.contains("budget block: $1.2500 of $5.0000 per day"),
+            "{usd_only}"
+        );
+        let time_only = line(serde_json::json!({
+            "mode": "block", "window": "hour",
+            "ceiling_model_seconds": 3600, "model_seconds": 729
+        }));
+        assert!(
+            time_only.contains("budget block: 729 s of 3600 s model time per hour"),
+            "{time_only}"
+        );
+        let both = line(serde_json::json!({
+            "mode": "alert", "window": "day",
+            "ceiling_usd_micros": 5_000_000, "spent_usd_micros": 0,
+            "ceiling_model_seconds": 60, "model_seconds": 0
+        }));
+        assert!(
+            both.contains("budget alert: $0.0000 of $5.0000, 0 s of 60 s model time per day"),
+            "{both}"
+        );
     }
 
     #[test]
