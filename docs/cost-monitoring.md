@@ -6,7 +6,7 @@ Wirken records the cost of every large language model (LLM) call on the audit ch
 
 Every LLM call appends an `llm_response` row (`SessionEvent::LlmResponse`) to the session's audit chain. The row carries token counts, latency, and per-call cost, keyed by the agent and the credential that made the call. No prompt or completion text is on the row; cost monitoring reads accounting fields only.
 
-Fields on each `llm_response` row (`crates/audit/src/session_log.rs:630-677`):
+Fields on each `llm_response` row (`crates/audit/src/session_log.rs:857-904`):
 
 | Field | Meaning |
 |-------|---------|
@@ -80,7 +80,7 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
 }
 ```
 
-The thirty-four entries above `llm_response` are the default-forward set (`should_forward` in `crates/audit/src/siem_typed.rs`); drop any you do not want, and dropping one stops forwarding it. `LlmResponse` rows carry no message bodies, so forwarding them adds per-call token and cost accounting to the feed, not personally identifiable information (PII).
+The thirty-nine entries above `llm_response` are the default-forward set (`should_forward` in `crates/audit/src/siem_typed.rs`); drop any you do not want, and dropping one stops forwarding it. `LlmResponse` rows carry no message bodies, so forwarding them adds per-call token and cost accounting to the feed, not personally identifiable information (PII).
 
 ## Per-agent daily spend queries
 
