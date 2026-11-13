@@ -1473,6 +1473,13 @@ function renderEvent(ev, live) {
         'The record names the credential. From the leak row on the record.');
       break;
     case 'budget_exceeded':
+      if (ev.model_time) {
+        addBlock('refusal', 'Model-time limit reached', '✕',
+          ev.model_time.window_model_seconds + ' s of ' + ev.model_time.ceiling_model_seconds +
+          ' s of model time this ' + ev.window + ' · the model was not called',
+          'From the budget row on the record.');
+        break;
+      }
       addBlock('refusal', 'Spending limit reached', '✕',
         usd(ev.window_spend_usd_micros) + ' of ' + usd(ev.ceiling_usd_micros) + ' this ' + ev.window +
         (ev.tool ? ' · ' + ev.tool + ' not called' : ' · the model was not called'),
@@ -4354,6 +4361,7 @@ pub fn session_events(
                 window,
                 action,
                 tool,
+                model_time,
                 ..
             } => Some(json!({
                 "kind": "budget_exceeded",
@@ -4362,6 +4370,7 @@ pub fn session_events(
                 "window_spend_usd_micros": window_spend_usd_micros,
                 "ceiling_usd_micros": ceiling_usd_micros,
                 "tool": tool,
+                "model_time": model_time,
             })),
             SessionEvent::PermissionDenied {
                 tool,
@@ -6615,6 +6624,7 @@ mod tests {
                     window: "day".into(),
                     action: BudgetAction::Blocked,
                     tool: Some("exec".into()),
+                    model_time: None,
                 },
             ),
             (

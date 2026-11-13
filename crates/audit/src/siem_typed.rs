@@ -879,6 +879,7 @@ mod tests {
             window: "day".into(),
             action: crate::session_log::BudgetAction::Blocked,
             tool: None,
+            model_time: None,
         };
         assert!(should_forward(&ev, &cfg));
         assert_eq!(variant_kind_for(&ev), "budget_exceeded");
@@ -928,6 +929,47 @@ mod tests {
         assert!(!should_forward(&approval, &cfg));
     }
 
+    /// A row for the model-time ceiling carries the figures, and a row
+    /// written before the field existed reads with none.
+    #[test]
+    fn budget_exceeded_carries_model_time_only_when_that_ceiling_was_reached() {
+        use crate::session_log::{BudgetAction, BudgetModelTime};
+        let ev = SessionEvent::BudgetExceeded {
+            agent_id: "local".into(),
+            credential_id: None,
+            window_spend_usd_micros: 0,
+            ceiling_usd_micros: 0,
+            window: "hour".into(),
+            action: BudgetAction::Blocked,
+            tool: None,
+            model_time: Some(BudgetModelTime {
+                window_model_seconds: 3_605,
+                ceiling_model_seconds: 3_600,
+            }),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.contains(
+                "\"model_time\":{\"window_model_seconds\":3605,\"ceiling_model_seconds\":3600}"
+            ),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), ev);
+
+        let before: SessionEvent = serde_json::from_str(
+            r#"{"kind":"budget_exceeded","agent_id":"work","window_spend_usd_micros":5,
+                "ceiling_usd_micros":4,"window":"day","action":"blocked"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            before,
+            SessionEvent::BudgetExceeded {
+                model_time: None,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn budget_exceeded_round_trips() {
         let ev = SessionEvent::BudgetExceeded {
@@ -938,10 +980,13 @@ mod tests {
             window: "hour".into(),
             action: crate::session_log::BudgetAction::Alerted,
             tool: None,
+            model_time: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"kind\":\"budget_exceeded\""));
         assert!(json.contains("\"action\":\"alerted\""));
+        // A USD row is written as it was before the model-time field.
+        assert!(!json.contains("model_time"));
         // credential_id is None, so it is omitted from the wire.
         assert!(!json.contains("credential_id"));
         let back: SessionEvent = serde_json::from_str(&json).unwrap();

@@ -3359,6 +3359,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             window: String::new(),
             action: BudgetAction::Alerted,
             tool: None,
+            model_time: None,
         },
         SessionEvent::PermissionDenied {
             tool: String::new(),

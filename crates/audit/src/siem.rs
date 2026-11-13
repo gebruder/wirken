@@ -1056,6 +1056,14 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         } => format!("permission_denied tool={tool} source={denial_source:?}"),
         SessionEvent::BudgetExceeded {
             action,
+            model_time: Some(time),
+            ..
+        } => format!(
+            "budget_exceeded action={action:?} model_seconds={} ceiling_model_seconds={}",
+            time.window_model_seconds, time.ceiling_model_seconds
+        ),
+        SessionEvent::BudgetExceeded {
+            action,
             window_spend_usd_micros,
             ceiling_usd_micros,
             ..
@@ -2262,6 +2270,7 @@ mod identity_tests {
                     window: "day".into(),
                     action: BudgetAction::Blocked,
                     tool: None,
+                    model_time: None,
                 },
                 None,
                 None,

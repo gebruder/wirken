@@ -241,6 +241,17 @@ pub enum BudgetAction {
     Blocked,
 }
 
+/// The model-time figures on a [`SessionEvent::BudgetExceeded`] row
+/// that reports the model-time ceiling: the wall-clock seconds the
+/// agent's model calls had taken in the window at gate time, and the
+/// configured limit. The runtime measures these itself, so they do not
+/// depend on the provider reporting usage or having a price.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BudgetModelTime {
+    pub window_model_seconds: u64,
+    pub ceiling_model_seconds: u64,
+}
+
 /// Why an approval attempt was refused on authority grounds.
 ///
 /// Three distinct failures that a single "unauthorized" label would
@@ -954,6 +965,13 @@ pub enum SessionEvent {
         /// window's ceiling was reached, and names what reached it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
+        /// Present when the ceiling this row reports is the model-time
+        /// one. The USD fields then carry the window's USD spend and
+        /// the USD ceiling beside it, `0` where the budget sets none,
+        /// and are not what was reached. Absent on a USD row, which
+        /// reads and serializes as it did before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_time: Option<BudgetModelTime>,
     },
     /// Permission denial recorded by the harness. `action_key` is
     /// the canonical key under which an operator can grant approval

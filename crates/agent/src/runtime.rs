@@ -1995,6 +1995,7 @@ impl Agent {
                 window: window.to_string(),
                 action,
                 tool: tool.map(str::to_string),
+                model_time: None,
             },
         )
     }
