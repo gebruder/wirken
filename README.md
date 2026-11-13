@@ -42,9 +42,12 @@ first.
 - **Least privilege by default.** A [three-tier permission
   model](docs/permissions-and-identity.md), and any sub-agent an agent spawns
   is boxed by limits you set.
-- **Shell commands run in a sandbox.** Anything the agent executes runs in an
-  [ephemeral container](docs/sandbox-properties.md) with no network. If the
-  sandbox is unavailable, execution is refused rather than run on the host.
+- **Shell commands run in a sandbox.** By default, anything the agent executes
+  runs in an [ephemeral container](docs/sandbox-properties.md) with no network.
+  `wirken agents set-egress` grants a channel's commands
+  [proxied egress](docs/egress.md#sandbox-egress), and `sandbox.json` can turn
+  networking on or the container off. If the sandbox is unavailable, execution
+  is refused rather than run on the host.
 
 ## Install
 
@@ -221,9 +224,11 @@ compile time and which at run time is in
 
 - **Channels.** Each channel adapter is a separate OS process that is handed
   only its own credentials. Agents run inside the gateway process.
-- **Shell.** `exec` runs in a container with no network, the agent workspace
-  as its only mount, no capabilities and a seccomp profile. If the container
-  runtime the sandbox mode names is not available, `exec` is refused.
+- **Shell.** By default `exec` runs in a container with no network, the agent
+  workspace as its only mount, no capabilities and a seccomp profile.
+  `wirken agents set-egress` and `sandbox.json` change the network and the
+  mode ([egress.md](docs/egress.md#sandbox-egress)). If the container runtime
+  the sandbox mode names is not available, `exec` is refused.
 - **Approvals.** The tier of a tool call is computed from the tool name and
   arguments, not by the model. Workspace file access does not prompt.
   Twenty-three inspection commands prompt unless the operator has recorded a
