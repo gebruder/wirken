@@ -4755,6 +4755,126 @@ mod subagent_bound_at_wake {
             "the cached agent is left in place",
         );
     }
+
+    /// A block budget on `parent` whose window is already spent, and
+    /// whatever entry `child` is given.
+    fn spent_parent_budget(
+        factory: &AgentFactory,
+        child: Option<wirken_gateway::budget::AgentBudget>,
+    ) {
+        use wirken_gateway::budget::{
+            AgentBudget, BudgetConfig, BudgetMode, BudgetStore, BudgetWindow, now_unix_secs,
+        };
+        let store = BudgetStore::open_in_memory().unwrap();
+        store
+            .add_spend(
+                "parent",
+                BudgetWindow::Day.window_start(now_unix_secs()),
+                600_000,
+            )
+            .unwrap();
+        let mut agents = HashMap::from([(
+            "parent".to_string(),
+            AgentBudget {
+                mode: BudgetMode::Block,
+                ceiling_usd_micros: 500_000,
+                window: BudgetWindow::Day,
+            },
+        )]);
+        if let Some(child) = child {
+            agents.insert("child".to_string(), child);
+        }
+        factory.attach_budget(
+            Arc::new(std::sync::Mutex::new(store)),
+            BudgetConfig {
+                default: None,
+                agents,
+            },
+        );
+    }
+
+    fn blocked_rows(log: &dyn SessionLog, session: &str) -> usize {
+        rows(log, session)
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SessionEvent::BudgetExceeded {
+                        action: wirken_audit::BudgetAction::Blocked,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// A child's calls are charged to the agent at the top of its spawn
+    /// chain, so that agent's budget is the one they are held to. A
+    /// child with no entry of its own used to run with no budget, and
+    /// the parent's ceiling never saw what it spawned.
+    #[tokio::test]
+    async fn a_child_with_no_budget_entry_is_refused_at_the_parents_ceiling() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let factory = live_factory(&tmp, &LlmConfig::ollama("test"), log.clone());
+        spent_parent_budget(&factory, None);
+        let session = child_session(0);
+
+        let child = factory
+            .wake_subagent("child", &session, binding())
+            .await
+            .unwrap();
+        let refusal = child.lock().await.test_check_budget_for_tool(None).unwrap();
+
+        assert!(refusal.is_some(), "the child's call went ahead");
+        assert_eq!(blocked_rows(&*log, &session), 1);
+    }
+
+    /// The child's own entry is not what a sub-agent session runs on:
+    /// an `off` there does not take the child out of its parent's
+    /// budget. Addressed directly, the same agent runs on its own
+    /// entry.
+    #[tokio::test]
+    async fn a_childs_own_entry_does_not_apply_to_its_sub_agent_session() {
+        use wirken_gateway::budget::{AgentBudget, BudgetMode, BudgetWindow};
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let factory = live_factory(&tmp, &LlmConfig::ollama("test"), log.clone());
+        spent_parent_budget(
+            &factory,
+            Some(AgentBudget {
+                mode: BudgetMode::Off,
+                ceiling_usd_micros: 0,
+                window: BudgetWindow::Day,
+            }),
+        );
+        let session = child_session(0);
+
+        let child = factory
+            .wake_subagent("child", &session, binding())
+            .await
+            .unwrap();
+        assert!(
+            child
+                .lock()
+                .await
+                .test_check_budget_for_tool(None)
+                .unwrap()
+                .is_some(),
+            "the child's own `off` took it out of the parent's budget"
+        );
+
+        let direct = factory.wake("child", "child/test/c1").unwrap();
+        assert!(
+            direct
+                .lock()
+                .await
+                .test_check_budget_for_tool(None)
+                .unwrap()
+                .is_none(),
+            "addressed directly, the child runs on its own entry"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

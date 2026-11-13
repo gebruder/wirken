@@ -120,7 +120,7 @@ Metering answers "what did each agent spend"; enforcement caps it. A per-agent b
 - **alert**: when the window's spend reaches the ceiling, emit a `budget_exceeded` audit event once per window and let the call proceed.
 - **block**: when the window's spend reaches the ceiling, emit a `budget_exceeded` event and refuse the call. The refusal returns a plain channel message (that the agent has reached its spending limit for the window), not a silent failure. The check runs before the `LlmRequest` is written, so a block never leaves an orphaned request on the chain: every `LlmRequest` has a paired `LlmResponse` or a call error, never a budget block between them.
 
-Spend is read from `total_cost_usd_micros` (the same precomputed field the metering queries use) and accumulated in a durable per-agent ledger (`budget.db`) keyed by the base agent id, so it aggregates across an agent's channels and conversations and survives a gateway restart.
+Spend is read from `total_cost_usd_micros` (the same precomputed field the metering queries use) and accumulated in a durable per-agent ledger (`budget.db`) keyed by the base agent id, so it aggregates across an agent's channels and conversations and survives a gateway restart. A sub-agent's calls are checked and charged against the budget of the agent at the top of its spawn chain, at any depth; the child's own `budget.json` entry applies only when that agent is addressed directly.
 
 ### Configuration
 

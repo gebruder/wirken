@@ -96,6 +96,19 @@ pub fn root_session_id(session_id: &str) -> &str {
         .map_or(session_id, |(root, _)| root)
 }
 
+/// The agent whose budget a session runs on and is charged to. A
+/// sub-agent session, at any depth, takes the agent that leads its
+/// root session id; every other session takes its own agent.
+fn budget_agent_for<'a>(agent_id: &'a str, session_id: &'a str) -> &'a str {
+    if !session_id.contains(SUBAGENT_SESSION_MARKER) {
+        return agent_id;
+    }
+    root_session_id(session_id)
+        .split('/')
+        .next()
+        .unwrap_or(agent_id)
+}
+
 /// Paired LLM config + API key selected for a specific channel. A
 /// provider and its credential are always chosen together, so the
 /// factory treats them as one record rather than two parallel maps
@@ -1040,10 +1053,18 @@ impl AgentFactory {
         if let Some(bw) = self.budget_wiring.read().unwrap().as_ref() {
             // Per-agent override (keyed by the base agent id) beats the
             // global default; an explicit per-agent off opts out.
-            let effective = bw.config.resolve(agent_id);
+            //
+            // A sub-agent session runs on the budget of the agent at
+            // the top of its spawn chain, which is also the agent its
+            // calls are charged to (`Agent::budget_key`). Resolving the
+            // child's own entry here would check the parent's ledger
+            // row against a different ceiling, and a child with no
+            // entry would charge nothing at all.
+            let budget_agent = budget_agent_for(agent_id, session_id);
+            let effective = bw.config.resolve(budget_agent);
             agent.set_budget(effective, Some(bw.store.clone()));
-            agent.set_budget_name(if bw.config.agents.contains_key(agent_id) {
-                format!("the budget.json budget agents.{agent_id}")
+            agent.set_budget_name(if bw.config.agents.contains_key(budget_agent) {
+                format!("the budget.json budget agents.{budget_agent}")
             } else {
                 "the budget.json default budget".to_string()
             });

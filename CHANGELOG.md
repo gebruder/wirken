@@ -10,6 +10,18 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- Budget enforcement: a sub-agent's model calls are checked and charged
+  against the budget of the agent at the top of its spawn chain. They were
+  charged to that agent's ledger row but checked against the child's own
+  `budget.json` entry, so a child with no entry, or one set to `off`, charged
+  nothing and the parent's ceiling never saw what it spawned. A child's own
+  entry now applies only when that agent is addressed directly
+  (`a_child_with_no_budget_entry_is_refused_at_the_parents_ceiling`,
+  `a_childs_own_entry_does_not_apply_to_its_sub_agent_session`,
+  `crates/agent/src/tests.rs`).
+
 ## [3.3.1] - 2026-11-12
 
 ### Security
