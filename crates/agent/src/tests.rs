@@ -11834,8 +11834,8 @@ mod budget_enforcement {
     }
 
     /// A call cut off with its turn, as a sub-agent's wall-clock limit
-    /// or a stop does, writes no response or failure row. Its time is
-    /// charged all the same.
+    /// does, writes no response or failure row. Its time is charged all
+    /// the same.
     #[tokio::test]
     async fn a_call_abandoned_with_its_turn_is_charged_its_elapsed_time() {
         let base_url = slow_model(std::time::Duration::from_millis(1), vec![Slow::Hang]).await;

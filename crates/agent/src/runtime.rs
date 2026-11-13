@@ -2133,8 +2133,7 @@ impl Agent {
     /// meter charges the ledger when it is dropped, so the time is
     /// counted however the call ends: answered, failed, timed out, or
     /// abandoned with the turn, as when a sub-agent's wall-clock limit
-    /// or a stop cuts it off. Inert unless the budget in force sets
-    /// that ceiling.
+    /// cuts it off. Inert unless the budget in force sets that ceiling.
     fn meter_model_time(&self) -> ModelTimeMeter {
         let ledger = self
             .budget
