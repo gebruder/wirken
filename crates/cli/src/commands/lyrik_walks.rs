@@ -487,7 +487,12 @@ fn brocard_section(walk_name: &str) -> String {
          A finding without both is a rule 1 rejection. Every finding also carries \
          `invariant`: one sentence naming the property the code must hold that this \
          finding shows violated. A defender-mode fix targets that property, not the \
-         input that showed it.\n\n\
+         input that showed it. Where you traced it, a finding carries `origin`: \
+         `{\"file\", \"line_start\", \"function\"}`, the code where the violation starts \
+         (where the bad value or state is produced), which is often not `location`, \
+         where it surfaces. Give the same site for both when they are one. Leave \
+         `origin` out when you have not traced it: a fix is compared against it, and a \
+         guessed origin misdirects the fix.\n\n\
          A candidate that fails one of the rules below is still written as a \
          finding. Also record the rejection: write a file to \
          `staging/<walk>/rejections/rejection-NNN.json` (zero-padded ordinal) with \
@@ -563,7 +568,18 @@ fn reproduction_section(walk_name: &str) -> String {
          what it observed beside yours. A replay that observes the other outcome is a \
          rule 8 rejection of the finding the record names, applied by the runner; a \
          replay that could not run the command is recorded and is not a disagreement. \
-         Write the record so that a reader with only the record can run it.\n"
+         Write the record so that a reader with only the record can run it.\n\n\
+         A command that shows a finding follows one contract, so that a later fix can be \
+         checked from the command's exit status and output alone. It prints `{reached}` on \
+         a line of its own, flushed, immediately before its assertion, and that line \
+         reaches the command's output (`cargo test` hides a passing test's output without \
+         `-- --nocapture`). It exits non-zero when the finding holds and zero when it does \
+         not. It names files under the run directory by their path from the project root, \
+         `.lyrik/state/runs/<run-id>/...`, and uses no other path outside the project's \
+         tree. A failed build or a missing dependency never reaches the line, and is read \
+         as neither. A command outside the contract still gets its record and its replay; \
+         a defender-mode fix for its finding cannot be checked and stays inconclusive.\n",
+        reached = super::lyrik_fix_arms::REACHED
     )
 }
 

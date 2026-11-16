@@ -21,6 +21,7 @@ use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::lyrik_brocards;
 use super::lyrik_fix;
+use super::lyrik_fix_arms;
 use super::lyrik_replay;
 use super::lyrik_semgrep::{
     self, DispatchOutcome, Seed, parse_scanner_config, write_bundled_ruleset, write_seed_files,
@@ -1611,6 +1612,7 @@ async fn dispatch_via_agent_runtime(
             expected_findings,
             extras,
             exec_available,
+            lyrik_fix::functionality_config(config),
             terminal.clone(),
             audit,
         )
@@ -2205,11 +2207,70 @@ fn aggregate_phase0_section(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Defender mode's fix step: one agent per confirmed finding, judged
-/// by the runner from the proof it writes. Confirmed findings come from
-/// the written `findings.json`; the verdicts go back into it under
-/// `fixes`. With `exec` unavailable nothing runs and each confirmed
-/// finding is recorded as skipped.
+/// What every agent of the fix step is built from.
+#[derive(Clone)]
+struct FixAgentCtx {
+    agent_id: String,
+    target: PathBuf,
+    llm_config: LlmConfig,
+    api_key: Option<String>,
+    api_key_credential: Option<String>,
+    session_log: Arc<dyn wirken_audit::SessionLog>,
+    sandbox: wirken_agent::sandbox::SandboxConfig,
+    permissions: Arc<Mutex<PermissionStore>>,
+    leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
+    lyrik_staged_dir: PathBuf,
+    walks_staged_dir: PathBuf,
+    terminal:
+        Option<Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>>,
+}
+
+/// One fresh agent, one prompt. Returns the calls the gate refused.
+async fn fix_agent_turn(
+    ctx: &FixAgentCtx,
+    asker: &str,
+    prompt: String,
+) -> std::result::Result<Vec<String>, String> {
+    let mut agent = Agent::new_with_sandbox(
+        ctx.agent_id.clone(),
+        ctx.target.clone(),
+        ctx.llm_config.clone(),
+        ctx.api_key.clone(),
+        ctx.api_key_credential.clone(),
+        ctx.session_log.clone(),
+        ctx.sandbox.clone(),
+        ctx.permissions.clone(),
+    )
+    .map_err(|e| format!("agent_construct: {e}"))?;
+    agent.set_agent_id(ctx.agent_id.clone());
+    agent.set_leak_matcher(ctx.leak_matcher.clone());
+    attach_terminal_gate(&mut agent, asker, ctx.terminal.clone());
+    lyrik_run_skills(&ctx.lyrik_staged_dir, Some(&ctx.walks_staged_dir))
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()))
+        .map_err(|e| format!("attach_skills: {e}"))?;
+    let inbound_id = format!("lyrik-{asker}-{}", uuid::Uuid::new_v4());
+    let r = agent
+        .process_message(&prompt, inbound_id)
+        .await
+        .map_err(|e| format!("turn: {e}"))?;
+    Ok(r.denials
+        .iter()
+        .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
+        .collect())
+}
+
+/// Defender mode's fix step. Per confirmed finding, three agents with
+/// fresh contexts: one writes the patch and runs the reproduction in
+/// three copies, one attacks the patch by other routes, one re-walks
+/// the code the patch reaches and runs the functionality checks. The
+/// runner then judges each fix from the `exec` results on the session
+/// log, never from what an agent wrote about a run, and writes the
+/// records into `findings.json` under `fixes`. A patch supplied under
+/// `.lyrik/fix-patches/<slug>.patch` is checked in place of one the
+/// agent would write. With `exec` unavailable nothing runs and each
+/// confirmed finding is recorded as skipped. A rejected fix is not
+/// retried.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_fixes(
     max_concurrent: u32,
@@ -2229,6 +2290,7 @@ async fn dispatch_fixes(
     findings_path: &Path,
     extras: &Extras,
     exec_available: bool,
+    functionality: lyrik_fix_arms::FunctionalityConfig,
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
@@ -2263,92 +2325,117 @@ async fn dispatch_fixes(
         .get("target_sha")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let fix_skill_dir = walks_staged_dir.join("fix");
-    std::fs::create_dir_all(&fix_skill_dir)
-        .with_context(|| format!("create {}", fix_skill_dir.display()))?;
-    std::fs::write(
-        fix_skill_dir.join("SKILL.md"),
-        lyrik_fix::fix_skill_text(&run_id, super::lyrik_walks::run_tools(true)),
-    )
-    .with_context(|| format!("write {}", fix_skill_dir.join("SKILL.md").display()))?;
-    wirken_agent::bundled_skills::stage_sign_skill_dir(&fix_skill_dir)
-        .with_context(|| format!("sign staged fix skill at {}", fix_skill_dir.display()))?;
+    for name in lyrik_fix::FIX_SKILLS {
+        let dir = walks_staged_dir.join(name);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        std::fs::write(
+            dir.join("SKILL.md"),
+            lyrik_fix::skill_text(name, &run_id, super::lyrik_walks::run_tools(true)),
+        )
+        .with_context(|| format!("write {}", dir.join("SKILL.md").display()))?;
+        wirken_agent::bundled_skills::stage_sign_skill_dir(&dir)
+            .with_context(|| format!("sign staged {name} skill at {}", dir.display()))?;
+    }
     eprintln!(
-        "  defender fix step: {} confirmed finding(s). This step asks before each of these          commands runs: {}, and each finding's reproduction command.",
+        "  defender fix step: {} confirmed finding(s). This step asks before each of these \
+         commands runs: {}, and each finding's reproduction, variant, test, coverage and \
+         fuzz commands.",
         confirmed.len(),
         lyrik_fix::FIX_EXEC_COMMANDS.join(", ")
     );
+    let ctx = FixAgentCtx {
+        agent_id: agent_id.clone(),
+        target: target.clone(),
+        llm_config: llm_config.clone(),
+        api_key,
+        api_key_credential,
+        session_log: session_log.clone(),
+        sandbox,
+        permissions,
+        leak_matcher,
+        lyrik_staged_dir,
+        walks_staged_dir,
+        terminal,
+    };
     use tokio::sync::Semaphore;
     let permits = std::cmp::max(1, std::cmp::min(max_concurrent, confirmed.len() as u32));
     let sem = Arc::new(Semaphore::new(permits as usize));
     let mut handles = Vec::with_capacity(confirmed.len());
     for c in confirmed {
-        let rel_dir = format!("staging/fix/{}", lyrik_fix::slug(&c.stable_id));
-        std::fs::create_dir_all(run_dir.join(&rel_dir))
-            .with_context(|| format!("create {}", run_dir.join(&rel_dir).display()))?;
+        let slug = lyrik_fix::slug(&c.stable_id);
+        let rel_dir = format!("staging/fix/{slug}");
+        let fix_dir = run_dir.join(&rel_dir);
+        std::fs::create_dir_all(&fix_dir)
+            .with_context(|| format!("create {}", fix_dir.display()))?;
+        lyrik_fix::write_apply_script(&fix_dir)?;
+        // A patch supplied for this finding is checked as it is.
+        let supplied_path = target
+            .join(lyrik_fix::SUPPLIED_PATCH_DIR)
+            .join(format!("{slug}.patch"));
+        let supplied = match std::fs::read(&supplied_path) {
+            Ok(bytes) => {
+                std::fs::write(fix_dir.join("fix.patch"), &bytes)
+                    .with_context(|| format!("write {}", fix_dir.join("fix.patch").display()))?;
+                Some(lyrik_fix::sha256_hex(&bytes))
+            }
+            Err(_) => None,
+        };
         audit.emit(
             "lyrik.fix.started",
-            serde_json::json!({ "stable_id": c.stable_id, "dir": rel_dir }),
+            serde_json::json!({
+                "stable_id": c.stable_id,
+                "dir": rel_dir,
+                "patch_source": if supplied.is_some() { "supplied" } else { "lyrik" },
+            }),
         )?;
+        let revision = code_revision
+            .clone()
+            .unwrap_or_else(|| c.reproduction.code_revision.clone());
         let sem_handle = sem.clone();
-        let agent_id_t = agent_id.clone();
-        let target_t = target.clone();
+        let ctx_t = ctx.clone();
         let run_id_t = run_id.clone();
-        let llm_config_t = llm_config.clone();
-        let api_key_t = api_key.clone();
-        let api_key_credential_t = api_key_credential.clone();
-        let session_log_t = session_log.clone();
-        let sandbox_t = sandbox.clone();
-        let permissions_t = permissions.clone();
-        let leak_t = leak_matcher.clone();
-        let terminal_t = terminal.clone();
-        let lyrik_staged_dir_t = lyrik_staged_dir.clone();
-        let walks_staged_dir_t = walks_staged_dir.clone();
-        let code_revision_t = code_revision.clone();
+        let functionality_t = functionality.clone();
         let h = tokio::spawn(async move {
             let _permit = sem_handle.acquire_owned().await.expect("semaphore closed");
-            let mut agent = match Agent::new_with_sandbox(
-                agent_id_t.clone(),
-                target_t,
-                llm_config_t,
-                api_key_t,
-                api_key_credential_t,
-                session_log_t,
-                sandbox_t,
-                permissions_t,
-            ) {
-                Ok(a) => a,
-                Err(e) => return (c, rel_dir, Err(format!("agent_construct: {e}"))),
-            };
-            agent.set_agent_id(agent_id_t);
-            agent.set_leak_matcher(leak_t);
-            attach_terminal_gate(&mut agent, "fix", terminal_t);
-            let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
-                .map_err(|e| format!("{e:#}"))
-                .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()));
-            if let Err(e) = attached {
-                return (c, rel_dir, Err(format!("attach_skills: {e}")));
-            }
+            let mut steps = Vec::with_capacity(lyrik_fix::FIX_SKILLS.len());
             let prompt =
-                lyrik_fix::build_fix_prompt(&c, &run_id_t, code_revision_t.as_deref(), &rel_dir);
-            let inbound_id = format!("lyrik-fix-{}", uuid::Uuid::new_v4());
-            match agent.process_message(&prompt, inbound_id).await {
-                Ok(r) => {
-                    let skipped: Vec<String> = r
-                        .denials
-                        .iter()
-                        .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
-                        .collect();
-                    (c, rel_dir, Ok(skipped))
-                }
-                Err(e) => (c, rel_dir, Err(format!("turn: {e}"))),
+                lyrik_fix::build_fix_prompt(&c, &run_id_t, &revision, &rel_dir, supplied.is_some());
+            steps.push(("fix", fix_agent_turn(&ctx_t, "fix", prompt).await));
+            // The other two agents have a patch to look at or do not run.
+            let shape = std::fs::read_to_string(fix_dir.join("fix.patch"))
+                .map(|t| lyrik_fix_arms::parse_patch(&t))
+                .unwrap_or_default();
+            if !shape.hunks.is_empty() {
+                let cross = shape.locality() == lyrik_fix_arms::Locality::CrossCutting;
+                let minimum = if cross {
+                    lyrik_fix_arms::VARIANT_MIN_CROSS_CUTTING
+                } else {
+                    lyrik_fix_arms::VARIANT_MIN_LOCALIZED
+                };
+                let prompt = lyrik_fix::build_attack_prompt(&c, &run_id_t, &rel_dir, minimum);
+                steps.push((
+                    "fix-attack",
+                    fix_agent_turn(&ctx_t, "fix-attack", prompt).await,
+                ));
+                let prompt = lyrik_fix::build_recheck_prompt(
+                    &c,
+                    &run_id_t,
+                    &rel_dir,
+                    &functionality_t,
+                    cross,
+                );
+                steps.push((
+                    "fix-recheck",
+                    fix_agent_turn(&ctx_t, "fix-recheck", prompt).await,
+                ));
             }
+            (c, rel_dir, revision, supplied, steps)
         });
         handles.push(h);
     }
-    let mut finished: Vec<(lyrik_fix::Confirmed, String)> = Vec::new();
+    let mut finished = Vec::new();
     for h in handles {
-        let (c, rel_dir, result) = match h.await {
+        let (c, rel_dir, revision, supplied, steps) = match h.await {
             Ok(r) => r,
             Err(e) => {
                 audit.emit(
@@ -2358,21 +2445,24 @@ async fn dispatch_fixes(
                 continue;
             }
         };
-        let (status, reason, skipped) = match result {
-            Ok(skipped) => ("success", None, skipped),
-            Err(reason) => ("transient_failure", Some(reason), Vec::new()),
-        };
-        audit.emit(
-            "lyrik.fix.completed",
-            serde_json::json!({
-                "stable_id": c.stable_id,
-                "dir": rel_dir,
-                "status": status,
-                "reason": reason,
-                "skipped": skipped,
-            }),
-        )?;
-        finished.push((c, rel_dir));
+        for (step, result) in steps {
+            let (status, reason, skipped) = match result {
+                Ok(skipped) => ("success", None, skipped),
+                Err(reason) => ("transient_failure", Some(reason), Vec::new()),
+            };
+            audit.emit(
+                "lyrik.fix.completed",
+                serde_json::json!({
+                    "stable_id": c.stable_id,
+                    "dir": rel_dir,
+                    "step": step,
+                    "status": status,
+                    "reason": reason,
+                    "skipped": skipped,
+                }),
+            )?;
+        }
+        finished.push((c, rel_dir, revision, supplied));
     }
     // A fix may not touch the target tree. A tree that was clean at
     // run start and is dirty now was written to; a tree already dirty
@@ -2382,14 +2472,29 @@ async fn dispatch_fixes(
     if target_modified {
         audit.emit("lyrik.fix.target_modified", serde_json::json!({}))?;
     }
+    // What ran is what the session log holds, not what an agent wrote.
+    let handle = session_log.handle_for(wirken_audit::SessionId::new(agent_id));
+    let events = session_log
+        .get_since(&handle, 0)
+        .context("read the run's session log for the fix step's commands")?;
+    let observed = lyrik_fix_arms::observed_execs(events.iter().map(|e| &e.event));
     let mut outcomes = Vec::with_capacity(finished.len());
-    let (mut fixes, mut inconclusive) = (0usize, 0usize);
-    for (c, rel_dir) in finished {
-        let out = lyrik_fix::judge(&run_dir.join(&rel_dir), &rel_dir, &c, target_modified);
-        match out.verdict {
-            lyrik_fix::Verdict::Fix => fixes += 1,
-            lyrik_fix::Verdict::Inconclusive => inconclusive += 1,
-        }
+    for (c, rel_dir, revision, supplied) in finished {
+        let layout = lyrik_fix_arms::Layout::new(&run_id, &rel_dir);
+        lyrik_fix::save_observed(&run_dir.join(&rel_dir), &layout, &observed)?;
+        let out = lyrik_fix::judge(&lyrik_fix::JudgeInput {
+            run_dir,
+            rel_dir: &rel_dir,
+            run_id: &run_id,
+            confirmed: &c,
+            revision: &revision,
+            observed: &observed,
+            target: &target,
+            target_modified,
+            fix_model: &llm_config.model,
+            supplied_sha256: supplied.as_deref(),
+            functionality: &functionality,
+        });
         audit.emit(
             "lyrik.fix.verdict",
             serde_json::json!({
@@ -2397,12 +2502,24 @@ async fn dispatch_fixes(
                 "dir": out.dir,
                 "verdict": out.verdict,
                 "reasons": out.reasons,
+                "labels": out.labels,
+                "arms": out.arms,
+                "fix_locality": out.fix_locality,
+                "class_open_sites": out.class_open_sites.count,
+                "untested_paths": out.untested_paths.len(),
             }),
         )?;
         outcomes.push(out);
     }
     lyrik_fix::record_fixes(findings_path, &outcomes)?;
-    eprintln!("  defender fixes: {fixes} proven, {inconclusive} inconclusive");
+    let rejected =
+        lyrik_fix::log_rejections(&findings_path.with_file_name("rejections.jsonl"), &outcomes)?;
+    let summary = lyrik_fix::summary(&outcomes);
+    eprintln!("  defender fixes: {}", lyrik_fix::summary_line(&summary));
+    audit.emit(
+        "lyrik.fix.summary",
+        serde_json::json!({ "summary": summary, "rejections_logged": rejected }),
+    )?;
     Ok(())
 }
 
