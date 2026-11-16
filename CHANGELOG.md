@@ -56,14 +56,41 @@ tagged.
   pass-through, says whether a model-time ceiling still applies, and is not
   logged under a budget with no USD ceiling.
 
-- Lyrik's defender fix step judges from the `exec` results on the session
-  log for commands the runner composed, and no longer reads a `proof.json`
-  written by the fix agent. A `fixes` entry's `verdict` is `candidate_fix`,
-  `rejected` or `inconclusive` where it was `fix` or `inconclusive`, and the
-  entry has no `proof`. A reproduction command must print `LYRIK_REACHED`
-  before its assertion and exit non-zero when the finding holds for its fix
-  to be checked; a failed build or a refused command is never a pass. Rejected
-  fixes are appended to `rejections.jsonl`.
+- Lyrik's defender fix step, as released in 2.5.1 through 3.3.1, did not
+  verify a fix. Three things were wrong:
+  - The three-arm proof was read from the fix agent's own `proof.json`. The
+    runner checked the file's shape and never executed an arm or looked at
+    what `exec` had run.
+  - The patch apply step the staged skill prescribed was a no-op. `git apply`
+    ran from inside a copy that sits in the target's own repository, where
+    it skips every path outside the copy and exits 0 with nothing changed.
+  - So every `fixes` entry with `verdict: "fix"` written by those releases
+    is unverified, and should be treated as an unchecked patch.
+
+  The step now judges from the `exec` results on the session log for
+  commands the runner composed, and applies the patch from the target root
+  with `git apply --directory`. `verdict` is `candidate_fix`, `rejected` or
+  `inconclusive`; the value `fix` and the `proof` field are gone. A
+  `candidate_fix` label and the run summary always carry the arm tally
+  (`candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run`), and the
+  summary counts candidates whose functionality arm did not pass as
+  functionality unverified. A reproduction command must print
+  `LYRIK_REACHED` on stdout before its assertion and exit non-zero when the
+  finding holds for its fix to be checked, so a reproduction written by an
+  earlier release leaves its fix `inconclusive`. A failed build or a refused
+  command is never a pass, and no arm passes on a copy that did not build.
+  Rejected fixes are appended to `rejections.jsonl`.
+- The fix step's inputs from the target, `fix.test_command` and
+  `fix.coverage_command` in `.lyrik/config.json` and the patches under
+  `.lyrik/fix-patches/`, are read once at run start before any agent runs.
+  Their SHA-256 values are on each fix record under `inputs` and on the
+  `lyrik.fix.started` and `lyrik.fix.verdict` rows, and the record carries
+  `patch_source` (`supplied` or `generated`). A change to either during the
+  run is recorded as `lyrik.fix.input_changed` and makes the arms that
+  rested on it `inconclusive`
+  (`a_config_an_agent_wrote_during_the_run_is_refused`,
+  `a_patch_written_into_the_supplied_directory_during_the_run_is_refused`,
+  `crates/cli/src/commands/lyrik_fix.rs`).
 
 ### Fixed
 
@@ -656,6 +683,11 @@ Revisited when both move to p256/p384 0.14.
   `findings.json`; anything short of all three arms is `inconclusive` with
   its reasons, never a fix. Exec stays gated per command with no stored
   grant; a refused command is recorded and skipped.
+  Correction, added after 3.3.1: this entry overstated the step. The runner
+  read the three arms from the agent's own `proof.json` and executed none of
+  them, and the patch apply was a no-op inside the copy. A `verdict` of
+  `fix` from 2.5.1 through 3.3.1 is unverified. The release after 3.3.1
+  replaces the step.
 - `docs/threat-model.md` carries the six sections the Lyrik adjudication
   reads: assets, trust boundaries, access controls, supported configurations,
   what is and is not a vulnerability, and the evidence required for a valid

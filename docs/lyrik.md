@@ -398,14 +398,34 @@ Lyrik did not write (a maintainer's, an upstream fix), put it at
 `.lyrik/fix-patches/<slug>.patch` in the target, where `<slug>` is the
 finding's `stable_id` with every run of bytes outside `[A-Za-z0-9._]` replaced
 by `-`. The run checks that patch in place of writing one, records
-`patch.source` `supplied` and its SHA-256, and runs the same arms. Matching a
+`patch_source` `supplied` (`generated` for a patch the fix agent wrote) and
+its SHA-256, and runs the same arms. Matching a
 known fix earns nothing: in the 1Password study the reference fix itself
 carried an off-by-one that a third of the generated patches reproduced and the
 grader took as equivalent ([FLAWED] 4.4).
 
+**Run inputs.** The fix step takes two inputs from the target:
+`fix.test_command` and `fix.coverage_command` in `.lyrik/config.json`, and the
+patches under `.lyrik/fix-patches/`. Both are read once, at run start, before
+any agent runs, and nothing reads them again except to compare. A patch or a
+command that appears there during the run is never used. `write_file` cannot
+reach either path: every staged skill's `write_paths` is the run's own
+directory. An approved `exec` runs with the target mounted read-write, so
+after the fix agents finish the runner hashes both again. A changed
+`.lyrik/config.json` makes the functionality arm `inconclusive`; a changed,
+added or removed patch for a finding makes every arm of that finding
+`inconclusive`; the run records `lyrik.fix.input_changed`. A changed
+`.lyrik/config.json` also fails the run, as it always has. Each fix record
+carries `inputs` with `config_sha256` and, for a supplied patch,
+`supplied_patch_sha256`, as read at run start; the `lyrik.fix.started` and
+`lyrik.fix.verdict` rows carry the same digests. A link under
+`.lyrik/fix-patches/` is not read.
+
 **The contract for a command that shows a defect.** It prints `LYRIK_REACHED`
-on a line of its own immediately before its assertion, exits non-zero when
-the defect shows and zero when it does not. One command string runs unchanged
+on a line of its own on stdout immediately before its assertion, once the
+code under test has run and returned what the assertion reads, and exits
+non-zero when the defect shows and zero when it does not. Stderr is not read
+for the line. One command string runs unchanged
 in each copy; a command that names a copy is refused. A run with no
 `LYRIK_REACHED` line never reached its assertion (a failed build, a missing
 dependency) and is `inconclusive`, whatever it exited with. The staged walk
@@ -422,7 +442,7 @@ The arms, in `arms` order:
 |---|---|---|
 | `reproduction` | The original reproduction shows the defect in a `baseline` copy of the scanned revision, does not in the `patched` copy, and shows it again in a `reverted` copy where the patch was applied, reverted, and `diff -r` against the baseline printed nothing | It still shows the defect in the patched copy |
 | `variant` | At least two proofs of concept by different paths (another caller, another input shape, a cleanup or error path) each show the defect in the baseline and not in the patched copy | Any variant shows the defect in the patched copy: the fix is partial |
-| `root_cause` | The patch touches the finding's `origin`, and the root-cause claim is confirmed by an executed run | The patch touches the sink at `location` and not the origin: `symptom_patch` |
+| `root_cause` | The patch touches the finding's `origin`, the root-cause claim is confirmed by an executed run, and the reproduction reached its assertion in the patched copy | The patch touches the sink at `location` and not the origin: `symptom_patch` |
 | `relocation` | The re-walk reported no candidate and a bounded fuzz run over the patched functions executed clean | The re-walk reported a new or relocated candidate, or the fuzz run shows a defect in the patched copy |
 | `functionality` | The test suite passes in both copies, a coverage report shows each patched file exercised, and the benign-input output is identical in both copies when that differential ran | The suite passes in the baseline and fails in the patched copy, or benign-input output differs |
 
@@ -436,7 +456,9 @@ The arms, in `arms` order:
   the list is complete.
 - **Root cause.** The comparison is of the patch's hunks against `origin` and
   `location`. With no `origin` on the finding, or a patch that touches
-  neither site, the arm is `inconclusive`.
+  neither site, the arm is `inconclusive`. It is also `inconclusive` when the
+  patched copy did not build or the reproduction never reached its assertion
+  there: no arm passes on a copy that did not run.
 - **Root-cause claim.** `root_cause_claim` holds the invariant the fix was
   given, the `origin`, and `evidence_state`: `confirmed_by_executed_poc` when
   the baseline run showed the defect and its output names the origin's file
@@ -470,15 +492,37 @@ The arms, in `arms` order:
   A cross-cutting patch raises `variant_minimum` to four and requires the
   benign-input differential. It does not withhold `apply.sh`.
 
-**Verdict.** `rejected` when any arm failed. `inconclusive` when the
-reproduction arm did not pass, the patch is missing, a supplied patch changed
-during the step, or a target tree that was clean at run start is dirty after
-it. Otherwise `candidate_fix`, with every arm and its state on the record:
-a `candidate_fix` may carry arms that are `inconclusive` or `not_run`. Each
-failed arm of a rejected fix is appended to `rejections.jsonl` as
-`{"kind": "fix", "stable_id", "arm", "basis", "reason", "patch"}`. A rejected
-fix is not retried. The run prints, and `fix_summary` holds, the count of
-fixes by verdict and by each arm's state.
+**Verdict.** The rule, in order:
+
+1. `rejected` when any arm is `fail`.
+2. Otherwise `inconclusive` when any of these holds: the `reproduction` arm
+   is not `pass`; `fix.patch` is missing or holds no hunk; the patch in the
+   fix directory is not the supplied patch read at run start; a run input
+   changed during the run; a target tree that was clean at run start is
+   dirty after the step.
+3. Otherwise `candidate_fix`.
+
+So what separates `candidate_fix` from `inconclusive` is the `reproduction`
+arm and the integrity of the patch, the inputs and the target tree. The other
+four arms do not: a `candidate_fix` may carry `variant`, `root_cause`,
+`relocation` or `functionality` as `inconclusive` or `not_run`. For that
+reason `candidate_fix` is never shown without the arm tally. `label` reads
+`candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run`, and
+`arm_tally` holds the counts. A fix whose `functionality` arm is
+`inconclusive` or `not_run` carries the label `functionality_unverified`.
+
+**Run summary.** `fix_summary.by_verdict.candidate_fix` is an object, not a
+count: `count`, `all_arms_passed`, `functionality_unverified` (candidates
+whose functionality arm did not pass) and `arms` with `passed`,
+`inconclusive` and `not_run` summed over the candidates. `rejected` and
+`inconclusive` are counts, and `by_arm` counts fixes in each state of each
+arm. The terminal line prints the same: `1 candidate (their arms: 3 passed,
+1 inconclusive, 1 not_run; 0 with all arms passed; 1 functionality
+unverified), 0 rejected, 0 inconclusive`.
+
+**Rejections.** Each failed arm of a rejected fix is appended to
+`rejections.jsonl` as `{"kind": "fix", "stable_id", "arm", "basis",
+"reason", "patch", "patch_source"}`. A rejected fix is not retried.
 
 **What is left for a maintainer.** Under `staging/fix/<slug>/`: `fix.patch`,
 `apply.sh` to run from the project root, `variants/` and `attack.json`,
@@ -496,22 +540,43 @@ replay runs, so no finding is confirmed and the run records
 `lyrik.fix.none_confirmed`; `lyrik.fix.skipped` is written per finding when
 findings were confirmed and `exec` is unavailable. The audit log carries
 `lyrik.fix.started`, `lyrik.fix.completed` per agent with its `step`,
-`lyrik.fix.verdict` with the arms, and `lyrik.fix.summary`.
+`lyrik.fix.input_changed`, `lyrik.fix.verdict` with the label, the arm
+tally, the arms, `patch_source` and the input digests, and
+`lyrik.fix.summary`.
 
-**What the arms do not catch.** Two or four variants is a floor; a fuzzer
-finds inputs a hand-written variant does not, and [PatchBench] reports patches
-that pass a corpus of dozens and still leave the root cause partly open. A
-different latent bug in the patched function, a performance regression, a new
-dependency that is not the package intended, and a default that keeps a class
-open while each instance is patched are outside every arm. No runner can show
-that a path nobody listed does not exist.
+**What the arms do not catch.**
+
+- **Fuzzer-scale variant corpora.** Two or four hand-written variants is a
+  floor. [PatchBench] derives dozens of inputs per vulnerability by fuzzing
+  from the original proof of concept, and still reports patches that pass
+  them all and leave the root cause partly open.
+- **Sanitizer errors on benign input.** The benign-input differential compares
+  output. It does not build with a sanitizer, so a memory error that does not
+  change the output is not seen.
+- **Reuse of project constructs.** A patch that adds its own check where the
+  project has a helper for it passes every arm.
+- **Performance regressions.** Nothing measures time or memory; a timeout is
+  `inconclusive`, not a finding.
+- **A different latent bug in the patched function.** The arms follow the
+  finding's invariant. Another defect in the same code is outside them.
+- **Defaults that regenerate a class.** `class_open_sites` lists code sites
+  with the same pattern. A default or a configuration that keeps producing
+  new instances is not a code site.
+- **Reproductions written before the marker contract.** A reproduction
+  command that does not print `LYRIK_REACHED` cannot be read, so a finding
+  from a run before this contract gets a fix whose `reproduction` arm, and
+  with it the verdict, is `inconclusive`.
+- **A dependency that is not the package intended.** `patch` lists any
+  dependency manifest the patch touches; nothing checks the package.
+- **Paths nobody listed.** No runner can show that an omitted path does not
+  exist.
 
 **Sources.** The arms follow checks described in:
 
 - OpenSSF, [Finding and Fixing Vulnerabilities Using AI][OpenSSF], sections
   5.4, 5.6 and 5.7: re-run the proof of concept, try variations with a
-  separate agent, fix the root cause and not the instance, keep verifiers
-  deterministic.
+  separate agent, fix the root cause and not the instance, and keep what was
+  learned as a deterministic check.
 - Shen et al., [PatchBench]: variants derived from the original proof of
   concept, benign-input output state, unit tests, and the four patterns of
   patches that stop the proof of concept and are still wrong.
@@ -679,7 +744,7 @@ without a marker and exits zero.
 
 ### Carried outside schema 1.1
 
-Five additions sit outside the 1.1 contract. The validator tolerates unknown
+Seven additions sit outside the 1.1 contract. The validator tolerates unknown
 keys, so they do not change `schema_version`, and a later minor release may
 change them:
 
@@ -701,13 +766,18 @@ change them:
   [lyrik-brocards.md](lyrik-brocards.md#reproductions-and-replay).
 - `fixes`, a top-level array present after a defender-mode run with at least
   one confirmed finding, one record per finding: `stable_id`, `dir`,
-  `verdict` (`candidate_fix`, `rejected` or `inconclusive`), `label`
-  (`candidate fix`, on a `candidate_fix` only), `reasons`, `labels`, `arms`,
-  `fix_locality`, `variant_minimum`, `root_cause_claim`, `untested_paths`,
-  `class_open_sites`, `patch`, `fix_model` and `artifacts`. See
+  `verdict` (`candidate_fix`, `rejected` or `inconclusive`), `label` (on a
+  `candidate_fix` only, always with the arm tally), `arm_tally`,
+  `patch_source` (`supplied` or `generated`), `inputs`, `reasons`, `labels`,
+  `arms`, `fix_locality`, `variant_minimum`, `root_cause_claim`,
+  `untested_paths`, `class_open_sites`, `patch`, `fix_model` and `artifacts`.
+  A `verdict` of `fix` in a `findings.json` from 3.3.1 or earlier was read
+  from the fix agent's own report and is unverified. See
   [Defender fix step](#defender-fix-step).
-- `fix_summary`, beside `fixes`: `fixes`, `by_verdict`, and `by_arm` with the
-  count of fixes in each state of each arm.
+- `fix_summary`, beside `fixes`: `fixes`, `by_verdict` (where
+  `candidate_fix` is an object carrying the arm tally and
+  `functionality_unverified`), and `by_arm` with the count of fixes in each
+  state of each arm.
 - `origin` on a finding, when the walk traced it: `file`, `line_start` and
   `function`, the code where the invariant violation starts, as distinct from
   `location`, where it surfaces.
