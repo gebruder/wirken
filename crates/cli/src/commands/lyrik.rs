@@ -206,6 +206,9 @@ pub async fn run(
         .with_context(|| format!("read {}", config_path.display()))?;
     let config: serde_json::Value = serde_json::from_str(&config_body)
         .with_context(|| format!("parse {}", config_path.display()))?;
+    // The fix step's inputs from the target, read here, once, before
+    // any agent exists. Nothing reads them again but to compare.
+    let fix_inputs = lyrik_fix::FixInputs::capture(target, &config_body, &config);
     super::lyrik_walks::refuse_target_walks_dir(&config, &super::config().data_dir)?;
     // Whether the sign-off is skipped is the operator's to say, on the
     // command line. The config is a file in the assessed repository,
@@ -382,6 +385,7 @@ pub async fn run(
                     &findings_dest,
                     &extras,
                     &scoring,
+                    &fix_inputs,
                     chain,
                 )
                 .await;
@@ -963,6 +967,7 @@ async fn dispatch_via_agent_runtime(
     expected_findings: &Path,
     extras: &Extras,
     scoring: &Scoring,
+    fix_inputs: &lyrik_fix::FixInputs,
     chain: Option<RunChain>,
 ) -> Result<Option<Funnel>> {
     // Per-walk parallelism opt-in. Parsed and validated here so a
@@ -1612,7 +1617,7 @@ async fn dispatch_via_agent_runtime(
             expected_findings,
             extras,
             exec_available,
-            lyrik_fix::functionality_config(config),
+            fix_inputs,
             terminal.clone(),
             audit,
         )
@@ -2290,7 +2295,7 @@ async fn dispatch_fixes(
     findings_path: &Path,
     extras: &Extras,
     exec_available: bool,
-    functionality: lyrik_fix_arms::FunctionalityConfig,
+    inputs: &lyrik_fix::FixInputs,
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
@@ -2368,24 +2373,23 @@ async fn dispatch_fixes(
         std::fs::create_dir_all(&fix_dir)
             .with_context(|| format!("create {}", fix_dir.display()))?;
         lyrik_fix::write_apply_script(&fix_dir)?;
-        // A patch supplied for this finding is checked as it is.
-        let supplied_path = target
-            .join(lyrik_fix::SUPPLIED_PATCH_DIR)
-            .join(format!("{slug}.patch"));
-        let supplied = match std::fs::read(&supplied_path) {
-            Ok(bytes) => {
-                std::fs::write(fix_dir.join("fix.patch"), &bytes)
-                    .with_context(|| format!("write {}", fix_dir.join("fix.patch").display()))?;
-                Some(lyrik_fix::sha256_hex(&bytes))
-            }
-            Err(_) => None,
-        };
+        // A patch supplied for this finding is checked as it was read at
+        // run start. The directory is not read again here.
+        let supplied = inputs.patches.get(&slug);
+        if let Some(patch) = supplied {
+            std::fs::write(fix_dir.join("fix.patch"), &patch.bytes)
+                .with_context(|| format!("write {}", fix_dir.join("fix.patch").display()))?;
+        }
+        let supplied_sha256 = supplied.map(|p| p.sha256.clone());
+        let supplied = supplied.is_some();
         audit.emit(
             "lyrik.fix.started",
             serde_json::json!({
                 "stable_id": c.stable_id,
                 "dir": rel_dir,
-                "patch_source": if supplied.is_some() { "supplied" } else { "lyrik" },
+                "patch_source": if supplied { "supplied" } else { "generated" },
+                "config_sha256": inputs.config_sha256,
+                "supplied_patch_sha256": supplied_sha256,
             }),
         )?;
         let revision = code_revision
@@ -2394,12 +2398,11 @@ async fn dispatch_fixes(
         let sem_handle = sem.clone();
         let ctx_t = ctx.clone();
         let run_id_t = run_id.clone();
-        let functionality_t = functionality.clone();
+        let functionality_t = inputs.functionality.clone();
         let h = tokio::spawn(async move {
             let _permit = sem_handle.acquire_owned().await.expect("semaphore closed");
             let mut steps = Vec::with_capacity(lyrik_fix::FIX_SKILLS.len());
-            let prompt =
-                lyrik_fix::build_fix_prompt(&c, &run_id_t, &revision, &rel_dir, supplied.is_some());
+            let prompt = lyrik_fix::build_fix_prompt(&c, &run_id_t, &revision, &rel_dir, supplied);
             steps.push(("fix", fix_agent_turn(&ctx_t, "fix", prompt).await));
             // The other two agents have a patch to look at or do not run.
             let shape = std::fs::read_to_string(fix_dir.join("fix.patch"))
@@ -2429,13 +2432,13 @@ async fn dispatch_fixes(
                     fix_agent_turn(&ctx_t, "fix-recheck", prompt).await,
                 ));
             }
-            (c, rel_dir, revision, supplied, steps)
+            (c, rel_dir, revision, steps)
         });
         handles.push(h);
     }
     let mut finished = Vec::new();
     for h in handles {
-        let (c, rel_dir, revision, supplied, steps) = match h.await {
+        let (c, rel_dir, revision, steps) = match h.await {
             Ok(r) => r,
             Err(e) => {
                 audit.emit(
@@ -2462,7 +2465,7 @@ async fn dispatch_fixes(
                 }),
             )?;
         }
-        finished.push((c, rel_dir, revision, supplied));
+        finished.push((c, rel_dir, revision));
     }
     // A fix may not touch the target tree. A tree that was clean at
     // run start and is dirty now was written to; a tree already dirty
@@ -2472,6 +2475,20 @@ async fn dispatch_fixes(
     if target_modified {
         audit.emit("lyrik.fix.target_modified", serde_json::json!({}))?;
     }
+    // The inputs read at run start against what is on disk now. A
+    // difference means something wrote there mid-run; the arms that
+    // rested on the input are withdrawn.
+    let changes = inputs.changes(&target);
+    if changes.any() {
+        audit.emit(
+            "lyrik.fix.input_changed",
+            serde_json::json!({
+                "config": changes.config,
+                "config_sha256_start": inputs.config_sha256,
+                "supplied_patches": changes.patches,
+            }),
+        )?;
+    }
     // What ran is what the session log holds, not what an agent wrote.
     let handle = session_log.handle_for(wirken_audit::SessionId::new(agent_id));
     let events = session_log
@@ -2479,7 +2496,7 @@ async fn dispatch_fixes(
         .context("read the run's session log for the fix step's commands")?;
     let observed = lyrik_fix_arms::observed_execs(events.iter().map(|e| &e.event));
     let mut outcomes = Vec::with_capacity(finished.len());
-    for (c, rel_dir, revision, supplied) in finished {
+    for (c, rel_dir, revision) in finished {
         let layout = lyrik_fix_arms::Layout::new(&run_id, &rel_dir);
         lyrik_fix::save_observed(&run_dir.join(&rel_dir), &layout, &observed)?;
         let out = lyrik_fix::judge(&lyrik_fix::JudgeInput {
@@ -2492,8 +2509,8 @@ async fn dispatch_fixes(
             target: &target,
             target_modified,
             fix_model: &llm_config.model,
-            supplied_sha256: supplied.as_deref(),
-            functionality: &functionality,
+            inputs,
+            changes: &changes,
         });
         audit.emit(
             "lyrik.fix.verdict",
@@ -2501,6 +2518,10 @@ async fn dispatch_fixes(
                 "stable_id": out.stable_id,
                 "dir": out.dir,
                 "verdict": out.verdict,
+                "label": out.label,
+                "arm_tally": out.arm_tally,
+                "patch_source": out.patch_source,
+                "inputs": out.inputs,
                 "reasons": out.reasons,
                 "labels": out.labels,
                 "arms": out.arms,

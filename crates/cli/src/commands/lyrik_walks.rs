@@ -571,8 +571,8 @@ fn reproduction_section(walk_name: &str) -> String {
          Write the record so that a reader with only the record can run it.\n\n\
          A command that shows a finding follows one contract, so that a later fix can be \
          checked from the command's exit status and output alone. It prints `{reached}` on \
-         a line of its own, flushed, immediately before its assertion, and that line \
-         reaches the command's output (`cargo test` hides a passing test's output without \
+         a line of its own on stdout, flushed, immediately before its assertion, and that \
+         line reaches the command's output (`cargo test` hides a passing test's output without \
          `-- --nocapture`). It exits non-zero when the finding holds and zero when it does \
          not. It names files under the run directory by their path from the project root, \
          `.lyrik/state/runs/<run-id>/...`, and uses no other path outside the project's \

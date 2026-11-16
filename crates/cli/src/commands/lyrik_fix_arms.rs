@@ -9,7 +9,7 @@
 //! reference fix gets nothing for it.
 //!
 //! A command that shows a defect follows one contract. It prints
-//! [`REACHED`] on a line of its own immediately before its assertion,
+//! [`REACHED`] on a line of its own on stdout immediately before its assertion,
 //! exits non-zero when the defect shows and zero when it does not.
 //! With no such line in the recorded output the harness never reached
 //! its assertion (a failed build, a missing dependency, an import
@@ -156,11 +156,15 @@ fn refused(o: &Observed) -> bool {
     !o.success && o.output.starts_with("Permission denied")
 }
 
+/// Whether the marker is on a line of its own on stdout. `exec` puts
+/// stderr after stdout behind a `[stderr] ` prefix; that part is not
+/// read, because an interpreter's error can echo the harness's own
+/// source, marker included, for a harness that ran nothing.
 fn has_marker(output: &str) -> bool {
-    output.lines().any(|l| {
-        let l = l.trim();
-        l == REACHED || l.strip_prefix("[stderr]").map(str::trim) == Some(REACHED)
-    })
+    output
+        .lines()
+        .take_while(|l| !l.starts_with("[stderr] "))
+        .any(|l| l.trim() == REACHED)
 }
 
 /// What a defect-showing command showed.
@@ -453,6 +457,14 @@ pub struct ArmResult {
 }
 
 impl ArmResult {
+    /// The arm with its state withdrawn: an input it rested on changed
+    /// while the run was under way.
+    pub fn withheld(mut self, reason: &str) -> Self {
+        self.state = ArmState::Inconclusive;
+        self.reasons.insert(0, reason.to_string());
+        self
+    }
+
     fn new(arm: &'static str, state: ArmState, basis: Option<Basis>, reasons: Vec<String>) -> Self {
         debug_assert!(
             !(state == ArmState::Pass && basis != Some(Basis::Executed)),
@@ -590,6 +602,8 @@ pub struct ClassSite {
 pub struct Reproduction {
     pub arm: ArmResult,
     pub baseline: Poc,
+    /// What the reproduction showed in the patched copy.
+    pub patched: Poc,
     /// What the baseline run printed, when it ran.
     pub baseline_output: Option<String>,
 }
@@ -690,6 +704,7 @@ pub fn reproduction_arm(log: &Log, layout: &Layout, command: &str, revision: &st
             reasons,
         ),
         baseline: b,
+        patched: p,
         baseline_output,
     }
 }
@@ -913,6 +928,7 @@ pub fn root_cause_arm(
     shape: &PatchShape,
     finding: &Value,
     claim: &RootCauseClaim,
+    patched: &Poc,
 ) -> (ArmResult, bool) {
     let judged = Some(Basis::ModelJudged);
     let Some(origin) = &claim.origin else {
@@ -932,6 +948,23 @@ pub fn root_cause_arm(
         .as_ref()
         .is_some_and(|s| shape.touches(&s.file, s.line_start));
     let at = |s: &Site| format!("{}:{}", s.file, s.line_start);
+    if at_origin && !matches!(patched, Poc::Shown | Poc::NotShown) {
+        // The patch is in the right place and nothing ran on it: a copy
+        // that did not build shows nothing about the patched code.
+        return (
+            ArmResult::new(
+                "root_cause",
+                ArmState::Inconclusive,
+                judged,
+                vec![format!(
+                    "the patch touches the recorded origin {}, and the reproduction never \
+                     reached its assertion in the patched copy",
+                    at(origin)
+                )],
+            ),
+            false,
+        );
+    }
     if at_origin {
         return match claim.evidence_state {
             ClaimEvidence::ConfirmedByExecutedPoc => (
@@ -1518,11 +1551,15 @@ mod tests {
         assert!(matches!(poc(&Run::TimedOut), Poc::Inconclusive(_)));
         assert!(matches!(poc(&Run::Refused), Poc::NotRun(_)));
         assert!(matches!(poc(&Run::Never), Poc::NotRun(_)));
-        // The marker on stderr counts.
-        assert_eq!(
+        // The marker on stderr does not count: a traceback can echo it.
+        assert!(matches!(
             poc(&done(false, &format!("[stderr] {REACHED}\nboom"))),
-            Poc::Shown
-        );
+            Poc::Inconclusive(_)
+        ));
+        assert!(matches!(
+            poc(&done(false, &format!("out\n[stderr] print(x)\n{REACHED}"))),
+            Poc::Inconclusive(_)
+        ));
     }
 
     #[test]
@@ -1779,6 +1816,7 @@ mod tests {
         Reproduction {
             arm: ArmResult::new("reproduction", ArmState::Inconclusive, None, Vec::new()),
             baseline,
+            patched: Poc::NotShown,
             baseline_output: output.map(str::to_string),
         }
     }
@@ -1787,7 +1825,7 @@ mod tests {
     fn a_patch_on_the_sink_with_the_origin_elsewhere_is_a_symptom_patch() {
         let f = finding();
         let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("panic in decode_len")));
-        let (arm, symptom) = root_cause_arm(&parse_patch(SINK_PATCH), &f, &claim);
+        let (arm, symptom) = root_cause_arm(&parse_patch(SINK_PATCH), &f, &claim, &Poc::NotShown);
         assert_eq!(arm.state, ArmState::Fail);
         assert!(symptom);
         assert!(
@@ -1810,13 +1848,28 @@ mod tests {
         );
         assert_eq!(claim.evidence_state, ClaimEvidence::ConfirmedByExecutedPoc);
         assert_eq!(claim.claim, "len never exceeds the buffer");
-        let (arm, symptom) = root_cause_arm(&shape, &f, &claim);
+        let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown);
         assert_eq!(arm.state, ArmState::Pass);
         assert!(!symptom);
+        // Same patch and claim, but the patched copy did not build: the
+        // reproduction never reached its assertion there.
+        for patched in [
+            Poc::Inconclusive("no marker".into()),
+            Poc::NotRun("not run".into()),
+        ] {
+            let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &patched);
+            assert_eq!(arm.state, ArmState::Inconclusive);
+            assert!(
+                arm.reasons[0].contains("never reached its assertion in the patched copy"),
+                "{:?}",
+                arm.reasons
+            );
+            assert!(!symptom);
+        }
         // Same patch, origin asserted only: a model's placement cannot pass.
         let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("boom")));
         assert_eq!(claim.evidence_state, ClaimEvidence::AssertedOnly);
-        let (arm, _) = root_cause_arm(&shape, &f, &claim);
+        let (arm, _) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown);
         assert_eq!(arm.state, ArmState::Inconclusive);
         assert_eq!(arm.basis, Some(Basis::ModelJudged));
         // Output names the origin, but the run never showed the defect.
@@ -1829,13 +1882,13 @@ mod tests {
         let mut bare = f.clone();
         bare.as_object_mut().unwrap().remove("origin");
         let claim = root_cause_claim(&bare, &reproduction(Poc::Shown, Some("x")));
-        let (arm, symptom) = root_cause_arm(&shape, &bare, &claim);
+        let (arm, symptom) = root_cause_arm(&shape, &bare, &claim, &Poc::NotShown);
         assert_eq!(arm.state, ArmState::Inconclusive);
         assert!(!symptom);
         // A patch that touches neither site.
         let other = parse_patch("--- a/src/z.rs\n+++ b/src/z.rs\n@@ -1,2 +1,3 @@\n x\n+y\n");
         let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("x")));
-        let (arm, symptom) = root_cause_arm(&other, &f, &claim);
+        let (arm, symptom) = root_cause_arm(&other, &f, &claim, &Poc::NotShown);
         assert_eq!(arm.state, ArmState::Inconclusive);
         assert!(!symptom);
     }

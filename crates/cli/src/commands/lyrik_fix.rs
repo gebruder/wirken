@@ -33,7 +33,7 @@
 //! one, an approval is a one-shot bypass that stores nothing, and a
 //! refused command is an arm not run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -139,7 +139,7 @@ pub const CANDIDATE_LABEL: &str = "candidate fix";
 #[serde(rename_all = "snake_case")]
 pub enum PatchSource {
     /// Written by the fix agent in this run.
-    Lyrik,
+    Generated,
     /// Supplied under [`SUPPLIED_PATCH_DIR`]: a maintainer's, an
     /// upstream fix, any other. Where it came from earns it nothing.
     Supplied,
@@ -151,7 +151,6 @@ pub struct PatchInfo {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    pub source: PatchSource,
     pub files: Vec<String>,
     /// Test files the patch edits. Any makes the suite unusable as a
     /// functionality check.
@@ -187,10 +186,17 @@ pub struct FixOutcome {
     /// The fix directory, relative to the run directory.
     pub dir: String,
     pub verdict: Verdict,
-    /// `candidate fix`, on a fix that was not rejected and whose
-    /// reproduction arm passed. Absent otherwise.
+    /// On a `candidate_fix` only, and never without the arm tally:
+    /// `candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<&'static str>,
+    pub label: Option<String>,
+    /// How many arms ended in each state.
+    pub arm_tally: ArmTally,
+    /// `supplied` for a patch read from the run's inputs, `generated`
+    /// for one the fix agent wrote.
+    pub patch_source: PatchSource,
+    /// The run inputs the arms rested on, as read at run start.
+    pub inputs: InputDigests,
     /// Why the verdict is not `candidate_fix`.
     pub reasons: Vec<String>,
     /// `symptom_patch`, `asserted_only_root_cause`,
@@ -212,6 +218,151 @@ pub struct FixOutcome {
     pub artifacts: Artifacts,
 }
 
+/// How many of a fix's arms ended in each state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct ArmTally {
+    pub pass: usize,
+    pub fail: usize,
+    pub inconclusive: usize,
+    pub not_run: usize,
+}
+
+impl ArmTally {
+    pub fn of(arms_list: &[ArmResult]) -> Self {
+        let mut t = Self::default();
+        for a in arms_list {
+            match a.state {
+                ArmState::Pass => t.pass += 1,
+                ArmState::Fail => t.fail += 1,
+                ArmState::Inconclusive => t.inconclusive += 1,
+                ArmState::NotRun => t.not_run += 1,
+            }
+        }
+        t
+    }
+
+    fn total(&self) -> usize {
+        self.pass + self.fail + self.inconclusive + self.not_run
+    }
+}
+
+/// The candidate label. There is no form of it without the tally.
+pub fn candidate_label(tally: &ArmTally) -> String {
+    format!(
+        "{CANDIDATE_LABEL}: {} of {} arms passed, {} inconclusive, {} not_run",
+        tally.pass,
+        tally.total(),
+        tally.inconclusive,
+        tally.not_run
+    )
+}
+
+/// The digests of the run inputs a fix record rested on.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InputDigests {
+    /// `.lyrik/config.json` as read at run start.
+    pub config_sha256: String,
+    /// The supplied patch as read at run start, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supplied_patch_sha256: Option<String>,
+}
+
+/// A patch supplied for a finding, as read at run start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuppliedPatch {
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+}
+
+/// The inputs the fix step takes from the target: the functionality
+/// commands in `.lyrik/config.json` and the patches under
+/// [`SUPPLIED_PATCH_DIR`]. Both sit in the tree an approved `exec`
+/// can write, so they are read once, at run start, before any agent
+/// runs, and nothing reads them again except to see whether they
+/// changed. What a walk or a fix agent writes there during the run is
+/// never used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixInputs {
+    pub config_sha256: String,
+    pub functionality: FunctionalityConfig,
+    /// By slug.
+    pub patches: BTreeMap<String, SuppliedPatch>,
+}
+
+/// Which run inputs differ on disk from what was read at run start.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct InputChanges {
+    pub config: bool,
+    /// Slugs whose supplied patch changed, appeared or went away.
+    pub patches: BTreeSet<String>,
+}
+
+impl InputChanges {
+    pub fn any(&self) -> bool {
+        self.config || !self.patches.is_empty()
+    }
+}
+
+fn read_supplied_patches(target: &Path) -> BTreeMap<String, SuppliedPatch> {
+    let dir = target.join(SUPPLIED_PATCH_DIR);
+    let mut out = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        // A regular file only: a link could point anywhere.
+        let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file());
+        let Some(slug) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".patch"))
+        else {
+            continue;
+        };
+        if let (true, Ok(bytes)) = (regular, std::fs::read(&path)) {
+            out.insert(
+                slug.to_string(),
+                SuppliedPatch {
+                    sha256: sha256_hex(&bytes),
+                    bytes,
+                },
+            );
+        }
+    }
+    out
+}
+
+impl FixInputs {
+    /// Read the inputs. `config_body` is the bytes of
+    /// `.lyrik/config.json` the run parsed `config` from.
+    pub fn capture(target: &Path, config_body: &str, config: &Value) -> Self {
+        Self {
+            config_sha256: sha256_hex(config_body.as_bytes()),
+            functionality: functionality_config(config),
+            patches: read_supplied_patches(target),
+        }
+    }
+
+    /// Compare what is on disk now with what was read.
+    pub fn changes(&self, target: &Path) -> InputChanges {
+        let config = std::fs::read(target.join(".lyrik").join("config.json"))
+            .map(|b| sha256_hex(&b) != self.config_sha256)
+            .unwrap_or(true);
+        let now = read_supplied_patches(target);
+        let patches = self
+            .patches
+            .keys()
+            .chain(now.keys())
+            .filter(|slug| {
+                self.patches.get(*slug).map(|p| &p.sha256) != now.get(*slug).map(|p| &p.sha256)
+            })
+            .cloned()
+            .collect();
+        InputChanges { config, patches }
+    }
+}
+
 /// What [`judge`] reads.
 pub struct JudgeInput<'a> {
     pub run_dir: &'a Path,
@@ -226,9 +377,10 @@ pub struct JudgeInput<'a> {
     /// Whether the target tree changed during the fix step.
     pub target_modified: bool,
     pub fix_model: &'a str,
-    /// The digest of the patch supplied for this finding, when one was.
-    pub supplied_sha256: Option<&'a str>,
-    pub functionality: &'a FunctionalityConfig,
+    /// The run's inputs as read at run start.
+    pub inputs: &'a FixInputs,
+    /// Which of them differ on disk now.
+    pub changes: &'a InputChanges,
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -254,7 +406,9 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         reasons.push("fix.patch is missing or holds no hunk".to_string());
     }
     let sha256 = (!patch_bytes.is_empty()).then(|| sha256_hex(&patch_bytes));
-    if let Some(supplied) = input.supplied_sha256
+    let slug = slug(&input.confirmed.stable_id);
+    let supplied = input.inputs.patches.get(&slug).map(|p| p.sha256.as_str());
+    if let Some(supplied) = supplied
         && sha256.as_deref() != Some(supplied)
     {
         reasons.push("the supplied patch was changed during the fix step".to_string());
@@ -283,12 +437,24 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     let (variant, untested_paths) =
         arms::variant_arm(&log, &layout, attack, command, variant_minimum, &fix_dir);
     claim.suspect = variant.state == ArmState::Fail;
-    let (root_cause, symptom_patch) =
-        arms::root_cause_arm(&shape, &input.confirmed.finding, &claim);
+    let (root_cause, symptom_patch) = arms::root_cause_arm(
+        &shape,
+        &input.confirmed.finding,
+        &claim,
+        &reproduction.patched,
+    );
     let recheck = arms::read_json::<arms::Recheck>(&fix_dir.join("recheck.json"));
     let relocation = arms::relocation_arm(&log, &layout, &recheck);
     let functionality =
-        arms::functionality_arm(&log, &layout, &recheck, &shape, input.functionality);
+        arms::functionality_arm(&log, &layout, &recheck, &shape, &input.inputs.functionality);
+    // The commands this arm ran came from the configuration read at run
+    // start. If the file differs now, something wrote it mid-run.
+    const CONFIG_CHANGED: &str = ".lyrik/config.json changed during the run";
+    let functionality = if input.changes.config {
+        functionality.withheld(CONFIG_CHANGED)
+    } else {
+        functionality
+    };
     let class_open_sites = arms::class_report(&recheck, input.target);
 
     if input.target_modified {
@@ -304,21 +470,35 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     if claim.suspect {
         labels.push("root_cause_suspect");
     }
-    if functionality
-        .reasons
-        .iter()
-        .any(|r| r.starts_with("functionality unverified"))
-    {
+    // Anything short of a pass, on a fix the arm did not reject.
+    if matches!(
+        functionality.state,
+        ArmState::Inconclusive | ArmState::NotRun
+    ) {
         labels.push("functionality_unverified");
     }
-    let reproduction_passed = reproduction.arm.state == ArmState::Pass;
-    let arms_list = vec![
+    let mut arms_list = vec![
         reproduction.arm,
         variant,
         root_cause,
         relocation,
         functionality,
     ];
+    // The patch the arms ran on was read at run start. If the file
+    // supplied for this finding differs now, no arm stands.
+    if input.changes.patches.contains(&slug) {
+        const PATCH_CHANGED: &str = "the patch supplied for this finding changed during the run";
+        arms_list = arms_list
+            .into_iter()
+            .map(|a| a.withheld(PATCH_CHANGED))
+            .collect();
+        reasons.push(PATCH_CHANGED.to_string());
+    }
+    if input.changes.config {
+        reasons.push(CONFIG_CHANGED.to_string());
+    }
+    let reproduction_passed = arms_list[0].state == ArmState::Pass;
+    let arm_tally = ArmTally::of(&arms_list);
     let failed: Vec<&ArmResult> = arms_list
         .iter()
         .filter(|a| a.state == ArmState::Fail)
@@ -346,7 +526,17 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         stable_id: input.confirmed.stable_id.clone(),
         dir: input.rel_dir.to_string(),
         verdict,
-        label: (verdict == Verdict::CandidateFix).then_some(CANDIDATE_LABEL),
+        label: (verdict == Verdict::CandidateFix).then(|| candidate_label(&arm_tally)),
+        arm_tally,
+        patch_source: if supplied.is_some() {
+            PatchSource::Supplied
+        } else {
+            PatchSource::Generated
+        },
+        inputs: InputDigests {
+            config_sha256: input.inputs.config_sha256.clone(),
+            supplied_patch_sha256: supplied.map(str::to_string),
+        },
         reasons,
         labels,
         arms: arms_list,
@@ -358,11 +548,6 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         patch: PatchInfo {
             path: format!("{}/fix.patch", input.rel_dir),
             sha256,
-            source: if input.supplied_sha256.is_some() {
-                PatchSource::Supplied
-            } else {
-                PatchSource::Lyrik
-            },
             test_files: shape.test_files().iter().map(|s| s.to_string()).collect(),
             dependency_manifests: shape
                 .dependency_manifests()
@@ -407,20 +592,44 @@ pub fn write_apply_script(fix_dir: &Path) -> Result<()> {
     .with_context(|| format!("write {}", dest.display()))
 }
 
-/// The run's counts: fixes by verdict and by each arm's outcome.
+/// The run's counts. A candidate count is an object that carries the
+/// arm tally of those candidates and how many of them have a
+/// functionality arm that did not pass; there is no bare count of
+/// candidates.
 pub fn summary(outcomes: &[FixOutcome]) -> Value {
-    let mut verdicts: BTreeMap<&str, usize> = BTreeMap::new();
-    for o in outcomes {
-        let key = match o.verdict {
-            Verdict::CandidateFix => "candidate_fix",
-            Verdict::Rejected => "rejected",
-            Verdict::Inconclusive => "inconclusive",
-        };
-        *verdicts.entry(key).or_default() += 1;
+    let count = |v: Verdict| outcomes.iter().filter(|o| o.verdict == v).count();
+    let candidates: Vec<&FixOutcome> = outcomes
+        .iter()
+        .filter(|o| o.verdict == Verdict::CandidateFix)
+        .collect();
+    let mut arms_of_candidates = ArmTally::default();
+    for o in &candidates {
+        arms_of_candidates.pass += o.arm_tally.pass;
+        arms_of_candidates.inconclusive += o.arm_tally.inconclusive;
+        arms_of_candidates.not_run += o.arm_tally.not_run;
     }
     serde_json::json!({
         "fixes": outcomes.len(),
-        "by_verdict": verdicts,
+        "by_verdict": {
+            "candidate_fix": {
+                "count": candidates.len(),
+                "all_arms_passed": candidates
+                    .iter()
+                    .filter(|o| o.arm_tally.pass == o.arms.len())
+                    .count(),
+                "functionality_unverified": candidates
+                    .iter()
+                    .filter(|o| o.labels.contains(&"functionality_unverified"))
+                    .count(),
+                "arms": {
+                    "passed": arms_of_candidates.pass,
+                    "inconclusive": arms_of_candidates.inconclusive,
+                    "not_run": arms_of_candidates.not_run,
+                },
+            },
+            "rejected": count(Verdict::Rejected),
+            "inconclusive": count(Verdict::Inconclusive),
+        },
         "by_arm": arms::count_by_arm(outcomes.iter().flat_map(|o| o.arms.iter())),
     })
 }
@@ -429,9 +638,16 @@ pub fn summary(outcomes: &[FixOutcome]) -> Value {
 pub fn summary_line(summary: &Value) -> String {
     let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
     let by_verdict = &summary["by_verdict"];
+    let c = &by_verdict["candidate_fix"];
     let mut line = format!(
-        "{} candidate, {} rejected, {} inconclusive",
-        n(by_verdict, "candidate_fix"),
+        "{} candidate (their arms: {} passed, {} inconclusive, {} not_run; {} with all arms \
+         passed; {} functionality unverified), {} rejected, {} inconclusive",
+        n(c, "count"),
+        n(&c["arms"], "passed"),
+        n(&c["arms"], "inconclusive"),
+        n(&c["arms"], "not_run"),
+        n(c, "all_arms_passed"),
+        n(c, "functionality_unverified"),
         n(by_verdict, "rejected"),
         n(by_verdict, "inconclusive")
     );
@@ -479,6 +695,7 @@ pub fn log_rejections(log_path: &Path, outcomes: &[FixOutcome]) -> Result<usize>
                 "basis": a.basis,
                 "reason": a.reasons.join("; "),
                 "patch": o.patch.path,
+                "patch_source": o.patch_source,
                 "applied_by": "fix",
             });
             lines.push_str(&serde_json::to_string(&line)?);
@@ -539,7 +756,8 @@ fn poc_contract() -> String {
     format!(
         "A proof of concept follows one contract. It prints `{}` on a line of its own, \
          flushed, immediately before its assertion; it exits non-zero when the defect shows \
-         and zero when it does not. It prints the line only once the code under test has \
+         and zero when it does not. The line goes to stdout; stderr is not read. It prints \
+         the line only once the code under test has \
          run and returned what the assertion reads: a harness that could not build or call \
          that code exits non-zero without printing it. The same command string runs \
          unchanged in each copy, \
@@ -960,7 +1178,17 @@ mod tests {
             self.judge_with(false, None)
         }
 
+        /// `supplied` is the patch read at run start for this finding.
         fn judge_with(&self, target_modified: bool, supplied: Option<&str>) -> FixOutcome {
+            self.judge_changed(target_modified, supplied, &InputChanges::default())
+        }
+
+        fn judge_changed(
+            &self,
+            target_modified: bool,
+            supplied: Option<&str>,
+            changes: &InputChanges,
+        ) -> FixOutcome {
             judge(&JudgeInput {
                 run_dir: self.tmp.path(),
                 rel_dir: REL,
@@ -971,9 +1199,29 @@ mod tests {
                 target: self.tmp.path(),
                 target_modified,
                 fix_model: "some-model",
-                supplied_sha256: supplied,
-                functionality: &FunctionalityConfig::default(),
+                inputs: &inputs(supplied),
+                changes,
             })
+        }
+    }
+
+    /// Run inputs holding, at most, a patch supplied for the one finding.
+    fn inputs(supplied: Option<&str>) -> FixInputs {
+        FixInputs {
+            config_sha256: sha256_hex(b"{}"),
+            functionality: FunctionalityConfig::default(),
+            patches: supplied
+                .map(|text| {
+                    (
+                        slug("auth::src/a.rs:10"),
+                        SuppliedPatch {
+                            bytes: text.as_bytes().to_vec(),
+                            sha256: sha256_hex(text.as_bytes()),
+                        },
+                    )
+                })
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -999,7 +1247,24 @@ mod tests {
     fn a_fix_no_arm_failed_is_a_candidate_fix_with_every_arm_listed() {
         let out = Case::new(ORIGIN_PATCH).with_variants(false).judge();
         assert_eq!(out.verdict, Verdict::CandidateFix, "{:?}", out.reasons);
-        assert_eq!(out.label, Some("candidate fix"));
+        // The label never stands without the tally.
+        assert_eq!(
+            out.label.as_deref(),
+            Some("candidate fix: 3 of 5 arms passed, 0 inconclusive, 2 not_run")
+        );
+        assert_eq!(
+            out.arm_tally,
+            ArmTally {
+                pass: 3,
+                fail: 0,
+                inconclusive: 0,
+                not_run: 2
+            }
+        );
+        // The functionality arm did not run: unverified, and labelled.
+        assert!(out.labels.contains(&"functionality_unverified"));
+        assert_eq!(out.inputs.config_sha256, sha256_hex(b"{}"));
+        assert_eq!(out.inputs.supplied_patch_sha256, None);
         let names: Vec<&str> = out.arms.iter().map(|a| a.arm).collect();
         assert_eq!(
             names,
@@ -1024,9 +1289,11 @@ mod tests {
         assert_eq!(out.untested_paths[0].id, "p3");
         assert!(!out.class_open_sites.listed);
         assert_eq!(out.fix_model, "some-model");
-        assert_eq!(out.patch.source, PatchSource::Lyrik);
+        assert_eq!(out.patch_source, PatchSource::Generated);
         let v = serde_json::to_value(&out).unwrap();
         assert_eq!(v["verdict"], "candidate_fix");
+        assert_eq!(v["patch_source"], "generated");
+        assert_eq!(v["arm_tally"]["not_run"], 2);
         assert_eq!(v["arms"][0]["basis"], "executed");
         assert_eq!(v["arms"][3]["state"], "not_run");
         assert!(v["arms"][3].get("basis").is_none());
@@ -1114,16 +1381,179 @@ mod tests {
     fn a_supplied_patch_runs_the_same_arms_and_earns_nothing_by_its_source() {
         // A reference fix that is a symptom patch is rejected like any other.
         let case = Case::new(SINK_PATCH).with_variants(false);
+        let out = case.judge_with(false, Some(SINK_PATCH));
+        assert_eq!(out.patch_source, PatchSource::Supplied);
         let digest = sha256_hex(SINK_PATCH.as_bytes());
-        let out = case.judge_with(false, Some(&digest));
-        assert_eq!(out.patch.source, PatchSource::Supplied);
         assert_eq!(out.patch.sha256.as_deref(), Some(digest.as_str()));
+        assert_eq!(
+            out.inputs.supplied_patch_sha256.as_deref(),
+            Some(digest.as_str())
+        );
         assert_eq!(out.verdict, Verdict::Rejected);
-        // A supplied patch that was edited during the step.
-        let out = case.judge_with(false, Some("00"));
+        // The fix directory's patch is not the one read at run start.
+        let out = case.judge_with(false, Some("another patch"));
         assert!(
             out.reasons
                 .contains(&"the supplied patch was changed during the fix step".to_string())
+        );
+    }
+
+    /// A target with a config and one supplied patch, as a run finds it.
+    fn target_with_inputs() -> (tempfile::TempDir, FixInputs) {
+        let tmp = tempdir().unwrap();
+        let lyrik = tmp.path().join(".lyrik");
+        std::fs::create_dir_all(lyrik.join("fix-patches")).unwrap();
+        let config = r#"{"mode":"defender","fix":{"test_command":"make check"}}"#;
+        std::fs::write(lyrik.join("config.json"), config).unwrap();
+        std::fs::write(
+            lyrik.join("fix-patches/auth-src-a.rs-10.patch"),
+            ORIGIN_PATCH,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(config).unwrap();
+        let inputs = FixInputs::capture(tmp.path(), config, &parsed);
+        (tmp, inputs)
+    }
+
+    #[test]
+    fn run_inputs_are_read_once_at_run_start_with_their_digests() {
+        let (tmp, inputs) = target_with_inputs();
+        assert_eq!(
+            inputs.functionality.test_command.as_deref(),
+            Some("make check")
+        );
+        assert_eq!(inputs.patches.len(), 1);
+        let patch = &inputs.patches["auth-src-a.rs-10"];
+        assert_eq!(patch.bytes, ORIGIN_PATCH.as_bytes());
+        assert_eq!(patch.sha256, sha256_hex(ORIGIN_PATCH.as_bytes()));
+        assert!(!inputs.changes(tmp.path()).any());
+    }
+
+    #[test]
+    fn a_config_an_agent_wrote_during_the_run_is_refused() {
+        let (tmp, inputs) = target_with_inputs();
+        // Mid-run, something writes a test command of its own choosing.
+        std::fs::write(
+            tmp.path().join(".lyrik/config.json"),
+            r#"{"mode":"defender","fix":{"test_command":"true","coverage_command":"echo src/len.rs 100%"}}"#,
+        )
+        .unwrap();
+        // The commands in force are still the ones read at run start.
+        assert_eq!(
+            inputs.functionality.test_command.as_deref(),
+            Some("make check")
+        );
+        assert_eq!(inputs.functionality.coverage_command, None);
+        let changes = inputs.changes(tmp.path());
+        assert!(changes.config);
+        assert!(changes.patches.is_empty());
+        // Even a suite that ran green in both copies under the written
+        // command, with the coverage it names, passes nothing.
+        let mut case = Case::new(ORIGIN_PATCH).with_variants(false);
+        let layout = Layout::new(RUN, REL);
+        case.add(layout.in_copy("baseline", "true"), true, "(no output)");
+        case.add(layout.in_copy("patched", "true"), true, "(no output)");
+        case.add(
+            layout.in_copy("patched", "echo src/len.rs 100%"),
+            true,
+            "src/len.rs 100%",
+        );
+        std::fs::write(
+            case.tmp.path().join(REL).join("recheck.json"),
+            r#"{"functionality":{"suite":{"command":"true"},"coverage":{"command":"echo src/len.rs 100%"}}}"#,
+        )
+        .unwrap();
+        // With the inputs unchanged this is what a pass looks like.
+        assert_eq!(arm(&case.judge(), "functionality").state, ArmState::Pass);
+        let out = case.judge_changed(false, None, &changes);
+        let functionality = arm(&out, "functionality");
+        assert_eq!(functionality.state, ArmState::Inconclusive);
+        assert_eq!(
+            functionality.reasons[0],
+            ".lyrik/config.json changed during the run"
+        );
+        assert!(out.labels.contains(&"functionality_unverified"));
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert_eq!(out.label, None);
+        // The other arms rested on nothing in the config and stand.
+        assert_eq!(arm(&out, "variant").state, ArmState::Pass);
+        // A config that went away is a change too.
+        std::fs::remove_file(tmp.path().join(".lyrik/config.json")).unwrap();
+        assert!(inputs.changes(tmp.path()).config);
+    }
+
+    #[test]
+    fn a_patch_written_into_the_supplied_directory_during_the_run_is_refused() {
+        let (tmp, inputs) = target_with_inputs();
+        let dir = tmp.path().join(".lyrik/fix-patches");
+        // A patch for another finding appears, and the supplied one is edited.
+        std::fs::write(dir.join("auth-src-b.rs-5.patch"), SINK_PATCH).unwrap();
+        std::fs::write(dir.join("auth-src-a.rs-10.patch"), SINK_PATCH).unwrap();
+        // Neither is what the run holds.
+        assert!(!inputs.patches.contains_key("auth-src-b.rs-5"));
+        assert_eq!(
+            inputs.patches["auth-src-a.rs-10"].bytes,
+            ORIGIN_PATCH.as_bytes()
+        );
+        let changes = inputs.changes(tmp.path());
+        assert!(!changes.config);
+        assert_eq!(
+            changes
+                .patches
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["auth-src-a.rs-10", "auth-src-b.rs-5"]
+        );
+        // Every arm of the affected finding is withdrawn.
+        let case = Case::new(ORIGIN_PATCH).with_variants(false);
+        let out = case.judge_changed(false, Some(ORIGIN_PATCH), &changes);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert!(out.arms.iter().all(|a| a.state == ArmState::Inconclusive));
+        assert!(out.arms.iter().all(|a| {
+            a.reasons[0] == "the patch supplied for this finding changed during the run"
+        }));
+        // A link in the directory is not read as a patch.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(dir.join("auth-src-b.rs-5.patch")).unwrap();
+            std::os::unix::fs::symlink("/etc/hostname", dir.join("auth-src-b.rs-5.patch")).unwrap();
+            assert!(!read_supplied_patches(tmp.path()).contains_key("auth-src-b.rs-5"));
+        }
+    }
+
+    #[test]
+    fn no_staged_skill_of_the_fix_step_may_write_the_run_inputs() {
+        // `write_file` is held to `write_paths`, which is the run's own
+        // directory; neither input path is under it.
+        let scope = super::super::lyrik_walks::run_write_scope(RUN);
+        assert_eq!(scope, "<workspace>/.lyrik/state/runs/sample/run-001");
+        for input in [
+            "<workspace>/.lyrik/config.json",
+            "<workspace>/.lyrik/fix-patches/x.patch",
+        ] {
+            assert!(!input.starts_with(&format!("{scope}/")), "{input}");
+        }
+        for name in FIX_SKILLS {
+            let text = skill_text(name, RUN, "exec, read_file, write_file, list_files");
+            let grants: Vec<&str> = text.lines().filter(|l| l.contains("write_paths")).collect();
+            assert_eq!(grants.len(), 1, "{name}");
+            assert!(
+                grants[0].ends_with(&format!("write_paths: [\"{scope}\"]")),
+                "{}",
+                grants[0]
+            );
+        }
+        let walk = super::super::lyrik_walks::wrap_with_wirken_frontmatter(
+            "sink-walk",
+            RUN,
+            None,
+            true,
+            "# walk\n",
+        );
+        assert!(
+            walk.contains(&format!("write_paths: [\"{scope}\"]")),
+            "{walk}"
         );
     }
 
@@ -1156,14 +1586,24 @@ mod tests {
         assert_eq!(body["fixes"][1]["verdict"], "rejected");
         let s = &body["fix_summary"];
         assert_eq!(s["fixes"], 3);
-        assert_eq!(s["by_verdict"]["candidate_fix"], 1);
+        // No bare candidate count: the tally and the unverified count ride with it.
+        let c = &s["by_verdict"]["candidate_fix"];
+        assert_eq!(c["count"], 1);
+        assert_eq!(c["arms"]["passed"], 3);
+        assert_eq!(c["arms"]["inconclusive"], 0);
+        assert_eq!(c["arms"]["not_run"], 2);
+        assert_eq!(c["all_arms_passed"], 0);
+        assert_eq!(c["functionality_unverified"], 1);
         assert_eq!(s["by_verdict"]["rejected"], 1);
         assert_eq!(s["by_verdict"]["inconclusive"], 1);
         assert_eq!(s["by_arm"]["variant"]["pass"], 1);
         assert_eq!(s["by_arm"]["variant"]["fail"], 1);
         assert_eq!(s["by_arm"]["variant"]["not_run"], 1);
         assert!(
-            summary_line(s).starts_with("1 candidate, 1 rejected, 1 inconclusive; "),
+            summary_line(s).starts_with(
+                "1 candidate (their arms: 3 passed, 0 inconclusive, 2 not_run; 0 with all arms \
+                 passed; 1 functionality unverified), 1 rejected, 1 inconclusive; "
+            ),
             "{}",
             summary_line(s)
         );
@@ -1459,8 +1899,8 @@ mod tests {
                     target: self.root(),
                     target_modified: false,
                     fix_model: "none: commands run by the test",
-                    supplied_sha256: None,
-                    functionality: &FunctionalityConfig::default(),
+                    inputs: &inputs(None),
+                    changes: &InputChanges::default(),
                 });
                 println!("{}", serde_json::to_string_pretty(&out).unwrap());
                 out
@@ -1520,6 +1960,10 @@ mod tests {
             assert_eq!(arm(&out, "functionality").state, ArmState::Fail);
             // No variant is counted as stopped by a copy that cannot run.
             assert_ne!(arm(&out, "variant").state, ArmState::Pass);
+            // The patch is at the origin, and no arm passes on a copy
+            // that did not build.
+            assert_eq!(arm(&out, "root_cause").state, ArmState::Inconclusive);
+            assert_eq!(out.arm_tally.pass, 0);
         }
     }
 }
