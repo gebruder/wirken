@@ -416,8 +416,11 @@ anything. The runner composes each command an arm rests on, the agents run
 them through `exec`, and the runner reads the exit status and output of
 exactly those commands from the run's session log. What an agent writes about
 a run is not read. No model grades a patch, its own or another's. Where a step
-does rest on a model's reading it is recorded as `model_judged`; such a step
-can fail an arm and cannot pass one.
+does rest on a model's reading it is recorded as `model_judged`. Such a step
+cannot pass an arm and cannot fail one: the arm is `inconclusive`, and what
+the model reported is kept on the arm under `model_claims` for a maintainer
+to read. An arm fails only on an executed run. A model-judged claim never
+rejects a fix by itself.
 
 **Any patch.** The arms take a patch and return a verdict. To check a patch
 Lyrik did not write (a maintainer's, an upstream fix), put it at
@@ -457,6 +460,15 @@ in each copy; a command that names a copy is refused. A run with no
 dependency) and is `inconclusive`, whatever it exited with. The staged walk
 wrapper tells every walk to write reproductions this way.
 
+**The same harness in the target and in a copy.** A walk's harness lives
+under the run's staging directory and names its own files by their path from
+the project root. A copy of the scanned revision does not hold the run's
+state, so each copy is given the `harness/` directory of every walk the
+reproduction command names, at the same relative path, and the command runs
+in the copy exactly as it ran in the target. The wrapper tells walks to keep
+a harness's inputs, markers and scratch output under its own `harness/`
+directory or in a temporary directory.
+
 **Arm states.** `pass`, `fail`, `inconclusive`, `not_run`. A refused `exec` is
 `not_run`. A failed build, a missing dependency, a timeout, or two runs of one
 command that disagree is `inconclusive`. Neither is a reproduction and neither
@@ -468,8 +480,8 @@ The arms, in `arms` order:
 |---|---|---|
 | `reproduction` | The original reproduction shows the defect in a `baseline` copy of the scanned revision, does not in the `patched` copy, and shows it again in a `reverted` copy where the patch was applied, reverted, and `diff -r` against the baseline printed nothing | It still shows the defect in the patched copy |
 | `variant` | At least two proofs of concept by different paths (another caller, another input shape, a cleanup or error path) each show the defect in the baseline and not in the patched copy | Any variant shows the defect in the patched copy: the fix is partial |
-| `root_cause` | The patch touches the finding's `origin`, the root-cause claim is confirmed by an executed run, and the reproduction reached its assertion in the patched copy | The patch touches the sink at `location` and not the origin: `symptom_patch` |
-| `relocation` | The re-walk reported no candidate and a bounded fuzz run over the patched functions executed clean | The re-walk reported a new or relocated candidate, or the fuzz run shows a defect in the patched copy |
+| `root_cause` | The patch touches the finding's `origin`, the root-cause claim is confirmed by an executed run, and the reproduction reached its assertion in the patched copy | The patch touches the sink at `location` and not the origin, and a variant by another path still shows the defect in the patched copy: `symptom_patch` |
+| `relocation` | The re-walk reported no candidate and a bounded fuzz run over the patched functions executed clean | A candidate's proof of concept shows it in the patched copy, or the fuzz run shows a defect there |
 | `functionality` | The test suite passes in both copies, a coverage report shows each patched file exercised, and the benign-input output is identical in both copies when that differential ran | The suite passes in the baseline and fails in the patched copy, or benign-input output differs |
 
 - **Variant.** The `fix-attack` agent lists every caller and path it finds
@@ -484,7 +496,12 @@ The arms, in `arms` order:
   `location`. With no `origin` on the finding, or a patch that touches
   neither site, the arm is `inconclusive`. It is also `inconclusive` when the
   patched copy did not build or the reproduction never reached its assertion
-  there: no arm passes on a copy that did not run.
+  there: no arm passes on a copy that did not run. A patch on the sink with
+  the origin elsewhere is a symptom patch only by the walks' placement of the
+  origin, which is a model's reading: alone it leaves the arm `inconclusive`
+  with the claim under `model_claims` and the label `symptom_patch_claimed`.
+  It fails, with the label `symptom_patch`, when the variant arm has an
+  executed variant that still shows the defect in the patched copy.
 - **Root-cause claim.** `root_cause_claim` holds the invariant the fix was
   given, the `origin`, and `evidence_state`: `confirmed_by_executed_poc` when
   the baseline run showed the defect and its output names the origin's file
@@ -494,7 +511,12 @@ The arms, in `arms` order:
 - **Relocation.** The `fix-recheck` agent applies the staged `invariant-walk`
   and `differential-walk` texts to everything reachable from the patched
   functions, not only the patched lines, looking for the violation moved
-  rather than removed, for example into a callback. Without a fuzz harness
+  rather than removed, for example into a callback. A candidate it reports is
+  a claim. The agent is told to write a proof of concept for each under
+  `relocation/<id>/` and run it in both copies; only a candidate whose proof
+  shows it in the patched copy fails the arm. One with no proof, or whose
+  proof does not show it, is listed under `model_claims`, the arm is
+  `inconclusive`, and the fix is not rejected for it. Without a fuzz harness
   the arm cannot pass: a re-walk that reports nothing is a model's reading,
   and the arm is `inconclusive`, `model_judged`.
 - **Functionality.** The suite and coverage commands come from `fix` in
@@ -565,7 +587,7 @@ any dependency manifests among them.
 **Exec** is gated as everywhere under `wirken lyrik`: the operator is asked
 before each command, an approval is a one-shot bypass that stores no grant,
 and a refused command is an arm not run. The step prints the command words it
-uses (`mkdir`, `git archive`, `tar`, `git apply`, `diff`) before the first
+uses (`mkdir`, `git archive`, `tar`, `cp`, `git apply`, `diff`) before the first
 prompt. Nothing is written into the project's tree. With the sandbox off no
 replay runs, so no finding is confirmed and the run records
 `lyrik.fix.none_confirmed`; `lyrik.fix.skipped` is written per finding when

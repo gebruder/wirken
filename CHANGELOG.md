@@ -96,6 +96,17 @@ tagged.
   finding holds for its fix to be checked, so a reproduction written by an
   earlier release leaves its fix `inconclusive`. A failed build or a refused
   command is never a pass, and no arm passes on a copy that did not build.
+  A step that rests on a model's reading can neither pass nor fail an arm:
+  the arm is `inconclusive` and the claim is kept on it under
+  `model_claims`. A relocation candidate fails its arm only when a proof of
+  concept shows it in the patched copy, and a symptom patch only when a
+  variant by another path still works there; a model-judged claim never
+  rejects a fix by itself
+  (`a_model_judged_claim_never_rejects_a_fix_by_itself`). Each copy carries
+  the harness directory of the walk whose reproduction it runs, at the path
+  it has in the target, so a harness that names its files from the project
+  root behaves the same in a copy
+  (`a_walk_style_harness_sees_the_defect_in_a_copy_that_carries_it`).
   Rejected fixes are appended to `rejections.jsonl`.
 - The fix step's inputs from the target, `fix.test_command` and
   `fix.coverage_command` in `.lyrik/config.json` and the patches under
