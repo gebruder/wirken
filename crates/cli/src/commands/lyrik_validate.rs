@@ -11,7 +11,7 @@
 //!
 //! Schema 1.1 changes from 1.0: `detection_source` promoted from
 //! the allowed-extras band to a closed enum enforced when present.
-//! `schema_version` strictly equals `"1.1"`. Pre-1.1 archives
+//! `schema_version` is `"1.1"` or `"1.2"`. Pre-1.1 archives
 //! continue to be readable by a pre-1.1 binary (tag-pinned).
 
 use std::path::Path;
@@ -22,9 +22,36 @@ use anyhow::{Context, Result};
 /// `$schema` field (current producer does not, future ones may)
 /// must string-equal this value.
 pub const SCHEMA_ID: &str =
+    "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.2/docs/lyrik-json-schema.json";
+/// The 1.1 schema's id. A document may still name it.
+pub const SCHEMA_ID_1_1: &str =
     "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json";
 
+/// The two classes schema 1.1 names. A document whose findings use only
+/// these is a 1.1 document and is written as one, so a consumer pinned
+/// to 1.1 reads what it always read.
 pub(super) const ALLOWED_FRAMINGS: &[&str] = &["auth", "injection"];
+
+/// A finding's class under schema 1.2: any lower-case identifier
+/// (`[a-z][a-z0-9_]*`), such as `memory_safety` or `unbounded_alloc`.
+/// 1.2 keeps a finding of any class; 1.1 kept two.
+pub(super) fn is_class(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The lowest schema version `findings` conform to by their classes:
+/// `1.1` when every framing is one 1.1 names, `1.2` otherwise.
+pub(super) fn schema_version_for(findings: &[serde_json::Value]) -> &'static str {
+    let within_1_1 = findings.iter().all(|f| {
+        f.get("framing").and_then(|v| v.as_array()).is_none_or(|a| {
+            a.iter()
+                .all(|v| v.as_str().is_none_or(|s| ALLOWED_FRAMINGS.contains(&s)))
+        })
+    });
+    if within_1_1 { "1.1" } else { "1.2" }
+}
 const ALLOWED_TIERS: &[&str] = &["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
 const ALLOWED_DETECTION_SOURCES: &[&str] = &["static_prescreen", "model_reasoning", "both"];
 
@@ -87,10 +114,10 @@ pub fn validate_value(root: &serde_json::Value) -> Vec<ValidationError> {
     // Optional $schema must string-equal the canonical $id when present.
     if let Some(v) = obj.get("$schema") {
         match v.as_str() {
-            Some(s) if s == SCHEMA_ID => {}
+            Some(s) if s == SCHEMA_ID || s == SCHEMA_ID_1_1 => {}
             Some(s) => errs.push(ValidationError {
                 path: "/$schema".into(),
-                message: format!("must equal {SCHEMA_ID:?}, got {s:?}"),
+                message: format!("must equal {SCHEMA_ID:?} or {SCHEMA_ID_1_1:?}, got {s:?}"),
             }),
             None => errs.push(ValidationError {
                 path: "/$schema".into(),
@@ -100,11 +127,14 @@ pub fn validate_value(root: &serde_json::Value) -> Vec<ValidationError> {
     }
 
     // Required top-level fields.
-    match obj.get("schema_version").and_then(|v| v.as_str()) {
-        Some("1.1") => {}
+    // 1.1 names two classes; 1.2 keeps any.
+    let version = obj.get("schema_version").and_then(|v| v.as_str());
+    let open = version == Some("1.2");
+    match version {
+        Some("1.1" | "1.2") => {}
         Some(other) => errs.push(ValidationError {
             path: "/schema_version".into(),
-            message: format!("must be \"1.1\", got {other:?}"),
+            message: format!("must be \"1.1\" or \"1.2\", got {other:?}"),
         }),
         None => errs.push(ValidationError {
             path: "/schema_version".into(),
@@ -140,7 +170,7 @@ pub fn validate_value(root: &serde_json::Value) -> Vec<ValidationError> {
     match obj.get("findings") {
         Some(serde_json::Value::Array(arr)) => {
             for (i, finding) in arr.iter().enumerate() {
-                validate_finding(finding, i, &mut errs);
+                validate_finding(finding, i, open, &mut errs);
             }
         }
         Some(_) => errs.push(ValidationError {
@@ -156,7 +186,12 @@ pub fn validate_value(root: &serde_json::Value) -> Vec<ValidationError> {
     errs
 }
 
-fn validate_finding(value: &serde_json::Value, index: usize, errs: &mut Vec<ValidationError>) {
+fn validate_finding(
+    value: &serde_json::Value,
+    index: usize,
+    open: bool,
+    errs: &mut Vec<ValidationError>,
+) {
     let prefix = format!("/findings/{index}");
     let obj = match value.as_object() {
         Some(o) => o,
@@ -178,10 +213,16 @@ fn validate_finding(value: &serde_json::Value, index: usize, errs: &mut Vec<Vali
         Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
             for (i, entry) in arr.iter().enumerate() {
                 match entry.as_str() {
-                    Some(s) if ALLOWED_FRAMINGS.contains(&s) => {}
+                    Some(s) if ALLOWED_FRAMINGS.contains(&s) || (open && is_class(s)) => {}
+                    Some(s) if open => errs.push(ValidationError {
+                        path: format!("{prefix}/framing/{i}"),
+                        message: format!("must be a class name ([a-z][a-z0-9_]*), got {s:?}"),
+                    }),
                     Some(s) => errs.push(ValidationError {
                         path: format!("{prefix}/framing/{i}"),
-                        message: format!("must be one of {ALLOWED_FRAMINGS:?}, got {s:?}"),
+                        message: format!(
+                            "must be one of {ALLOWED_FRAMINGS:?} under schema 1.1, got {s:?}"
+                        ),
                     }),
                     None => errs.push(ValidationError {
                         path: format!("{prefix}/framing/{i}"),
@@ -252,7 +293,7 @@ fn validate_finding(value: &serde_json::Value, index: usize, errs: &mut Vec<Vali
     // stable_id grammar: <framing>::<rel_file>:<line>.
     match obj.get("stable_id").and_then(|v| v.as_str()) {
         Some(s) => {
-            if let Err(reason) = parse_stable_id(s) {
+            if let Err(reason) = parse_stable_id_with(s, open) {
                 errs.push(ValidationError {
                     path: format!("{prefix}/stable_id"),
                     message: reason,
@@ -319,7 +360,14 @@ pub struct StableId<'a> {
 /// right-to-left parse for the line separator (admits colons in
 /// `rel_file` without an escape character), closed-enum framing,
 /// decimal-integer line, workspace-relative path (no leading `/`).
+#[cfg(test)]
 pub fn parse_stable_id(s: &str) -> Result<StableId<'_>, String> {
+    parse_stable_id_with(s, false)
+}
+
+/// [`parse_stable_id`], with the framing segment held to the two 1.1
+/// classes or, when `open`, to any class name.
+pub fn parse_stable_id_with(s: &str, open: bool) -> Result<StableId<'_>, String> {
     let sep = "::";
     let sep_idx = s
         .find(sep)
@@ -338,10 +386,12 @@ pub fn parse_stable_id(s: &str) -> Result<StableId<'_>, String> {
     if framing.is_empty() {
         return Err(format!("framing segment is empty: {s:?}"));
     }
-    if !ALLOWED_FRAMINGS.contains(&framing) {
-        return Err(format!(
-            "framing {framing:?} not in {ALLOWED_FRAMINGS:?}: {s:?}"
-        ));
+    if !(ALLOWED_FRAMINGS.contains(&framing) || (open && is_class(framing))) {
+        return Err(if open {
+            format!("framing {framing:?} is not a class name ([a-z][a-z0-9_]*): {s:?}")
+        } else {
+            format!("framing {framing:?} not in {ALLOWED_FRAMINGS:?}: {s:?}")
+        });
     }
 
     // Right-to-left: the final `:` separates `line` from `rel_file`.
@@ -580,6 +630,48 @@ mod tests {
             v.get("$id").and_then(|s| s.as_str()),
             Some(SCHEMA_ID),
             "schema file $id must match SCHEMA_ID constant"
+        );
+    }
+
+    #[test]
+    fn schema_1_2_keeps_a_finding_of_any_class_and_1_1_still_names_two() {
+        let mut r = good_report();
+        r["findings"][0]["framing"] = json!(["unbounded_alloc"]);
+        r["findings"][0]["stable_id"] = json!("unbounded_alloc::a.sh:4");
+        // Labelled 1.1, the class is outside the two it names.
+        let errs = validate_value(&r);
+        assert!(
+            errs.iter().any(|e| e.path == "/findings/0/framing/0"),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| e.path == "/findings/0/stable_id"),
+            "{errs:?}"
+        );
+        // Labelled 1.2, it is kept.
+        r["schema_version"] = json!("1.2");
+        assert_eq!(validate_value(&r), vec![]);
+        // 1.2 still wants a class name, not free text.
+        r["findings"][0]["framing"] = json!(["Unbounded Alloc"]);
+        assert!(!validate_value(&r).is_empty());
+        // A 1.1 document is a 1.2 document: additive.
+        let mut old = good_report();
+        assert_eq!(validate_value(&old), vec![]);
+        old["schema_version"] = json!("1.2");
+        assert_eq!(validate_value(&old), vec![]);
+        // Either schema id may be named.
+        old["$schema"] = json!(SCHEMA_ID_1_1);
+        assert_eq!(validate_value(&old), vec![]);
+        assert!(is_class("memory_safety") && is_class("a1"));
+        assert!(!is_class("") && !is_class("1a") && !is_class("a-b") && !is_class("A"));
+        assert_eq!(
+            schema_version_for(&[json!({"framing": ["auth", "injection"]})]),
+            "1.1"
+        );
+        assert_eq!(schema_version_for(&[]), "1.1");
+        assert_eq!(
+            schema_version_for(&[json!({"framing": ["auth"]}), json!({"framing": ["crypto"]})]),
+            "1.2"
         );
     }
 

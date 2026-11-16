@@ -27,9 +27,10 @@ use super::lyrik_semgrep::{
     self, DispatchOutcome, Seed, parse_scanner_config, write_bundled_ruleset, write_seed_files,
 };
 use super::lyrik_steps;
+#[cfg(test)]
+use super::lyrik_walks::stage_walk_skills;
 use super::lyrik_walks::{
     build_walk_prompt, ensure_walk_staging, parse_walks_config, resolve_walks_dir,
-    stage_walk_skills,
 };
 use super::open_permission_store;
 
@@ -299,6 +300,10 @@ pub async fn run(
             &pin,
             walks.as_deref(),
             exec_available,
+            &super::lyrik_walks::TargetProfile::detect(
+                target,
+                fix_inputs.functionality.test_command.as_deref(),
+            ),
         );
         let shown = summary.clone();
         let answer = tokio::task::spawn_blocking(move || {
@@ -532,6 +537,7 @@ fn one_line(s: &str) -> String {
 /// What the operator is asked to sign off: where the run points,
 /// what it scores against, where the code goes, and what it may ask
 /// to run.
+#[allow(clippy::too_many_arguments)]
 fn signoff_summary(
     run_id: &str,
     target: &Path,
@@ -540,6 +546,7 @@ fn signoff_summary(
     pin: &PhasePin,
     walks: Option<&[String]>,
     exec_available: bool,
+    profile: &super::lyrik_walks::TargetProfile,
 ) -> String {
     let head = match (&provenance.sha, provenance.dirty) {
         (Some(sha), Some(false)) => format!("HEAD {sha}, tracked files unchanged"),
@@ -564,7 +571,7 @@ fn signoff_summary(
             walks
                 .iter()
                 .map(|w| {
-                    let commands = super::lyrik_walks::walk_exec_commands(w);
+                    let commands = super::lyrik_walks::walk_commands(w, profile);
                     if commands.is_empty() {
                         format!("{w}: none listed")
                     } else {
@@ -1263,16 +1270,23 @@ async fn dispatch_via_agent_runtime(
     // frontmatter, then merge them into the agent's loaded skills.
     // Each walk becomes a `/<walk-name>` slash invocation with the
     // operator's installed body intact.
+    // The commands each walk is offered come from the target as it
+    // stands, with the test command the run read at start.
+    let target_profile = super::lyrik_walks::TargetProfile::detect(
+        target,
+        fix_inputs.functionality.test_command.as_deref(),
+    );
     let walks_staged_dir = match walks_cfg.as_ref() {
         Some(wc) => {
             ensure_walk_staging(&run_dir, &wc.walks).context("ensure per-walk staging dirs")?;
-            let staged = stage_walk_skills(
+            let staged = super::lyrik_walks::stage_walk_skills_for(
                 &wc.walks,
                 &walks_source_dir,
                 &run_dir,
                 run_id,
                 scoring.walk_sections().as_deref(),
                 exec_available,
+                &target_profile,
             )
             .context("stage walk skills")?;
             Some(staged)
@@ -1358,6 +1372,7 @@ async fn dispatch_via_agent_runtime(
                 String::new()
             };
             let outcomes = dispatch_walks_concurrent(
+                &target_profile,
                 wc.walks.clone(),
                 wc.max_concurrent_walks,
                 agent_id.clone(),
@@ -2744,6 +2759,7 @@ pub(super) enum WalkStatus {
 /// shape unchanged from the serial baseline.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_walks_concurrent(
+    profile: &super::lyrik_walks::TargetProfile,
     walks: Vec<String>,
     max_concurrent: u32,
     agent_id: String,
@@ -2775,7 +2791,7 @@ async fn dispatch_walks_concurrent(
     let asks: Vec<String> = walks
         .iter()
         .filter_map(|w| {
-            let commands = super::lyrik_walks::walk_exec_commands(w);
+            let commands = super::lyrik_walks::walk_commands(w, profile);
             (!commands.is_empty()).then(|| format!("{w}: {}", commands.join(", ")))
         })
         .collect();
@@ -2789,9 +2805,9 @@ async fn dispatch_walks_concurrent(
         if terminal.is_some() {
             // Said before anything is asked: an approved command that
             // needs a binary the sandbox lacks can only fail.
-            let needed: Vec<&str> = walks
+            let needed: Vec<String> = walks
                 .iter()
-                .flat_map(|w| super::lyrik_walks::walk_exec_commands(w).iter().copied())
+                .flat_map(|w| super::lyrik_walks::walk_commands(w, profile))
                 .collect();
             let binaries = super::lyrik_walks::binaries_for(&needed);
             let missing = binaries_missing_for_exec(&sandbox, &target, &binaries).await;
@@ -3367,7 +3383,7 @@ fn aggregate_findings_multi(
     )
     .with_context(|| format!("write rejections.jsonl beside {}", dest.display()))?;
     let body = serde_json::json!({
-        "schema_version": "1.1",
+        "schema_version": super::lyrik_validate::schema_version_for(&findings),
         "run_id": run_id,
         "produced_at": chrono::Utc::now().to_rfc3339(),
         "citation_check": {
@@ -3573,26 +3589,36 @@ enum FramingOutcome {
     Refused,
 }
 
-/// Hold a staged finding's `framing` to the schema 1.1 enum
-/// ([`super::lyrik_validate::ALLOWED_FRAMINGS`]) so findings.json
-/// passes `wirken lyrik validate` whatever a walk emits. Values
-/// outside the enum are removed. When the stable_id's framing
+/// Hold a staged finding's `framing` to class names
+/// ([`super::lyrik_validate::is_class`]) so findings.json passes
+/// `wirken lyrik validate` whatever a walk emits. A finding of any
+/// class is kept; schema 1.1 named two and dropped the rest. A single
+/// class written as a string becomes a list of one. Values that are
+/// not class names are removed. When the stable_id's framing
 /// segment was one of them, the segment becomes the first framing
 /// that remains, since the validator rejects a stable_id whose
 /// framing is outside the enum.
 fn conform_framing(finding: &mut serde_json::Value) -> FramingOutcome {
-    use super::lyrik_validate::ALLOWED_FRAMINGS;
+    use super::lyrik_validate::is_class;
 
     let Some(obj) = finding.as_object_mut() else {
         return FramingOutcome::Refused;
     };
+    // A walk that wrote one class as a string means a list of one.
+    if let Some(one) = obj
+        .get("framing")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        obj.insert("framing".to_string(), serde_json::json!([one]));
+    }
     let Some(framing) = obj.get("framing").and_then(|v| v.as_array()) else {
         return FramingOutcome::Refused;
     };
     let (kept, removed): (Vec<serde_json::Value>, Vec<serde_json::Value>) = framing
         .iter()
         .cloned()
-        .partition(|v| v.as_str().is_some_and(|s| ALLOWED_FRAMINGS.contains(&s)));
+        .partition(|v| v.as_str().is_some_and(is_class));
     if kept.is_empty() {
         return FramingOutcome::Refused;
     }
@@ -4143,7 +4169,7 @@ fn aggregate_findings(source: &Path, dest: &Path, run_id: &str) -> Result<()> {
         findings.push(parsed);
     }
     let body = serde_json::json!({
-        "schema_version": "1.1",
+        "schema_version": super::lyrik_validate::schema_version_for(&findings),
         "run_id": run_id,
         "produced_at": chrono::Utc::now().to_rfc3339(),
         "findings": findings,
@@ -5263,6 +5289,10 @@ mod tests {
             &pin,
             Some(&walks),
             true,
+            &super::super::lyrik_walks::TargetProfile {
+                git: true,
+                ..Default::default()
+            },
         );
         let lines: Vec<&str> = summary.lines().collect();
         assert_eq!(lines.len(), 8, "{summary}");
@@ -5282,7 +5312,9 @@ mod tests {
         assert_eq!(lines[5], "  walks    sink-walk, chain-walk");
         assert_eq!(
             lines[6],
-            "  exec     sink-walk: git log, git blame; chain-walk: none listed"
+            "  exec     sink-walk: git log, git blame, \
+             sh .lyrik/state/runs/<run-id>/staging/sink-walk/harness/<script>; \
+             chain-walk: sh .lyrik/state/runs/<run-id>/staging/chain-walk/harness/<script>"
         );
     }
 
@@ -5354,6 +5386,7 @@ mod tests {
             &pin,
             Some(&walks),
             false,
+            &Default::default(),
         );
         assert!(
             summary.contains(
@@ -6139,12 +6172,12 @@ mod tests {
         (body, log)
     }
 
-    /// A finding framed only outside the 1.1 enum is not written;
+    /// A finding whose framing holds no class name is not written;
     /// the per-run log carries it whole.
     #[test]
-    fn aggregate_findings_multi_refuses_crypto_only_finding() {
+    fn aggregate_findings_multi_refuses_a_finding_with_no_class_name() {
         let tmp = tempdir().unwrap();
-        let staged = finding("src/a.rs", 10, "crypto", "HIGH");
+        let staged = finding("src/a.rs", 10, "Crypto Misuse", "HIGH");
         let (body, log) =
             aggregate_one_walk(tmp.path(), "crypto-walk", std::slice::from_ref(&staged));
         assert_eq!(body["findings"], serde_json::json!([]));
@@ -6156,7 +6189,7 @@ mod tests {
         assert_eq!(
             audit_details(&log, "lyrik.finding.refused"),
             vec![serde_json::json!({
-                "stable_id": "crypto::src/a.rs:10",
+                "stable_id": "Crypto Misuse::src/a.rs:10",
                 "walk": "crypto-walk",
                 "finding": staged,
             })]
@@ -6164,13 +6197,13 @@ mod tests {
         assert!(audit_details(&log, "lyrik.finding.framing_stripped").is_empty());
     }
 
-    /// `["auth", "crypto"]` is written as `["auth"]`; a stable_id
+    /// `["auth", "Crypto Misuse"]` is written as `["auth"]`; a stable_id
     /// keyed on the stripped framing moves to the one that remains.
     #[test]
-    fn aggregate_findings_multi_strips_crypto_beside_auth() {
+    fn aggregate_findings_multi_strips_a_value_that_is_not_a_class_name() {
         let tmp = tempdir().unwrap();
-        let mut staged = finding("src/a.rs", 10, "crypto", "HIGH");
-        staged["framing"] = serde_json::json!(["auth", "crypto"]);
+        let mut staged = finding("src/a.rs", 10, "Crypto Misuse", "HIGH");
+        staged["framing"] = serde_json::json!(["auth", "Crypto Misuse"]);
         let (body, log) = aggregate_one_walk(tmp.path(), "crypto-walk", &[staged]);
         let written = &body["findings"][0];
         assert_eq!(written["framing"], serde_json::json!(["auth"]));
@@ -6183,9 +6216,9 @@ mod tests {
         assert_eq!(
             audit_details(&log, "lyrik.finding.framing_stripped"),
             vec![serde_json::json!({
-                "stable_id": "crypto::src/a.rs:10",
+                "stable_id": "Crypto Misuse::src/a.rs:10",
                 "walk": "crypto-walk",
-                "removed": ["crypto"],
+                "removed": ["Crypto Misuse"],
                 "stable_id_written": "auth::src/a.rs:10",
             })]
         );
@@ -6195,11 +6228,11 @@ mod tests {
     #[test]
     fn conform_framing_keeps_stable_id_keyed_on_a_kept_framing() {
         let mut f = finding("src/a.rs", 10, "injection", "HIGH");
-        f["framing"] = serde_json::json!(["memory_safety", "injection"]);
+        f["framing"] = serde_json::json!(["Memory Safety", "injection"]);
         assert_eq!(
             super::conform_framing(&mut f),
             super::FramingOutcome::Stripped {
-                removed: vec![serde_json::json!("memory_safety")],
+                removed: vec![serde_json::json!("Memory Safety")],
                 staged_stable_id: Some("injection::src/a.rs:10".to_string()),
             }
         );
@@ -6226,6 +6259,106 @@ mod tests {
             super::conform_framing(&mut kept),
             super::FramingOutcome::Kept
         );
+    }
+
+    /// The two findings sink-walk staged in run fixarms-002, as it wrote
+    /// them: one class given as a string, outside the two schema 1.1
+    /// names. Both are kept, and the document says it is 1.2.
+    #[test]
+    fn a_walk_finding_of_a_class_outside_1_1_is_kept() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp
+            .path()
+            .join("staging")
+            .join("sink-walk")
+            .join("findings");
+        let staged = |file: &str, slot: &str, name: &str| {
+            serde_json::json!({
+                "stable_id": format!("sink-walk/unbounded_alloc/{file}-{slot}-slot-unbounded-len"),
+                "title": format!("{file} copies a declared length into the 8-byte {slot} slot unchecked"),
+                "framing": "unbounded_alloc",
+                "location": {"file": file, "function": "<top-level>", "line_start": 4},
+                "origin": {"file": "len.sh", "function": "decode_len", "line_start": 3},
+                "invariant": "The number of bytes copied into a slot must never exceed the slot's 8-byte size, whatever length the record header declares.",
+                "threat_model": {
+                    "attacker_capability": "Supplies a record whose header declares the field length.",
+                    "harm_path": "A declared length of 9 or more passes through decode_len unchanged and becomes the count copied into the 8-byte slot."
+                },
+                "reproduced": false,
+                "sink": format!("{file}:4"),
+                "note": name,
+            })
+        };
+        write_finding(
+            &dir,
+            "finding-001.json",
+            &staged("a.sh", "name", "first caller"),
+        );
+        write_finding(
+            &dir,
+            "finding-002.json",
+            &staged("b.sh", "tag", "second caller"),
+        );
+        let dest = tmp.path().join("findings.json");
+        let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut audit =
+            super::AuditLogger::open(&tmp.path().join("audit.log"), "fixarms-002", true).unwrap();
+        let funnel = aggregate_findings_multi(
+            &[(Some("sink-walk".to_string()), dir)],
+            &dest,
+            "fixarms-002",
+            true,
+            &seeds,
+            tmp.path(),
+            &Default::default(),
+            &Default::default(),
+            None,
+            lyrik_brocards::Mode::Defender,
+            &mut audit,
+        )
+        .unwrap();
+        assert_eq!(funnel.merged.emitted, 2);
+        assert_eq!(funnel.merged.refused, 0);
+        assert_eq!(funnel.merged.kept, 2);
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(body["schema_version"], "1.2");
+        let findings = body["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 2);
+        for (f, file) in findings.iter().zip(["a.sh", "b.sh"]) {
+            assert_eq!(f["framing"], serde_json::json!(["unbounded_alloc"]));
+            assert_eq!(f["location"]["file"], file);
+            assert_eq!(f["location"]["line_start"], 4);
+            assert_eq!(f["origin"]["file"], "len.sh");
+            assert_eq!(f["origin"]["line_start"], 3);
+        }
+        assert!(audit_details(&tmp.path().join("audit.log"), "lyrik.finding.refused").is_empty());
+        // A run whose findings are all auth or injection is still 1.1.
+        let dir = tmp.path().join("staging").join("findings");
+        write_finding(
+            &dir,
+            "finding-001.json",
+            &finding("src/a.rs", 1, "auth", "HIGH"),
+        );
+        let dest = tmp.path().join("old.json");
+        aggregate_findings_multi(
+            &[(None, dir)],
+            &dest,
+            "r",
+            false,
+            &seeds,
+            tmp.path(),
+            &Default::default(),
+            &Default::default(),
+            None,
+            lyrik_brocards::Mode::Pentest,
+            &mut audit,
+        )
+        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(body["schema_version"], "1.1");
+        assert!(super::super::lyrik_validate::validate_value(&body).is_empty());
     }
 
     /// A git target's provenance reaches findings.json and, from
@@ -6303,10 +6436,10 @@ mod tests {
         write_finding(
             &sink,
             "finding-002.json",
-            &finding("src/b.rs", 5, "crypto", "HIGH"),
+            &finding("src/b.rs", 5, "Crypto Misuse", "HIGH"),
         );
         let mut stripped = finding("src/c.rs", 7, "auth", "MEDIUM");
-        stripped["framing"] = serde_json::json!(["auth", "crypto"]);
+        stripped["framing"] = serde_json::json!(["auth", "Crypto Misuse"]);
         stripped["grade"] = serde_json::json!(1.0);
         write_finding(&sink, "finding-003.json", &stripped);
         write_finding(
@@ -6570,7 +6703,7 @@ mod tests {
         write_finding(
             &graph,
             "finding-001.json",
-            &finding("src/b.rs", 5, "crypto", "HIGH"),
+            &finding("src/b.rs", 5, "Crypto Misuse", "HIGH"),
         );
         for walk in ["sink-walk", "graph-walk"] {
             write_finding(

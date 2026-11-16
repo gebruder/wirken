@@ -385,7 +385,7 @@ pub fn build_sarif(findings_path: &Path, driver_version: &str) -> Result<Sarif> 
     let report: LyrikReport = serde_json::from_str(&body)
         .with_context(|| format!("parse findings.json at {}", findings_path.display()))?;
 
-    let rules = build_rules();
+    let rules = build_rules(&report.findings);
     let results: Vec<SarifResult> = report
         .findings
         .iter()
@@ -437,21 +437,45 @@ pub fn build_sarif(findings_path: &Path, driver_version: &str) -> Result<Sarif> 
     })
 }
 
-fn build_rules() -> Vec<Rule> {
-    let framing_rules = FRAMINGS.iter().map(|(framing, name, description)| Rule {
+fn build_rules(findings: &[Finding]) -> Vec<Rule> {
+    let rule = |framing: &str, name: String, description: String| Rule {
         id: format!("lyrik.framing.{framing}"),
-        name: (*name).to_string(),
+        name,
         short_description: Text {
             text: description_short(framing),
         },
-        full_description: Text {
-            text: (*description).to_string(),
-        },
+        full_description: Text { text: description },
         default_configuration: DefaultConfig {
             level: Level::Warning,
         },
         properties: serde_json::json!({ "lyrik_framing": framing }),
+    };
+    let named = FRAMINGS.iter().map(|(framing, name, description)| {
+        rule(framing, name.to_string(), description.to_string())
     });
+    // A class outside the nine above gets a rule of its own, so every
+    // result's ruleId is defined in the run.
+    let mut others: Vec<&str> = findings
+        .iter()
+        .filter_map(|f| f.framing.first().map(String::as_str))
+        .filter(|c| !FRAMINGS.iter().any(|(known, _, _)| known == c))
+        .collect();
+    others.sort_unstable();
+    others.dedup();
+    let other_rules = others.into_iter().map(|class| {
+        let name: String = class
+            .split('_')
+            .map(|w| {
+                let mut c = w.chars();
+                c.next()
+                    .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<String>()
+            + "Framing";
+        rule(class, name, format!("Findings of class {class}."))
+    });
+    let framing_rules = named.chain(other_rules);
     let brocard_rules = RULES.iter().enumerate().map(|(i, (name, statement))| {
         let rule = (i + 1) as u8;
         Rule {

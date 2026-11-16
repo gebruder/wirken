@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json",
-  "title": "Lyrik findings report (1.1)",
-  "description": "Lyrik security-assessment skill output. The prose spec is the Findings schema (1.1) section of docs/lyrik.md.",
+  "$id": "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.2/docs/lyrik-json-schema.json",
+  "title": "Lyrik findings report (1.2)",
+  "description": "Lyrik security-assessment skill output. The prose spec is the Findings schema section of docs/lyrik.md. 1.2 adds to 1.1: a finding of any class is kept, where 1.1 named two. A 1.1 document is a valid 1.2 document.",
   "type": "object",
   "required": ["schema_version", "run_id", "produced_at", "findings"],
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "1.1"
+      "enum": ["1.1", "1.2"]
     },
     "run_id": {
       "type": "string",
@@ -39,15 +39,16 @@
         "id": { "type": "string", "minLength": 1 },
         "stable_id": {
           "type": "string",
-          "description": "Conforms to <framing>::<rel_file>:<line> with framing in {auth, injection} and line a decimal integer. Parse right-to-left for the line separator. See spec for full grammar.",
-          "pattern": "^(auth|injection)::[^/].*:[0-9]+$"
+          "description": "Conforms to <framing>::<rel_file>:<line> with framing a class name ([a-z][a-z0-9_]*) and line a decimal integer. A document with schema_version 1.1 uses only auth and injection. Parse right-to-left for the line separator. See spec for full grammar.",
+          "pattern": "^[a-z][a-z0-9_]*::[^/].*:[0-9]+$"
         },
         "framing": {
           "type": "array",
           "minItems": 1,
           "items": {
             "type": "string",
-            "enum": ["auth", "injection"]
+            "description": "The finding's class. 1.1 named two, auth and injection; 1.2 keeps a finding of any class.",
+            "pattern": "^[a-z][a-z0-9_]*$"
           }
         },
         "location": {

@@ -231,6 +231,7 @@ pub fn parse_walks_config(
 /// [`wirken_agent::Agent::extend_skills`] alongside the existing
 /// `<data_dir>/skills/` load so the slash interceptor finds
 /// `/<walk-name>` as a first-class skill.
+#[cfg(test)]
 pub fn stage_walk_skills(
     walks: &[String],
     walks_source_dir: &Path,
@@ -238,6 +239,28 @@ pub fn stage_walk_skills(
     run_id: &str,
     scoring: Option<&str>,
     exec_available: bool,
+) -> Result<PathBuf> {
+    stage_walk_skills_for(
+        walks,
+        walks_source_dir,
+        run_dir,
+        run_id,
+        scoring,
+        exec_available,
+        &TargetProfile::default(),
+    )
+}
+
+/// [`stage_walk_skills`] with the commands each walk is offered taken
+/// from the target, as [`TargetProfile::detect`] read it.
+pub fn stage_walk_skills_for(
+    walks: &[String],
+    walks_source_dir: &Path,
+    run_dir: &Path,
+    run_id: &str,
+    scoring: Option<&str>,
+    exec_available: bool,
+    profile: &TargetProfile,
 ) -> Result<PathBuf> {
     let staged = run_dir.join("walks-skills");
     std::fs::create_dir_all(&staged).with_context(|| format!("create {}", staged.display()))?;
@@ -249,7 +272,7 @@ pub fn stage_walk_skills(
         std::fs::create_dir_all(&dest_dir)
             .with_context(|| format!("create {}", dest_dir.display()))?;
         let dest = dest_dir.join("SKILL.md");
-        let wrapped = wrap_with_wirken_frontmatter(name, run_id, scoring, exec_available, &body);
+        let wrapped = wrap_for_target(name, run_id, scoring, exec_available, profile, &body);
         std::fs::write(&dest, wrapped).with_context(|| format!("write {}", dest.display()))?;
         wirken_agent::bundled_skills::stage_sign_skill_dir(&dest_dir)
             .with_context(|| format!("sign staged walk skill at {}", dest_dir.display()))?;
@@ -274,6 +297,7 @@ pub fn stage_walk_skills(
 /// that true; the section is so the walk does not spend its turn on
 /// writes the gate refuses. `scoring`, the team rubric and project
 /// context when the run has them, follows the run section.
+#[cfg(test)]
 pub fn wrap_with_wirken_frontmatter(
     walk_name: &str,
     run_id: &str,
@@ -281,12 +305,33 @@ pub fn wrap_with_wirken_frontmatter(
     exec_available: bool,
     source: &str,
 ) -> String {
+    wrap_for_target(
+        walk_name,
+        run_id,
+        scoring,
+        exec_available,
+        &TargetProfile::default(),
+        source,
+    )
+}
+
+/// [`wrap_with_wirken_frontmatter`] with the run section's commands
+/// taken from the target.
+pub fn wrap_for_target(
+    walk_name: &str,
+    run_id: &str,
+    scoring: Option<&str>,
+    exec_available: bool,
+    profile: &TargetProfile,
+    source: &str,
+) -> String {
     let (orig_description, body) = strip_leading_frontmatter(source);
     let description =
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
     let mut section = format!(
-        "{}\n{}\n{}\n{}",
-        run_section(walk_name, exec_available),
+        "{}\n{}\n{}\n{}\n{}",
+        run_section(walk_name, exec_available, profile),
+        finding_section(),
         brocard_section(walk_name),
         step_section(walk_name),
         reproduction_section(walk_name)
@@ -324,30 +369,131 @@ pub fn run_write_scope(run_id: &str) -> String {
     format!("<workspace>/.lyrik/state/runs/{run_id}")
 }
 
-/// The commands a walk's text has it run through `exec`, as the
-/// command words an operator will be asked about. Listed in the staged
-/// walk and printed before a run starts, so what will be asked is
-/// known before the first prompt. A walk not listed here runs none.
-pub fn walk_exec_commands(walk_name: &str) -> &'static [&'static str] {
-    match walk_name {
-        "crypto-walk" => &["cargo audit"],
-        "fuzz-walk" => &["cargo test"],
-        "sink-walk" => &["git log", "git blame"],
-        "fix" => super::lyrik_fix::FIX_EXEC_COMMANDS,
-        _ => &[],
+/// What a run reads off the target to decide which commands its walks
+/// are offered: the languages at its root, its test command, and
+/// whether it is a git repository. Nothing here is fixed in advance: a
+/// shell project is not offered `cargo test`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TargetProfile {
+    /// `rust`, `node`, `go`, `python`, `shell`, by the files at the
+    /// target's root.
+    pub languages: Vec<&'static str>,
+    /// `fix.test_command` from the target's configuration when set,
+    /// else the usual one for the first language that has one.
+    pub test_command: Option<String>,
+    pub git: bool,
+}
+
+impl TargetProfile {
+    /// Read the target's root. `configured_test` is `fix.test_command`
+    /// as the run read it at start.
+    pub fn detect(target: &Path, configured_test: Option<&str>) -> Self {
+        let has = |name: &str| target.join(name).exists();
+        let root_has_ext = |ext: &str| {
+            std::fs::read_dir(target).is_ok_and(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.path().extension().is_some_and(|x| x == ext))
+            })
+        };
+        let mut languages = Vec::new();
+        if has("Cargo.toml") {
+            languages.push("rust");
+        }
+        if has("package.json") {
+            languages.push("node");
+        }
+        if has("go.mod") {
+            languages.push("go");
+        }
+        if has("pyproject.toml") || has("setup.py") || has("requirements.txt") || root_has_ext("py")
+        {
+            languages.push("python");
+        }
+        if root_has_ext("sh") {
+            languages.push("shell");
+        }
+        let usual = languages.iter().find_map(|l| match *l {
+            "rust" => Some("cargo test"),
+            "node" => Some("npm test"),
+            "go" => Some("go test ./..."),
+            "python" => Some("python3 -m pytest"),
+            _ => None,
+        });
+        Self {
+            test_command: configured_test
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or(usual)
+                .map(str::to_string),
+            git: has(".git"),
+            languages,
+        }
     }
+
+    /// The interpreters a harness script may be run with: `sh` always,
+    /// and the target's own where it is a scripting language.
+    pub fn harness_interpreters(&self) -> Vec<&'static str> {
+        let mut out = vec!["sh"];
+        if self.languages.contains(&"python") {
+            out.push("python3");
+        }
+        if self.languages.contains(&"node") {
+            out.push("node");
+        }
+        out
+    }
+}
+
+/// The commands a walk is expected to ask for through `exec`, derived
+/// from the target, as an operator will see them. Listed in the staged
+/// walk and printed before a run starts, so what will be asked is
+/// known before the first prompt. Every walk may also ask to run the
+/// scripts it wrote under its own harness directory; that entry is
+/// [`harness_command`]. The list is not a grant: each command is still
+/// put to the operator when it is about to run.
+pub fn walk_commands(walk_name: &str, profile: &TargetProfile) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    match walk_name {
+        "fix" => {
+            return super::lyrik_fix::FIX_EXEC_COMMANDS
+                .iter()
+                .map(|c| c.to_string())
+                .collect();
+        }
+        "sink-walk" if profile.git => {
+            out.push("git log".into());
+            out.push("git blame".into());
+        }
+        "crypto-walk" if profile.languages.contains(&"rust") => out.push("cargo audit".into()),
+        "fuzz-walk" | "invariant-walk" => out.extend(profile.test_command.clone()),
+        _ => {}
+    }
+    out.push(harness_command(walk_name, profile));
+    out
+}
+
+/// How a walk runs a script it wrote: an interpreter and a path under
+/// the walk's own harness directory.
+pub fn harness_command(walk_name: &str, profile: &TargetProfile) -> String {
+    format!(
+        "{} .lyrik/state/runs/<run-id>/staging/{walk_name}/harness/<script>",
+        profile.harness_interpreters().join("|")
+    )
 }
 
 /// The binaries `commands` need, by their first word, deduplicated in
 /// first-seen order: `["git log", "git blame", "cargo test"]` needs
 /// `git` and `cargo`.
-pub fn binaries_for(commands: &[&str]) -> Vec<String> {
+pub fn binaries_for<S: AsRef<str>>(commands: &[S]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for c in commands {
-        if let Some(bin) = c.split_whitespace().next()
-            && !out.iter().any(|b| b == bin)
-        {
-            out.push(bin.to_string());
+        // `sh|python3 <path>` names each interpreter a harness may use.
+        let first = c.as_ref().split_whitespace().next().unwrap_or_default();
+        for bin in first.split('|').filter(|b| !b.is_empty()) {
+            if !out.iter().any(|b| b == bin) {
+                out.push(bin.to_string());
+            }
         }
     }
     out
@@ -374,27 +520,45 @@ pub fn sandbox_banner(where_exec_runs: &str, missing: Option<&[String]>) -> Opti
 /// The rules a walk runs under inside `wirken lyrik run`, placed ahead
 /// of the operator's walk text. They take precedence over a location
 /// the walk text names, such as a harness in the project's test tree.
-fn run_section(walk_name: &str, exec_available: bool) -> String {
-    let commands = walk_exec_commands(walk_name);
-    let exec_line = if !exec_available {
+fn run_section(walk_name: &str, exec_available: bool, profile: &TargetProfile) -> String {
+    let exec_lines = if !exec_available {
         "- `exec` is not available in this run: the sandbox is off, so a command \
          would run on the host. A call to it is refused: record the step as skipped \
          and carry on."
             .to_string()
-    } else if commands.is_empty() {
-        "- This walk runs no commands through `exec`. Any command it tries is put \
-         to the operator first, and a refused one is a step skipped."
-            .to_string()
     } else {
+        let commands = walk_commands(walk_name, profile);
+        let interpreters = profile.harness_interpreters();
         format!(
-            "- Commands this walk runs through `exec`: {}. The operator is asked \
-             before each one runs, and a refused one is a step skipped: record that \
-             it was skipped and carry on.",
+            "- Commands this walk is expected to ask for through `exec`: {}. The operator \
+             is asked before each one runs and may refuse any; a refused one is a step \
+             skipped: record that it was skipped and carry on. The list is what is \
+             expected, not a limit: a command outside it is put to the operator the same \
+             way.\n\
+             - You may ask to run a script you wrote under \
+             `.lyrik/state/runs/<run-id>/staging/{walk_name}/harness/`, from the project \
+             root, with {}: for example \
+             `{} .lyrik/state/runs/<run-id>/staging/{walk_name}/harness/<name>`. This is \
+             how a finding is shown to hold. Write the harness with `write_file`, ask to \
+             run it, and write the reproduction record described under Reproductions; \
+             the harness follows the contract given there. After this walk returns, a \
+             replay runs the same command. A finding with no executed reproduction is \
+             not confirmed, and a defender-mode fix is made only for a confirmed \
+             finding, so do not stop at a static trace when a harness can be run.\n\
+             - This turn has at most {} tool rounds. Put independent tool calls in one \
+             round, and reach the harness run and its record before the rounds run out.",
             commands
                 .iter()
                 .map(|c| format!("`{c}`"))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            interpreters
+                .iter()
+                .map(|i| format!("`{i}`"))
+                .collect::<Vec<_>>()
+                .join(" or "),
+            interpreters[0],
+            wirken_agent::runtime::MAX_TOOL_ROUNDS,
         )
     };
     format!(
@@ -406,8 +570,28 @@ fn run_section(walk_name: &str, exec_available: bool) -> String {
          - A harness or test this walk would place in the project's test tree goes \
          under `.lyrik/state/runs/<run-id>/staging/{walk_name}/harness/` instead. \
          Promoting it into the test tree is an operator step after the run.\n\
-         {exec_line}\n"
+         {exec_lines}\n"
     )
+}
+
+/// The fields the runner needs on every staged finding, whatever shape
+/// the walk text gives its own. The walk's other fields ride along.
+fn finding_section() -> String {
+    "## Finding format\n\n\
+     Each `finding-NNN.json` is one JSON object. Whatever other fields this walk's text \
+     asks for, it carries these, which the runner and `findings.json` are keyed on:\n\n\
+     - `framing`: a list of one or more classes, each a lower-case name such as \
+     `auth`, `injection`, `memory_safety`, `unbounded_alloc`, `race_condition`. A finding \
+     of any class is kept; name the class the finding is, not the nearest familiar one.\n\
+     - `location`: `{\"file\", \"line_start\"}`, the file relative to the project root and \
+     the 1-based line where the finding surfaces.\n\
+     - `stable_id`: `<framing>::<file>:<line>`, built from the first `framing` and \
+     `location`, for example `injection::src/run.sh:12`. Use this same string wherever \
+     a rejection or a reproduction record names the finding.\n\
+     - `id`: any non-empty string unique in this walk; the `stable_id` will do.\n\
+     - `title` and `summary`: non-empty strings.\n\
+     - `tier`: one of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`.\n"
+        .to_string()
 }
 
 /// Brocard rules a walk applies, in rule order. Rules 1, 2 and 6 apply
@@ -572,8 +756,8 @@ fn reproduction_section(walk_name: &str) -> String {
          A command that shows a finding follows one contract, so that a later fix can be \
          checked from the command's exit status and output alone. It prints `{reached}` on \
          a line of its own on stdout, flushed, immediately before its assertion, and that \
-         line reaches the command's output (`cargo test` hides a passing test's output without \
-         `-- --nocapture`). It exits non-zero when the finding holds and zero when it does \
+         line reaches the command's output (a test runner that hides a passing test's output \
+         needs its flag to show it). It exits non-zero when the finding holds and zero when it does \
          not. It names files under the run directory by their path from the project root, \
          `.lyrik/state/runs/<run-id>/...`, and uses no other path outside the project's \
          tree. A failed build or a missing dependency never reaches the line, and is read \
@@ -852,6 +1036,120 @@ mod tests {
             binaries_for(&["git log", "git blame", "cargo test"]),
             vec!["git".to_string(), "cargo".to_string()]
         );
+        // A harness entry names every interpreter it may run under.
+        assert_eq!(
+            binaries_for(&["sh|python3 .lyrik/x/harness/<script>", "sh test.sh"]),
+            vec!["sh".to_string(), "python3".to_string()]
+        );
+    }
+
+    fn shell_target() -> tempfile::TempDir {
+        let tmp = tempdir().unwrap();
+        for name in ["a.sh", "len.sh", "test.sh"] {
+            std::fs::write(tmp.path().join(name), "echo x\n").unwrap();
+        }
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn a_non_rust_target_is_offered_no_cargo_command() {
+        let tmp = shell_target();
+        let profile = TargetProfile::detect(tmp.path(), None);
+        assert_eq!(profile.languages, ["shell"]);
+        assert_eq!(profile.test_command, None);
+        assert!(profile.git);
+        for walk in KNOWN_WALKS {
+            let commands = walk_commands(walk, &profile);
+            assert!(
+                !commands.iter().any(|c| c.contains("cargo")),
+                "{walk}: {commands:?}"
+            );
+            let text = wrap_for_target(walk, "r1", None, true, &profile, "body\n");
+            assert!(!text.contains("cargo"), "{walk}: {text}");
+        }
+        // The fuzz walk has only its own harness to run.
+        assert_eq!(
+            walk_commands("fuzz-walk", &profile),
+            ["sh .lyrik/state/runs/<run-id>/staging/fuzz-walk/harness/<script>"]
+        );
+        // With the run's configured test command, that is what is offered.
+        let configured = TargetProfile::detect(tmp.path(), Some(" sh test.sh "));
+        assert_eq!(configured.test_command.as_deref(), Some("sh test.sh"));
+        assert_eq!(walk_commands("fuzz-walk", &configured)[0], "sh test.sh");
+        assert_eq!(
+            walk_commands("invariant-walk", &configured)[0],
+            "sh test.sh"
+        );
+        assert!(!walk_commands("graph-walk", &configured).contains(&"sh test.sh".to_string()));
+    }
+
+    #[test]
+    fn the_commands_offered_follow_the_target() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let rust = TargetProfile::detect(tmp.path(), None);
+        assert_eq!(rust.languages, ["rust"]);
+        assert!(!rust.git);
+        assert_eq!(walk_commands("fuzz-walk", &rust)[0], "cargo test");
+        assert_eq!(walk_commands("crypto-walk", &rust)[0], "cargo audit");
+        // Not a git checkout: the sink walk is not offered git.
+        assert!(
+            !walk_commands("sink-walk", &rust)
+                .iter()
+                .any(|c| c.starts_with("git"))
+        );
+        // The configured command wins over the language's usual one.
+        let configured = TargetProfile::detect(tmp.path(), Some("make check"));
+        assert_eq!(walk_commands("fuzz-walk", &configured)[0], "make check");
+        // Python and Node targets, and their interpreters for a harness.
+        std::fs::remove_file(tmp.path().join("Cargo.toml")).unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let py = TargetProfile::detect(tmp.path(), None);
+        assert_eq!(py.test_command.as_deref(), Some("python3 -m pytest"));
+        assert_eq!(py.harness_interpreters(), ["sh", "python3"]);
+        assert!(harness_command("graph-walk", &py).starts_with("sh|python3 "));
+        // Nothing recognised: no test command, a shell harness only.
+        let empty = tempdir().unwrap();
+        let none = TargetProfile::detect(empty.path(), None);
+        assert_eq!(none, TargetProfile::default());
+        assert_eq!(walk_commands("fuzz-walk", &none).len(), 1);
+    }
+
+    #[test]
+    fn every_walk_is_told_it_may_run_its_own_harness_under_the_contract() {
+        let tmp = shell_target();
+        let profile = TargetProfile::detect(tmp.path(), Some("sh test.sh"));
+        for walk in KNOWN_WALKS {
+            let text = wrap_for_target(walk, "sample/r1", None, true, &profile, "body\n");
+            let harness = format!(".lyrik/state/runs/<run-id>/staging/{walk}/harness/");
+            assert!(
+                text.contains(&format!(
+                    "You may ask to run a script you wrote under `{harness}`"
+                )),
+                "{walk}: {text}"
+            );
+            assert!(text.contains("a replay runs the same command"), "{walk}");
+            assert!(
+                text.contains(super::super::lyrik_fix_arms::REACHED),
+                "{walk}"
+            );
+            assert!(text.contains("at most 20 tool rounds"), "{walk}");
+            assert!(text.contains("not a limit"), "{walk}");
+            // Asking is still asking: nothing is granted ahead of time,
+            // and the write scope is the run directory as before.
+            assert!(text.contains("The operator"), "{walk}");
+            assert!(
+                text.contains("write_paths: [\"<workspace>/.lyrik/state/runs/sample/r1\"]"),
+                "{walk}"
+            );
+            assert!(text.contains("## Finding format"), "{walk}");
+            assert!(text.contains("of any class is kept"), "{walk}");
+        }
+        // With exec unavailable no command is offered at all.
+        let off = wrap_for_target("fuzz-walk", "r1", None, false, &profile, "body\n");
+        assert!(off.contains("`exec` is not available in this run"), "{off}");
+        assert!(!off.contains("You may ask to run a script"), "{off}");
     }
 
     #[test]
@@ -871,10 +1169,18 @@ mod tests {
 
     #[test]
     fn the_staged_walk_lists_the_commands_it_will_ask_for() {
-        let sink = wrap_with_wirken_frontmatter("sink-walk", "r1", None, true, "body\n");
+        let git = TargetProfile {
+            git: true,
+            ..Default::default()
+        };
+        let sink = wrap_for_target("sink-walk", "r1", None, true, &git, "body\n");
         assert!(sink.contains("`git log`, `git blame`"), "{sink}");
-        let doc = wrap_with_wirken_frontmatter("doc-walk", "r1", None, true, "body\n");
-        assert!(doc.contains("runs no commands through `exec`"), "{doc}");
+        let doc = wrap_for_target("doc-walk", "r1", None, true, &git, "body\n");
+        assert!(
+            doc.contains("`sh .lyrik/state/runs/<run-id>/staging/doc-walk/harness/<script>`"),
+            "{doc}"
+        );
+        assert!(!doc.contains("git log"), "{doc}");
     }
 
     #[test]

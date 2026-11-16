@@ -21,7 +21,7 @@ use wirken_gateway::budget::{AgentBudget, BudgetMode, BudgetStore, BudgetWindow,
 use wirken_gateway::permissions::{PermissionCheck, PermissionStore, PermissionTier};
 
 /// Maximum tool call rounds per turn to prevent infinite loops.
-const MAX_TOOL_ROUNDS: usize = 20;
+pub const MAX_TOOL_ROUNDS: usize = 20;
 
 /// Channel-visible message returned when a block-mode budget refuses a
 /// call. Kept generic (no dollar figures) so it is safe to surface to
