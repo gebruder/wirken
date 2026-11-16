@@ -93,7 +93,8 @@ scorers into a consensus, and does not send findings to any delivery channel.
   finding depends on `mode`: pentest halves its grade once per distinct rule,
   and defender removes it from `findings.json`. The same rejections are written
   one per line to `rejections.jsonl` in the run directory, each with
-  `label: "negative"`, for calibration.
+  `label: "negative"`, for calibration. A defender-mode fix an arm rejected
+  adds a line with `kind: "fix"`, the arm and the reason.
 - **Per-finding `detection_source` provenance**, a closed enum enforced when
   present.
 - **Opt-in Semgrep prescreen.** With `scanner.semgrep.enabled` set, the runner
@@ -181,6 +182,7 @@ committed; run state lives under `.lyrik/state/`.
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
+| `<repo>/.lyrik/fix-patches/<slug>.patch` | optional: a patch for the defender fix step to check in place of writing one |
 | `<repo>/.lyrik/context.md` | the team's project context |
 | `<repo>/THREAT_MODEL.md`, else `<repo>/docs/threat-model.md` | the target's own threat model, loaded when committed and unmodified. The first of the two that exists is the one checked; when it is uncommitted or modified it is skipped with its reason and the other path is not tried (`load_target_threat_model`, `crates/cli/src/commands/lyrik.rs`); see [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) |
 | `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may `write_file` |
@@ -298,32 +300,9 @@ sections the file is expected to carry and which rule each check records.
 
 **Fix step, defender mode only.** After aggregation, a run in `defender`
 mode takes each confirmed finding, one kept by the gate and backed by a
-reproduction the replay agreed with, and starts one fresh agent under a
-staged `fix` skill. Its brief is the finding, the `invariant` the finding
-names (the property the code must hold that the finding shows violated; the
-staged wrapper has every walk emit it), the reproduction, and the revision.
-The patch targets the invariant, not the reproduction's input. The agent
-is told to write only under `staging/fix/<slug>/`, with `write_paths`
-enforcing the run directory: `fix.patch`, `apply.sh` for the
-operator to run from the project root, and `proof.json`. Nothing is written
-into the project's tree; the arms run in two copies extracted from the scanned
-revision under that directory with `git archive`. The proof has three arms
-against the live build: the reproduction fails in the baseline copy, passes in
-the patched copy, and fails again after `git apply -R` with `diff -r` showing
-the reverted copy identical to the baseline. The runner judges the proof as
-`proof.json` reports it, without re-running the arms, and writes `fixes` into
-`findings.json`: `fix` only when all three arms are present in that shape, the
-patch exists, the invariant is named and a target tree that was clean at run
-start is still clean after the step (a tree already dirty at start cannot be
-told apart and adds no reason); otherwise `inconclusive`, with each reason
-listed. An inconclusive outcome is never recorded as a fix. Exec is
-gated as everywhere under `wirken lyrik`: the operator is asked before each
-command, an approval is a one-shot bypass that stores no grant, a refused
-command is a skipped step, and the step's commands are printed before the
-first prompt. With the sandbox off no replay runs, so no finding is confirmed
-and the run records `lyrik.fix.none_confirmed`; a per-finding
-`lyrik.fix.skipped` is written only when findings were confirmed and `exec` is
-unavailable at the fix step.
+reproduction the replay agreed with, and produces a candidate fix with a set
+of arms that check it. [Defender fix step](#defender-fix-step) has the arms,
+the record and what a state means.
 
 **Reproductions and replay.** A command a walk runs to show a finding leaves
 a record under `staging/<walk-name>/reproductions/`. After the walks return,
@@ -381,6 +360,12 @@ finding from `findings.json`; its rejection record stays. The funnel counts
 removed candidates as `brocard_removed`. A Semgrep seed whose only candidate was
 removed counts as `brocard_rejected` in the scanner funnel, not `accepted`.
 
+**`fix`**: optional, read in defender mode. `test_command` is the project's
+test suite and `coverage_command` a command whose output lists each source
+file with a coverage percentage, both as run from the project root. The fix
+step runs them in copies of the scanned revision for the functionality arm.
+When absent, the `fix-recheck` agent picks the project's own.
+
 **`--bench`**: a flag on `wirken lyrik run`, for benchmark and
 batch-evaluation targets. With it the run does not ask for a sign-off and
 writes a `lyrik.phase_0.signoff` row before dispatch and a
@@ -393,6 +378,163 @@ Without the flag, the run asks at the terminal (see [Setup](#setup)); without
 a terminal it writes a `lyrik.phase_0.signoff` row with `decision:
 "pending_adapter_route"` and exits non-zero before dispatch. `scoring_disagreement` has no bench handling and no routing; a
 disagreement is recorded on the finding as `scoring_disagreement: true`.
+
+## Defender fix step
+
+A fix is recorded as a `candidate fix`. Nothing in a run calls a fix fixed or
+verified: the record lists what was checked, how, and what was not.
+
+**Who decides.** Three agents run per finding, each with a fresh context, under
+staged skills `fix`, `fix-attack` and `fix-recheck`. None of them judges
+anything. The runner composes each command an arm rests on, the agents run
+them through `exec`, and the runner reads the exit status and output of
+exactly those commands from the run's session log. What an agent writes about
+a run is not read. No model grades a patch, its own or another's. Where a step
+does rest on a model's reading it is recorded as `model_judged`; such a step
+can fail an arm and cannot pass one.
+
+**Any patch.** The arms take a patch and return a verdict. To check a patch
+Lyrik did not write (a maintainer's, an upstream fix), put it at
+`.lyrik/fix-patches/<slug>.patch` in the target, where `<slug>` is the
+finding's `stable_id` with every run of bytes outside `[A-Za-z0-9._]` replaced
+by `-`. The run checks that patch in place of writing one, records
+`patch.source` `supplied` and its SHA-256, and runs the same arms. Matching a
+known fix earns nothing: in the 1Password study the reference fix itself
+carried an off-by-one that a third of the generated patches reproduced and the
+grader took as equivalent ([FLAWED] 4.4).
+
+**The contract for a command that shows a defect.** It prints `LYRIK_REACHED`
+on a line of its own immediately before its assertion, exits non-zero when
+the defect shows and zero when it does not. One command string runs unchanged
+in each copy; a command that names a copy is refused. A run with no
+`LYRIK_REACHED` line never reached its assertion (a failed build, a missing
+dependency) and is `inconclusive`, whatever it exited with. The staged walk
+wrapper tells every walk to write reproductions this way.
+
+**Arm states.** `pass`, `fail`, `inconclusive`, `not_run`. A refused `exec` is
+`not_run`. A failed build, a missing dependency, a timeout, or two runs of one
+command that disagree is `inconclusive`. Neither is a reproduction and neither
+is a pass.
+
+The arms, in `arms` order:
+
+| Arm | Passes when | Fails when |
+|---|---|---|
+| `reproduction` | The original reproduction shows the defect in a `baseline` copy of the scanned revision, does not in the `patched` copy, and shows it again in a `reverted` copy where the patch was applied, reverted, and `diff -r` against the baseline printed nothing | It still shows the defect in the patched copy |
+| `variant` | At least two proofs of concept by different paths (another caller, another input shape, a cleanup or error path) each show the defect in the baseline and not in the patched copy | Any variant shows the defect in the patched copy: the fix is partial |
+| `root_cause` | The patch touches the finding's `origin`, and the root-cause claim is confirmed by an executed run | The patch touches the sink at `location` and not the origin: `symptom_patch` |
+| `relocation` | The re-walk reported no candidate and a bounded fuzz run over the patched functions executed clean | The re-walk reported a new or relocated candidate, or the fuzz run shows a defect in the patched copy |
+| `functionality` | The test suite passes in both copies, a coverage report shows each patched file exercised, and the benign-input output is identical in both copies when that differential ran | The suite passes in the baseline and fails in the patched copy, or benign-input output differs |
+
+- **Variant.** The `fix-attack` agent lists every caller and path it finds
+  that reaches the same sink or invariant, from the code and the run's
+  `graph-walk` and `chain-walk` step records, and writes a proof of concept
+  for some. A variant that does not show the defect in the baseline is not a
+  variant and does not count. Every listed path with no variant that held is
+  in `untested_paths` with the reason; it is not assumed safe. The list of
+  paths is a model's, so a passing arm says the tested paths held, not that
+  the list is complete.
+- **Root cause.** The comparison is of the patch's hunks against `origin` and
+  `location`. With no `origin` on the finding, or a patch that touches
+  neither site, the arm is `inconclusive`.
+- **Root-cause claim.** `root_cause_claim` holds the invariant the fix was
+  given, the `origin`, and `evidence_state`: `confirmed_by_executed_poc` when
+  the baseline run showed the defect and its output names the origin's file
+  or function, `asserted_only` otherwise. A fix built on an asserted claim
+  carries the label `asserted_only_root_cause`. A failed variant arm sets
+  `suspect` and the label `root_cause_suspect`.
+- **Relocation.** The `fix-recheck` agent applies the staged `invariant-walk`
+  and `differential-walk` texts to everything reachable from the patched
+  functions, not only the patched lines, looking for the violation moved
+  rather than removed, for example into a callback. Without a fuzz harness
+  the arm cannot pass: a re-walk that reports nothing is a model's reading,
+  and the arm is `inconclusive`, `model_judged`.
+- **Functionality.** The suite and coverage commands come from `fix` in
+  `.lyrik/config.json` when set; otherwise the `fix-recheck` agent picks the
+  project's own. A suite that fails in both copies attributes nothing and is
+  `inconclusive`. A patch that edits test files cannot pass on the suite.
+  With no coverage report listing each patched file above zero the arm
+  records `functionality unverified`, carries the label
+  `functionality_unverified`, and does not pass. The benign-input harness
+  runs twice in the baseline; output that differs between those two runs is
+  `inconclusive`. A difference between baseline and patched output blocks
+  the fix even where the change is intended: with no reference build the
+  runner cannot tell the two apart, and the differing line is in the arm's
+  reasons for a maintainer to decide.
+- **Class report.** `class_open_sites` lists other sites with the same
+  invariant pattern unguarded: `count`, `locations`, and `unverified` for
+  sites whose quoted line is not in the file they name. A fix closes one
+  instance. It is never described as closing the class.
+- **Locality.** `fix_locality` is computed from the diff: `localized` for one
+  hunk, or hunks inside one function of one file; `cross_cutting` otherwise.
+  A cross-cutting patch raises `variant_minimum` to four and requires the
+  benign-input differential. It does not withhold `apply.sh`.
+
+**Verdict.** `rejected` when any arm failed. `inconclusive` when the
+reproduction arm did not pass, the patch is missing, a supplied patch changed
+during the step, or a target tree that was clean at run start is dirty after
+it. Otherwise `candidate_fix`, with every arm and its state on the record:
+a `candidate_fix` may carry arms that are `inconclusive` or `not_run`. Each
+failed arm of a rejected fix is appended to `rejections.jsonl` as
+`{"kind": "fix", "stable_id", "arm", "basis", "reason", "patch"}`. A rejected
+fix is not retried. The run prints, and `fix_summary` holds, the count of
+fixes by verdict and by each arm's state.
+
+**What is left for a maintainer.** Under `staging/fix/<slug>/`: `fix.patch`,
+`apply.sh` to run from the project root, `variants/` and `attack.json`,
+`benign/` and `recheck.json`, and `observed.json`, every command the arms read
+with its exit status and output. `artifacts` on the record has the paths and
+the reproduction command. `patch` has the files touched, any test files and
+any dependency manifests among them.
+
+**Exec** is gated as everywhere under `wirken lyrik`: the operator is asked
+before each command, an approval is a one-shot bypass that stores no grant,
+and a refused command is an arm not run. The step prints the command words it
+uses (`mkdir`, `git archive`, `tar`, `git apply`, `diff`) before the first
+prompt. Nothing is written into the project's tree. With the sandbox off no
+replay runs, so no finding is confirmed and the run records
+`lyrik.fix.none_confirmed`; `lyrik.fix.skipped` is written per finding when
+findings were confirmed and `exec` is unavailable. The audit log carries
+`lyrik.fix.started`, `lyrik.fix.completed` per agent with its `step`,
+`lyrik.fix.verdict` with the arms, and `lyrik.fix.summary`.
+
+**What the arms do not catch.** Two or four variants is a floor; a fuzzer
+finds inputs a hand-written variant does not, and [PatchBench] reports patches
+that pass a corpus of dozens and still leave the root cause partly open. A
+different latent bug in the patched function, a performance regression, a new
+dependency that is not the package intended, and a default that keeps a class
+open while each instance is patched are outside every arm. No runner can show
+that a path nobody listed does not exist.
+
+**Sources.** The arms follow checks described in:
+
+- OpenSSF, [Finding and Fixing Vulnerabilities Using AI][OpenSSF], sections
+  5.4, 5.6 and 5.7: re-run the proof of concept, try variations with a
+  separate agent, fix the root cause and not the instance, keep verifiers
+  deterministic.
+- Shen et al., [PatchBench]: variants derived from the original proof of
+  concept, benign-input output state, unit tests, and the four patterns of
+  patches that stop the proof of concept and are still wrong.
+- Trail of Bits, [1Password's AI patching benchmark is misleading][ToB] and
+  the [post-patch-validation skill][ToB-skill]: the reach marker, checks that
+  cannot see which revision they run on, a variant that must fail on the
+  base, broken runs as gaps, and provenance as context, not evidence.
+- 1Password Off-by-1 Labs, [Frontier Models' Vulnerability Patches are Often
+  F.L.A.W.E.D.][FLAWED], sections 2.7, 2.8, 4.4 and 4.9: a reproducer covers
+  one path, a model grader agreed with human review on about two grades in
+  three, a reference fix carried a bug, and a use-after-free relocated into a
+  callback passed both the reproducer and the grader.
+- flyingpenguin, [Disinformation Pushed by 1Password][fp-1p] and [OpenClaw is
+  Cooked][fp-oc]: grading by the models under test, and a class that
+  reappears wherever its generator is still in place.
+
+[OpenSSF]: https://best.openssf.org/Finding-and-Fixing-Vulnerabilities-Using-AI/verify-fixes.html
+[PatchBench]: https://arxiv.org/abs/2609.04075
+[ToB]: https://blog.trailofbits.com/2026/09/15/1passwords-ai-patching-benchmark-is-misleading/
+[ToB-skill]: https://github.com/trailofbits/skills/tree/main/plugins/post-patch-validation
+[FLAWED]: https://1password.com/files/resources/frontier-models-vulnerability-patches-flawed.pdf
+[fp-1p]: https://www.flyingpenguin.com/disinformation-pushed-by-1password-ai-patching-report-is-false/
+[fp-oc]: https://www.flyingpenguin.com/openclaw-is-cooked-433-cves-patched-by-agents-that-cant-fix-whats-broken/
 
 ## Writing the scoring guide
 
@@ -558,9 +700,17 @@ change them:
   `file`, the record's fields, `replay` and `agreement`. See
   [lyrik-brocards.md](lyrik-brocards.md#reproductions-and-replay).
 - `fixes`, a top-level array present after a defender-mode run with at least
-  one confirmed finding: `stable_id`, `dir` (the fix directory under the run
-  directory), `verdict` (`fix` or `inconclusive`), `reasons`, and the
-  `proof` as the agent wrote it when it parsed.
+  one confirmed finding, one record per finding: `stable_id`, `dir`,
+  `verdict` (`candidate_fix`, `rejected` or `inconclusive`), `label`
+  (`candidate fix`, on a `candidate_fix` only), `reasons`, `labels`, `arms`,
+  `fix_locality`, `variant_minimum`, `root_cause_claim`, `untested_paths`,
+  `class_open_sites`, `patch`, `fix_model` and `artifacts`. See
+  [Defender fix step](#defender-fix-step).
+- `fix_summary`, beside `fixes`: `fixes`, `by_verdict`, and `by_arm` with the
+  count of fixes in each state of each arm.
+- `origin` on a finding, when the walk traced it: `file`, `line_start` and
+  `function`, the code where the invariant violation starts, as distinct from
+  `location`, where it surfaces.
 
 ## Reports and audit
 

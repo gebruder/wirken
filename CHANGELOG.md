@@ -31,11 +31,39 @@ tagged.
   `a_budget_with_both_ceilings_reports_the_one_reached`,
   `crates/agent/src/tests.rs`; [docs/cost-monitoring.md](docs/cost-monitoring.md#model-time)).
 
+- Lyrik's defender fix step checks each fix in five arms and records it as a
+  `candidate fix`. Beside the original reproduction in baseline, patched and
+  reverted copies: `variant` (proofs of concept by other paths to the same
+  sink; one that works on the patched code rejects the fix as partial),
+  `root_cause` (a patch on the sink with the origin elsewhere is a
+  `symptom_patch` and is rejected), `relocation` (a re-walk of everything
+  reachable from the patched functions, with a bounded fuzz run where a
+  harness exists) and `functionality` (the project's suite before and after
+  with coverage of the patched files, and a benign-input differential). Each
+  arm is `pass`, `fail`, `inconclusive` or `not_run`, and says whether it
+  rests on executed commands or a model's reading; a model's reading cannot
+  pass an arm. The record also carries `fix_locality`, `root_cause_claim`
+  with its evidence state, `untested_paths`, `class_open_sites`, the model,
+  and the paths to re-run everything. A patch placed at
+  `.lyrik/fix-patches/<slug>.patch` is checked in place of one Lyrik writes.
+  Findings may carry `origin`. `fix` in `.lyrik/config.json` names the test
+  and coverage commands ([docs/lyrik.md](docs/lyrik.md#defender-fix-step);
+  `crates/cli/src/commands/lyrik_fix_arms.rs`).
+
 ### Changed
 
 - The uncosted-call warning names the USD ceiling as the one that is
   pass-through, says whether a model-time ceiling still applies, and is not
   logged under a budget with no USD ceiling.
+
+- Lyrik's defender fix step judges from the `exec` results on the session
+  log for commands the runner composed, and no longer reads a `proof.json`
+  written by the fix agent. A `fixes` entry's `verdict` is `candidate_fix`,
+  `rejected` or `inconclusive` where it was `fix` or `inconclusive`, and the
+  entry has no `proof`. A reproduction command must print `LYRIK_REACHED`
+  before its assertion and exit non-zero when the finding holds for its fix
+  to be checked; a failed build or a refused command is never a pass. Rejected
+  fixes are appended to `rejections.jsonl`.
 
 ### Fixed
 
