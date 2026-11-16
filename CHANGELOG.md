@@ -76,6 +76,13 @@ tagged.
   `crates/cli/src/commands/mod.rs`;
   [docs/sandbox-properties.md](docs/sandbox-properties.md)).
 
+- A Lyrik model pin may set `max_tokens`, the output tokens allowed per
+  reply. Absent, the limit is 4096 as before, which cuts off a fix agent's
+  patch when the patch and the reasoning before it do not fit in one reply.
+  The sign-off summary names the limit when set
+  (`resolve_phase_pin_reads_max_tokens_when_set`,
+  `crates/cli/src/commands/lyrik.rs`).
+
 ### Changed
 
 - The uncosted-call warning names the USD ceiling as the one that is

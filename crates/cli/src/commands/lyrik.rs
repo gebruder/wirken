@@ -607,7 +607,16 @@ fn signoff_summary(
         ("target", head),
         ("rubric", doc(&scoring.rubric)),
         ("context", context),
-        ("model", format!("{} {}", pin.provider, pin.model)),
+        (
+            "model",
+            match pin.max_tokens {
+                Some(max) => format!(
+                    "{} {}, up to {max} output tokens a reply",
+                    pin.provider, pin.model
+                ),
+                None => format!("{} {}", pin.provider, pin.model),
+            },
+        ),
         ("walks", walk_line),
         ("exec", exec_line),
     ] {
@@ -1015,6 +1024,9 @@ async fn dispatch_via_agent_runtime(
     let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
     if let Some(cw) = pin.context_window {
         llm_config.context_window = cw as usize;
+    }
+    if let Some(max) = pin.max_tokens {
+        llm_config.max_tokens = max;
     }
 
     let cfg = super::config();
@@ -4228,6 +4240,10 @@ struct PhasePin {
     /// 32K default, or a custom OpenAI-compat endpoint with a known
     /// larger window) without touching the agent crate.
     context_window: Option<u32>,
+    /// Output tokens allowed per model reply, when the pin sets it. A
+    /// reply that carries a whole file in one tool call, as the fix
+    /// step's patch does, is cut off at the limit.
+    max_tokens: Option<u32>,
 }
 
 fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
@@ -4261,11 +4277,17 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
         .get("context_window")
         .and_then(|v| v.as_u64())
         .and_then(|n| u32::try_from(n).ok());
+    let max_tokens = pin_obj
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .and_then(|n| u32::try_from(n).ok());
     Ok(PhasePin {
         provider,
         model,
         base_url,
         context_window,
+        max_tokens,
     })
 }
 
@@ -4537,6 +4559,30 @@ mod tests {
         assert_eq!(pin.context_window, Some(65_536));
         assert_eq!(pin.provider, "ollama");
         assert_eq!(pin.base_url, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn resolve_phase_pin_reads_max_tokens_when_set() {
+        let cfg = serde_json::json!({
+            "phases": {"framing": {"provider": "ollama", "model": "m", "max_tokens": 16000}}
+        });
+        assert_eq!(
+            super::resolve_phase_pin(&cfg).unwrap().max_tokens,
+            Some(16_000)
+        );
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(-5),
+            serde_json::json!("16000"),
+        ] {
+            let cfg = serde_json::json!({
+                "phases": {"framing": {"provider": "ollama", "model": "m", "max_tokens": bad}}
+            });
+            assert_eq!(super::resolve_phase_pin(&cfg).unwrap().max_tokens, None);
+        }
+        let absent =
+            serde_json::json!({"phases": {"framing": {"provider": "ollama", "model": "m"}}});
+        assert_eq!(super::resolve_phase_pin(&absent).unwrap().max_tokens, None);
     }
 
     #[test]
@@ -5311,6 +5357,7 @@ mod tests {
             model: "m1".into(),
             base_url: "http://localhost:8080/v1".into(),
             context_window: None,
+            max_tokens: None,
         };
         let walks = vec!["sink-walk".to_string(), "chain-walk".to_string()];
         let summary = super::signoff_summary(
@@ -5365,6 +5412,7 @@ mod tests {
             model: "m1".into(),
             base_url: "http://localhost:11434/v1".into(),
             context_window: None,
+            max_tokens: None,
         };
         let walks = vec!["sink-walk".to_string()];
         let summary = |limits| {
@@ -5453,6 +5501,7 @@ mod tests {
             model: "m".into(),
             base_url: "http://localhost:11434/v1".into(),
             context_window: None,
+            max_tokens: None,
         };
         let walks = vec!["sink-walk".to_string()];
         let summary = super::signoff_summary(

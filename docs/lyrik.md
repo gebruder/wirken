@@ -206,7 +206,12 @@ the staged walk prompts do not mention them (`crates/cli/src/commands/lyrik_walk
 resolves one pin for the whole run, `phases.framing`, else `phases.score`,
 else `phases.recon`, and every model call in the run, the preflight probe and
 each walk included, goes to it. Other keys, including `articulate`, `rubric`
-and `exploit`, are accepted and not read; no exploit phase runs.
+and `exploit`, are accepted and not read; no exploit phase runs. A pin may
+carry `max_tokens`, the output tokens allowed per model reply; absent, the
+provider default of 4096 applies. A reply that writes a whole file in one
+tool call, as the fix step's patch does, is cut off at the limit, so a run
+whose fixes are more than a few lines sets it higher. The sign-off summary
+names the limit when the pin sets one.
 
 Confidentiality is the pin: there is no `confidential: true` flag, so pinning
 the resolved phase to Privatemode or Tinfoil is the mechanism. A `score` pin
