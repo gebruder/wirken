@@ -490,26 +490,31 @@ The arms, in `arms` order:
 - **Locality.** `fix_locality` is computed from the diff: `localized` for one
   hunk, or hunks inside one function of one file; `cross_cutting` otherwise.
   A cross-cutting patch raises `variant_minimum` to four and requires the
-  benign-input differential. It does not withhold `apply.sh`.
+  benign-input differential. With fewer variants held the variant arm is
+  `inconclusive`, and so is the verdict. `apply.sh` is written either way.
 
 **Verdict.** The rule, in order:
 
 1. `rejected` when any arm is `fail`.
 2. Otherwise `inconclusive` when any of these holds: the `reproduction` arm
-   is not `pass`; `fix.patch` is missing or holds no hunk; the patch in the
-   fix directory is not the supplied patch read at run start; a run input
-   changed during the run; a target tree that was clean at run start is
-   dirty after the step.
+   is not `pass`; the `variant` arm is not `pass`; `fix.patch` is missing or
+   holds no hunk; the patch in the fix directory is not the supplied patch
+   read at run start; a run input changed during the run; a target tree that
+   was clean at run start is dirty after the step.
 3. Otherwise `candidate_fix`.
 
-So what separates `candidate_fix` from `inconclusive` is the `reproduction`
-arm and the integrity of the patch, the inputs and the target tree. The other
-four arms do not: a `candidate_fix` may carry `variant`, `root_cause`,
+So a `candidate_fix` has stopped the original reproduction and the required
+number of variants by other paths, in runs the runner observed, on a patch,
+inputs and target tree that did not change. A reproduction that passes with
+the variant arm `inconclusive` or `not_run` is `inconclusive`: one path
+closed says nothing about the others. The other three arms do not decide
+the verdict unless they fail: a `candidate_fix` may carry `root_cause`,
 `relocation` or `functionality` as `inconclusive` or `not_run`. For that
 reason `candidate_fix` is never shown without the arm tally. `label` reads
 `candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run`, and
 `arm_tally` holds the counts. A fix whose `functionality` arm is
-`inconclusive` or `not_run` carries the label `functionality_unverified`.
+`inconclusive` or `not_run` carries the label `functionality_unverified`
+and is counted as such in the summary.
 
 **Run summary.** `fix_summary.by_verdict.candidate_fix` is an object, not a
 count: `count`, `all_arms_passed`, `functionality_unverified` (candidates

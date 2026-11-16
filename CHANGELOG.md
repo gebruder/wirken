@@ -70,8 +70,13 @@ tagged.
   The step now judges from the `exec` results on the session log for
   commands the runner composed, and applies the patch from the target root
   with `git apply --directory`. `verdict` is `candidate_fix`, `rejected` or
-  `inconclusive`; the value `fix` and the `proof` field are gone. A
-  `candidate_fix` label and the run summary always carry the arm tally
+  `inconclusive`; the value `fix` and the `proof` field are gone. The rule:
+  `rejected` when any arm fails; otherwise `candidate_fix` only when both
+  the reproduction arm and the variant arm pass and the patch, the run
+  inputs and the target tree did not change; otherwise `inconclusive`. A
+  reproduction that passes with the variant arm inconclusive or not run is
+  `inconclusive`. The functionality arm may be inconclusive or not run on a
+  `candidate_fix`. The label and the run summary always carry the arm tally
   (`candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run`), and the
   summary counts candidates whose functionality arm did not pass as
   functionality unverified. A reproduction command must print
