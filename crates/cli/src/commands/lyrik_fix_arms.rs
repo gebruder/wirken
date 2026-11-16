@@ -23,7 +23,9 @@
 //!
 //! A step that rests on a model's reading (where a walk placed the
 //! origin, what a re-walk reported, which paths reach the sink) is
-//! marked `model_judged`. It can fail an arm. It cannot pass one.
+//! marked `model_judged`. It cannot pass an arm and it cannot fail one:
+//! the arm is inconclusive and the claim is recorded on it. An arm
+//! fails only on an executed run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -211,18 +213,64 @@ pub struct Layout {
     /// The fix directory, relative to the target root, where `exec`
     /// starts.
     pub dir: String,
+    run_id: String,
+    /// The walks whose harness directory each copy carries, at the path
+    /// it has in the target.
+    pub carried: Vec<String>,
 }
 
 impl Layout {
     pub fn new(run_id: &str, rel_dir: &str) -> Self {
         Self {
             dir: format!(".lyrik/state/runs/{run_id}/{rel_dir}"),
+            run_id: run_id.to_string(),
+            carried: Vec::new(),
         }
     }
 
+    /// The layout for a finding whose reproduction is `command`. A
+    /// walk's harness lives under the run's staging directory, which a
+    /// copy of the scanned revision does not hold, and a harness names
+    /// its own files by their path from the project root. So each copy
+    /// is given the harness directory of every walk the command names,
+    /// at the same relative path, and the command runs in a copy
+    /// exactly as it ran in the target.
+    pub fn for_reproduction(run_id: &str, rel_dir: &str, command: &str) -> Self {
+        let mut layout = Self::new(run_id, rel_dir);
+        let staging = layout.staging();
+        for piece in command.split(&format!("{staging}/")).skip(1) {
+            if let Some((walk, rest)) = piece.split_once('/')
+                && rest.starts_with("harness")
+                && !walk.is_empty()
+                && walk
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                && !layout.carried.iter().any(|w| w == walk)
+            {
+                layout.carried.push(walk.to_string());
+            }
+        }
+        layout
+    }
+
+    fn staging(&self) -> String {
+        format!(".lyrik/state/runs/{}/staging", self.run_id)
+    }
+
+    /// Make one copy of the scanned revision, with the carried harness
+    /// directories beside it.
     pub fn extract(&self, side: &str, revision: &str) -> String {
         let d = &self.dir;
-        format!("mkdir -p {d}/{side} && git archive --format=tar {revision} | tar -x -C {d}/{side}")
+        let s = self.staging();
+        let mut out = format!(
+            "mkdir -p {d}/{side} && git archive --format=tar {revision} | tar -x -C {d}/{side}"
+        );
+        for walk in &self.carried {
+            out.push_str(&format!(
+                " && mkdir -p {d}/{side}/{s}/{walk} && cp -R {s}/{walk}/harness {d}/{side}/{s}/{walk}/"
+            ));
+        }
+        out
     }
 
     /// `command` run from inside one copy.
@@ -251,17 +299,26 @@ impl Layout {
     }
 
     /// A command written to run from the target root, as it runs from
-    /// inside a copy: each path into the run's state is re-pointed at
-    /// the target root, which a copy does not hold.
+    /// inside a copy. A path into a harness directory the copy carries
+    /// is left as it is. Any other path into the run's state is
+    /// re-pointed at the target root, which a copy does not hold.
     pub fn rebase(&self, command: &str) -> String {
         const STATE: &str = ".lyrik/state/runs/";
         let depth = self.dir.split('/').filter(|c| !c.is_empty()).count() + 1;
         let up = "../".repeat(depth);
+        let carried: Vec<String> = self
+            .carried
+            .iter()
+            .map(|w| format!("{}/staging/{w}/harness", self.run_id))
+            .collect();
         let mut out = String::with_capacity(command.len());
         let mut before: Option<char> = None;
         for (i, piece) in command.split(STATE).enumerate() {
             if i > 0 {
-                if before.is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '=')) {
+                let in_copy = carried.iter().any(|c| piece.starts_with(c.as_str()));
+                if !in_copy
+                    && before.is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '='))
+                {
                     out.push_str(&up);
                 }
                 out.push_str(STATE);
@@ -454,9 +511,24 @@ pub struct ArmResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub basis: Option<Basis>,
     pub reasons: Vec<String>,
+    /// What a model reported that no executed run confirmed. Kept for a
+    /// maintainer to read. A claim here never fails the arm.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_claims: Vec<String>,
 }
 
 impl ArmResult {
+    fn with_claims(mut self, claims: Vec<String>) -> Self {
+        debug_assert!(
+            claims.is_empty()
+                || self.state != ArmState::Fail
+                || self.basis == Some(Basis::Executed),
+            "an arm fails on executed evidence, not on a claim"
+        );
+        self.model_claims = claims;
+        self
+    }
+
     /// The arm with its state withdrawn: an input it rested on changed
     /// while the run was under way.
     pub fn withheld(mut self, reason: &str) -> Self {
@@ -470,11 +542,16 @@ impl ArmResult {
             !(state == ArmState::Pass && basis != Some(Basis::Executed)),
             "an arm passes on executed evidence only"
         );
+        debug_assert!(
+            !(state == ArmState::Fail && basis != Some(Basis::Executed)),
+            "an arm fails on executed evidence only"
+        );
         Self {
             arm,
             state,
             basis,
             reasons,
+            model_claims: Vec::new(),
         }
     }
 }
@@ -571,6 +648,10 @@ pub struct Candidate {
     /// `new` or `relocated`.
     #[serde(default)]
     pub kind: String,
+    /// A proof of concept for the candidate under the marker contract,
+    /// as run from a copy's root. Without one the candidate is a claim.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -923,12 +1004,16 @@ pub fn root_cause_claim(finding: &Value, reproduction: &Reproduction) -> RootCau
 
 /// The root-cause arm: the patched location against the origin. A
 /// patch on the sink alone, with the origin elsewhere, is a symptom
-/// patch and fails. The second value says so.
+/// patch. Where the origin lies is a walk's reading, so that alone is
+/// a claim and leaves the arm inconclusive; it fails when a variant by
+/// another path still shows the defect in the patched copy. The second
+/// value is whether it failed as a symptom patch.
 pub fn root_cause_arm(
     shape: &PatchShape,
     finding: &Value,
     claim: &RootCauseClaim,
     patched: &Poc,
+    variant_failed: bool,
 ) -> (ArmResult, bool) {
     let judged = Some(Basis::ModelJudged);
     let Some(origin) = &claim.origin else {
@@ -992,17 +1077,40 @@ pub fn root_cause_arm(
     }
     if at_sink {
         let sink = sink.as_ref().map(at).unwrap_or_default();
+        let claim_text = format!(
+            "symptom_patch: the patch touches the sink {sink} and not the origin {}",
+            at(origin)
+        );
+        // Where the origin lies is a walk's reading. It rejects the fix
+        // only with an executed run behind it: a variant by another
+        // path that still shows the defect in the patched copy.
+        if variant_failed {
+            return (
+                ArmResult::new(
+                    "root_cause",
+                    ArmState::Fail,
+                    Some(Basis::Executed),
+                    vec![format!(
+                        "{claim_text}; a variant by another path shows the defect in the \
+                         patched copy"
+                    )],
+                ),
+                true,
+            );
+        }
         return (
             ArmResult::new(
                 "root_cause",
-                ArmState::Fail,
+                ArmState::Inconclusive,
                 judged,
-                vec![format!(
-                    "symptom_patch: the patch touches the sink {sink} and not the origin {}",
-                    at(origin)
-                )],
-            ),
-            true,
+                vec![
+                    "the walks place the origin away from the patch; no executed run \
+                     confirms it"
+                        .into(),
+                ],
+            )
+            .with_claims(vec![claim_text]),
+            false,
         );
     }
     (
@@ -1019,11 +1127,13 @@ pub fn root_cause_arm(
     )
 }
 
-/// The regression and relocation arm. Any candidate the re-walk of the
-/// code reachable from the patched functions reported fails it, as does
-/// a bounded fuzz run that shows a defect in the patched copy. It
-/// passes only on a fuzz run that executed clean; a re-walk that
-/// reported nothing is a model's reading and leaves it inconclusive.
+/// The regression and relocation arm. It fails on an executed run: a
+/// candidate from the re-walk whose proof of concept shows it in the
+/// patched copy, or a bounded fuzz run that shows a defect there. A
+/// candidate with no such run is a model's claim: it is recorded on
+/// the arm, which is then inconclusive, and it does not reject the
+/// fix. The arm passes only on a fuzz run that executed clean with no
+/// candidate reported.
 pub fn relocation_arm(
     log: &Log,
     layout: &Layout,
@@ -1043,14 +1153,38 @@ pub fn relocation_arm(
             vec!["no re-walk of the patched code was recorded".into()],
         );
     };
-    let mut reasons: Vec<String> = relocation
-        .candidates
-        .iter()
-        .map(|c| {
-            let kind = if c.kind.is_empty() { "new" } else { &c.kind };
-            format!("{kind} candidate at {}: {}", c.location, c.title)
-        })
-        .collect();
+    // A candidate is a model's claim. It fails the arm only when a
+    // proof of concept for it, under the marker contract, shows the
+    // defect in the patched copy. Otherwise it is kept as a claim.
+    let mut reasons: Vec<String> = Vec::new();
+    let mut claims: Vec<String> = Vec::new();
+    let mut confirmed = false;
+    for c in &relocation.candidates {
+        let kind = if c.kind.is_empty() { "new" } else { &c.kind };
+        let text = format!("{kind} candidate at {}: {}", c.location, c.title);
+        let shown = c.command.as_ref().map(|cmd| {
+            if names_a_copy(cmd) {
+                Poc::Inconclusive("its command names a copy".into())
+            } else {
+                poc(&log.run(&layout.in_copy("patched", cmd)))
+            }
+        });
+        match shown {
+            Some(Poc::Shown) => {
+                confirmed = true;
+                reasons.push(format!(
+                    "{text}; its proof of concept shows it in the patched copy"
+                ));
+            }
+            Some(Poc::NotShown) => claims.push(format!(
+                "{text} (its proof of concept does not show it in the patched copy)"
+            )),
+            Some(Poc::Inconclusive(w) | Poc::NotRun(w)) => {
+                claims.push(format!("{text} (its proof of concept: {w})"))
+            }
+            None => claims.push(format!("{text} (no proof of concept)")),
+        }
+    }
     let fuzz = relocation.fuzz.as_ref().map(|f| {
         if names_a_copy(&f.command) {
             Poc::Inconclusive("its command names a copy".into())
@@ -1060,15 +1194,24 @@ pub fn relocation_arm(
     });
     if fuzz == Some(Poc::Shown) {
         reasons.push("the bounded fuzz run shows a defect in the patched copy".into());
-        return ArmResult::new("relocation", ArmState::Fail, Some(Basis::Executed), reasons);
+        confirmed = true;
     }
-    if !reasons.is_empty() {
+    if confirmed {
+        return ArmResult::new("relocation", ArmState::Fail, Some(Basis::Executed), reasons)
+            .with_claims(claims);
+    }
+    if !claims.is_empty() {
         return ArmResult::new(
             "relocation",
-            ArmState::Fail,
+            ArmState::Inconclusive,
             Some(Basis::ModelJudged),
-            reasons,
-        );
+            vec![format!(
+                "the re-walk reported {} candidate(s) that no executed run confirms; they \
+                 are recorded as claims and do not reject the fix",
+                claims.len()
+            )],
+        )
+        .with_claims(claims);
     }
     if relocation.scope.is_empty() {
         return ArmResult::new(
@@ -1627,6 +1770,35 @@ mod tests {
             "cat /w/.lyrik/state/runs/r1/x"
         );
         assert_eq!(l.rebase("cargo test"), "cargo test");
+        // A reproduction's own harness directory rides in each copy, so
+        // the command, and every path the harness names from the project
+        // root, is the same there as in the target.
+        let carried = Layout::for_reproduction("r1", "staging/fix/f1", REPRO);
+        assert_eq!(carried.carried, ["fuzz-walk"]);
+        assert_eq!(
+            carried.in_copy("baseline", REPRO),
+            format!("cd .lyrik/state/runs/r1/staging/fix/f1/baseline && {REPRO}")
+        );
+        assert_eq!(
+            carried.extract("baseline", REV),
+            "mkdir -p .lyrik/state/runs/r1/staging/fix/f1/baseline && git archive --format=tar \
+             abc123 | tar -x -C .lyrik/state/runs/r1/staging/fix/f1/baseline && mkdir -p \
+             .lyrik/state/runs/r1/staging/fix/f1/baseline/.lyrik/state/runs/r1/staging/fuzz-walk \
+             && cp -R .lyrik/state/runs/r1/staging/fuzz-walk/harness \
+             .lyrik/state/runs/r1/staging/fix/f1/baseline/.lyrik/state/runs/r1/staging/fuzz-walk/"
+        );
+        // A path into another walk's staging is still re-pointed.
+        assert!(
+            carried
+                .rebase("cat .lyrik/state/runs/r1/staging/sink-walk/notes.txt")
+                .starts_with("cat ../../")
+        );
+        // A command that names no harness carries nothing.
+        assert!(
+            Layout::for_reproduction("r1", "staging/fix/f1", "cargo test")
+                .carried
+                .is_empty()
+        );
         // A command that starts with the path.
         assert!(
             l.rebase(".lyrik/state/runs/r1/x.sh --go")
@@ -1864,19 +2036,33 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_on_the_sink_with_the_origin_elsewhere_is_a_symptom_patch() {
+    fn a_symptom_patch_fails_only_with_an_executed_variant_behind_it() {
         let f = finding();
         let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("panic in decode_len")));
-        let (arm, symptom) = root_cause_arm(&parse_patch(SINK_PATCH), &f, &claim, &Poc::NotShown);
+        let shape = parse_patch(SINK_PATCH);
+        // The walks' placement of the origin alone: a claim, not a failure.
+        let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown, false);
+        assert_eq!(arm.state, ArmState::Inconclusive);
+        assert_eq!(arm.basis, Some(Basis::ModelJudged));
+        assert!(!symptom);
+        assert_eq!(arm.model_claims.len(), 1);
+        assert!(
+            arm.model_claims[0].starts_with("symptom_patch:"),
+            "{:?}",
+            arm.model_claims
+        );
+        assert!(arm.model_claims[0].contains("src/parse.rs:42"));
+        assert!(arm.model_claims[0].contains("src/header.rs:12"));
+        // With a variant that still works on the patched code: fails.
+        let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown, true);
         assert_eq!(arm.state, ArmState::Fail);
+        assert_eq!(arm.basis, Some(Basis::Executed));
         assert!(symptom);
         assert!(
             arm.reasons[0].starts_with("symptom_patch:"),
             "{:?}",
             arm.reasons
         );
-        assert!(arm.reasons[0].contains("src/parse.rs:42"));
-        assert!(arm.reasons[0].contains("src/header.rs:12"));
     }
 
     #[test]
@@ -1890,7 +2076,7 @@ mod tests {
         );
         assert_eq!(claim.evidence_state, ClaimEvidence::ConfirmedByExecutedPoc);
         assert_eq!(claim.claim, "len never exceeds the buffer");
-        let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown);
+        let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Pass);
         assert!(!symptom);
         // Same patch and claim, but the patched copy did not build: the
@@ -1899,7 +2085,7 @@ mod tests {
             Poc::Inconclusive("no marker".into()),
             Poc::NotRun("not run".into()),
         ] {
-            let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &patched);
+            let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &patched, false);
             assert_eq!(arm.state, ArmState::Inconclusive);
             assert!(
                 arm.reasons[0].contains("never reached its assertion in the patched copy"),
@@ -1911,7 +2097,7 @@ mod tests {
         // Same patch, origin asserted only: a model's placement cannot pass.
         let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("boom")));
         assert_eq!(claim.evidence_state, ClaimEvidence::AssertedOnly);
-        let (arm, _) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown);
+        let (arm, _) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Inconclusive);
         assert_eq!(arm.basis, Some(Basis::ModelJudged));
         // Output names the origin, but the run never showed the defect.
@@ -1924,13 +2110,13 @@ mod tests {
         let mut bare = f.clone();
         bare.as_object_mut().unwrap().remove("origin");
         let claim = root_cause_claim(&bare, &reproduction(Poc::Shown, Some("x")));
-        let (arm, symptom) = root_cause_arm(&shape, &bare, &claim, &Poc::NotShown);
+        let (arm, symptom) = root_cause_arm(&shape, &bare, &claim, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Inconclusive);
         assert!(!symptom);
         // A patch that touches neither site.
         let other = parse_patch("--- a/src/z.rs\n+++ b/src/z.rs\n@@ -1,2 +1,3 @@\n x\n+y\n");
         let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("x")));
-        let (arm, symptom) = root_cause_arm(&other, &f, &claim, &Poc::NotShown);
+        let (arm, symptom) = root_cause_arm(&other, &f, &claim, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Inconclusive);
         assert!(!symptom);
     }
@@ -1940,19 +2126,62 @@ mod tests {
     }
 
     #[test]
-    fn a_relocated_candidate_blocks_the_fix() {
+    fn a_relocated_candidate_is_a_claim_until_an_executed_run_confirms_it() {
         let l = layout();
-        let rc = recheck(serde_json::json!({"relocation": {
-            "scope": ["on_event at src/cb.rs:9"],
-            "candidates": [{"title": "callback holds a raw pointer", "location": "src/cb.rs:14",
-                            "kind": "relocated"}]
-        }}));
-        let arm = relocation_arm(&Log(&[]), &l, &rc);
-        assert_eq!(arm.state, ArmState::Fail);
+        let candidate = |command: Option<&str>| {
+            let mut c = serde_json::json!({"title": "callback holds a raw pointer",
+                "location": "src/cb.rs:14", "kind": "relocated"});
+            if let Some(cmd) = command {
+                c["command"] = serde_json::json!(cmd);
+            }
+            recheck(serde_json::json!({"relocation": {
+                "scope": ["on_event at src/cb.rs:9"], "candidates": [c]
+            }}))
+        };
+        // No proof of concept: inconclusive, the claim kept, nothing rejected.
+        let arm = relocation_arm(&Log(&[]), &l, &candidate(None));
+        assert_eq!(arm.state, ArmState::Inconclusive);
         assert_eq!(arm.basis, Some(Basis::ModelJudged));
         assert_eq!(
-            arm.reasons,
-            ["relocated candidate at src/cb.rs:14: callback holds a raw pointer"]
+            arm.model_claims,
+            [
+                "relocated candidate at src/cb.rs:14: callback holds a raw pointer (no proof of concept)"
+            ]
+        );
+        // A proof of concept that did not show it, or never reached its
+        // assertion: still a claim.
+        let cmd = "sh ../relocation/c1/poc.sh";
+        let mut r = Runs::new();
+        r.add(l.in_copy("patched", cmd), true, &clean());
+        let arm = relocation_arm(&Log(&r.0), &l, &candidate(Some(cmd)));
+        assert_eq!(arm.state, ArmState::Inconclusive);
+        assert_eq!(arm.model_claims.len(), 1);
+        let mut r = Runs::new();
+        r.add(l.in_copy("patched", cmd), false, "sh: not found");
+        let arm = relocation_arm(&Log(&r.0), &l, &candidate(Some(cmd)));
+        assert_eq!(arm.state, ArmState::Inconclusive);
+        // A proof of concept that shows it in the patched copy: fails.
+        let mut r = Runs::new();
+        r.add(l.in_copy("patched", cmd), false, &shown());
+        let arm = relocation_arm(&Log(&r.0), &l, &candidate(Some(cmd)));
+        assert_eq!(arm.state, ArmState::Fail);
+        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert!(arm.model_claims.is_empty());
+        assert!(
+            arm.reasons[0].ends_with("shows it in the patched copy"),
+            "{:?}",
+            arm.reasons
+        );
+        // A claim beside a clean fuzz run does not pass the arm either.
+        let both = recheck(serde_json::json!({"relocation": {
+            "scope": ["f"], "fuzz": {"command": "./fuzz -runs=1000"},
+            "candidates": [{"title": "t", "location": "a:1"}]
+        }}));
+        let mut r = Runs::new();
+        r.add(l.in_copy("patched", "./fuzz -runs=1000"), true, &clean());
+        assert_eq!(
+            relocation_arm(&Log(&r.0), &l, &both).state,
+            ArmState::Inconclusive
         );
         // A fuzz run that shows a defect in the patched copy fails on execution.
         let rc = recheck(serde_json::json!({"relocation": {
@@ -2233,8 +2462,8 @@ mod tests {
     #[test]
     fn fixes_are_counted_by_arm_outcome() {
         let arms = [
-            ArmResult::new("variant", ArmState::Fail, None, Vec::new()),
-            ArmResult::new("variant", ArmState::Fail, None, Vec::new()),
+            ArmResult::new("variant", ArmState::Fail, Some(Basis::Executed), Vec::new()),
+            ArmResult::new("variant", ArmState::Fail, Some(Basis::Executed), Vec::new()),
             ArmResult::new("variant", ArmState::NotRun, None, Vec::new()),
             ArmResult::new("relocation", ArmState::Inconclusive, None, Vec::new()),
         ];

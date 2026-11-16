@@ -758,9 +758,13 @@ fn reproduction_section(walk_name: &str) -> String {
          a line of its own on stdout, flushed, immediately before its assertion, and that \
          line reaches the command's output (a test runner that hides a passing test's output \
          needs its flag to show it). It exits non-zero when the finding holds and zero when it does \
-         not. It names files under the run directory by their path from the project root, \
-         `.lyrik/state/runs/<run-id>/...`, and uses no other path outside the project's \
-         tree. A failed build or a missing dependency never reaches the line, and is read \
+         not. It runs from the project root and keeps every file of its own (inputs, \
+         markers, scratch output) under this walk's `harness/` directory, named by its \
+         path from the project root, or in a temporary directory it makes. A defender-mode \
+         fix runs the same command in copies of the project that carry this walk's \
+         `harness/` directory at the same path and nothing else of the run's state, so a \
+         harness that reads or writes elsewhere under `.lyrik/` behaves differently \
+         there. A failed build or a missing dependency never reaches the line, and is read \
          as neither. A command outside the contract still gets its record and its replay; \
          a defender-mode fix for its finding cannot be checked and stays inconclusive.\n",
         reached = super::lyrik_fix_arms::REACHED

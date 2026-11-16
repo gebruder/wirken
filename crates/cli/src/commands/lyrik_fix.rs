@@ -49,7 +49,7 @@ use super::lyrik_replay::{ReproductionOutcome, ReproductionRecord};
 
 /// The command words the fix step runs through `exec`, besides each
 /// finding's reproduction, variant, test, coverage and fuzz commands.
-pub const FIX_EXEC_COMMANDS: &[&str] = &["mkdir", "git archive", "tar", "git apply", "diff"];
+pub const FIX_EXEC_COMMANDS: &[&str] = &["mkdir", "git archive", "tar", "cp", "git apply", "diff"];
 
 /// The staged skills of the fix step, in the order they run.
 pub const FIX_SKILLS: [&str; 3] = ["fix", "fix-attack", "fix-recheck"];
@@ -202,8 +202,9 @@ pub struct FixOutcome {
     pub inputs: InputDigests,
     /// Why the verdict is not `candidate_fix`.
     pub reasons: Vec<String>,
-    /// `symptom_patch`, `asserted_only_root_cause`,
-    /// `root_cause_suspect`, `functionality_unverified`.
+    /// `symptom_patch`, `symptom_patch_claimed`,
+    /// `asserted_only_root_cause`, `root_cause_suspect`,
+    /// `functionality_unverified`.
     pub labels: Vec<&'static str>,
     pub arms: Vec<ArmResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -398,7 +399,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// directory.
 pub fn judge(input: &JudgeInput) -> FixOutcome {
     let fix_dir = input.run_dir.join(input.rel_dir);
-    let layout = Layout::new(input.run_id, input.rel_dir);
+    let layout = Layout::for_reproduction(
+        input.run_id,
+        input.rel_dir,
+        &input.confirmed.reproduction.command,
+    );
     let log = arms::Log(input.observed);
     let mut reasons = Vec::new();
 
@@ -445,6 +450,7 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         &input.confirmed.finding,
         &claim,
         &reproduction.patched,
+        claim.suspect,
     );
     let recheck = arms::read_json::<arms::Recheck>(&fix_dir.join("recheck.json"));
     let relocation = arms::relocation_arm(&log, &layout, &recheck);
@@ -466,6 +472,14 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     let mut labels = Vec::new();
     if symptom_patch {
         labels.push("symptom_patch");
+    } else if root_cause
+        .model_claims
+        .iter()
+        .any(|c| c.starts_with("symptom_patch"))
+    {
+        // The walks place the origin away from the patch and nothing
+        // executed says so: a claim for a maintainer, not a rejection.
+        labels.push("symptom_patch_claimed");
     }
     if claim.evidence_state == arms::ClaimEvidence::AssertedOnly {
         labels.push("asserted_only_root_cause");
@@ -874,8 +888,16 @@ pub fn recheck_skill_text(run_id: &str, tools: &str) -> String {
          callers that rely on what changed. Not only the patched lines. Look for the \
          violation moved rather than removed, for example into a callback or a second \
          pointer, and for a new one. `scope` lists what you walked as `function at \
-         file:line`. Each candidate is `{{\"title\", \"location\", \"kind\"}}` with `kind` \
-         `new` or `relocated` and `location` as `file:line` in the patched copy. If the \
+         file:line`. Each candidate is `{{\"title\", \"location\", \"kind\", \"command\"}}` with \
+         `kind` `new` or `relocated` and `location` as `file:line` in the patched copy. A \
+         candidate is your reading until a run shows it: write a proof of concept for it \
+         under `relocation/<id>/` in the fix directory, under the contract above, run \
+         `cd <fix-dir>/baseline && <command>` and then `cd <fix-dir>/patched && <command>`, \
+         and record `command` as run from a copy's root. Only a candidate whose proof of \
+         concept shows it in the patched copy counts against the fix; one with no \
+         `command`, or whose run does not show it, is recorded as a claim for a \
+         maintainer and rejects nothing. Do not report a candidate you would not write a \
+         proof for. If the \
          project has a fuzz harness that reaches the patched functions, give a bounded \
          command for it, fixed seed and fixed run count, under the contract above, and run \
          `cd <fix-dir>/patched && <command>`.\n\
@@ -974,7 +996,7 @@ pub fn build_fix_prompt(
     fix_dir_rel: &str,
     supplied: bool,
 ) -> String {
-    let layout = Layout::new(run_id, fix_dir_rel);
+    let layout = Layout::for_reproduction(run_id, fix_dir_rel, &confirmed.reproduction.command);
     let invariant = confirmed
         .finding
         .get("invariant")
@@ -1021,7 +1043,7 @@ pub fn build_attack_prompt(
     fix_dir_rel: &str,
     minimum: usize,
 ) -> String {
-    let layout = Layout::new(run_id, fix_dir_rel);
+    let layout = Layout::for_reproduction(run_id, fix_dir_rel, &confirmed.reproduction.command);
     format!(
         "/fix-attack Find other routes to this patched finding. Run-id: `{run_id}`. Fix \
          directory: `{0}`. The patch is `{0}/fix.patch`; the copies are `{0}/baseline` and \
@@ -1043,7 +1065,7 @@ pub fn build_recheck_prompt(
     functionality: &FunctionalityConfig,
     benign_required: bool,
 ) -> String {
-    let layout = Layout::new(run_id, fix_dir_rel);
+    let layout = Layout::for_reproduction(run_id, fix_dir_rel, &confirmed.reproduction.command);
     let named = |what: &str, cmd: &Option<String>| match cmd {
         Some(c) => format!("The {what} command is `{c}`; use it as given."),
         None => format!("The run's configuration names no {what} command."),
@@ -1130,7 +1152,7 @@ mod tests {
                 std::fs::write(dir.join("fix.patch"), patch).unwrap();
             }
             let confirmed = confirmed_findings(&body()).remove(0);
-            let layout = Layout::new(RUN, REL);
+            let layout = Layout::for_reproduction(RUN, REL, REPRO);
             let mut case = Self {
                 tmp,
                 observed: Vec::new(),
@@ -1160,7 +1182,7 @@ mod tests {
 
         /// Two variants by different paths; the second holds or not.
         fn with_variants(mut self, second_shown_on_patched: bool) -> Self {
-            let layout = Layout::new(RUN, REL);
+            let layout = Layout::for_reproduction(RUN, REL, REPRO);
             let dir = self.tmp.path().join(REL);
             for (id, patched_shown) in [("v1", false), ("v2", second_shown_on_patched)] {
                 std::fs::write(dir.join(format!("variants/{id}.py")), "x").unwrap();
@@ -1334,19 +1356,90 @@ mod tests {
     }
 
     #[test]
-    fn a_symptom_patch_is_rejected_though_the_reproduction_stops() {
+    fn a_symptom_patch_is_a_claim_until_a_variant_still_works() {
+        // The walks place the origin elsewhere; every executed run is
+        // clean. That reading alone does not reject the fix.
         let out = Case::new(SINK_PATCH).with_variants(false).judge();
         assert_eq!(arm(&out, "reproduction").state, ArmState::Pass);
+        let root = arm(&out, "root_cause");
+        assert_eq!(root.state, ArmState::Inconclusive);
+        assert_eq!(root.basis, Some(arms::Basis::ModelJudged));
+        assert!(root.model_claims[0].starts_with("symptom_patch:"));
+        assert_eq!(out.verdict, Verdict::CandidateFix);
+        assert!(out.labels.contains(&"symptom_patch_claimed"));
+        assert!(!out.labels.contains(&"symptom_patch"));
+        // The claim is on the record for a maintainer.
+        let v = serde_json::to_value(&out).unwrap();
+        assert!(
+            v["arms"][2]["model_claims"][0]
+                .as_str()
+                .unwrap()
+                .contains("not the origin")
+        );
+        // With a variant that still works on the patched code, an
+        // executed run stands behind it: rejected, on both arms.
+        let out = Case::new(SINK_PATCH).with_variants(true).judge();
         assert_eq!(out.verdict, Verdict::Rejected);
         assert!(out.labels.contains(&"symptom_patch"));
-        assert!(out.reasons[0].starts_with("root_cause arm failed: symptom_patch:"));
+        assert_eq!(arm(&out, "root_cause").state, ArmState::Fail);
+        assert_eq!(arm(&out, "root_cause").basis, Some(arms::Basis::Executed));
+        assert!(
+            out.reasons
+                .iter()
+                .any(|r| r.starts_with("root_cause arm failed: symptom_patch:"))
+        );
+    }
+
+    #[test]
+    fn a_model_judged_claim_never_rejects_a_fix_by_itself() {
+        // The re-walk reports a relocated candidate with no proof.
+        let case = Case::new(ORIGIN_PATCH).with_variants(false);
+        std::fs::write(
+            case.tmp.path().join(REL).join("recheck.json"),
+            r#"{"relocation":{"scope":["decode_len at src/len.rs:2"],
+                "candidates":[{"title":"the caller ignores the new error","location":"src/a.rs:9","kind":"new"}]}}"#,
+        )
+        .unwrap();
+        let out = case.judge();
+        let relocation = arm(&out, "relocation");
+        assert_eq!(relocation.state, ArmState::Inconclusive);
+        assert_eq!(relocation.basis, Some(arms::Basis::ModelJudged));
+        assert_eq!(
+            relocation.model_claims,
+            ["new candidate at src/a.rs:9: the caller ignores the new error (no proof of concept)"]
+        );
+        assert_eq!(out.verdict, Verdict::CandidateFix);
+        // No arm anywhere is failed on a model's reading.
+        assert!(
+            out.arms
+                .iter()
+                .all(|a| a.state != ArmState::Fail || a.basis == Some(arms::Basis::Executed))
+        );
+        // The same candidate with a proof that shows it in the patched
+        // copy rejects the fix.
+        let mut case = Case::new(ORIGIN_PATCH).with_variants(false);
+        let layout = Layout::for_reproduction(RUN, REL, REPRO);
+        let cmd = "sh ../relocation/c1/poc.sh";
+        case.add(layout.in_copy("baseline", cmd), true, &clean());
+        case.add(layout.in_copy("patched", cmd), false, &shown());
+        std::fs::write(
+            case.tmp.path().join(REL).join("recheck.json"),
+            r#"{"relocation":{"scope":["decode_len at src/len.rs:2"],
+                "candidates":[{"title":"the caller ignores the new error","location":"src/a.rs:9","kind":"new",
+                               "command":"sh ../relocation/c1/poc.sh"}]}}"#,
+        )
+        .unwrap();
+        let out = case.judge();
+        assert_eq!(arm(&out, "relocation").state, ArmState::Fail);
+        assert_eq!(arm(&out, "relocation").basis, Some(arms::Basis::Executed));
+        assert_eq!(out.verdict, Verdict::Rejected);
     }
 
     #[test]
     fn a_fix_built_on_an_asserted_claim_is_labelled_so() {
         let mut case = Case::new(ORIGIN_PATCH).with_variants(false);
         // The baseline output no longer names the origin.
-        let baseline = Layout::new(RUN, REL).in_copy("baseline", REPRO);
+        let baseline = Layout::for_reproduction(RUN, REL, REPRO).in_copy("baseline", REPRO);
         for o in case.observed.iter_mut().filter(|o| o.command == baseline) {
             o.output = format!("{}\nboom", arms::REACHED);
         }
@@ -1386,8 +1479,9 @@ mod tests {
 
     #[test]
     fn a_supplied_patch_runs_the_same_arms_and_earns_nothing_by_its_source() {
-        // A reference fix that is a symptom patch is rejected like any other.
-        let case = Case::new(SINK_PATCH).with_variants(false);
+        // A reference fix that leaves another path open is rejected like
+        // any other.
+        let case = Case::new(SINK_PATCH).with_variants(true);
         let out = case.judge_with(false, Some(SINK_PATCH));
         assert_eq!(out.patch_source, PatchSource::Supplied);
         let digest = sha256_hex(SINK_PATCH.as_bytes());
@@ -1457,7 +1551,7 @@ mod tests {
         // Even a suite that ran green in both copies under the written
         // command, with the coverage it names, passes nothing.
         let mut case = Case::new(ORIGIN_PATCH).with_variants(false);
-        let layout = Layout::new(RUN, REL);
+        let layout = Layout::for_reproduction(RUN, REL, REPRO);
         case.add(layout.in_copy("baseline", "true"), true, "(no output)");
         case.add(layout.in_copy("patched", "true"), true, "(no output)");
         case.add(
@@ -1605,7 +1699,7 @@ mod tests {
         // Variants pass, the reproduction's patched run never reached its
         // assertion.
         let mut case = Case::new(ORIGIN_PATCH).with_variants(false);
-        let patched = Layout::new(RUN, REL).in_copy("patched", REPRO);
+        let patched = Layout::for_reproduction(RUN, REL, REPRO).in_copy("patched", REPRO);
         for o in case.observed.iter_mut().filter(|o| o.command == patched) {
             o.output = "nothing ran".into();
         }
@@ -1620,7 +1714,7 @@ mod tests {
         assert_eq!(out.verdict, Verdict::CandidateFix);
         assert!(out.labels.contains(&"functionality_unverified"));
         // A failed arm is rejected whatever else passed.
-        let out = Case::new(SINK_PATCH).with_variants(false).judge();
+        let out = Case::new(SINK_PATCH).with_variants(true).judge();
         assert_eq!(out.verdict, Verdict::Rejected);
     }
 
@@ -1693,7 +1787,7 @@ mod tests {
             success: true,
             output: "x".into(),
         });
-        save_observed(&dir, &Layout::new(RUN, REL), &observed).unwrap();
+        save_observed(&dir, &Layout::for_reproduction(RUN, REL, REPRO), &observed).unwrap();
         let saved: Vec<Observed> =
             serde_json::from_str(&std::fs::read_to_string(dir.join("observed.json")).unwrap())
                 .unwrap();
@@ -1722,7 +1816,7 @@ mod tests {
     #[test]
     fn the_prompts_carry_the_exact_commands_the_arms_read() {
         let c = confirmed_findings(&body()).remove(0);
-        let layout = Layout::new(RUN, REL);
+        let layout = Layout::for_reproduction(RUN, REL, REPRO);
         let p = build_fix_prompt(&c, RUN, REV, REL, false);
         assert!(p.starts_with("/fix "), "{p}");
         assert!(p.contains("Invariant: len is bounded"), "{p}");
@@ -1868,10 +1962,15 @@ mod tests {
                 p.git(&["init", "-q"]);
                 p.git(&["add", "."]);
                 p.git(&["commit", "-q", "-m", "init"]);
-                // The reproduction a walk left, under the marker contract.
+                // The reproduction a walk left, under the marker contract,
+                // written the way a walk writes one: it keeps its scratch
+                // file under its own harness directory, named by its path
+                // from the project root.
                 let poc = |script: &str, arg: &str| {
                     format!(
-                        "out=$(sh {script} {arg}) || exit 2\necho {}\nn=${{out##* }}\n\
+                        "d=.lyrik/state/runs/r1/staging/fuzz-walk/harness\n\
+                         sh {script} {arg} > \"$d/out-{script}-{arg}.txt\" || exit 2\n\
+                         echo {}\nn=$(cut -d' ' -f3 \"$d/out-{script}-{arg}.txt\")\n\
                          [ \"$n\" -le 8 ] || {{ echo \"decode_len in len.sh gave $n\"; exit 1; }}\n",
                         arms::REACHED
                     )
@@ -1918,7 +2017,7 @@ mod tests {
 
             /// Every command the three agents would run, in order.
             fn run_all(&mut self) -> FixOutcome {
-                let layout = Layout::new(RUN, REL);
+                let layout = Layout::for_reproduction(RUN, REL, REPRO);
                 for c in reproduction_commands(&layout, REPRO, "HEAD") {
                     self.exec(&c);
                 }
@@ -1989,6 +2088,56 @@ mod tests {
             assert_eq!(out.class_open_sites.count, 1);
             assert_eq!(out.class_open_sites.unverified.len(), 1);
             assert_eq!(out.fix_locality, Some(Locality::Localized));
+        }
+
+        /// A harness that names its scratch file under `.lyrik/state/`
+        /// from the project root. In a copy that carries the walk's
+        /// harness directory it sees the defect on the baseline. In a
+        /// bare copy of the revision that path does not exist, and it
+        /// never reaches its assertion.
+        #[test]
+        fn a_walk_style_harness_sees_the_defect_in_a_copy_that_carries_it() {
+            let mut p = Project::new();
+            let carried = Layout::for_reproduction(RUN, REL, REPRO);
+            assert_eq!(carried.carried, ["fuzz-walk"]);
+            assert!(p.exec(&carried.extract("baseline", "HEAD")));
+            let cmd = carried.in_copy("baseline", REPRO);
+            assert!(!p.exec(&cmd), "the defect shows: non-zero exit");
+            let seen = p.observed.last().unwrap().clone();
+            assert!(seen.output.contains(arms::REACHED), "{}", seen.output);
+            assert!(
+                seen.output.contains("decode_len in len.sh gave 99"),
+                "{}",
+                seen.output
+            );
+            assert_eq!(
+                arms::poc(&arms::Log(&p.observed).run(&cmd)),
+                arms::Poc::Shown
+            );
+            // The harness wrote inside the copy, not into the target's run state.
+            let scratch = "out-a.sh-99.txt";
+            assert!(
+                p.fix_dir()
+                    .join("baseline/.lyrik/state/runs/r1/staging/fuzz-walk/harness")
+                    .join(scratch)
+                    .is_file()
+            );
+            assert!(
+                !p.root()
+                    .join(".lyrik/state/runs/r1/staging/fuzz-walk/harness")
+                    .join(scratch)
+                    .exists()
+            );
+            // The same harness in a copy made without its directory.
+            let mut bare = Project::new();
+            let plain = Layout::new(RUN, REL);
+            assert!(bare.exec(&plain.extract("baseline", "HEAD")));
+            let cmd = plain.in_copy("baseline", REPRO);
+            bare.exec(&cmd);
+            assert!(matches!(
+                arms::poc(&arms::Log(&bare.observed).run(&cmd)),
+                arms::Poc::Inconclusive(_)
+            ));
         }
 
         #[test]
