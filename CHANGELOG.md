@@ -62,6 +62,20 @@ tagged.
   `crates/cli/src/commands/lyrik.rs`;
   [docs/lyrik.md](docs/lyrik.md#findings-schema-12)).
 
+- `sandbox.json` takes three optional exec limits: `memory_mb`, `pids_limit`
+  and `timeout_secs`. Absent, the limits are what they were: 512 MB, 256
+  processes and 300 seconds per command. They are read from the data
+  directory's `sandbox.json` only; a target's `.lyrik/config.json`, a skill
+  and a tool call's arguments cannot set or raise them. A value that is not
+  a positive whole number is refused. With a limit off its default,
+  `wirken lyrik run` names the limits in its sign-off summary, the
+  `lyrik.run.started` row carries `sandbox_limits`, and each `exec` result
+  row carries `limits` inside `sandbox`; all three are absent under the
+  defaults (`load_sandbox_config_reads_the_exec_limits`,
+  `exec_limits_come_only_from_the_data_directory`,
+  `crates/cli/src/commands/mod.rs`;
+  [docs/sandbox-properties.md](docs/sandbox-properties.md)).
+
 ### Changed
 
 - The uncosted-call warning names the USD ceiling as the one that is

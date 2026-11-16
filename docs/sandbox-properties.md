@@ -156,11 +156,11 @@ belongs to the egress sidecar container, not to the exec sandbox:
 | `network_mode` | `none` (configurable) | `sandbox.rs:888-893, 903` - default is `--network none`, loopback only; outbound DNS/HTTP fail. A channel configured for sandbox egress joins a policed internal network instead; see below. |
 | `dns` | unset, or `127.0.0.1` on the egress path | `sandbox.rs:896-899, 904` - pinned to an address with no resolver behind it when an egress network is in use, so names are resolved by the proxy rather than in the container. |
 | `binds` | `<workspace>:/workspace:rw` | `sandbox.rs:901` - only the agent workspace is mounted, RW. |
-| `memory` | 512 MB | `lib.rs:27`, applied at `sandbox.rs:905` - `MEMORY_LIMIT` constant. |
-| `pids_limit` | 256 | `lib.rs:29`, applied at `sandbox.rs:906` - `PIDS_LIMIT` constant; fork-bomb cap. |
+| `memory` | 512 MB by default | `MEMORY_LIMIT`, `crates/sandbox/src/lib.rs`; `memory_mb` in `sandbox.json` sets it. |
+| `pids_limit` | 256 by default | `PIDS_LIMIT`, `crates/sandbox/src/lib.rs`; fork-bomb cap; `pids_limit` in `sandbox.json` sets it. |
 | `user` | `1000:1000` | `sandbox.rs:548` - non-root UID/GID inside the container. |
 | `auto_remove` | `false` | `lib.rs:162` - removed explicitly after log collection (`ExecResources`, `sandbox.rs:560`) so output is never lost to a teardown race. |
-| timeout | 300 s | `sandbox.rs:235`, applied at `:610-611` - wall-clock cap; container is killed and removed on timeout. |
+| timeout | 300 s by default | Wall-clock cap; the container is killed and removed on timeout; `timeout_secs` in `sandbox.json` sets it. |
 
 ### Sandbox egress
 
@@ -205,6 +205,28 @@ because adding one widens the sandbox surface for every install, including
 installs that never configure egress and rely on no interface and no client as
 two independent walls. Putting the choice in `sandbox.json` puts it where the
 consequence lands.
+
+**Exec limits.** Three more keys set the limits one `exec` runs under:
+
+```json
+{ "memory_mb": 16384, "pids_limit": 4096, "timeout_secs": 3600 }
+```
+
+`memory_mb` is the container's memory cap in megabytes, `pids_limit` its
+process cap, and `timeout_secs` the wall-clock limit on one command. Each is
+optional; absent means the default (512 MB, 256 processes, 300 seconds). A
+value that is not a positive whole number is refused when the file is read.
+The limits are the operator's alone: they are read from `sandbox.json` in the
+data directory and nowhere else. A target's `.lyrik/config.json`, a skill's
+frontmatter and a tool call's arguments have no field that sets or raises
+them (`exec_limits_come_only_from_the_data_directory`,
+`crates/cli/src/commands/mod.rs`). When any limit is off its default,
+`wirken lyrik run` says so in the sign-off summary, records `sandbox_limits`
+on the `lyrik.run.started` row, and each `exec` result row carries `limits`
+(`memory_mb`, `pids`, `timeout_secs`) inside `sandbox`. Under the defaults
+none of these appear and the rows are as they were. Raising a limit widens
+what an approved command can consume on the host; MCP server containers keep
+their own caps.
 
 A key in `sandbox.json` that the loader does not read is named in a warning at
 start and ignored. The loader never refuses a file over one, so a file written
