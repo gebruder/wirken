@@ -3430,6 +3430,7 @@ fn every_session_event() -> Vec<SessionEvent> {
                 mode: crate::session_log::SandboxModeLabel::Off,
                 runtime: crate::session_log::SandboxRuntimeLabel::Host,
                 container_id: None,
+                limits: None,
             },
             agent_id: String::new(),
             adapter_id: None,

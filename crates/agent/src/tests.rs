@@ -13982,16 +13982,19 @@ fn the_row_carries_what_the_dispatch_reported() {
             mode: SandboxModeLabel::ExecOnly,
             runtime: SandboxRuntimeLabel::Docker,
             container_id: Some("70f792320e59".into()),
+            limits: None,
         },
         SandboxProvenance {
             mode: SandboxModeLabel::Gvisor,
             runtime: SandboxRuntimeLabel::Gvisor,
             container_id: Some("abc123abc123".into()),
+            limits: None,
         },
         SandboxProvenance {
             mode: SandboxModeLabel::Off,
             runtime: SandboxRuntimeLabel::Host,
             container_id: None,
+            limits: None,
         },
     ] {
         assert_eq!(
@@ -15735,6 +15738,7 @@ mod exec_location_disagreements {
                 mode,
                 runtime,
                 container_id: None,
+                limits: None,
             }),
             agent_id: "slackbot".into(),
             adapter_id: None,

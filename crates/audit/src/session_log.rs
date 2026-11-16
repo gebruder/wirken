@@ -575,6 +575,20 @@ pub struct SandboxProvenance {
     /// The container the command ran in, absent on the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_id: Option<String>,
+    /// The limits the command ran under, when the operator's
+    /// `sandbox.json` set any away from the defaults. Absent under the
+    /// defaults, so a row written under them is byte for byte the row
+    /// an earlier build wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<SandboxLimits>,
+}
+
+/// Non-default limits an `exec` ran under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxLimits {
+    pub memory_mb: u64,
+    pub pids: u64,
+    pub timeout_secs: u64,
 }
 
 /// Where an approved `exec` would run, as the approval prompt told the

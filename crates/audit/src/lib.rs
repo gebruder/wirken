@@ -40,11 +40,12 @@ pub use session_log::{
     LeakSurface, LlmCallPurpose, MCP_CREDENTIAL_SESSION, McpServerRestartCause,
     OPERATOR_APPROVERS_SESSION, OPERATOR_COMMANDS_SESSION, OPERATOR_SENDERS_SESSION, OwnSession,
     PermissionDenialRecord, PhaseDenyContent, PhaseExitReason, RedactionRecord,
-    SANDBOX_RUNTIME_SESSION, SandboxEgressDenyReason, SandboxEgressModeLabel, SandboxModeLabel,
-    SandboxProvenance, SandboxRuntimeLabel, SchemaDriftRecord, SessionEvent, SessionHandle,
-    SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason, SqliteSessionLog,
-    StoredSessionEvent, SubagentCrossCheck, SubagentStatus, ToolCallRecord, ToolsHashVersion,
-    TrustLevel, cross_check_spawned_children, cross_check_subagent_session, set_build_identity,
+    SANDBOX_RUNTIME_SESSION, SandboxEgressDenyReason, SandboxEgressModeLabel, SandboxLimits,
+    SandboxModeLabel, SandboxProvenance, SandboxRuntimeLabel, SchemaDriftRecord, SessionEvent,
+    SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason,
+    SqliteSessionLog, StoredSessionEvent, SubagentCrossCheck, SubagentStatus, ToolCallRecord,
+    ToolsHashVersion, TrustLevel, cross_check_spawned_children, cross_check_subagent_session,
+    set_build_identity,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

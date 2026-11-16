@@ -815,6 +815,7 @@ impl ToolRegistry {
                         mode: self.sandbox_config.mode.label(),
                         runtime: wirken_audit::SandboxRuntimeLabel::Host,
                         container_id: None,
+                        limits: self.sandbox_config.non_default_limits(),
                     }),
                 });
             }
@@ -849,6 +850,7 @@ impl ToolRegistry {
                 mode: self.sandbox_config.mode.label(),
                 runtime: wirken_audit::SandboxRuntimeLabel::Host,
                 container_id: None,
+                limits: self.sandbox_config.non_default_limits(),
             }),
         })
     }

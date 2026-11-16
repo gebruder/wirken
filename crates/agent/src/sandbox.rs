@@ -228,7 +228,12 @@ fn find_executable(name: &str) -> Option<std::path::PathBuf> {
 pub struct SandboxConfig {
     pub mode: SandboxMode,
     pub image: String,
+    /// Wall-clock limit on one command, in seconds.
     pub timeout_secs: u64,
+    /// Memory cap on the container a command runs in, in bytes.
+    pub memory_bytes: i64,
+    /// Process cap on that container.
+    pub pids_limit: i64,
     /// Allow network access from sandbox (default: false).
     pub network: bool,
     /// Which interpreter the host-exec fallback uses when
@@ -248,12 +253,32 @@ pub struct SandboxConfig {
     pub instance: String,
 }
 
+/// Default wall-clock limit on one command.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+impl SandboxConfig {
+    /// The limits a command runs under, when any differs from the
+    /// default. `None` under the defaults.
+    pub fn non_default_limits(&self) -> Option<wirken_audit::SandboxLimits> {
+        let default = self.timeout_secs == DEFAULT_TIMEOUT_SECS
+            && self.memory_bytes == MEMORY_LIMIT
+            && self.pids_limit == PIDS_LIMIT;
+        (!default).then(|| wirken_audit::SandboxLimits {
+            memory_mb: u64::try_from(self.memory_bytes / (1024 * 1024)).unwrap_or(0),
+            pids: u64::try_from(self.pids_limit).unwrap_or(0),
+            timeout_secs: self.timeout_secs,
+        })
+    }
+}
+
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             mode: SandboxMode::ExecOnly,
             image: DEFAULT_IMAGE.into(),
-            timeout_secs: 300,
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            memory_bytes: MEMORY_LIMIT,
+            pids_limit: PIDS_LIMIT,
             network: false,
             shell: ShellMode::Auto,
             sidecar_binary: None,
@@ -653,6 +678,7 @@ impl DockerSandbox {
             mode: self.config.mode.label(),
             runtime,
             container_id: Some(container.id.clone()),
+            limits: self.config.non_default_limits(),
         };
 
         self.client
@@ -960,8 +986,8 @@ pub fn build_host_config(
         network_mode,
         dns,
         dns_search,
-        memory: MEMORY_LIMIT,
-        pids: PIDS_LIMIT,
+        memory: config.memory_bytes,
+        pids: config.pids_limit,
         nano_cpus: None,
         runtime: config.mode.runtime_name(),
         seccomp: wirken_sandbox::seccomp::Seccomp::Profile,

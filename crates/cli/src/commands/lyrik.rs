@@ -236,15 +236,20 @@ pub async fn run(
 
     let mut audit = AuditLogger::open(&run_dir.join("audit.log"), run_id, bench_mode)?;
 
-    audit.emit(
-        "lyrik.run.started",
-        serde_json::json!({
-            "target": target.display().to_string(),
-            "config_path": config_path.display().to_string(),
-            "bench_mode": bench_mode,
-            "driver_version": DRIVER_VERSION,
-        }),
-    )?;
+    // The exec limits come from the operator's data directory and
+    // nowhere else. Recorded when they are not the defaults.
+    let sandbox_limits =
+        super::load_sandbox_config(&super::config().data_dir)?.non_default_limits();
+    let mut started = serde_json::json!({
+        "target": target.display().to_string(),
+        "config_path": config_path.display().to_string(),
+        "bench_mode": bench_mode,
+        "driver_version": DRIVER_VERSION,
+    });
+    if let Some(limits) = sandbox_limits {
+        started["sandbox_limits"] = serde_json::to_value(limits)?;
+    }
+    audit.emit("lyrik.run.started", started)?;
 
     // Provenance, taken before the run writes anything. The fields go
     // on findings.json; a target whose git state cannot be read gets
@@ -290,8 +295,8 @@ pub async fn run(
         let walks = parse_walks_config(&config, &walks_dir)
             .context("parse walks config")?
             .map(|c| c.walks);
-        let exec_available = super::load_sandbox_config(&super::config().data_dir)?.mode
-            != wirken_agent::sandbox::SandboxMode::Off;
+        let sandbox_for_summary = super::load_sandbox_config(&super::config().data_dir)?;
+        let exec_available = sandbox_for_summary.mode != wirken_agent::sandbox::SandboxMode::Off;
         let summary = signoff_summary(
             run_id,
             target,
@@ -304,6 +309,7 @@ pub async fn run(
                 target,
                 fix_inputs.functionality.test_command.as_deref(),
             ),
+            sandbox_for_summary.non_default_limits(),
         );
         let shown = summary.clone();
         let answer = tokio::task::spawn_blocking(move || {
@@ -547,6 +553,7 @@ fn signoff_summary(
     walks: Option<&[String]>,
     exec_available: bool,
     profile: &super::lyrik_walks::TargetProfile,
+    limits: Option<wirken_audit::SandboxLimits>,
 ) -> String {
     let head = match (&provenance.sha, provenance.dirty) {
         (Some(sha), Some(false)) => format!("HEAD {sha}, tracked files unchanged"),
@@ -605,6 +612,15 @@ fn signoff_summary(
         ("exec", exec_line),
     ] {
         lines.push(format!("  {label:<8} {}", one_line(&value)));
+    }
+    // Said only when the operator's sandbox.json moved a limit: a run
+    // under the defaults reads as it always did.
+    if let (true, Some(l)) = (exec_available, limits) {
+        lines.push(format!(
+            "  limits   each command: {} MB memory, {} processes, {} s (sandbox.json; \
+             defaults 512 MB, 256, 300 s)",
+            l.memory_mb, l.pids, l.timeout_secs
+        ));
     }
     lines.push(if exec_available {
         "  Each exec command is asked again before it runs; nothing else leaves \
@@ -5293,6 +5309,7 @@ mod tests {
                 git: true,
                 ..Default::default()
             },
+            None,
         );
         let lines: Vec<&str> = summary.lines().collect();
         assert_eq!(lines.len(), 8, "{summary}");
@@ -5315,6 +5332,50 @@ mod tests {
             "  exec     sink-walk: git log, git blame, \
              sh .lyrik/state/runs/<run-id>/staging/sink-walk/harness/<script>; \
              chain-walk: sh .lyrik/state/runs/<run-id>/staging/chain-walk/harness/<script>"
+        );
+    }
+
+    /// Limits the operator moved in sandbox.json are said before the
+    /// sign-off; under the defaults the summary has no such line.
+    #[test]
+    fn signoff_summary_names_non_default_exec_limits() {
+        let provenance = super::super::lyrik_git::Provenance {
+            sha: Some("abc123".into()),
+            dirty: Some(false),
+            unavailable: None,
+        };
+        let pin = super::PhasePin {
+            provider: "ollama".into(),
+            model: "m1".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            context_window: None,
+        };
+        let walks = vec!["sink-walk".to_string()];
+        let summary = |limits| {
+            super::signoff_summary(
+                "r1",
+                std::path::Path::new("/t"),
+                &provenance,
+                &super::Scoring::inline(),
+                &pin,
+                Some(&walks),
+                true,
+                &Default::default(),
+                limits,
+            )
+        };
+        assert!(!summary(None).contains("limits"), "{}", summary(None));
+        let raised = summary(Some(wirken_audit::SandboxLimits {
+            memory_mb: 16384,
+            pids: 4096,
+            timeout_secs: 3600,
+        }));
+        assert!(
+            raised.contains(
+                "  limits   each command: 16384 MB memory, 4096 processes, 3600 s (sandbox.json; \
+                 defaults 512 MB, 256, 300 s)"
+            ),
+            "{raised}"
         );
     }
 
@@ -5387,6 +5448,7 @@ mod tests {
             Some(&walks),
             false,
             &Default::default(),
+            None,
         );
         assert!(
             summary.contains(

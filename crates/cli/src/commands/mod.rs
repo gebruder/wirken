@@ -96,7 +96,16 @@ pub fn config() -> GatewayConfig {
 /// the tests reads the loader's source and asserts this list matches
 /// it, so a key added to one and not the other fails rather than
 /// quietly joining the set the loader ignores.
-pub(crate) const SANDBOX_KEYS: &[&str] = &["image", "mode", "network", "shell", "sidecar_binary"];
+pub(crate) const SANDBOX_KEYS: &[&str] = &[
+    "image",
+    "memory_mb",
+    "mode",
+    "network",
+    "pids_limit",
+    "shell",
+    "sidecar_binary",
+    "timeout_secs",
+];
 
 /// Top-level keys in `sandbox.json` that the loader will not read,
 /// sorted. An unread key produced nothing at all before this existed:
@@ -253,12 +262,47 @@ fn sandbox_json_config(data_dir: &Path) -> Result<SandboxConfig, String> {
     } else {
         ShellMode::from_str_config(shell_str)
     };
+    // Limits on one `exec`: memory, processes, wall-clock time. This
+    // file in the operator's data directory is the only place they are
+    // read from. Nothing a run is pointed at (a target's
+    // `.lyrik/config.json`), nothing a skill declares and nothing in a
+    // tool call's arguments sets or raises them. A value that is not a
+    // positive whole number is refused, not replaced by the default.
+    let limit = |key: &str| -> Result<Option<u64>, String> {
+        match val.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(v) => match v.as_u64() {
+                Some(n) if n > 0 => Ok(Some(n)),
+                _ => Err(format!(
+                    "{}: `{key}` must be a positive whole number, got {v}",
+                    path.display()
+                )),
+            },
+        }
+    };
+    let defaults = SandboxConfig::default();
+    let memory_bytes = match limit("memory_mb")? {
+        Some(mb) => i64::try_from(mb)
+            .ok()
+            .and_then(|mb| mb.checked_mul(1024 * 1024))
+            .ok_or_else(|| format!("{}: `memory_mb` is too large", path.display()))?,
+        None => defaults.memory_bytes,
+    };
+    let pids_limit = match limit("pids_limit")? {
+        Some(n) => i64::try_from(n)
+            .map_err(|_| format!("{}: `pids_limit` is too large", path.display()))?,
+        None => defaults.pids_limit,
+    };
+    let timeout_secs = limit("timeout_secs")?.unwrap_or(defaults.timeout_secs);
     Ok(SandboxConfig {
         mode,
         network,
         shell,
         sidecar_binary,
         image,
+        memory_bytes,
+        pids_limit,
+        timeout_secs,
         ..Default::default()
     })
 }
@@ -1282,6 +1326,109 @@ mod tests {
         assert_eq!(cfg.image, SandboxConfig::default().image);
     }
 
+    /// The three exec limits are read from the data directory's
+    /// sandbox.json, default when absent, and refused when they are not
+    /// positive whole numbers.
+    #[test]
+    fn load_sandbox_config_reads_the_exec_limits() {
+        let tmp = TempDir::new().unwrap();
+        // Absent: the defaults, and nothing to record.
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
+        assert_eq!(cfg.memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(cfg.pids_limit, 256);
+        assert_eq!(cfg.timeout_secs, 300);
+        assert_eq!(cfg.non_default_limits(), None);
+        std::fs::write(
+            tmp.path().join("sandbox.json"),
+            r#"{"mode":"exec-only","memory_mb":16384,"pids_limit":4096,"timeout_secs":3600}"#,
+        )
+        .unwrap();
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
+        assert_eq!(cfg.memory_bytes, 16384 * 1024 * 1024);
+        assert_eq!(cfg.pids_limit, 4096);
+        assert_eq!(cfg.timeout_secs, 3600);
+        assert_eq!(
+            cfg.non_default_limits(),
+            Some(wirken_audit::SandboxLimits {
+                memory_mb: 16384,
+                pids: 4096,
+                timeout_secs: 3600
+            })
+        );
+        // One key set: the others stay at their defaults.
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"timeout_secs":900}"#).unwrap();
+        let cfg = load_sandbox_config(tmp.path()).unwrap();
+        assert_eq!(cfg.timeout_secs, 900);
+        assert_eq!(cfg.memory_bytes, 512 * 1024 * 1024);
+        // Zero, a negative, a fraction or a string is refused.
+        for bad in [
+            r#"{"memory_mb":0}"#,
+            r#"{"pids_limit":-1}"#,
+            r#"{"timeout_secs":1.5}"#,
+            r#"{"memory_mb":"8192"}"#,
+        ] {
+            std::fs::write(tmp.path().join("sandbox.json"), bad).unwrap();
+            let err = load_sandbox_config(tmp.path()).unwrap_err().to_string();
+            assert!(
+                err.contains("must be a positive whole number"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    /// The limits are the operator's. A file a run is pointed at, or one
+    /// a model can write, does not set or raise them: the loader reads
+    /// the data directory's sandbox.json and nothing else.
+    #[test]
+    fn exec_limits_come_only_from_the_data_directory() {
+        let data = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let raised = r#"{"memory_mb":65536,"pids_limit":100000,"timeout_secs":86400}"#;
+        // A target's Lyrik config asking for more, in every shape a
+        // model might try, and a sandbox.json planted in the target.
+        std::fs::create_dir_all(target.path().join(".lyrik")).unwrap();
+        std::fs::write(
+            target.path().join(".lyrik").join("config.json"),
+            format!(r#"{{"mode":"defender","sandbox":{raised},"memory_mb":65536,"timeout_secs":86400,"fix":{{"timeout_secs":86400}}}}"#),
+        )
+        .unwrap();
+        std::fs::write(target.path().join("sandbox.json"), raised).unwrap();
+        std::fs::write(target.path().join(".lyrik").join("sandbox.json"), raised).unwrap();
+        let cfg = load_sandbox_config(data.path()).unwrap();
+        assert_eq!(cfg.non_default_limits(), None);
+        assert_eq!(cfg.memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(cfg.pids_limit, 256);
+        assert_eq!(cfg.timeout_secs, 300);
+        // The fix step's own configuration reads two commands and no limit.
+        let lyrik: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(target.path().join(".lyrik").join("config.json")).unwrap(),
+        )
+        .unwrap();
+        let fix = super::lyrik_fix::functionality_config(&lyrik);
+        assert_eq!(fix, Default::default());
+        // An exec call's arguments carry a command and nothing that
+        // reaches the limits.
+        let args = serde_json::json!({
+            "command": "true", "timeout_secs": 86400, "memory_mb": 65536, "pids_limit": 100000
+        });
+        assert_eq!(
+            wirken_agent::tool::extract_exec_command(&args).unwrap(),
+            "true"
+        );
+        // A staged skill's permissions have no field for them either.
+        let staged = super::lyrik_walks::wrap_for_target(
+            "sink-walk",
+            "r1",
+            None,
+            true,
+            &Default::default(),
+            "body\n",
+        );
+        for key in ["memory_mb", "pids_limit", "timeout_secs"] {
+            assert!(!staged.contains(key), "{key}");
+        }
+    }
+
     #[test]
     fn unknown_sandbox_keys_names_what_the_loader_will_ignore() {
         let v: serde_json::Value =
@@ -1292,7 +1439,7 @@ mod tests {
             vec!["imgae".to_string(), "timeout".to_string()]
         );
         let known: serde_json::Value = serde_json::from_str(
-            r#"{"image":"a","mode":"b","network":true,"shell":"c","sidecar_binary":"d"}"#,
+            r#"{"image":"a","mode":"b","network":true,"shell":"c","sidecar_binary":"d","memory_mb":1,"pids_limit":1,"timeout_secs":1}"#,
         )
         .unwrap();
         assert!(unknown_sandbox_keys(&known).is_empty());
@@ -1329,6 +1476,9 @@ mod tests {
             "network": true,
             "shell": "sh",
             "sidecar_binary": "/opt/wirken/egress-sidecar",
+            "memory_mb": 2048,
+            "pids_limit": 1024,
+            "timeout_secs": 900,
         });
         assert_eq!(
             every_key.as_object().unwrap().len(),
@@ -1351,6 +1501,15 @@ mod tests {
         );
         assert!(cfg.network && !default.network, "network is not read");
         assert_ne!(cfg.shell, default.shell, "shell is not read");
+        assert_ne!(
+            cfg.memory_bytes, default.memory_bytes,
+            "memory_mb is not read"
+        );
+        assert_ne!(cfg.pids_limit, default.pids_limit, "pids_limit is not read");
+        assert_ne!(
+            cfg.timeout_secs, default.timeout_secs,
+            "timeout_secs is not read"
+        );
         assert_eq!(
             cfg.sidecar_binary.as_deref(),
             Some(std::path::Path::new("/opt/wirken/egress-sidecar")),

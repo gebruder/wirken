@@ -3793,8 +3793,8 @@ pub async fn status_snapshot(
                 "image": sb.image,
                 "legacy_network_flag": sb.network,
                 "limits": {
-                    "memory_mb": wirken_agent::sandbox::MEMORY_LIMIT / (1024 * 1024),
-                    "pids": wirken_agent::sandbox::PIDS_LIMIT,
+                    "memory_mb": sb.memory_bytes / (1024 * 1024),
+                    "pids": sb.pids_limit,
                     "timeout_secs": sb.timeout_secs,
                 },
                 "workspace_mount": "/workspace (rw)",
@@ -9795,6 +9795,7 @@ mod tests {
                     mode: SandboxModeLabel::ExecOnly,
                     runtime: SandboxRuntimeLabel::Docker,
                     container_id: Some("70f792320e59".into()),
+                    limits: None,
                 }),
             ),
             (
@@ -9803,6 +9804,7 @@ mod tests {
                     mode: SandboxModeLabel::Gvisor,
                     runtime: SandboxRuntimeLabel::Gvisor,
                     container_id: Some("abc123abc123".into()),
+                    limits: None,
                 }),
             ),
             (
@@ -9811,6 +9813,7 @@ mod tests {
                     mode: SandboxModeLabel::Off,
                     runtime: SandboxRuntimeLabel::Host,
                     container_id: None,
+                    limits: None,
                 }),
             ),
             ("in-process", None),
