@@ -1649,6 +1649,13 @@ async fn dispatch_via_agent_runtime(
             extras,
             exec_available,
             fix_inputs,
+            // The fix step's agents work from the same project context
+            // and threat model the walks were given.
+            [scoring.context_section(), scoring.threat_model_section()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n"),
             terminal.clone(),
             audit,
         )
@@ -2327,6 +2334,7 @@ async fn dispatch_fixes(
     extras: &Extras,
     exec_available: bool,
     inputs: &lyrik_fix::FixInputs,
+    project_sections: String,
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
@@ -2366,7 +2374,12 @@ async fn dispatch_fixes(
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::write(
             dir.join("SKILL.md"),
-            lyrik_fix::skill_text(name, &run_id, super::lyrik_walks::run_tools(true)),
+            lyrik_fix::skill_text_with(
+                name,
+                &run_id,
+                super::lyrik_walks::run_tools(true),
+                &project_sections,
+            ),
         )
         .with_context(|| format!("write {}", dir.join("SKILL.md").display()))?;
         wirken_agent::bundled_skills::stage_sign_skill_dir(&dir)

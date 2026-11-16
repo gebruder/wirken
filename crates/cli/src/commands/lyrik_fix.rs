@@ -967,6 +967,18 @@ pub fn recheck_skill_text(run_id: &str, tools: &str) -> String {
     )
 }
 
+/// The text of one of [`FIX_SKILLS`] with the run's project context
+/// and threat model after it, as the walks carry them. `sections` is
+/// empty when the run has neither.
+pub fn skill_text_with(name: &str, run_id: &str, tools: &str, sections: &str) -> String {
+    let text = skill_text(name, run_id, tools);
+    if sections.trim().is_empty() {
+        text
+    } else {
+        format!("{text}\n{sections}")
+    }
+}
+
 /// The text of one of [`FIX_SKILLS`].
 pub fn skill_text(name: &str, run_id: &str, tools: &str) -> String {
     match name {
@@ -1941,6 +1953,20 @@ mod tests {
             );
         }
         assert!(attack_skill_text(RUN, tools).contains("attack.json"));
+        // The project context the walks were given rides after the text;
+        // with none, the text is as it was.
+        let with = skill_text_with(
+            "fix-attack",
+            RUN,
+            tools,
+            "## Project context\n\ntwo deployments\n",
+        );
+        assert!(with.starts_with(&attack_skill_text(RUN, tools)));
+        assert!(with.ends_with("two deployments\n"), "{with}");
+        assert_eq!(
+            skill_text_with("fix", RUN, tools, " \n"),
+            fix_skill_text(RUN, tools)
+        );
         assert!(recheck_skill_text(RUN, tools).contains("class_sites"));
     }
 

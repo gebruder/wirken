@@ -126,7 +126,8 @@ tagged.
   checked in place and the patch then applied again. A project that takes
   long to build is built once for the baseline and once per finding, with an
   incremental rebuild for the revert, where it was built three times per
-  finding. The fix step takes one finding at a time.
+  finding. The fix step takes one finding at a time. Its three agents carry
+  the project context and threat model the walks were given.
   Rejected fixes are appended to `rejections.jsonl`.
 - The fix step's inputs from the target, `fix.test_command` and
   `fix.coverage_command` in `.lyrik/config.json` and the patches under

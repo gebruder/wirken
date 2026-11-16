@@ -411,7 +411,9 @@ A fix is recorded as a `candidate fix`. Nothing in a run calls a fix fixed or
 verified: the record lists what was checked, how, and what was not.
 
 **Who decides.** Three agents run per finding, each with a fresh context, under
-staged skills `fix`, `fix-attack` and `fix-recheck`. None of them judges
+staged skills `fix`, `fix-attack` and `fix-recheck`. Each carries the project
+context and the target's threat model the walks were given, when the run has
+them. None of them judges
 anything. The runner composes each command an arm rests on, the agents run
 them through `exec`, and the runner reads the exit status and output of
 exactly those commands from the run's session log. What an agent writes about
