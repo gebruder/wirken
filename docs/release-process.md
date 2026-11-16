@@ -34,7 +34,7 @@ format. `wirken lyrik` is outside it: its subcommands, flags, run output, and
 the fields `findings.json` carries outside schema 1.1. A change there never
 forces more than a minor bump. The findings schema is versioned on its own,
 by tag (`schema-v1.1`), not by Wirken release; see
-[lyrik.md](lyrik.md#findings-schema-11).
+[lyrik.md](lyrik.md#findings-schema-12).
 
 ## Sequence
 

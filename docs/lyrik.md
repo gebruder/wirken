@@ -212,19 +212,28 @@ Confidentiality is the pin: there is no `confidential: true` flag, so pinning
 the resolved phase to Privatemode or Tinfoil is the mechanism. A `score` pin
 does not apply while a `framing` pin is present.
 
-The skill assesses two framings, `auth` and `injection`, the same two the
-findings schema 1.1 accepts. The SARIF emitter carries rules for nine: those
-two plus `crypto`, `deserialization`, `memory_safety`, `secrets`,
-`supply_chain`, `race_condition` and `prompt_injection`.
+The bundled single-call skill assesses two framings, `auth` and `injection`.
+A walk may report a finding of any class: `framing` is the finding's class, a
+lower-case name such as `memory_safety`, `unbounded_alloc` or
+`race_condition`. The SARIF emitter carries named rules for nine classes
+(`auth`, `injection`, `crypto`, `deserialization`, `memory_safety`, `secrets`,
+`supply_chain`, `race_condition`, `prompt_injection`) and adds a rule for any
+other class a run's findings carry.
 
-The runner holds every walk to the 1.1 enum before dedup. It removes framing
-values outside the enum and records each removal in the per-run log as
+The runner keeps a finding of any class. Schema 1.1 named only `auth` and
+`injection`, and until schema 1.2 a walk finding of any other class was
+dropped at aggregation. Before dedup the runner turns a single class written
+as a string into a list of one, and removes `framing` values that are not
+class names (`[a-z][a-z0-9_]*`), recording each removal in the per-run log as
 `lyrik.finding.framing_stripped` with the stable ID, the walk and the removed
-values. When the stable ID was keyed on a removed framing, it is rewritten to
+values. When the stable ID was keyed on a removed value, it is rewritten to
 the first framing that remains, and the row carries the written ID as
-`stable_id_written`. A finding left with no framing in the enum, or with no
-`framing` array, is not written to `findings.json`; the per-run log records
-it whole as `lyrik.finding.refused`.
+`stable_id_written`. A finding left with no class name, or with no `framing`,
+is not written to `findings.json`; the per-run log records it whole as
+`lyrik.finding.refused`. The staged wrapper tells every walk the fields a
+finding carries (`framing`, `location`, `stable_id`, `id`, `title`, `summary`,
+`tier`); the runner does not rewrite a `stable_id` that is off the grammar or
+supply a missing `tier`, and `wirken lyrik validate` reports both.
 
 **`walks` and `max_concurrent_walks`**: opt into per-walk dispatch: one agent
 turn per named walk, run concurrently against the same target, producing a
@@ -315,9 +324,25 @@ the same command, and writes its own observation under
 rule 8 against the finding. [lyrik-brocards.md](lyrik-brocards.md#reproductions-and-replay)
 has the fields and the rule.
 
-`exec` stays gated. The staged section lists the commands a walk runs through
-`exec` (`crypto-walk`: `cargo audit`; `fuzz-walk`: `cargo test`; `sink-walk`:
-`git log`, `git blame`), and the run prints the same list before it starts.
+`exec` stays gated. The staged section lists the commands a walk is expected
+to ask for, and the run prints the same list before it starts. The list is
+read off the target, not fixed: `sink-walk` is offered `git log` and
+`git blame` when the target is a git checkout; `crypto-walk` is offered
+`cargo audit` when the target has a `Cargo.toml`; `fuzz-walk` and
+`invariant-walk` are offered the target's test command, which is
+`fix.test_command` from `.lyrik/config.json` when set and otherwise the usual
+one for the language at the target's root (`cargo test`, `npm test`,
+`go test ./...`, `python3 -m pytest`), or none. A shell project is not offered
+`cargo test`. Every walk is also told it may ask to run a script it wrote
+under its own `staging/<walk>/harness/` directory, with `sh` or the target's
+interpreter, under the marker contract, that this is how a finding gets a
+reproduction, and that the replay runs the same command. The list is what is
+expected, not a grant and not a limit: nothing is approved ahead of time, and
+a command outside the list is put to the operator the same way. The section
+also tells the walk it has 20 tool rounds in its turn. A walk that uses them
+up ends there: the per-run log records `lyrik.walk.completed` with status
+`transient_failure` and the reason, what it had staged is still aggregated,
+and nothing in `findings.json` marks the walk as cut short.
 With stdin on a terminal, the operator is asked at the moment each command is
 about to run, one prompt at a time across concurrent walks, in a prompt that
 is the walk's name and the exact command and nothing else; an answer covers
@@ -326,7 +351,8 @@ such command is refused: the run says so once, before it dispatches, and each
 refusal's `permission_denied` row carries `denial_reason` `no terminal for
 approval`. A refused command is a skipped step, not a failed
 walk. An approved command runs in the `exec` sandbox, so the sandbox image
-needs `git` or `cargo` for these walks; the default image has neither. Before
+needs the binaries those commands name; the default image has neither `git`
+nor `cargo`. Before
 the first prompt the run asks the sandbox which of the binaries its walks need
 are missing, and names them, so no one approves a command that can only fail.
 
@@ -652,29 +678,42 @@ Lyrik does not write the rubric for you. Rubric sections a run stages land
 under the run's `proposed/` directory; promoting one is a commit the team
 makes.
 
-## Findings schema (1.1)
+## Findings schema (1.2)
 
 `findings.json` is the contract external consumers (SIEM ingestors, ticketing
 systems, CI gates, diff tools) pin against. Candidates declined under a brocard
 rule are recorded alongside the findings; see [lyrik-brocards.md](lyrik-brocards.md).
 
 `$id` is
-`https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json`.
+`https://raw.githubusercontent.com/gebruder/wirken/schema-v1.2/docs/lyrik-json-schema.json`.
 The schema is tag-pinned, not release-pinned: wirken releases that do not
 change it do not move the tag, and schema changes cut a new tag and a new
-spec. `wirken lyrik validate --path <path>` checks the 1.1 rules in code
+spec. The 1.1 schema stays at its own tag, `schema-v1.1`, unchanged.
+
+**1.2 adds one thing to 1.1: a finding of any class is kept.** In 1.1
+`framing[*]` was `"auth"` or `"injection"` and the `stable_id` framing segment
+was one of those two. In 1.2 both are any class name, `[a-z][a-z0-9_]*`.
+Nothing else changed, so every 1.1 document is a valid 1.2 document. The
+runner writes `schema_version` as the lowest version the document fits:
+`"1.1"` when every finding's framings are `auth` or `injection`, `"1.2"` when
+any finding has another class. A consumer pinned to 1.1 therefore reads every
+1.1 document exactly as before; a run that kept a finding of another class is
+labelled 1.2, where 1.1 would have dropped that finding without saying so.
+
+`wirken lyrik validate --path <path>` checks the rules of the version the
+document names in code
 (`crates/cli/src/commands/lyrik_validate.rs`; the schema file is read only by
 its tests) and never fetches `$id`; the URL is for external JSON Schema
 validators.
 
 Pin the schema, not the CLI. `wirken lyrik` is outside Wirken's stability
 surface: its subcommands, flags, run output, and the fields `findings.json`
-carries outside schema 1.1 can change in any minor release. The 1.1 contract
-changes only with a new schema tag.
+carries outside the schema can change in any minor release. A schema
+contract changes only with a new schema tag.
 
 ```json
 {
-  "schema_version": "1.1",
+  "schema_version": "1.1 or 1.2",
   "run_id": "<non-empty string>",
   "produced_at": "<RFC 3339 timestamp>",
   "findings": [ /* zero or more */ ]
@@ -682,9 +721,10 @@ changes only with a new schema tag.
 ```
 
 Required per finding: `id`, `stable_id`, `framing` (array of one or more
-closed-enum strings), `location.file` (workspace-relative), `location.line_start`
-(1-based), `title`, `summary`, `tier`. Closed enums: `framing[*]` is `"auth"`
-or `"injection"`; `tier` is `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`;
+class names), `location.file` (workspace-relative), `location.line_start`
+(1-based), `title`, `summary`, `tier`. `framing[*]` is a class name,
+`[a-z][a-z0-9_]*`; under `schema_version` `"1.1"` it is `"auth"` or
+`"injection"`. Closed enums: `tier` is `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`;
 `detection_source`, optional but enforced when present, is `static_prescreen`,
 `model_reasoning` or `both`.
 
@@ -699,7 +739,7 @@ field is absent), so single-call mode never produces it on its own.
 Extra fields at both levels are allowed and ignored, so producers can carry
 `grade`, `stream`, `scoring_passes`, `dedup_sources`, `rubric_silent`,
 `location.line_end` and similar through without the validator enforcing their
-shape. The runner adds run-level extras of its own, outside the 1.1 contract:
+shape. The runner adds run-level extras of its own, outside the schema contract:
 `target_sha`, `target_dirty`, `audit_log_ref`, `rubric`, `context`,
 `target_threat_model`, `funnel` and `citation_check`.
 
@@ -716,8 +756,9 @@ side; filesystems disagree (Linux is bytes, macOS HFS+ may apply NFD, Windows
 is UTF-16), so consumers comparing across platforms normalize themselves.
 
 Conforming: `auth::src/foo.rs:42`, `injection::deeply/nested/file.py:1`,
-`auth::a:b:c.rs:7`. Not conforming: an absolute path, an empty or unknown
-framing, a missing or non-integer line.
+`auth::a:b:c.rs:7`, and under 1.2 `unbounded_alloc::a.sh:4`. Not conforming:
+an absolute path, an empty framing or one that is not a class name, a missing
+or non-integer line.
 
 `line` is the brittle component: a finding shifts line numbers when unrelated
 edits land above it, so consumer-side fuzzy matchers should fall back to
@@ -728,11 +769,11 @@ walk mode keeps first-seen group order across walks in config order, with
 findings that have no location at the end. The validator does not check
 order.
 
-**Not in the 1.1 surface**, and consumers must not pin against them: a
+**Not in the schema surface**, and consumers must not pin against them: a
 top-level `target`, `funnel`, `concentration` or `observations` block (the
 runner's `funnel` is one of the extras above);
 per-finding `gate_routed`, `dedup_match` or `stream` as closed enums; a
-`triage_status` field. 1.1 does not require producers to emit `$schema`, and
+`triage_status` field. The schema does not require producers to emit `$schema`, and
 if a report carries one the validator asserts it string-equals `$id`.
 
 A run that finds nothing still writes `findings.json`, with an empty `findings`
@@ -747,9 +788,9 @@ marker with zero findings fails the run. A single-call run that ends in
 rate-limit exhaustion or context overflow writes an empty `findings.json`
 without a marker and exits zero.
 
-### Carried outside schema 1.1
+### Carried outside the schema
 
-Seven additions sit outside the 1.1 contract. The validator tolerates unknown
+Seven additions sit outside the schema contract. The validator tolerates unknown
 keys, so they do not change `schema_version`, and a later minor release may
 change them:
 

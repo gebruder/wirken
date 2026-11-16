@@ -50,6 +50,18 @@ tagged.
   and coverage commands ([docs/lyrik.md](docs/lyrik.md#defender-fix-step);
   `crates/cli/src/commands/lyrik_fix_arms.rs`).
 
+- Findings schema 1.2, tagged `schema-v1.2`: a finding of any class is kept.
+  `framing` and the `stable_id` framing segment are any class name
+  (`[a-z][a-z0-9_]*`), where 1.1 named `auth` and `injection`. Nothing else
+  changed, so a 1.1 document is a valid 1.2 document, and `schema-v1.1` is
+  untouched. The runner writes `schema_version` as the lowest version the
+  document fits: `1.1` when every finding is `auth` or `injection`, `1.2`
+  otherwise. `wirken lyrik validate` accepts both, and SARIF output carries a
+  rule for any class a run's findings have
+  (`a_walk_finding_of_a_class_outside_1_1_is_kept`,
+  `crates/cli/src/commands/lyrik.rs`;
+  [docs/lyrik.md](docs/lyrik.md#findings-schema-12)).
+
 ### Changed
 
 - The uncosted-call warning names the USD ceiling as the one that is
@@ -99,6 +111,22 @@ tagged.
 
 ### Fixed
 
+- A walk finding of a class other than `auth` or `injection` is no longer
+  dropped at aggregation. Until now every such finding was refused
+  (`lyrik.finding.refused`) and left out of `findings.json`. A class written
+  as a single string is read as a list of one.
+- The staged walk section offers commands read off the target. A walk is
+  told it may ask to run scripts it wrote under its own harness directory,
+  under the marker contract, and that the replay runs them; the test command
+  is `fix.test_command` or the usual one for the target's language, so a
+  shell project is no longer offered `cargo test`. Until now each walk was
+  told a fixed list (`fuzz-walk`: `cargo test`), read it as a limit, and ran
+  no harness, so no reproduction was recorded and no finding was ever
+  confirmed. Nothing is approved ahead of time and `write_paths` is as it
+  was. Each walk is also told the fields a finding carries and its 20-round
+  budget (`a_non_rust_target_is_offered_no_cargo_command`,
+  `every_walk_is_told_it_may_run_its_own_harness_under_the_contract`,
+  `crates/cli/src/commands/lyrik_walks.rs`).
 - Budget enforcement: a sub-agent's model calls are checked and charged
   against the budget of the agent at the top of its spawn chain. They were
   charged to that agent's ledger row but checked against the child's own

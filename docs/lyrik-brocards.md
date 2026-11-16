@@ -80,7 +80,7 @@ Both modes write every rejection to `rejected_candidates`, and both print the ru
 
 Fields the runner cannot fill are omitted rather than set to null.
 
-The array sits outside the findings schema's contract. The validator accepts it, and a later release may change it. See [lyrik.md](lyrik.md#carried-outside-schema-11).
+The array sits outside the findings schema's contract. The validator accepts it, and a later release may change it. See [lyrik.md](lyrik.md#carried-outside-the-schema).
 
 ## SARIF
 
