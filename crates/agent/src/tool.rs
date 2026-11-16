@@ -839,28 +839,8 @@ impl ToolRegistry {
         let stdout = crate::ansi::strip_control_sequences(&String::from_utf8_lossy(&output.stdout));
         let stderr = crate::ansi::strip_control_sequences(&String::from_utf8_lossy(&output.stderr));
 
-        let mut result = String::new();
-        if !stdout.is_empty() {
-            result.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            if !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str("[stderr] ");
-            result.push_str(&stderr);
-        }
-        if result.is_empty() {
-            result.push_str("(no output)");
-        }
-
-        if result.len() > 32_000 {
-            result.truncate(32_000);
-            result.push_str("\n... (truncated)");
-        }
-
         Ok(ToolResult {
-            output: result,
+            output: crate::sandbox::exec_output(&stdout, &stderr),
             success: output.status.success(),
             // Reached only when the operator set `"mode":"off"`: the
             // branch above refuses rather than falling back, so a

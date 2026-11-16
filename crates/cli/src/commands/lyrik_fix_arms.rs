@@ -1562,6 +1562,48 @@ mod tests {
         ));
     }
 
+    /// The container path and the host path both build the recorded
+    /// output with `wirken_agent::sandbox::exec_output`. Through it, a
+    /// marker counts only when the command printed it on stdout.
+    #[test]
+    fn the_marker_is_read_from_stdout_only_as_exec_records_the_streams() {
+        use wirken_agent::sandbox::exec_output;
+        let run = |stdout: &str, stderr: &str, success| Run::Done {
+            success,
+            output: exec_output(stdout, stderr),
+            seq: 0,
+        };
+        // On stdout, with noise on stderr after it.
+        assert_eq!(
+            poc(&run(
+                &format!("start\n{REACHED}\n"),
+                "assert failed\n",
+                false
+            )),
+            Poc::Shown
+        );
+        assert_eq!(poc(&run(&format!("{REACHED}\n"), "", true)), Poc::NotShown);
+        // Only on stderr: first line, and a later line of a traceback.
+        for stderr in [
+            format!("{REACHED}\n"),
+            format!("Traceback (most recent call last):\n{REACHED}\nSyntaxError\n"),
+        ] {
+            for stdout in ["", "building\n", "no newline at the end"] {
+                assert!(
+                    matches!(poc(&run(stdout, &stderr, false)), Poc::Inconclusive(_)),
+                    "{stdout:?} {stderr:?}"
+                );
+            }
+        }
+        // The streams as the log holds them.
+        assert_eq!(exec_output("out\n", "err\n"), "out\n\n[stderr] err\n");
+        assert_eq!(exec_output("", "err"), "[stderr] err");
+        assert_eq!(exec_output("", ""), "(no output)");
+        // A cut inside a multi-byte character does not panic.
+        let long = "\u{00e9}".repeat(20_000);
+        assert!(exec_output(&long, "").ends_with("... (truncated)"));
+    }
+
     #[test]
     fn a_later_passing_run_does_not_replace_an_earlier_one() {
         let mut r = Runs::new();

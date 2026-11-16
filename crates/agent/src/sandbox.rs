@@ -520,7 +520,8 @@ impl DockerSandbox {
     }
 
     /// Execute a command inside an ephemeral container.
-    /// The workspace is bind-mounted at /workspace.
+    /// The workspace is bind-mounted at /workspace. What the command
+    /// printed comes back through [`exec_output`].
     ///
     /// `egress` carries the channel's egress policy plus the
     /// attribution this exec's denials are recorded under. `None`,
@@ -724,28 +725,8 @@ impl DockerSandbox {
             }
         }
 
-        let mut result = String::new();
-        if !stdout.is_empty() {
-            result.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            if !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str("[stderr] ");
-            result.push_str(&stderr);
-        }
-        if result.is_empty() {
-            result.push_str("(no output)");
-        }
-
-        if result.len() > 32_000 {
-            result.truncate(32_000);
-            result.push_str("\n... (truncated)");
-        }
-
         Ok(ToolResult {
-            output: result,
+            output: exec_output(&stdout, &stderr),
             success: exit_code == 0,
             sandbox: Some(provenance),
         })
@@ -1049,6 +1030,38 @@ pub async fn detect_gvisor() -> bool {
         return runtimes.contains_key("runsc");
     }
     false
+}
+
+/// What an `exec` reports for a command's two streams, on the host
+/// and in a container alike: stdout as printed, then stderr behind a
+/// `[stderr] ` prefix on a line of its own, `(no output)` when both are
+/// empty, cut at 32,000 bytes. Everything from the first line that
+/// starts with `[stderr] ` on is stderr, which is how a reader of the
+/// session log tells the two apart.
+pub fn exec_output(stdout: &str, stderr: &str) -> String {
+    let mut result = String::new();
+    if !stdout.is_empty() {
+        result.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str("[stderr] ");
+        result.push_str(stderr);
+    }
+    if result.is_empty() {
+        result.push_str("(no output)");
+    }
+    if result.len() > 32_000 {
+        let mut cut = 32_000;
+        while !result.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        result.truncate(cut);
+        result.push_str("\n... (truncated)");
+    }
+    result
 }
 
 #[allow(

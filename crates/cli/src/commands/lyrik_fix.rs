@@ -21,8 +21,8 @@
 //! commands. What an agent says it saw is not read. The arms and their
 //! states are in [`super::lyrik_fix_arms`].
 //!
-//! A fix no arm failed, whose reproduction arm passed, is a
-//! `candidate_fix`: never "fixed", never "verified". Each record lists
+//! A fix no arm failed, whose reproduction and variant arms both
+//! passed, is a `candidate_fix`: never "fixed", never "verified". Each record lists
 //! every arm, its state and whether it rests on executed commands or a
 //! model's reading. A failed arm rejects the fix, and the rejection is
 //! written to `rejections.jsonl` with the arm and the reason. A
@@ -122,13 +122,16 @@ pub fn slug(stable_id: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
-    /// The reproduction arm passed and no arm failed. The other arms'
-    /// states are on the record; this is not a claim that they passed.
+    /// The reproduction and variant arms passed, no arm failed, and the
+    /// patch, the run inputs and the target tree are as they were. The
+    /// other three arms' states are on the record; this is not a claim
+    /// that they passed.
     CandidateFix,
     /// An arm failed.
     Rejected,
-    /// The reproduction arm did not pass, so nothing shows the patch
-    /// stops even the original reproduction.
+    /// No arm failed, and the reproduction arm or the variant arm did
+    /// not pass, or the patch, an input or the target tree changed:
+    /// nothing shows the patch stops the defect by more than one path.
     Inconclusive,
 }
 
@@ -498,6 +501,7 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         reasons.push(CONFIG_CHANGED.to_string());
     }
     let reproduction_passed = arms_list[0].state == ArmState::Pass;
+    let variant_passed = arms_list[1].state == ArmState::Pass;
     let arm_tally = ArmTally::of(&arms_list);
     let failed: Vec<&ArmResult> = arms_list
         .iter()
@@ -508,9 +512,12 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
             reasons.push(format!("{} arm failed: {}", a.arm, a.reasons.join("; ")));
         }
         Verdict::Rejected
-    } else if !reproduction_passed || !reasons.is_empty() {
+    } else if !reproduction_passed || !variant_passed || !reasons.is_empty() {
         if !reproduction_passed {
             reasons.push("the reproduction arm did not pass".to_string());
+        }
+        if !variant_passed {
+            reasons.push("the variant arm did not pass".to_string());
         }
         Verdict::Inconclusive
     } else {
@@ -1565,8 +1572,62 @@ mod tests {
         assert_eq!(out.variant_minimum, 4);
         assert_eq!(arm(&out, "variant").state, ArmState::Inconclusive);
         assert_eq!(out.patch.files, ["src/len.rs", "src/a.rs"]);
-        // The script is not withheld: the fix is still a candidate.
+        // Two variants held where four are required: not a candidate.
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert_eq!(out.label, None);
+        assert_eq!(out.reasons, ["the variant arm did not pass"]);
+        // The script is not withheld.
+        assert!(case_dir_has_apply_script());
+    }
+
+    #[test]
+    fn a_candidate_needs_the_reproduction_and_the_variant_arm_to_pass() {
+        // Reproduction passes, no variant was attempted.
+        let out = Case::new(ORIGIN_PATCH).judge();
+        assert_eq!(arm(&out, "reproduction").state, ArmState::Pass);
+        assert_eq!(arm(&out, "variant").state, ArmState::NotRun);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert_eq!(out.label, None);
+        assert_eq!(out.reasons, ["the variant arm did not pass"]);
+        // Reproduction passes, the variants' builds broke: inconclusive.
+        let mut case = Case::new(ORIGIN_PATCH).with_variants(false);
+        for o in case
+            .observed
+            .iter_mut()
+            .filter(|o| o.command.contains("variants/"))
+        {
+            o.success = false;
+            o.output = "ModuleNotFoundError".into();
+        }
+        let out = case.judge();
+        assert_eq!(arm(&out, "variant").state, ArmState::Inconclusive);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        // Variants pass, the reproduction's patched run never reached its
+        // assertion.
+        let mut case = Case::new(ORIGIN_PATCH).with_variants(false);
+        let patched = Layout::new(RUN, REL).in_copy("patched", REPRO);
+        for o in case.observed.iter_mut().filter(|o| o.command == patched) {
+            o.output = "nothing ran".into();
+        }
+        let out = case.judge();
+        assert_eq!(arm(&out, "variant").state, ArmState::Pass);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert_eq!(out.reasons, ["the reproduction arm did not pass"]);
+        // Both pass; functionality did not run. Still a candidate, and
+        // counted as functionality unverified.
+        let out = Case::new(ORIGIN_PATCH).with_variants(false).judge();
+        assert_eq!(arm(&out, "functionality").state, ArmState::NotRun);
         assert_eq!(out.verdict, Verdict::CandidateFix);
+        assert!(out.labels.contains(&"functionality_unverified"));
+        // A failed arm is rejected whatever else passed.
+        let out = Case::new(SINK_PATCH).with_variants(false).judge();
+        assert_eq!(out.verdict, Verdict::Rejected);
+    }
+
+    fn case_dir_has_apply_script() -> bool {
+        let case = Case::new(ORIGIN_PATCH);
+        let dir = case.tmp.path().join(REL);
+        write_apply_script(&dir).is_ok() && dir.join("apply.sh").is_file()
     }
 
     #[test]
