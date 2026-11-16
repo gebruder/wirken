@@ -37,8 +37,18 @@ use wirken_audit::SessionEvent;
 /// The line a defect-showing command prints before its assertion.
 pub const REACHED: &str = "LYRIK_REACHED";
 
-/// The copies of the scanned revision under a fix directory.
-pub const SIDES: [&str; 3] = ["baseline", "patched", "reverted"];
+/// The copies of the scanned revision a fix is checked in. The
+/// baseline is made once per run and shared by every finding, so its
+/// build is paid for once. Each finding has its own patched copy. There
+/// is no third copy: the revert is checked in the patched copy, in
+/// place, where the toolchain rebuilds only what the patch touched, and
+/// the patch is then applied again.
+///
+/// A side-blind command may contain none of these words.
+const SIDE_WORDS: [&str; 3] = ["baseline", "patched", "reverted"];
+
+/// The directory under `staging/fix/` that holds the shared baseline.
+pub const SHARED_DIR: &str = "_shared";
 
 /// Variants a localized patch must survive, by different paths.
 pub const VARIANT_MIN_LOCALIZED: usize = 2;
@@ -257,45 +267,102 @@ impl Layout {
         format!(".lyrik/state/runs/{}/staging", self.run_id)
     }
 
-    /// Make one copy of the scanned revision, with the carried harness
-    /// directories beside it.
-    pub fn extract(&self, side: &str, revision: &str) -> String {
-        let d = &self.dir;
+    /// Where a copy is, relative to the target root.
+    pub fn copy(&self, side: &str) -> String {
+        if side == "baseline" {
+            format!("{}/fix/{SHARED_DIR}/baseline", self.staging())
+        } else {
+            format!("{}/{side}", self.dir)
+        }
+    }
+
+    fn carry(&self, copy: &str) -> Vec<String> {
         let s = self.staging();
-        let mut out = format!(
-            "mkdir -p {d}/{side} && git archive --format=tar {revision} | tar -x -C {d}/{side}"
-        );
-        for walk in &self.carried {
-            out.push_str(&format!(
-                " && mkdir -p {d}/{side}/{s}/{walk} && cp -R {s}/{walk}/harness {d}/{side}/{s}/{walk}/"
-            ));
+        self.carried
+            .iter()
+            .map(|walk| {
+                format!("mkdir -p {copy}/{s}/{walk} && cp -R {s}/{walk}/harness {copy}/{s}/{walk}/")
+            })
+            .collect()
+    }
+
+    /// Make the run's baseline copy, once. The command is the same
+    /// string for every finding and does nothing when the copy is
+    /// there, so what was built in it stays built.
+    pub fn extract_baseline(&self, revision: &str) -> String {
+        let b = self.copy("baseline");
+        format!(
+            "[ -e {b}.ready ] || {{ mkdir -p {b} && git archive --format=tar {revision} | tar -x \
+             -C {b} && touch {b}.ready; }}"
+        )
+    }
+
+    /// Put this finding's carried harness directories into the shared
+    /// baseline. `None` when the reproduction names no harness.
+    pub fn carry_into_baseline(&self) -> Option<String> {
+        let parts = self.carry(&self.copy("baseline"));
+        (!parts.is_empty()).then(|| parts.join(" && "))
+    }
+
+    /// Make this finding's patched copy, with the carried harness
+    /// directories in it.
+    pub fn extract_patched(&self, revision: &str) -> String {
+        let p = self.copy("patched");
+        let mut out =
+            format!("mkdir -p {p} && git archive --format=tar {revision} | tar -x -C {p}");
+        for part in self.carry(&p) {
+            out.push_str(" && ");
+            out.push_str(&part);
         }
         out
     }
 
+    /// The path from a copy's root back to the target root.
+    pub fn up(&self) -> String {
+        "../".repeat(
+            self.copy("patched")
+                .split('/')
+                .filter(|c| !c.is_empty())
+                .count(),
+        )
+    }
+
     /// `command` run from inside one copy.
     pub fn in_copy(&self, side: &str, command: &str) -> String {
-        format!("cd {}/{side} && {}", self.dir, self.rebase(command))
+        format!("cd {} && {}", self.copy(side), self.rebase(command))
     }
 
-    /// Apply the patch to one copy, from the target root. A copy sits
-    /// inside the target's own repository, where `git apply` run from
-    /// the copy would skip every path outside it and exit zero having
-    /// changed nothing; `--directory` puts the patch's paths under the
-    /// copy.
-    pub fn apply(&self, side: &str) -> String {
-        format!("git apply --directory={0}/{side} {0}/fix.patch", self.dir)
-    }
-
-    pub fn revert(&self) -> String {
+    /// Apply the patch to the patched copy, from the target root. A
+    /// copy sits inside the target's own repository, where `git apply`
+    /// run from the copy would skip every path outside it and exit zero
+    /// having changed nothing; `--directory` puts the patch's paths
+    /// under the copy. The same command applies the patch again after
+    /// the revert check.
+    pub fn apply(&self) -> String {
         format!(
-            "git apply -R --directory={0}/reverted {0}/fix.patch",
+            "git apply --directory={} {}/fix.patch",
+            self.copy("patched"),
             self.dir
         )
     }
 
-    pub fn diff(&self) -> String {
-        format!("diff -r {0}/baseline {0}/reverted", self.dir)
+    /// Take the patch back out of the patched copy, in place.
+    pub fn revert(&self) -> String {
+        format!(
+            "git apply -R --directory={} {}/fix.patch",
+            self.copy("patched"),
+            self.dir
+        )
+    }
+
+    /// Whether every tracked file in the patched copy is as the scanned
+    /// revision has it. Build output and the carried harness are not
+    /// tracked and are not compared.
+    pub fn check_reverted(&self, revision: &str) -> String {
+        format!(
+            "git --work-tree={} diff --quiet {revision} --",
+            self.copy("patched")
+        )
     }
 
     /// A command written to run from the target root, as it runs from
@@ -304,8 +371,8 @@ impl Layout {
     /// re-pointed at the target root, which a copy does not hold.
     pub fn rebase(&self, command: &str) -> String {
         const STATE: &str = ".lyrik/state/runs/";
-        let depth = self.dir.split('/').filter(|c| !c.is_empty()).count() + 1;
-        let up = "../".repeat(depth);
+        // Both copies sit at the same depth below the target root.
+        let up = self.up();
         let carried: Vec<String> = self
             .carried
             .iter()
@@ -687,6 +754,9 @@ pub struct Reproduction {
     pub patched: Poc,
     /// What the baseline run printed, when it ran.
     pub baseline_output: Option<String>,
+    /// Whether the patched copy was left with the patch taken out: the
+    /// revert ran and no apply followed it.
+    pub left_reverted: bool,
 }
 
 fn setup(log: &Log, command: &str, what: &str, reasons: &mut Vec<String>) -> (Option<usize>, bool) {
@@ -703,10 +773,34 @@ fn setup(log: &Log, command: &str, what: &str, reasons: &mut Vec<String>) -> (Op
     (seq_of(&run), ran)
 }
 
-/// The original reproduction in three copies: it shows the defect in
-/// the baseline, does not in the patched copy, and shows it again in a
-/// copy where the patch was applied and reverted and `diff -r` found
-/// nothing against the baseline.
+/// The successful runs of `command`, by position on the log.
+fn successes(log: &Log, command: &str) -> Vec<usize> {
+    log.runs(command)
+        .iter()
+        .filter(|o| o.success)
+        .map(|o| o.seq)
+        .collect()
+}
+
+fn as_run(o: &Observed) -> Run {
+    if o.output.starts_with("Command timed out") {
+        Run::TimedOut
+    } else {
+        Run::Done {
+            success: o.success,
+            output: o.output.clone(),
+            seq: o.seq,
+        }
+    }
+}
+
+/// The original reproduction, in order: it shows the defect in the
+/// shared baseline, does not in the patched copy, and shows it again in
+/// the patched copy after the patch is taken back out and every tracked
+/// file there is as the scanned revision has it. The patch is then
+/// applied again. The patched copy is one directory, so which state a
+/// run saw is read from where it sits on the log between the apply, the
+/// revert and the second apply.
 pub fn reproduction_arm(log: &Log, layout: &Layout, command: &str, revision: &str) -> Reproduction {
     let mut reasons = Vec::new();
     let mut ran_any = false;
@@ -715,38 +809,69 @@ pub fn reproduction_arm(log: &Log, layout: &Layout, command: &str, revision: &st
         ran_any |= ran;
         seq
     };
-    for side in SIDES {
+    let base_ready = step(
+        layout.extract_baseline(revision),
+        "extracting the baseline copy",
+        &mut reasons,
+    );
+    if let Some(cmd) = layout.carry_into_baseline() {
         step(
-            layout.extract(side, revision),
-            &format!("extracting the {side} copy"),
+            cmd,
+            "carrying the harness into the baseline copy",
             &mut reasons,
         );
     }
-    let applied = step(layout.apply("patched"), "applying the patch", &mut reasons);
-    let applied_r = step(
-        layout.apply("reverted"),
-        "applying the patch in the reverted copy",
+    step(
+        layout.extract_patched(revision),
+        "extracting the patched copy",
         &mut reasons,
     );
-    let reverted = step(layout.revert(), "reverting the patch", &mut reasons);
-    let diffed = step(
-        layout.diff(),
-        "the diff of the reverted copy against the baseline",
+    let revert = step(layout.revert(), "reverting the patch", &mut reasons);
+    let checked = step(
+        layout.check_reverted(revision),
+        "the check that the reverted copy is the scanned revision",
         &mut reasons,
     );
-    if !(applied_r < reverted && reverted < diffed) && diffed.is_some() {
-        reasons.push("the apply, revert and diff did not run in that order".into());
+    let applies = successes(log, &layout.apply());
+    let asked = !log.runs(&layout.apply()).is_empty();
+    ran_any |= asked;
+    let applied = applies.first().copied();
+    if applied.is_none() {
+        reasons.push(if asked {
+            "applying the patch failed".to_string()
+        } else {
+            "applying the patch was not run".to_string()
+        });
+    }
+    if !(applied < revert && revert < checked) && checked.is_some() {
+        reasons.push("the apply, revert and check did not run in that order".into());
     }
 
-    let run_in = |side: &str| log.run(&layout.in_copy(side, command));
-    let (b_run, p_run, r_run) = (run_in("baseline"), run_in("patched"), run_in("reverted"));
+    let b_run = log.run(&layout.in_copy("baseline", command));
+    let patched_cmd = layout.in_copy("patched", command);
+    let patched_runs = log.runs(&patched_cmd);
+    let refused = patched_runs.is_empty() && log.run(&patched_cmd) == Run::Refused;
+    let missing = || if refused { Run::Refused } else { Run::Never };
+    // The first run after the apply and before the revert saw the patch.
+    let p_run = patched_runs
+        .iter()
+        .find(|o| applied.is_some_and(|a| o.seq > a) && revert.is_none_or(|r| o.seq < r))
+        .map(|o| as_run(o))
+        .unwrap_or_else(missing);
+    // The first run after the revert was checked saw the revision again.
+    let r_run = patched_runs
+        .iter()
+        .find(|o| checked.is_some_and(|c| o.seq > c))
+        .map(|o| as_run(o))
+        .unwrap_or_else(missing);
+    let reapplied = match (seq_of(&r_run), applies.get(1)) {
+        (Some(r), Some(again)) => *again > r,
+        _ => false,
+    };
     let (b, p, r) = (poc(&b_run), poc(&p_run), poc(&r_run));
     ran_any |= [&b, &p, &r].iter().any(|o| !matches!(o, Poc::NotRun(_)));
-    if seq_of(&p_run).is_some() && seq_of(&p_run) < applied {
-        reasons.push("the patched copy was run before the patch was applied".into());
-    }
-    if seq_of(&r_run).is_some() && seq_of(&r_run) < diffed {
-        reasons.push("the reverted copy was run before the revert was checked".into());
+    if seq_of(&b_run).is_some() && seq_of(&b_run) < base_ready {
+        reasons.push("the baseline copy was run before it was extracted".into());
     }
     let mut note = |side: &str, o: &Poc, want_shown: bool| match o {
         Poc::Shown if !want_shown => reasons.push(format!(
@@ -763,6 +888,9 @@ pub fn reproduction_arm(log: &Log, layout: &Layout, command: &str, revision: &st
     note("baseline", &b, true);
     note("patched", &p, false);
     note("reverted", &r, true);
+    if seq_of(&r_run).is_some() && !reapplied {
+        reasons.push("the patch was not applied again after the revert check".into());
+    }
 
     let state = if p == Poc::Shown && applied.is_some() {
         ArmState::Fail
@@ -787,11 +915,12 @@ pub fn reproduction_arm(log: &Log, layout: &Layout, command: &str, revision: &st
         baseline: b,
         patched: p,
         baseline_output,
+        left_reverted: revert.is_some() && applies.last().is_none_or(|a| Some(*a) < revert),
     }
 }
 
 fn names_a_copy(command: &str) -> bool {
-    SIDES.iter().any(|s| command.contains(s))
+    SIDE_WORDS.iter().any(|s| command.contains(s))
 }
 
 /// The variant arm: other routes to the same sink or invariant, each
@@ -1618,28 +1747,35 @@ mod tests {
             });
             self
         }
-        /// The setup and the three runs of a patch that works.
+        /// The setup and the runs of a patch that works: the baseline
+        /// shows the defect, the patched copy does not, and the same
+        /// copy shows it again with the patch taken out, after which
+        /// the patch goes back in.
         fn good() -> Self {
             let l = layout();
             let mut r = Self::new();
-            for side in SIDES {
-                r.add(l.extract(side, REV), true, "(no output)");
-            }
-            r.add(l.apply("patched"), true, "(no output)");
-            r.add(l.apply("reverted"), true, "(no output)");
-            r.add(l.revert(), true, "(no output)");
-            r.add(l.diff(), true, "(no output)");
+            r.add(l.extract_baseline(REV), true, "(no output)");
+            r.add(l.extract_patched(REV), true, "(no output)");
+            r.add(l.apply(), true, "(no output)");
             r.add(l.in_copy("baseline", REPRO), false, &shown());
             r.add(l.in_copy("patched", REPRO), true, &clean());
-            r.add(l.in_copy("reverted", REPRO), false, &shown());
+            r.add(l.revert(), true, "(no output)");
+            r.add(l.check_reverted(REV), true, "(no output)");
+            r.add(l.in_copy("patched", REPRO), false, &shown());
+            r.add(l.apply(), true, "(no output)");
             r
         }
         fn set(&mut self, command: &str, success: bool, output: &str) -> &mut Self {
+            self.set_nth(command, 0, success, output)
+        }
+        /// Change the `n`th run of `command`.
+        fn set_nth(&mut self, command: &str, n: usize, success: bool, output: &str) -> &mut Self {
             let o = self
                 .0
                 .iter_mut()
-                .find(|o| o.command == command)
-                .unwrap_or_else(|| panic!("no run of {command}"));
+                .filter(|o| o.command == command)
+                .nth(n)
+                .unwrap_or_else(|| panic!("no run {n} of {command}"));
             o.success = success;
             o.output = output.to_string();
             self
@@ -1761,7 +1897,7 @@ mod tests {
         assert_eq!(l.dir, ".lyrik/state/runs/r1/staging/fix/f1");
         assert_eq!(
             l.in_copy("baseline", REPRO),
-            "cd .lyrik/state/runs/r1/staging/fix/f1/baseline && python3 \
+            "cd .lyrik/state/runs/r1/staging/fix/_shared/baseline && python3 \
              ../../../../../../../../.lyrik/state/runs/r1/staging/fuzz-walk/harness/poc.py"
         );
         // An absolute path is left as it is.
@@ -1777,16 +1913,52 @@ mod tests {
         assert_eq!(carried.carried, ["fuzz-walk"]);
         assert_eq!(
             carried.in_copy("baseline", REPRO),
-            format!("cd .lyrik/state/runs/r1/staging/fix/f1/baseline && {REPRO}")
+            format!("cd .lyrik/state/runs/r1/staging/fix/_shared/baseline && {REPRO}")
         );
         assert_eq!(
-            carried.extract("baseline", REV),
-            "mkdir -p .lyrik/state/runs/r1/staging/fix/f1/baseline && git archive --format=tar \
-             abc123 | tar -x -C .lyrik/state/runs/r1/staging/fix/f1/baseline && mkdir -p \
-             .lyrik/state/runs/r1/staging/fix/f1/baseline/.lyrik/state/runs/r1/staging/fuzz-walk \
-             && cp -R .lyrik/state/runs/r1/staging/fuzz-walk/harness \
-             .lyrik/state/runs/r1/staging/fix/f1/baseline/.lyrik/state/runs/r1/staging/fuzz-walk/"
+            carried.in_copy("patched", REPRO),
+            format!("cd .lyrik/state/runs/r1/staging/fix/f1/patched && {REPRO}")
         );
+        // The baseline is made once: the command is the same for every
+        // finding of the run and does nothing when the copy is there.
+        let other = Layout::for_reproduction("r1", "staging/fix/f2", "cargo test");
+        assert_eq!(carried.extract_baseline(REV), other.extract_baseline(REV));
+        assert_eq!(
+            carried.extract_baseline(REV),
+            "[ -e .lyrik/state/runs/r1/staging/fix/_shared/baseline.ready ] || { mkdir -p \
+             .lyrik/state/runs/r1/staging/fix/_shared/baseline && git archive --format=tar \
+             abc123 | tar -x -C .lyrik/state/runs/r1/staging/fix/_shared/baseline && touch \
+             .lyrik/state/runs/r1/staging/fix/_shared/baseline.ready; }"
+        );
+        assert_eq!(
+            carried.carry_into_baseline().as_deref(),
+            Some(
+                "mkdir -p .lyrik/state/runs/r1/staging/fix/_shared/baseline/.lyrik/state/runs/r1/staging/fuzz-walk \
+                 && cp -R .lyrik/state/runs/r1/staging/fuzz-walk/harness \
+                 .lyrik/state/runs/r1/staging/fix/_shared/baseline/.lyrik/state/runs/r1/staging/fuzz-walk/"
+            )
+        );
+        assert_eq!(other.carry_into_baseline(), None);
+        assert_eq!(
+            carried.extract_patched(REV),
+            "mkdir -p .lyrik/state/runs/r1/staging/fix/f1/patched && git archive --format=tar \
+             abc123 | tar -x -C .lyrik/state/runs/r1/staging/fix/f1/patched && mkdir -p \
+             .lyrik/state/runs/r1/staging/fix/f1/patched/.lyrik/state/runs/r1/staging/fuzz-walk \
+             && cp -R .lyrik/state/runs/r1/staging/fuzz-walk/harness \
+             .lyrik/state/runs/r1/staging/fix/f1/patched/.lyrik/state/runs/r1/staging/fuzz-walk/"
+        );
+        // The revert is taken in the patched copy and checked against
+        // the revision's tracked files; there is no third copy.
+        assert_eq!(
+            carried.revert(),
+            "git apply -R --directory=.lyrik/state/runs/r1/staging/fix/f1/patched \
+             .lyrik/state/runs/r1/staging/fix/f1/fix.patch"
+        );
+        assert_eq!(
+            carried.check_reverted(REV),
+            "git --work-tree=.lyrik/state/runs/r1/staging/fix/f1/patched diff --quiet abc123 --"
+        );
+        assert_eq!(carried.up(), "../".repeat(8));
         // A path into another walk's staging is still re-pointed.
         assert!(
             carried
@@ -1807,11 +1979,13 @@ mod tests {
     }
 
     #[test]
-    fn the_reproduction_arm_passes_on_three_observed_runs() {
+    fn the_reproduction_arm_passes_on_runs_observed_in_order() {
         let out = repro(&Runs::good());
         assert_eq!(out.arm.state, ArmState::Pass, "{:?}", out.arm.reasons);
         assert_eq!(out.arm.basis, Some(Basis::Executed));
         assert_eq!(out.baseline, Poc::Shown);
+        assert_eq!(out.patched, Poc::NotShown);
+        assert!(!out.left_reverted);
     }
 
     #[test]
@@ -1841,10 +2015,39 @@ mod tests {
         let mut r = Runs::good();
         r.set(&l.in_copy("patched", REPRO), true, "nothing to run");
         assert_eq!(repro(&r).arm.state, ArmState::Inconclusive);
-        // The reverted copy differs from the baseline.
+        // A tracked file in the reverted copy is not as the revision has it.
         let mut r = Runs::good();
-        r.set(&l.diff(), false, "Only in baseline: x");
+        r.set(&l.check_reverted(REV), false, "(no output)");
         assert_eq!(repro(&r).arm.state, ArmState::Inconclusive);
+        // With the patch out, the defect does not come back: something
+        // other than the patch explains the patched run.
+        let mut r = Runs::good();
+        r.set_nth(&l.in_copy("patched", REPRO), 1, true, &clean());
+        let out = repro(&r);
+        assert_eq!(out.arm.state, ArmState::Inconclusive);
+        assert!(
+            out.arm
+                .reasons
+                .contains(&"the reproduction does not show the defect in the reverted copy".into()),
+            "{:?}",
+            out.arm.reasons
+        );
+        // The patch was not put back after the revert check.
+        let mut r = Runs::good();
+        r.0.pop();
+        let out = repro(&r);
+        assert_eq!(out.arm.state, ArmState::Inconclusive);
+        assert!(out.left_reverted);
+        // One run in the patched copy only: nothing saw the revert.
+        let mut r = Runs::good();
+        r.0.remove(7);
+        let out = repro(&r);
+        assert_eq!(
+            out.arm.state,
+            ArmState::Inconclusive,
+            "{:?}",
+            out.arm.reasons
+        );
         // Every command refused at the gate.
         let mut r = Runs::good();
         for o in &mut r.0 {
@@ -2032,6 +2235,7 @@ mod tests {
             baseline,
             patched: Poc::NotShown,
             baseline_output: output.map(str::to_string),
+            left_reverted: false,
         }
     }
 

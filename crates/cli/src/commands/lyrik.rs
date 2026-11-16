@@ -2394,8 +2394,11 @@ async fn dispatch_fixes(
         terminal,
     };
     use tokio::sync::Semaphore;
-    let permits = std::cmp::max(1, std::cmp::min(max_concurrent, confirmed.len() as u32));
-    let sem = Arc::new(Semaphore::new(permits as usize));
+    // One finding at a time. The baseline copy is shared by the run,
+    // and so is whatever the toolchain built in it: findings that ran
+    // at once would build over each other there.
+    let _ = max_concurrent;
+    let sem = Arc::new(Semaphore::new(1));
     let mut handles = Vec::with_capacity(confirmed.len());
     for c in confirmed {
         let slug = lyrik_fix::slug(&c.stable_id);

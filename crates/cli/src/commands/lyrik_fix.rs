@@ -429,6 +429,7 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
 
     let command = input.confirmed.reproduction.command.trim();
     let reproduction = arms::reproduction_arm(&log, &layout, command, input.revision);
+    let left_reverted = reproduction.left_reverted;
     let mut claim = arms::root_cause_claim(&input.confirmed.finding, &reproduction);
     let attack = arms::read_json::<arms::Attack>(&fix_dir.join("attack.json"));
     let variant_files: Vec<String> = attack
@@ -514,6 +515,25 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     if input.changes.config {
         reasons.push(CONFIG_CHANGED.to_string());
     }
+    // The patched copy is one directory. If the patch was taken out for
+    // the revert check and not put back, what ran there afterwards ran
+    // on unpatched code and says nothing about the patch.
+    if left_reverted {
+        const LEFT_OUT: &str = "the patch was not applied again after the revert check, so later runs in the \
+             patched copy did not run on patched code";
+        arms_list = arms_list
+            .into_iter()
+            .map(|a| {
+                if matches!(a.arm, "variant" | "relocation" | "functionality")
+                    && matches!(a.state, ArmState::Pass | ArmState::Fail)
+                {
+                    a.withheld(LEFT_OUT)
+                } else {
+                    a
+                }
+            })
+            .collect();
+    }
     let reproduction_passed = arms_list[0].state == ArmState::Pass;
     let variant_passed = arms_list[1].state == ArmState::Pass;
     let arm_tally = ArmTally::of(&arms_list);
@@ -590,12 +610,15 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     }
 }
 
-/// Save the `exec` results that ran under a fix directory beside the
-/// patch, so a maintainer can read what each arm saw and run it again.
+/// Save the `exec` results that ran under a fix directory, or in the
+/// run's shared baseline copy, beside the patch, so a maintainer can read what each arm saw and run it again.
 pub fn save_observed(fix_dir: &Path, layout: &Layout, observed: &[Observed]) -> Result<()> {
     let mine: Vec<&Observed> = observed
         .iter()
-        .filter(|o| o.command.contains(&layout.dir))
+        .filter(|o| {
+            // This finding's own directory, and the run's shared baseline.
+            o.command.contains(&layout.dir) || o.command.contains(&layout.copy("baseline"))
+        })
         .collect();
     let dest = fix_dir.join("observed.json");
     std::fs::write(&dest, serde_json::to_string_pretty(&mine)?)
@@ -809,18 +832,21 @@ pub fn fix_skill_text(run_id: &str, tools: &str) -> String {
          shows.\n\n\
          Steps, in order:\n\n\
          1. Read the code the finding and its origin point at, and the reproduction.\n\
-         2. Run the three extraction commands from the prompt.\n\
+         2. Run the commands the prompt lists as before the patch. They make the copies.\n\
          3. Write the patch as a unified diff with `a/` and `b/` prefixes to `fix.patch` in \
          the fix directory. If the prompt says a patch was supplied, it is already there: \
          do not edit it. You may check the patch with \
-         `git apply --check --directory=<fix-dir>/patched <fix-dir>/fix.patch` and rewrite it \
-         until that \
-         is clean; do this before the first apply command, never after.\n\
-         4. Run the remaining commands from the prompt, in order.\n\n\
+         `git apply --check --directory=<patched> <fix-dir>/fix.patch`, with `<patched>` the \
+         patched copy the prompt names, and rewrite it until that is clean; do this before \
+         the first apply command, never after.\n\
+         4. Run the remaining commands from the prompt, in order. Two of them are the \
+         same string twice, and the apply command appears twice: the patched copy is one \
+         directory, checked with the patch in, then with it taken out, then patched \
+         again. Run each where it stands in the list.\n\n\
          Your reply is one sentence saying the commands were run.\n",
         frontmatter(
             "fix",
-            "Write a candidate fix for one confirmed finding and run its reproduction in three copies",
+            "Write a candidate fix for one confirmed finding and run its reproduction in a baseline and a patched copy",
             run_id,
             tools
         )
@@ -848,15 +874,18 @@ pub fn attack_skill_text(run_id: &str, tools: &str) -> String {
          `variants/<id>/` in the fix directory. Derive each from the root cause. Changing \
          only a literal, a file name or a size is not another route unless that boundary \
          is the invariant.\n\
-         3. For each variant run `cd <fix-dir>/baseline && <command>` and then \
-         `cd <fix-dir>/patched && <command>`, with `<fix-dir>` exactly as the prompt gives \
-         it and `<command>` exactly as you record it.\n\
+         3. For each variant run `cd <baseline> && <interpreter> <up><script>` and then \
+         `cd <patched> && <interpreter> <up><script>`. `<baseline>`, `<patched>` and `<up>` \
+         are exactly as the prompt gives them; `<script>` is the proof's path from the \
+         project root, `<fix-dir>/variants/<id>/<file>`; `<interpreter>` is `sh`, `bash` or \
+         `python3`. The baseline copy is shared by the whole run: do not write into it.\n\
          4. Write `attack.json` in the fix directory: `paths`, a list of \
          `{{\"id\", \"route\", \"location\", \"description\"}}` with `route` one of `caller`, \
          `input_shape`, `cleanup`, `error_path`, `other` and `location` as `file:line`; and \
          `variants`, a list of `{{\"id\", \"path\", \"poc\", \"command\"}}` with `path` the id of \
          the path it goes through, `poc` the file relative to the fix directory and \
-         `command` the command as run from a copy's root. List every path you found, \
+         `command` the command without `<up>`, as it would run from the project root: \
+         `<interpreter> <script>`. List every path you found, \
          including those you wrote nothing for: a path with no attempt is reported as \
          untested.\n\n\
          Do not edit the copies' source or the patch. Your reply is one sentence saying \
@@ -892,26 +921,31 @@ pub fn recheck_skill_text(run_id: &str, tools: &str) -> String {
          `kind` `new` or `relocated` and `location` as `file:line` in the patched copy. A \
          candidate is your reading until a run shows it: write a proof of concept for it \
          under `relocation/<id>/` in the fix directory, under the contract above, run \
-         `cd <fix-dir>/baseline && <command>` and then `cd <fix-dir>/patched && <command>`, \
-         and record `command` as run from a copy's root. Only a candidate whose proof of \
+         `cd <baseline> && <interpreter> <up><script>` and then \
+         `cd <patched> && <interpreter> <up><script>`, with `<baseline>`, `<patched>` and \
+         `<up>` exactly as the prompt gives them and `<script>` the proof's path from the \
+         project root, and record `command` as `<interpreter> <script>`, without `<up>`. Only a candidate whose proof of \
          concept shows it in the patched copy counts against the fix; one with no \
          `command`, or whose run does not show it, is recorded as a claim for a \
          maintainer and rejects nothing. Do not report a candidate you would not write a \
          proof for. If the \
          project has a fuzz harness that reaches the patched functions, give a bounded \
          command for it, fixed seed and fixed run count, under the contract above, and run \
-         `cd <fix-dir>/patched && <command>`.\n\
+         `cd <patched> && <command>`.\n\
          2. Functionality. Use the test command the prompt gives; if it gives none, the \
          project's own, the narrowest that exercises the patched files. Run \
-         `cd <fix-dir>/baseline && <command>` and then `cd <fix-dir>/patched && <command>`. \
+         `cd <baseline> && <command>` and then `cd <patched> && <command>`. \
          If the prompt gives a coverage command, or the project has coverage tooling, run \
-         `cd <fix-dir>/patched && <coverage command>`; its output must list each file with \
+         `cd <patched> && <coverage command>`; its output must list each file with \
          a percentage. Then write a benign-input harness under `benign/` in the fix \
          directory: inputs the code accepted before the patch and must still accept, sent \
          through the patched functions. It prints the marker line, then each input's output \
          and observable state, with nothing that varies between runs (no times, addresses, \
-         random ids or unordered listings), and exits zero. Run it in the `baseline` copy \
-         twice and in the `patched` copy once.\n\
+         random ids or unordered listings), and exits zero. Run it as \
+         `cd <baseline> && <interpreter> <up><script>` twice and \
+         `cd <patched> && <interpreter> <up><script>` once, and record its `command` as \
+         `<interpreter> <script>`. The baseline copy is shared by the whole run: do not \
+         write into it.\n\
          3. Class. List the other sites in the project where the same invariant pattern \
          appears: `{{\"file\", \"line\", \"quote\", \"guarded\"}}`, with `file` relative to the \
          project root, `quote` the line at that site copied exactly, and `guarded` whether \
@@ -962,20 +996,27 @@ fn finding_brief(confirmed: &Confirmed) -> String {
     serde_json::to_string_pretty(&Value::Object(finding)).unwrap_or_default()
 }
 
-/// The commands the reproduction arm reads, in the order they run.
-pub fn reproduction_commands(layout: &Layout, command: &str, revision: &str) -> Vec<String> {
-    let mut out: Vec<String> = arms::SIDES
-        .iter()
-        .map(|side| layout.extract(side, revision))
-        .collect();
-    out.push(layout.apply("patched"));
-    out.push(layout.apply("reverted"));
+/// The commands the reproduction arm reads, in the order they run,
+/// and how many of them come before the patch is written.
+pub fn reproduction_commands(
+    layout: &Layout,
+    command: &str,
+    revision: &str,
+) -> (Vec<String>, usize) {
+    let mut out = vec![layout.extract_baseline(revision)];
+    out.extend(layout.carry_into_baseline());
+    out.push(layout.extract_patched(revision));
+    let before_patch = out.len();
+    out.push(layout.apply());
+    out.push(layout.in_copy("baseline", command));
+    out.push(layout.in_copy("patched", command));
     out.push(layout.revert());
-    out.push(layout.diff());
-    for side in arms::SIDES {
-        out.push(layout.in_copy(side, command));
-    }
-    out
+    out.push(layout.check_reverted(revision));
+    // The same string as the patched run: here it sees the revision
+    // again, in the same directory, rebuilt from what the patch touched.
+    out.push(layout.in_copy("patched", command));
+    out.push(layout.apply());
+    (out, before_patch)
 }
 
 fn numbered(commands: &[String]) -> String {
@@ -1021,15 +1062,19 @@ pub fn build_fix_prompt(
     } else {
         "Write the patch to `fix.patch` in the fix directory."
     };
-    let commands = reproduction_commands(&layout, &confirmed.reproduction.command, revision);
+    let (commands, before_patch) =
+        reproduction_commands(&layout, &confirmed.reproduction.command, revision);
     format!(
         "/fix Write a candidate fix for this confirmed finding. Run-id: `{run_id}`. \
          Code revision: `{revision}`. Fix directory: `{}`. {invariant} {origin} {patch}\n\n\
-         Commands, in this order, each exactly as written. The first three before the \
-         patch, the rest after it:\n\n{}\n\n\
+         The copies are `{}` (baseline, shared by the run) and `{}` (patched). \
+         Commands, in this order, each exactly as written. The first {before_patch} before \
+         the patch, the rest after it:\n\n{}\n\n\
          Finding:\n```json\n{}\n```\n\n\
          Reproduction:\n```json\n{}\n```",
         layout.dir,
+        layout.copy("baseline"),
+        layout.copy("patched"),
         numbered(&commands),
         finding_brief(confirmed),
         serde_json::to_string_pretty(&confirmed.reproduction).unwrap_or_default()
@@ -1046,14 +1091,18 @@ pub fn build_attack_prompt(
     let layout = Layout::for_reproduction(run_id, fix_dir_rel, &confirmed.reproduction.command);
     format!(
         "/fix-attack Find other routes to this patched finding. Run-id: `{run_id}`. Fix \
-         directory: `{0}`. The patch is `{0}/fix.patch`; the copies are `{0}/baseline` and \
-         `{0}/patched`. Step records are in `.lyrik/state/runs/{run_id}/findings.json`. \
+         directory: `{0}`. The patch is `{0}/fix.patch`. `<baseline>` is `{3}`, \
+         `<patched>` is `{4}`, and `<up>` is `{5}`. Step records are in \
+         `.lyrik/state/runs/{run_id}/findings.json`. \
          Write a proof of concept for at least {minimum} paths by different routes. The \
          original reproduction's command is `{1}`; a variant is not that command.\n\n\
          Finding:\n```json\n{2}\n```",
         layout.dir,
         confirmed.reproduction.command,
-        finding_brief(confirmed)
+        finding_brief(confirmed),
+        layout.copy("baseline"),
+        layout.copy("patched"),
+        layout.up()
     )
 }
 
@@ -1077,13 +1126,16 @@ pub fn build_recheck_prompt(
     };
     format!(
         "/fix-recheck Recheck the code around this patched finding. Run-id: `{run_id}`. Fix \
-         directory: `{0}`. The patch is `{0}/fix.patch`; the copies are `{0}/baseline` and \
-         `{0}/patched`. {1} {2} {benign}\n\n\
+         directory: `{0}`. The patch is `{0}/fix.patch`. `<baseline>` is `{4}`, \
+         `<patched>` is `{5}`, and `<up>` is `{6}`. {1} {2} {benign}\n\n\
          Finding:\n```json\n{3}\n```",
         layout.dir,
         named("test", &functionality.test_command),
         named("coverage", &functionality.coverage_command),
-        finding_brief(confirmed)
+        finding_brief(confirmed),
+        layout.copy("baseline"),
+        layout.copy("patched"),
+        layout.up()
     )
 }
 
@@ -1158,9 +1210,18 @@ mod tests {
                 observed: Vec::new(),
                 confirmed,
             };
-            for c in reproduction_commands(&layout, REPRO, REV) {
+            // The patched copy runs the reproduction twice: with the
+            // patch in, where the defect is gone, and with it taken
+            // out, where it is back.
+            let mut patched_runs = 0;
+            for c in reproduction_commands(&layout, REPRO, REV).0 {
                 let (ok, out) = if c == layout.in_copy("patched", REPRO) {
-                    (true, clean())
+                    patched_runs += 1;
+                    if patched_runs == 1 {
+                        (true, clean())
+                    } else {
+                        (false, shown())
+                    }
                 } else if c.ends_with("p.py") {
                     (false, shown())
                 } else {
@@ -1822,9 +1883,22 @@ mod tests {
         assert!(p.contains("Invariant: len is bounded"), "{p}");
         assert!(p.contains("Code revision: `abc`"), "{p}");
         assert!(p.contains("\"origin\""), "{p}");
-        for command in reproduction_commands(&layout, REPRO, REV) {
+        let (commands, before_patch) = reproduction_commands(&layout, REPRO, REV);
+        for command in &commands {
             assert!(p.contains(&format!("`{command}`")), "{command} in {p}");
         }
+        // Baseline, the carried harness, the patched copy: then the patch.
+        assert_eq!(before_patch, 3);
+        assert!(p.contains("The first 3 before the patch"), "{p}");
+        assert_eq!(commands.len(), 10);
+        assert_eq!(
+            commands[3], commands[9],
+            "the patch is applied again at the end"
+        );
+        assert_eq!(
+            commands[5], commands[8],
+            "one string for the patched and reverted runs"
+        );
         assert!(p.contains("Write the patch to `fix.patch`"), "{p}");
         let supplied = build_fix_prompt(&c, RUN, REV, REL, true);
         assert!(
@@ -1989,8 +2063,8 @@ mod tests {
                         {"id":"p2","route":"input_shape","location":"a.sh:2","description":"leading zeros"},
                         {"id":"p3","route":"error_path","location":"a.sh:3","description":"not attempted"}],
                       "variants":[
-                        {"id":"v1","path":"p1","poc":"variants/v1/poc.sh","command":"sh ../variants/v1/poc.sh"},
-                        {"id":"v2","path":"p2","poc":"variants/v2/poc.sh","command":"sh ../variants/v2/poc.sh"}]}"#,
+                        {"id":"v1","path":"p1","poc":"variants/v1/poc.sh","command":"sh .lyrik/state/runs/r1/staging/fix/len-a.sh-2/variants/v1/poc.sh"},
+                        {"id":"v2","path":"p2","poc":"variants/v2/poc.sh","command":"sh .lyrik/state/runs/r1/staging/fix/len-a.sh-2/variants/v2/poc.sh"}]}"#,
                 );
                 write(
                     &fix.join("benign/run.sh"),
@@ -1999,7 +2073,7 @@ mod tests {
                 write(
                     &fix.join("recheck.json"),
                     r#"{"relocation":{"scope":["decode_len at len.sh:1","a.sh:2","b.sh:2"],"candidates":[]},
-                        "functionality":{"suite":{"command":"sh test.sh"},"benign":{"command":"sh ../benign/run.sh"}},
+                        "functionality":{"suite":{"command":"sh test.sh"},"benign":{"command":"sh .lyrik/state/runs/r1/staging/fix/len-a.sh-2/benign/run.sh"}},
                         "class_sites":[{"file":"b.sh","line":2,"quote":"n=$(decode_len \"$1\")","guarded":false},
                                        {"file":"b.sh","line":9,"quote":"no such line","guarded":false}]}"#,
                 );
@@ -2018,20 +2092,21 @@ mod tests {
             /// Every command the three agents would run, in order.
             fn run_all(&mut self) -> FixOutcome {
                 let layout = Layout::for_reproduction(RUN, REL, REPRO);
-                for c in reproduction_commands(&layout, REPRO, "HEAD") {
+                for c in reproduction_commands(&layout, REPRO, "HEAD").0 {
                     self.exec(&c);
                 }
                 for v in ["v1", "v2"] {
-                    let cmd = format!("sh ../variants/{v}/poc.sh");
+                    let cmd = format!("sh {}/variants/{v}/poc.sh", layout.dir);
                     self.exec(&layout.in_copy("baseline", &cmd));
                     self.exec(&layout.in_copy("patched", &cmd));
                 }
                 for side in ["baseline", "patched"] {
                     self.exec(&layout.in_copy(side, "sh test.sh"));
                 }
-                self.exec(&layout.in_copy("baseline", "sh ../benign/run.sh"));
-                self.exec(&layout.in_copy("baseline", "sh ../benign/run.sh"));
-                self.exec(&layout.in_copy("patched", "sh ../benign/run.sh"));
+                let benign = format!("sh {}/benign/run.sh", layout.dir);
+                self.exec(&layout.in_copy("baseline", &benign));
+                self.exec(&layout.in_copy("baseline", &benign));
+                self.exec(&layout.in_copy("patched", &benign));
                 let finding = serde_json::json!({
                     "stable_id": "len::a.sh:2",
                     "invariant": "a copy is never longer than 8",
@@ -2100,7 +2175,10 @@ mod tests {
             let mut p = Project::new();
             let carried = Layout::for_reproduction(RUN, REL, REPRO);
             assert_eq!(carried.carried, ["fuzz-walk"]);
-            assert!(p.exec(&carried.extract("baseline", "HEAD")));
+            assert!(p.exec(&carried.extract_baseline("HEAD")));
+            assert!(p.exec(&carried.carry_into_baseline().unwrap()));
+            // Asked for again by another finding: the copy stands as it is.
+            assert!(p.exec(&carried.extract_baseline("HEAD")));
             let cmd = carried.in_copy("baseline", REPRO);
             assert!(!p.exec(&cmd), "the defect shows: non-zero exit");
             let seen = p.observed.last().unwrap().clone();
@@ -2117,8 +2195,9 @@ mod tests {
             // The harness wrote inside the copy, not into the target's run state.
             let scratch = "out-a.sh-99.txt";
             assert!(
-                p.fix_dir()
-                    .join("baseline/.lyrik/state/runs/r1/staging/fuzz-walk/harness")
+                p.root()
+                    .join(carried.copy("baseline"))
+                    .join(".lyrik/state/runs/r1/staging/fuzz-walk/harness")
                     .join(scratch)
                     .is_file()
             );
@@ -2131,7 +2210,7 @@ mod tests {
             // The same harness in a copy made without its directory.
             let mut bare = Project::new();
             let plain = Layout::new(RUN, REL);
-            assert!(bare.exec(&plain.extract("baseline", "HEAD")));
+            assert!(bare.exec(&plain.extract_baseline("HEAD")));
             let cmd = plain.in_copy("baseline", REPRO);
             bare.exec(&cmd);
             assert!(matches!(
