@@ -121,6 +121,12 @@ tagged.
   it has in the target, so a harness that names its files from the project
   root behaves the same in a copy
   (`a_walk_style_harness_sees_the_defect_in_a_copy_that_carries_it`).
+  A fix is checked in two copies, not three: one baseline per run, shared by
+  every finding, and one patched copy per finding in which the revert is
+  checked in place and the patch then applied again. A project that takes
+  long to build is built once for the baseline and once per finding, with an
+  incremental rebuild for the revert, where it was built three times per
+  finding. The fix step takes one finding at a time.
   Rejected fixes are appended to `rejections.jsonl`.
 - The fix step's inputs from the target, `fix.test_command` and
   `fix.coverage_command` in `.lyrik/config.json` and the patches under

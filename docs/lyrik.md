@@ -460,6 +460,23 @@ in each copy; a command that names a copy is refused. A run with no
 dependency) and is `inconclusive`, whatever it exited with. The staged walk
 wrapper tells every walk to write reproductions this way.
 
+**Copies and build reuse.** A fix is checked in two copies of the scanned
+revision, not three. The `baseline` copy is made once per run, under
+`staging/fix/_shared/`, and shared by every finding, so whatever the
+project's toolchain builds there is built once. Each finding has its own
+`patched` copy. The revert is checked in that same copy, in place: the patch
+is taken out with `git apply -R`, `git diff --quiet` against the scanned
+revision confirms every tracked file is as it was, the reproduction runs
+again, and the patch is applied again. An incremental toolchain rebuilds only
+what the patch touched for that step, where a third copy would be built from
+nothing. The reproduction's command in the patched copy is one string run
+twice; which state it saw is read from its place on the session log between
+the apply, the revert and the second apply. If the patch is not applied again
+after the revert check, the arms that ran in the patched copy afterwards are
+`inconclusive`. The fix step takes one finding at a time, so two findings do
+not build in the shared baseline at once. One command string still runs
+unchanged in each copy.
+
 **The same harness in the target and in a copy.** A walk's harness lives
 under the run's staging directory and names its own files by their path from
 the project root. A copy of the scanned revision does not hold the run's
@@ -478,7 +495,7 @@ The arms, in `arms` order:
 
 | Arm | Passes when | Fails when |
 |---|---|---|
-| `reproduction` | The original reproduction shows the defect in a `baseline` copy of the scanned revision, does not in the `patched` copy, and shows it again in a `reverted` copy where the patch was applied, reverted, and `diff -r` against the baseline printed nothing | It still shows the defect in the patched copy |
+| `reproduction` | The original reproduction shows the defect in the `baseline` copy of the scanned revision, does not in the `patched` copy, and shows it again in that copy after the patch is taken back out and every tracked file there is as the scanned revision has it | It still shows the defect in the patched copy |
 | `variant` | At least two proofs of concept by different paths (another caller, another input shape, a cleanup or error path) each show the defect in the baseline and not in the patched copy | Any variant shows the defect in the patched copy: the fix is partial |
 | `root_cause` | The patch touches the finding's `origin`, the root-cause claim is confirmed by an executed run, and the reproduction reached its assertion in the patched copy | The patch touches the sink at `location` and not the origin, and a variant by another path still shows the defect in the patched copy: `symptom_patch` |
 | `relocation` | The re-walk reported no candidate and a bounded fuzz run over the patched functions executed clean | A candidate's proof of concept shows it in the patched copy, or the fuzz run shows a defect there |
