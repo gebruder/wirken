@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use wirken_time::TimestampExt;
 
 use anyhow::{Context, Result};
 // UnixListener/UnixStream are still used for the orchestrator-push
@@ -4435,6 +4434,7 @@ fn process_permissions_request(
     use wirken_ipc::permissions::{
         DecisionResult, PendingDetail, PendingSummary, PermissionsRequest, PermissionsResponse,
     };
+    use wirken_time::TimestampExt;
 
     match req {
         PermissionsRequest::PendingList => {
