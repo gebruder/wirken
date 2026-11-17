@@ -2354,8 +2354,12 @@ mod tests {
         assert_eq!(exec_output("", "err"), "[stderr] err");
         assert_eq!(exec_output("", ""), "(no output)");
         // A cut inside a multi-byte character does not panic.
-        let long = "\u{00e9}".repeat(20_000);
-        assert!(exec_output(&long, "").ends_with("... (truncated)"));
+        // Byte 32,000 is the second byte of a two-byte character here.
+        let long = format!("a{}", "\u{00e9}".repeat(20_000));
+        assert!(!long.is_char_boundary(32_000));
+        let cut = exec_output(&long, "");
+        assert_eq!(cut.len(), 31_999 + "\n... (truncated)".len());
+        assert!(cut.ends_with("... (truncated)"));
     }
 
     #[test]
