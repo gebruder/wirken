@@ -754,13 +754,66 @@ pub struct Relocation {
 pub struct Candidate {
     pub title: String,
     pub location: String,
-    /// `new` or `relocated`.
+    /// `new` or `relocated` for a security defect the patch introduced
+    /// or moved; `regression` for behaviour that worked before the
+    /// patch and does not after it, which is not a security defect and
+    /// is read by the functionality arm.
     #[serde(default)]
     pub kind: String,
     /// A proof of concept for the candidate under the marker contract,
     /// as run from a copy's root. Without one the candidate is a claim.
     #[serde(default)]
     pub command: Option<String>,
+}
+
+impl Candidate {
+    /// Whether the candidate is a functional regression, not a
+    /// security defect.
+    pub fn is_regression(&self) -> bool {
+        matches!(
+            self.kind.trim().to_ascii_lowercase().as_str(),
+            "regression" | "functional_regression" | "functional"
+        )
+    }
+}
+
+/// The functional regressions the re-walk reported whose proof shows
+/// in the patched copy and not in the baseline, and the ones no run
+/// confirms.
+fn regressions(
+    log: &Log,
+    layout: &Layout,
+    recheck: &Result<Option<Recheck>, String>,
+) -> (Vec<String>, Vec<String>) {
+    let (mut shown, mut claims) = (Vec::new(), Vec::new());
+    let candidates = recheck
+        .as_ref()
+        .ok()
+        .and_then(|r| r.as_ref())
+        .and_then(|r| r.relocation.as_ref())
+        .map(|r| r.candidates.as_slice())
+        .unwrap_or_default();
+    for c in candidates.iter().filter(|c| c.is_regression()) {
+        let text = format!("regression at {}: {}", c.location, c.title);
+        let Some(cmd) = c.command.as_ref().filter(|cmd| !names_a_copy(cmd)) else {
+            claims.push(format!("{text} (no proof of concept)"));
+            continue;
+        };
+        let patched = poc(&log.run(&layout.in_copy("patched", cmd)));
+        let baseline = poc(&log.run(&layout.in_copy("baseline", cmd)));
+        if patched == Poc::Shown && baseline == Poc::NotShown {
+            shown.push(format!(
+                "{text}; its proof shows in the patched copy and not in the baseline"
+            ));
+        } else {
+            claims.push(format!(
+                "{text} (patched copy: {}; baseline copy: {})",
+                poc_word(&patched),
+                poc_word(&baseline)
+            ));
+        }
+    }
+    (shown, claims)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -824,10 +877,17 @@ pub struct VariantResult {
     pub baseline: String,
     pub patched: String,
     /// `held`: shown in the baseline, not in the patched copy. `open`:
-    /// shown in both, the patch does not cover this path. `introduced`:
+    /// shown in both, the patch does not cover this path.
+    /// `open_by_configuration`: shown in both, and its script sets a
+    /// setting the operator declared an explicit opt-out of the
+    /// control, so it says nothing about the patch. `introduced`:
     /// shown in the patched copy only. `not_a_variant`: not shown in
     /// the baseline. `inconclusive` otherwise.
     pub outcome: &'static str,
+    /// The operator-declared opt-out the variant's script sets, on an
+    /// `open_by_configuration` variant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opt_out: Option<String>,
 }
 
 fn poc_word(p: &Poc) -> String {
@@ -1153,6 +1213,34 @@ pub fn variant_arm(
     attack: Result<Option<Attack>, String>,
     reproduction_command: &str,
     minimum: usize,
+    opt_out: &dyn Fn(&VariantSpec) -> Option<String>,
+) -> (ArmResult, Vec<UntestedPath>, Vec<VariantResult>) {
+    variant_arm_in(
+        log,
+        layout,
+        specs,
+        attack,
+        &[reproduction_command],
+        minimum,
+        opt_out,
+        &|command| patched_poc(log, layout, command),
+    )
+}
+
+/// [`variant_arm`] with the reading of a patched run supplied: for one
+/// finding's copy, the run that saw the patch in; for a combined copy,
+/// which only ever holds the patches, the run itself. `reproductions`
+/// are the commands the reproduction arm already reads.
+#[allow(clippy::too_many_arguments)]
+pub fn variant_arm_in(
+    log: &Log,
+    layout: &Layout,
+    specs: &[VariantSpec],
+    attack: Result<Option<Attack>, String>,
+    reproductions: &[&str],
+    minimum: usize,
+    opt_out: &dyn Fn(&VariantSpec) -> Option<String>,
+    patched_run: &dyn Fn(&str) -> Poc,
 ) -> (ArmResult, Vec<UntestedPath>, Vec<VariantResult>) {
     let mut reasons = Vec::new();
     let mut failed = false;
@@ -1168,6 +1256,7 @@ pub fn variant_arm(
             baseline: poc_word(baseline),
             patched: poc_word(patched),
             outcome,
+            opt_out: None,
         };
         let unread = Poc::NotRun("not read".into());
         if v.source == VariantSource::Agent && names_a_copy(&v.command.replace(&layout.dir, "")) {
@@ -1175,16 +1264,37 @@ pub fn variant_arm(
             results.push(result(&unread, &unread, "inconclusive"));
             continue;
         }
-        if layout.rebase(&v.command).trim() == layout.rebase(reproduction_command).trim() {
+        if reproductions
+            .iter()
+            .any(|r| layout.rebase(&v.command).trim() == layout.rebase(r).trim())
+        {
             reasons.push(format!("variant {}: it is the original reproduction", v.id));
             results.push(result(&unread, &unread, "inconclusive"));
             continue;
         }
         let base = poc(&log.run(&layout.in_copy("baseline", &v.command)));
-        let patched = patched_poc(log, layout, &layout.in_copy("patched", &v.command));
+        let patched = patched_run(&layout.in_copy("patched", &v.command));
         ran_any |= [&base, &patched]
             .iter()
             .any(|o| !matches!(o, Poc::NotRun(_)));
+        // Shown in both copies under a setting the operator declared
+        // an explicit opt-out of the control: the variant works because
+        // the control is switched off, which no patch to the control
+        // changes. Recorded, and neither held nor counted against the fix.
+        if base == Poc::Shown
+            && patched == Poc::Shown
+            && let Some(setting) = opt_out(v)
+        {
+            reasons.push(format!(
+                "variant {}: open by configuration: it sets `{setting}`, which the run's \
+                 configuration declares an explicit opt-out; it does not fail the arm",
+                v.id
+            ));
+            let mut r = result(&base, &patched, "open_by_configuration");
+            r.opt_out = Some(setting);
+            results.push(r);
+            continue;
+        }
         let outcome = match (&base, &patched) {
             (Poc::Shown, Poc::Shown) => {
                 failed = true;
@@ -1290,6 +1400,113 @@ pub fn variant_arm(
         ArmResult::new("variant", state, basis, reasons),
         untested,
         results,
+    )
+}
+
+/// Apply another finding's patch to this layout's patched copy: how a
+/// combined copy is given each member's patch in turn.
+pub fn apply_member(layout: &Layout, member_dir: &str) -> String {
+    format!(
+        "git apply --directory={} {member_dir}/fix.patch",
+        layout.copy("patched")
+    )
+}
+
+/// The reproduction arm of a combined record: every member finding's
+/// own reproduction shows the defect in the baseline and does not in
+/// the copy that holds all the member patches. One that still shows it
+/// there fails the arm.
+pub fn combined_reproduction_arm(
+    log: &Log,
+    layout: &Layout,
+    members: &[(&str, &str)],
+) -> ArmResult {
+    let mut reasons = Vec::new();
+    let mut failed = false;
+    let mut ran_any = false;
+    for (stable_id, command) in members {
+        let base = poc(&log.run(&layout.in_copy("baseline", command)));
+        let patched = poc(&log.run(&layout.in_copy("patched", command)));
+        ran_any |= [&base, &patched]
+            .iter()
+            .any(|o| !matches!(o, Poc::NotRun(_)));
+        match (&base, &patched) {
+            (Poc::Shown, Poc::NotShown) => {}
+            (_, Poc::Shown) => {
+                failed = true;
+                reasons.push(format!(
+                    "the reproduction of {stable_id} still shows the defect in the combined copy"
+                ));
+            }
+            (Poc::Shown, Poc::Inconclusive(w) | Poc::NotRun(w)) => reasons.push(format!(
+                "the reproduction of {stable_id} in the combined copy: {w}"
+            )),
+            (b, _) => reasons.push(format!(
+                "the reproduction of {stable_id} in the baseline copy: {}",
+                poc_word(b)
+            )),
+        }
+    }
+    let state = if failed {
+        ArmState::Fail
+    } else if reasons.is_empty() && !members.is_empty() {
+        ArmState::Pass
+    } else if ran_any {
+        ArmState::Inconclusive
+    } else {
+        ArmState::NotRun
+    };
+    ArmResult::new(
+        "reproduction",
+        state,
+        ran_any.then_some(Basis::Executed),
+        reasons,
+    )
+}
+
+/// The functionality arm of a combined record: the configured test
+/// command in the baseline and in the combined copy. It fails when the
+/// command passes in the baseline and fails with the patches in. It
+/// does not pass: no coverage and no benign-input run is read for a
+/// union, so passing in both copies is recorded and nothing more.
+pub fn combined_functionality_arm(log: &Log, layout: &Layout, test: Option<&str>) -> ArmResult {
+    let Some(test) = test else {
+        return ArmResult::new(
+            "functionality",
+            ArmState::NotRun,
+            None,
+            vec!["the run's configuration names no test command".into()],
+        );
+    };
+    let base = log.run(&layout.in_copy("baseline", test));
+    let patched = log.run(&layout.in_copy("patched", test));
+    let ran = |r: &Run| !matches!(r, Run::Never | Run::Refused);
+    let (state, reason) = match (&base, &patched) {
+        (Run::Done { success: true, .. }, Run::Done { success: false, .. }) => (
+            ArmState::Fail,
+            "the test command passes in the baseline copy and fails in the combined copy",
+        ),
+        (Run::Done { success: true, .. }, Run::Done { success: true, .. }) => (
+            ArmState::Inconclusive,
+            "the test command passes in both copies; no coverage or benign-input run was read \
+             for the union",
+        ),
+        (Run::Done { success: false, .. }, _) => (
+            ArmState::Inconclusive,
+            "the test command fails in the baseline copy, so a failure cannot be attributed \
+             to the patches",
+        ),
+        _ if ran(&base) || ran(&patched) => (
+            ArmState::Inconclusive,
+            "the test command did not finish in both copies",
+        ),
+        _ => (ArmState::NotRun, "the test command was not run"),
+    };
+    ArmResult::new(
+        "functionality",
+        state,
+        (ran(&base) || ran(&patched)).then_some(Basis::Executed),
+        vec![reason.to_string()],
     )
 }
 
@@ -1525,30 +1742,47 @@ pub fn relocation_arm(
     let mut reasons: Vec<String> = Vec::new();
     let mut claims: Vec<String> = Vec::new();
     let mut confirmed = false;
-    for c in &relocation.candidates {
+    // A functional regression is not this arm's: the functionality arm
+    // reads it. This arm fails on a security defect the patch made or
+    // moved, which is one its proof shows in the patched copy and does
+    // not show in the baseline.
+    for c in relocation.candidates.iter().filter(|c| !c.is_regression()) {
         let kind = if c.kind.is_empty() { "new" } else { &c.kind };
         let text = format!("{kind} candidate at {}: {}", c.location, c.title);
-        let shown = c.command.as_ref().map(|cmd| {
-            if names_a_copy(cmd) {
-                Poc::Inconclusive("its command names a copy".into())
-            } else {
-                poc(&log.run(&layout.in_copy("patched", cmd)))
-            }
-        });
-        match shown {
-            Some(Poc::Shown) => {
+        let Some(cmd) = c.command.as_ref() else {
+            claims.push(format!("{text} (no proof of concept)"));
+            continue;
+        };
+        if names_a_copy(cmd) {
+            claims.push(format!(
+                "{text} (its proof of concept: its command names a copy)"
+            ));
+            continue;
+        }
+        let patched = poc(&log.run(&layout.in_copy("patched", cmd)));
+        let baseline = poc(&log.run(&layout.in_copy("baseline", cmd)));
+        match (&patched, &baseline) {
+            (Poc::Shown, Poc::NotShown) => {
                 confirmed = true;
                 reasons.push(format!(
-                    "{text}; its proof of concept shows it in the patched copy"
+                    "{text}; its proof of concept shows it in the patched copy and not in \
+                     the baseline"
                 ));
             }
-            Some(Poc::NotShown) => claims.push(format!(
+            (Poc::Shown, Poc::Shown) => claims.push(format!(
+                "{text} (its proof of concept shows it in both copies: it was there before \
+                 the patch, so the patch neither made nor moved it)"
+            )),
+            (Poc::Shown, Poc::Inconclusive(w) | Poc::NotRun(w)) => claims.push(format!(
+                "{text} (its proof of concept shows it in the patched copy; in the baseline \
+                 copy: {w}, so nothing shows it is new)"
+            )),
+            (Poc::NotShown, _) => claims.push(format!(
                 "{text} (its proof of concept does not show it in the patched copy)"
             )),
-            Some(Poc::Inconclusive(w) | Poc::NotRun(w)) => {
+            (Poc::Inconclusive(w) | Poc::NotRun(w), _) => {
                 claims.push(format!("{text} (its proof of concept: {w})"))
             }
-            None => claims.push(format!("{text} (no proof of concept)")),
         }
     }
     let fuzz = relocation.fuzz.as_ref().map(|f| {
@@ -1669,9 +1903,12 @@ pub fn functionality_arm(
         .or(plan.coverage.map(|c| c.command));
     let benign = plan.benign.map(|c| c.command);
 
-    let mut reasons = Vec::new();
-    let mut failed = false;
-    let mut ran_any = false;
+    // Behaviour the re-walk showed the patch breaks: a proof that
+    // shows in the patched copy and not in the baseline.
+    let (regressed, regression_claims) = regressions(log, layout, recheck);
+    let mut failed = !regressed.is_empty();
+    let mut ran_any = failed;
+    let mut reasons = regressed;
     let mut ran = |r: &Run| {
         let did = !matches!(r, Run::Never | Run::Refused);
         ran_any |= did;
@@ -1878,6 +2115,7 @@ pub fn functionality_arm(
         ran_any.then_some(Basis::Executed),
         reasons,
     )
+    .with_claims(regression_claims)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2364,7 +2602,8 @@ mod tests {
         variant_runs(&mut r, &l, &specs[0], true, false);
         variant_runs(&mut r, &l, &specs[1], true, false);
         // No attack.json at all: the runs alone carry the arm.
-        let (arm, untested, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2);
+        let (arm, untested, results) =
+            variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2, &|_| None);
         assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
         assert_eq!(arm.basis, Some(Basis::Executed));
         assert!(untested.is_empty());
@@ -2374,7 +2613,8 @@ mod tests {
         );
         // With the agent's list of paths, the one nothing ran for is listed.
         let a = attack(&["p1", "p2", "p3"]);
-        let (arm, untested, _) = variant_arm(&Log(&r.0), &l, &specs, Ok(Some(a)), REPRO, 2);
+        let (arm, untested, _) =
+            variant_arm(&Log(&r.0), &l, &specs, Ok(Some(a)), REPRO, 2, &|_| None);
         assert_eq!(arm.state, ArmState::Pass);
         assert_eq!(untested.len(), 1);
         assert_eq!(untested[0].id, "p3");
@@ -2386,6 +2626,7 @@ mod tests {
             Err("attack.json does not parse".into()),
             REPRO,
             2,
+            &|_| None,
         );
         assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
     }
@@ -2411,7 +2652,7 @@ mod tests {
                 "cd {} && sh .lyrik/state/runs/r1/staging/sink-walk/harness/internal_keyless.sh",
                 l.copy("patched")
             )));
-        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2);
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2, &|_| None);
         assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
         assert!(
             results
@@ -2440,7 +2681,7 @@ mod tests {
         let mut r = Runs::new();
         variant_runs(&mut r, &l2, &specs[0], true, false);
         variant_runs(&mut r, &l2, &specs[1], true, true);
-        let (arm, _, results) = variant_arm(&Log(&r.0), &l2, &specs, Ok(None), REPRO, 1);
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l2, &specs, Ok(None), REPRO, 1, &|_| None);
         assert_eq!(arm.state, ArmState::Fail);
         assert_eq!(arm.basis, Some(Basis::Executed));
         assert!(
@@ -2460,7 +2701,8 @@ mod tests {
         // Shown in the patched copy only: the arm fails, and it is not "open".
         let mut r = Runs::new();
         variant_runs(&mut r, &l, &specs[0], false, true);
-        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1);
+        let (arm, _, results) =
+            variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1, &|_| None);
         assert_eq!(arm.state, ArmState::Fail);
         assert_eq!(results[0].outcome, "introduced");
     }
@@ -2485,7 +2727,7 @@ mod tests {
             "ModuleNotFoundError",
         );
         r.add(l.in_copy("baseline", &specs[3].command), false, &shown());
-        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2);
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2, &|_| None);
         assert_eq!(arm.state, ArmState::Inconclusive, "{:?}", arm.reasons);
         for want in [
             "variant variants/v2/run.py: does not show the defect in the baseline, so it is not a variant",
@@ -2509,7 +2751,8 @@ mod tests {
         r.add(l.revert(), true, "");
         r.add(l.in_copy("baseline", &specs[0].command), false, &shown());
         r.add(l.in_copy("patched", &specs[0].command), false, &shown());
-        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1);
+        let (arm, _, results) =
+            variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1, &|_| None);
         assert_eq!(arm.state, ArmState::Inconclusive, "{:?}", arm.reasons);
         assert_eq!(
             results[0].patched,
@@ -2518,14 +2761,22 @@ mod tests {
         // The same two runs after the runner put the patch back count.
         r.add(l.ensure_applied(), true, "");
         r.add(l.in_copy("patched", &specs[0].command), true, &clean());
-        let (arm, _, _) = variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1);
+        let (arm, _, _) = variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1, &|_| None);
         assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
         // A command that names a copy, and the original reproduction again.
         let mut copy_named = agent_spec("v5", "p5");
         copy_named.command = "python3 ../patched/x.py".into();
         let mut original = agent_spec("v6", "p6");
         original.command = REPRO.into();
-        let (arm, _, _) = variant_arm(&Log(&[]), &l, &[copy_named, original], Ok(None), REPRO, 2);
+        let (arm, _, _) = variant_arm(
+            &Log(&[]),
+            &l,
+            &[copy_named, original],
+            Ok(None),
+            REPRO,
+            2,
+            &|_| None,
+        );
         assert_eq!(arm.state, ArmState::NotRun);
         assert!(
             arm.reasons
@@ -2548,13 +2799,125 @@ mod tests {
             Ok(None),
             REPRO,
             VARIANT_MIN_CROSS_CUTTING,
+            &|_| None,
         );
         assert_eq!(arm.state, ArmState::Inconclusive);
         // No variant on record at all: not run.
-        let (arm, _, results) = variant_arm(&Log(&[]), &l, &[], Ok(None), REPRO, 2);
+        let (arm, _, results) = variant_arm(&Log(&[]), &l, &[], Ok(None), REPRO, 2, &|_| None);
         assert_eq!(arm.state, ArmState::NotRun);
         assert_eq!(arm.basis, None);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn a_variant_open_under_an_operator_declared_opt_out_does_not_fail_the_arm() {
+        let l = layout();
+        let specs = [
+            agent_spec("v1", "p1"),
+            agent_spec("opted_out", "control switched off"),
+        ];
+        let mut r = Runs::new();
+        variant_runs(&mut r, &l, &specs[0], true, false);
+        variant_runs(&mut r, &l, &specs[1], true, true);
+        let declared = |v: &VariantSpec| {
+            v.id.contains("opted_out")
+                .then(|| "ENFORCE_AUTH=false".to_string())
+        };
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 1, &declared);
+        assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
+        assert_eq!(results[1].outcome, "open_by_configuration");
+        assert_eq!(results[1].opt_out.as_deref(), Some("ENFORCE_AUTH=false"));
+        assert!(
+            arm.reasons
+                .iter()
+                .any(|x| x.contains("open by configuration: it sets `ENFORCE_AUTH=false`"))
+        );
+        // It is not counted as held either: one held variant, not two.
+        let (arm, _, _) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2, &declared);
+        assert_eq!(arm.state, ArmState::Inconclusive);
+        // With nothing declared the same runs fail the arm.
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 1, &|_| None);
+        assert_eq!(arm.state, ArmState::Fail);
+        assert_eq!(results[1].outcome, "open");
+        // A declared opt-out does not excuse a variant the patch stopped,
+        // nor one that shows only in the patched copy.
+        let mut r = Runs::new();
+        variant_runs(&mut r, &l, &specs[1], false, true);
+        let (arm, _, results) =
+            variant_arm(&Log(&r.0), &l, &specs[1..], Ok(None), REPRO, 1, &declared);
+        assert_eq!(arm.state, ArmState::Fail);
+        assert_eq!(results[0].outcome, "introduced");
+    }
+
+    #[test]
+    fn a_functional_regression_fails_functionality_and_not_relocation() {
+        let l = layout();
+        let cmd = "sh .lyrik/state/runs/r1/staging/fix/f1/relocation/peers/poc.sh";
+        let with_kind = |kind: &str| {
+            recheck(
+                serde_json::json!({"relocation": {"scope": ["init at src/a.rs:1"],
+                "candidates": [{"title": "peers can no longer reach each other",
+                    "location": "src/a.rs:9", "kind": kind, "command": cmd}]}}),
+            )
+        };
+        // Not shown in the baseline, shown in the patched copy.
+        let mut r = Runs::new();
+        r.add(l.in_copy("baseline", cmd), true, &clean());
+        r.add(l.in_copy("patched", cmd), false, &shown());
+        let shape = parse_patch(ORIGIN_PATCH);
+        let config = FunctionalityConfig::default();
+        // Declared a regression: the functionality arm fails, relocation does not.
+        let reloc = relocation_arm(&Log(&r.0), &l, &with_kind("regression"));
+        assert_ne!(reloc.state, ArmState::Fail, "{:?}", reloc.reasons);
+        assert!(
+            reloc
+                .reasons
+                .iter()
+                .chain(reloc.model_claims.iter())
+                .all(|x| !x.contains("peers"))
+        );
+        let func = functionality_arm(&Log(&r.0), &l, &with_kind("regression"), &shape, &config);
+        assert_eq!(func.state, ArmState::Fail);
+        assert_eq!(func.basis, Some(Basis::Executed));
+        assert!(
+            func.reasons[0]
+                .starts_with("regression at src/a.rs:9: peers can no longer reach each other")
+        );
+        // Declared a new security defect: relocation fails, functionality does not.
+        let reloc = relocation_arm(&Log(&r.0), &l, &with_kind("new"));
+        assert_eq!(reloc.state, ArmState::Fail);
+        assert!(reloc.reasons[0].ends_with("shows it in the patched copy and not in the baseline"));
+        let func = functionality_arm(&Log(&r.0), &l, &with_kind("new"), &shape, &config);
+        assert_ne!(func.state, ArmState::Fail);
+        // Shown in both copies: it was there before the patch. A claim, no failure.
+        let mut r = Runs::new();
+        r.add(l.in_copy("baseline", cmd), false, &shown());
+        r.add(l.in_copy("patched", cmd), false, &shown());
+        let reloc = relocation_arm(&Log(&r.0), &l, &with_kind("relocated"));
+        assert_eq!(reloc.state, ArmState::Inconclusive);
+        assert!(
+            reloc.model_claims[0].contains("shows it in both copies"),
+            "{:?}",
+            reloc.model_claims
+        );
+        // Shown in the patched copy with no baseline run: nothing shows it is new.
+        let mut r = Runs::new();
+        r.add(l.in_copy("patched", cmd), false, &shown());
+        let reloc = relocation_arm(&Log(&r.0), &l, &with_kind("new"));
+        assert_eq!(reloc.state, ArmState::Inconclusive);
+        assert!(
+            reloc.model_claims[0].contains("nothing shows it is new"),
+            "{:?}",
+            reloc.model_claims
+        );
+        // A regression no run confirms is a claim on the functionality arm.
+        let func = functionality_arm(&Log(&r.0), &l, &with_kind("regression"), &shape, &config);
+        assert_ne!(func.state, ArmState::Fail);
+        assert!(
+            func.model_claims[0].starts_with("regression at src/a.rs:9"),
+            "{:?}",
+            func.model_claims
+        );
     }
 
     #[test]
@@ -2777,15 +3140,17 @@ mod tests {
         r.add(l.in_copy("patched", cmd), false, "sh: not found");
         let arm = relocation_arm(&Log(&r.0), &l, &candidate(Some(cmd)));
         assert_eq!(arm.state, ArmState::Inconclusive);
-        // A proof of concept that shows it in the patched copy: fails.
+        // A proof of concept that shows it in the patched copy and not
+        // in the baseline: fails.
         let mut r = Runs::new();
+        r.add(l.in_copy("baseline", cmd), true, &clean());
         r.add(l.in_copy("patched", cmd), false, &shown());
         let arm = relocation_arm(&Log(&r.0), &l, &candidate(Some(cmd)));
         assert_eq!(arm.state, ArmState::Fail);
         assert_eq!(arm.basis, Some(Basis::Executed));
         assert!(arm.model_claims.is_empty());
         assert!(
-            arm.reasons[0].ends_with("shows it in the patched copy"),
+            arm.reasons[0].ends_with("shows it in the patched copy and not in the baseline"),
             "{:?}",
             arm.reasons
         );

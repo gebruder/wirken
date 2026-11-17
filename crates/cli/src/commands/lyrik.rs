@@ -2283,6 +2283,8 @@ struct FixAgentCtx {
         Option<Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>>,
     /// Tool rounds each agent gets.
     max_rounds: usize,
+    /// The plan the operator approved for the finding being worked on.
+    plan: Option<Arc<super::stdin_approval::PlanGrant>>,
 }
 
 /// How one fix-step agent's turn ended.
@@ -2314,7 +2316,13 @@ fn fix_agent(ctx: &FixAgentCtx, asker: &str) -> std::result::Result<Agent, Strin
     agent.set_agent_id(ctx.agent_id.clone());
     agent.set_leak_matcher(ctx.leak_matcher.clone());
     agent.set_max_tool_rounds(ctx.max_rounds);
-    attach_terminal_gate(&mut agent, asker, ctx.terminal.clone());
+    match ctx.terminal.clone() {
+        Some(terminal) => agent.set_approval_gate(Arc::new(
+            super::stdin_approval::LyrikPromptGate::new(asker, terminal)
+                .with_plan(ctx.plan.clone()),
+        )),
+        None => agent.set_unmediated_denial_reason(NO_TERMINAL_FOR_APPROVAL),
+    }
     lyrik_run_skills(&ctx.lyrik_staged_dir, Some(&ctx.walks_staged_dir))
         .map_err(|e| format!("{e:#}"))
         .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()))
@@ -2420,6 +2428,14 @@ impl FixRunner {
         self.exec(&layout.ensure_applied())
             .await
             .is_some_and(|r| r.success)
+    }
+
+    /// Run `command` unless the log already holds a run of it.
+    async fn run_once(&mut self, command: &str) {
+        let observed = self.observed();
+        if lyrik_fix_arms::Log(&observed).runs(command).is_empty() {
+            self.exec(command).await;
+        }
     }
 
     /// Run each of `specs` in the baseline copy and, when it shows the
@@ -2532,9 +2548,10 @@ async fn dispatch_fixes(
             .with_context(|| format!("sign staged {name} skill at {}", dir.display()))?;
     }
     eprintln!(
-        "  defender fix step: {} confirmed finding(s). This step asks before each of these \
-         commands runs: {}, and each finding's reproduction, variant, test, coverage and \
-         fuzz commands.",
+        "  defender fix step: {} confirmed finding(s). For each finding the commands the \
+         runner composes are shown as one plan and approved once; any other command is \
+         asked before it runs. The commands: {}, and each finding's reproduction, variant, \
+         test, coverage and fuzz commands.",
         confirmed.len(),
         lyrik_fix::FIX_EXEC_COMMANDS.join(", ")
     );
@@ -2552,6 +2569,7 @@ async fn dispatch_fixes(
         walks_staged_dir,
         terminal,
         max_rounds: fix_tool_rounds,
+        plan: None,
     };
     use tokio::sync::Semaphore;
     // One finding at a time. The baseline copy is shared by the run,
@@ -2601,6 +2619,32 @@ async fn dispatch_fixes(
         let functionality_t = inputs.functionality.clone();
         let h = tokio::spawn(async move {
             let _permit = sem_handle.acquire_owned().await.expect("semaphore closed");
+            let mut ctx_t = ctx_t;
+            // The plan: every command the runner composes for this
+            // finding's arms, shown together and approved once. Refused
+            // or unanswered, each command is asked on its own as before.
+            let plan_commands =
+                lyrik_fix::plan_commands(&c, &run_id_t, &rel_dir, &revision, &functionality_t);
+            let mut plan_decision = "no terminal";
+            if let Some(terminal) = ctx_t.terminal.clone() {
+                let outcome = terminal
+                    .ask(&super::stdin_approval::render_plan_prompt(
+                        &c.stable_id,
+                        &plan_commands,
+                    ))
+                    .await;
+                plan_decision = match outcome {
+                    wirken_agent::approval_gate::ApprovalOutcome::Approved { .. } => {
+                        ctx_t.plan = Some(Arc::new(super::stdin_approval::PlanGrant::new(
+                            &c.stable_id,
+                            &plan_commands,
+                        )));
+                        "approved"
+                    }
+                    wirken_agent::approval_gate::ApprovalOutcome::Denied { .. } => "denied",
+                    wirken_agent::approval_gate::ApprovalOutcome::Timeout => "timeout",
+                };
+            }
             let mut steps = Vec::with_capacity(lyrik_fix::FIX_SKILLS.len());
             let rounds = ctx_t.max_rounds;
             let prompt =
@@ -2657,13 +2701,23 @@ async fn dispatch_fixes(
                     fix_agent_turn(&ctx_t, "fix-recheck", prompt).await,
                 ));
             }
-            (c, rel_dir, revision, steps)
+            // The grant ends with the finding: it was only ever in memory.
+            let plan_used = ctx_t.plan.as_ref().map(|p| p.used()).unwrap_or_default();
+            (
+                c,
+                rel_dir,
+                revision,
+                steps,
+                plan_commands,
+                plan_decision,
+                plan_used,
+            )
         });
         handles.push(h);
     }
     let mut finished = Vec::new();
     for h in handles {
-        let (c, rel_dir, revision, steps) = match h.await {
+        let (c, rel_dir, revision, steps, plan_commands, plan_decision, plan_used) = match h.await {
             Ok(r) => r,
             Err(e) => {
                 audit.emit(
@@ -2673,6 +2727,19 @@ async fn dispatch_fixes(
                 continue;
             }
         };
+        // The plan, the operator's answer, and what ran under the grant.
+        // Each such command also has its own `permission_approved` row
+        // on the session log, approved by `lyrik-fix-plan`.
+        audit.emit(
+            "lyrik.fix.plan",
+            serde_json::json!({
+                "stable_id": c.stable_id,
+                "dir": rel_dir,
+                "commands": plan_commands,
+                "decision": plan_decision,
+                "ran_under_grant": plan_used,
+            }),
+        )?;
         let mut agents = Vec::with_capacity(steps.len());
         for (step, turn) in steps {
             // Stopped at the round limit is `incomplete`, with the
@@ -2751,6 +2818,8 @@ async fn dispatch_fixes(
         .context("read the run's session log for the fix step's commands")?;
     let observed = lyrik_fix_arms::observed_execs(events.iter().map(|e| &e.event));
     let mut outcomes = Vec::with_capacity(finished.len());
+    let mut judged: Vec<(lyrik_fix::Confirmed, String, String)> =
+        Vec::with_capacity(finished.len());
     for (c, rel_dir, revision, agents) in finished {
         let layout = lyrik_fix_arms::Layout::new(&run_id, &rel_dir);
         lyrik_fix::save_observed(&run_dir.join(&rel_dir), &layout, &observed)?;
@@ -2790,8 +2859,157 @@ async fn dispatch_fixes(
             }),
         )?;
         outcomes.push(out);
+        judged.push((c, rel_dir, revision));
     }
-    lyrik_fix::record_fixes(findings_path, &outcomes)?;
+    // Findings that share an origin or an invariant and whose own
+    // patches were each rejected as partial: the patches together, in
+    // one copy, checked by the runner alone.
+    let pairs: Vec<(&lyrik_fix::Confirmed, &lyrik_fix::FixOutcome)> =
+        judged.iter().map(|j| &j.0).zip(outcomes.iter()).collect();
+    let groups = lyrik_fix::combined_groups(&pairs);
+    let mut combined = Vec::with_capacity(groups.len());
+    for (n, (indexes, shared)) in groups.iter().enumerate() {
+        let rel_dir = format!("staging/fix/_combined-{}", n + 1);
+        std::fs::create_dir_all(run_dir.join(&rel_dir))
+            .with_context(|| format!("create {}", run_dir.join(&rel_dir).display()))?;
+        let members: Vec<lyrik_fix::CombinedMember> = indexes
+            .iter()
+            .map(|i| lyrik_fix::CombinedMember {
+                confirmed: &judged[*i].0,
+                rel_dir: &judged[*i].1,
+            })
+            .collect();
+        let revision = judged[indexes[0]].2.clone();
+        let layout = lyrik_fix::combined_layout(&members, &run_id, &rel_dir);
+        let variants = lyrik_fix::combined_variants(&members, run_dir, &run_id, &observed);
+        let (setup, plan_commands) = lyrik_fix::combined_plan(
+            &members,
+            &run_id,
+            &layout,
+            &revision,
+            &inputs.functionality,
+            &variants,
+        );
+        let label = format!(
+            "the combined record of {}",
+            members
+                .iter()
+                .map(|m| m.confirmed.stable_id.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        );
+        let mut ctx_c = ctx.clone();
+        let mut plan_decision = "no terminal";
+        if let Some(terminal) = ctx_c.terminal.clone() {
+            plan_decision = match terminal
+                .ask(&super::stdin_approval::render_plan_prompt(
+                    &label,
+                    &plan_commands,
+                ))
+                .await
+            {
+                wirken_agent::approval_gate::ApprovalOutcome::Approved { .. } => {
+                    ctx_c.plan = Some(Arc::new(super::stdin_approval::PlanGrant::new(
+                        &label,
+                        &plan_commands,
+                    )));
+                    "approved"
+                }
+                wirken_agent::approval_gate::ApprovalOutcome::Denied { .. } => "denied",
+                wirken_agent::approval_gate::ApprovalOutcome::Timeout => "timeout",
+            };
+        }
+        if let Ok(mut runner) = FixRunner::new(&ctx_c) {
+            // The copies and each member patch, in order. A step that
+            // fails ends it: nothing is run in a copy that is not the union.
+            let mut ready = true;
+            for step in &plan_commands[..setup] {
+                if !runner.exec(step).await.is_some_and(|r| r.success) {
+                    ready = false;
+                    break;
+                }
+            }
+            if ready {
+                for command in &plan_commands[setup..] {
+                    runner.run_once(command).await;
+                }
+                // The scripts the members' variant agents wrote: each
+                // asked on its own, as any command an agent originated.
+                for v in variants
+                    .iter()
+                    .filter(|v| v.spec.source == lyrik_fix_arms::VariantSource::Agent)
+                {
+                    runner
+                        .run_once(&layout.in_copy("baseline", &v.spec.command))
+                        .await;
+                    runner
+                        .run_once(&layout.in_copy("patched", &v.spec.command))
+                        .await;
+                }
+            }
+        }
+        audit.emit(
+            "lyrik.fix.plan",
+            serde_json::json!({
+                "combined": true,
+                "members": members.iter().map(|m| m.confirmed.stable_id.clone()).collect::<Vec<_>>(),
+                "dir": rel_dir,
+                "commands": plan_commands,
+                "decision": plan_decision,
+                "ran_under_grant": ctx_c.plan.as_ref().map(|p| p.used()).unwrap_or_default(),
+            }),
+        )?;
+        // What ran, and the tree, as they are after the combined runs.
+        let events = session_log
+            .get_since(&handle, 0)
+            .context("read the run's session log for the combined record's commands")?;
+        let observed_now = lyrik_fix_arms::observed_execs(events.iter().map(|e| &e.event));
+        let tree_now =
+            lyrik_fix::TreeRecord::of(&inputs.tree, &super::lyrik_git::tree_fingerprint(&target));
+        lyrik_fix::save_observed(&run_dir.join(&rel_dir), &layout, &observed_now)?;
+        let out = lyrik_fix::judge_combined(&lyrik_fix::CombinedInput {
+            run_dir,
+            rel_dir: &rel_dir,
+            run_id: &run_id,
+            members: &members,
+            shared,
+            observed: &observed_now,
+            target: &target,
+            tree: &tree_now,
+            inputs,
+            variant_minimum: indexes
+                .iter()
+                .map(|i| outcomes[*i].variant_minimum)
+                .max()
+                .unwrap_or(lyrik_fix_arms::VARIANT_MIN_CROSS_CUTTING),
+        });
+        audit.emit(
+            "lyrik.fix.combined",
+            serde_json::json!({
+                "members": out.members,
+                "shared": out.shared,
+                "dir": out.dir,
+                "verdict": out.verdict,
+                "label": out.label,
+                "arm_tally": out.arm_tally,
+                "reasons": out.reasons,
+                "patches_apply_together": out.patches_apply_together,
+                "arms": out.arms,
+                "partial": out.partial,
+                "target_tree": out.target_tree,
+            }),
+        )?;
+        eprintln!(
+            "  combined record of {}: {}",
+            out.members.join(", "),
+            serde_json::to_value(out.verdict)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default()
+        );
+        combined.push(out);
+    }
+    lyrik_fix::record_fixes(findings_path, &outcomes, &combined)?;
     let rejected =
         lyrik_fix::log_rejections(&findings_path.with_file_name("rejections.jsonl"), &outcomes)?;
     let summary = lyrik_fix::summary(&outcomes);

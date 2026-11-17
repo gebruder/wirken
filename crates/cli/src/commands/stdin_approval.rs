@@ -208,6 +208,7 @@ impl OneAtATime<StdinApprovalGate> {
 pub struct LyrikPromptGate {
     asker: String,
     terminal: std::sync::Arc<OneAtATime<StdinApprovalGate>>,
+    plan: Option<std::sync::Arc<PlanGrant>>,
 }
 
 impl LyrikPromptGate {
@@ -215,13 +216,29 @@ impl LyrikPromptGate {
         Self {
             asker: asker.to_string(),
             terminal,
+            plan: None,
         }
+    }
+
+    /// The same gate with a plan the operator approved: a command the
+    /// plan covers runs without another prompt.
+    pub fn with_plan(mut self, plan: Option<std::sync::Arc<PlanGrant>>) -> Self {
+        self.plan = plan;
+        self
     }
 }
 
 #[async_trait]
 impl ApprovalGate for LyrikPromptGate {
     async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+        if let Some(plan) = &self.plan
+            && let Some(command) = plan.covered(ctx)
+        {
+            plan.note_use(command);
+            return ApprovalOutcome::Approved {
+                actor: Some(plan.actor()),
+            };
+        }
         self.terminal
             .ask(&render_lyrik_prompt(&self.asker, ctx))
             .await
@@ -230,6 +247,86 @@ impl ApprovalGate for LyrikPromptGate {
     fn source(&self) -> ApprovalSource {
         ApprovalSource::Stdin
     }
+}
+
+/// The actor a command that ran under a plan grant is approved by, on
+/// its `PermissionApproved` row.
+pub const PLAN_GRANT_ACTOR: &str = "lyrik-fix-plan";
+
+/// One approval for a list of commands. The fix step's runner composes
+/// the commands the arms of one finding rest on, shows them together,
+/// and the operator approves the list once. The grant is those exact
+/// command strings and nothing else: a command that differs by a byte
+/// is not covered and is asked on its own. It lives in memory for the
+/// one finding of the one run it was approved for, and nothing of it is
+/// written to the permission store.
+pub struct PlanGrant {
+    /// What the plan is for, as the audit row shows it.
+    label: String,
+    commands: std::collections::BTreeSet<String>,
+    used: std::sync::Mutex<Vec<String>>,
+}
+
+impl PlanGrant {
+    pub fn new(label: &str, commands: &[String]) -> Self {
+        Self {
+            label: label.to_string(),
+            // A command the prompt would cut was not shown whole, so
+            // approving the plan did not approve it.
+            commands: commands
+                .iter()
+                .filter(|c| wirken_adapter_core::approval_card::shown_whole(c))
+                .map(|c| c.trim().to_string())
+                .collect(),
+            used: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The command of an `exec` call the plan covers, or `None`: for
+    /// any other tool, for arguments that do not parse, and for a
+    /// command that is not one of the plan's strings.
+    pub fn covered(&self, ctx: &PermissionDenialContext) -> Option<String> {
+        if ctx.tool_name != "exec" {
+            return None;
+        }
+        let args: serde_json::Value = serde_json::from_str(ctx.arguments.as_deref()?).ok()?;
+        let command = wirken_agent::tool::extract_exec_command(&args).ok()?;
+        let command = command.trim();
+        self.commands.contains(command).then(|| command.to_string())
+    }
+
+    fn note_use(&self, command: String) {
+        self.used
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(command);
+    }
+
+    /// The commands that ran under the grant, in order, repeats kept.
+    pub fn used(&self) -> Vec<String> {
+        self.used.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn actor(&self) -> wirken_gateway::pending_approvals::DecisionActor {
+        wirken_gateway::pending_approvals::DecisionActor::new(PLAN_GRANT_ACTOR)
+            .with_display(self.label.clone())
+    }
+}
+
+/// The plan as the operator is shown it: what it is for, every command
+/// on its own numbered line, then one question.
+pub(crate) fn render_plan_prompt(label: &str, commands: &[String]) -> String {
+    let mut out = format!(
+        "wirken lyrik: fix plan for {}: {} command(s) the runner composed. Approving covers \
+         exactly these, for this finding in this run; any other command is asked on its own.\n",
+        one_line(label),
+        commands.len()
+    );
+    for (i, command) in commands.iter().enumerate() {
+        out.push_str(&format!("  {}. {}\n", i + 1, one_line(command)));
+    }
+    out.push_str("approve plan? [y/N]: ");
+    out
 }
 
 /// `wirken lyrik: <asker> wants to run:`, the command on its own
@@ -301,6 +398,99 @@ fn parse_decision(line: &str) -> ApprovalOutcome {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    fn exec_ctx(tool: &str, arguments: &str) -> PermissionDenialContext {
+        said_ctx(
+            tool,
+            wirken_gateway::permissions::Action::WorkspaceFileAccess,
+            Some(arguments),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_plan_grant_covers_exactly_its_command_strings() {
+        let plan = std::sync::Arc::new(PlanGrant::new(
+            "auth::src/a.rs:10",
+            &[
+                "git apply --directory=copy fix.patch".to_string(),
+                " cd copy && sh poc.sh ".to_string(),
+            ],
+        ));
+        let exec = |command: &str| {
+            exec_ctx(
+                "exec",
+                &serde_json::json!({ "command": command }).to_string(),
+            )
+        };
+        assert_eq!(
+            plan.covered(&exec("git apply --directory=copy fix.patch"))
+                .as_deref(),
+            Some("git apply --directory=copy fix.patch")
+        );
+        // Surrounding whitespace is not part of a command.
+        assert!(plan.covered(&exec("cd copy && sh poc.sh")).is_some());
+        // A command that is not in the plan is not covered: one byte
+        // more, a second command appended, another command entirely.
+        for other in [
+            "git apply --directory=copy fix.patch --unsafe-paths",
+            "cd copy && sh poc.sh; rm -rf src",
+            "git apply -R --directory=copy fix.patch",
+            "ls",
+            "",
+        ] {
+            assert_eq!(plan.covered(&exec(other)), None, "{other}");
+        }
+        // A command too long for the prompt to show whole is not covered
+        // by a plan that listed it.
+        let long = format!("echo {}", "x".repeat(4000));
+        let cut = PlanGrant::new("f", std::slice::from_ref(&long));
+        assert_eq!(cut.covered(&exec(&long)), None);
+        // Another tool with the same text is not covered, nor arguments that do not parse.
+        assert_eq!(
+            plan.covered(&exec_ctx(
+                "write_file",
+                r#"{"command":"cd copy && sh poc.sh"}"#
+            )),
+            None
+        );
+        assert_eq!(plan.covered(&exec_ctx("exec", "not json")), None);
+
+        // Through the gate: a covered command is approved with no prompt,
+        // by the plan's actor, and is on the grant's record.
+        let terminal = std::sync::Arc::new(OneAtATime::new(StdinApprovalGate::new()));
+        let gate = LyrikPromptGate::new("fix", terminal).with_plan(Some(plan.clone()));
+        let outcome = gate.request_approval(&exec("cd copy && sh poc.sh")).await;
+        match outcome {
+            ApprovalOutcome::Approved { actor: Some(actor) } => {
+                assert_eq!(actor.id, PLAN_GRANT_ACTOR);
+                assert_eq!(actor.display.as_deref(), Some("auth::src/a.rs:10"));
+            }
+            other => panic!("expected the plan's approval, got {other:?}"),
+        }
+        assert_eq!(plan.used(), ["cd copy && sh poc.sh"]);
+    }
+
+    #[test]
+    fn the_plan_prompt_lists_every_command_and_asks_once() {
+        let prompt = render_plan_prompt(
+            "auth::src/a.rs:10",
+            &[
+                "mkdir -p copy".to_string(),
+                "cd copy && sh poc.sh".to_string(),
+            ],
+        );
+        assert!(
+            prompt.starts_with("wirken lyrik: fix plan for auth::src/a.rs:10: 2 command(s)"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("\n  1. mkdir -p copy\n  2. cd copy && sh poc.sh\n"),
+            "{prompt}"
+        );
+        assert!(prompt.ends_with("approve plan? [y/N]: "), "{prompt}");
+        assert_eq!(prompt.matches("[y/N]").count(), 1);
+    }
 
     #[tokio::test]
     async fn y_approves() {

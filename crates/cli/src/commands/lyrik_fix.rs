@@ -277,6 +277,11 @@ pub struct FixOutcome {
     /// ones named here open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial: Option<Partial>,
+    /// Variants still open in the patched copy because their script
+    /// sets a setting the run's configuration declares an explicit
+    /// opt-out of the control. They do not fail the variant arm.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub open_by_configuration: Vec<OpenByConfiguration>,
     /// Paths to the same sink or invariant with no variant that held.
     pub untested_paths: Vec<UntestedPath>,
     pub class_open_sites: ClassOpenSites,
@@ -296,6 +301,15 @@ pub struct FixOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Partial {
     pub open_paths: Vec<OpenPath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OpenByConfiguration {
+    pub id: String,
+    pub path: String,
+    pub command: String,
+    /// The declared opt-out the variant's script sets.
+    pub setting: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -347,6 +361,435 @@ impl AgentRounds {
             "the {} agent was stopped at its limit of {} tool rounds before it finished",
             self.step, self.round_limit
         )
+    }
+}
+
+/// One combined record: the patches of several findings applied to
+/// one copy and checked together. Written when findings of a run share
+/// an origin or an invariant and each one's own patch was rejected as
+/// partial: each closes the path its finding reproduced and leaves
+/// another open, and the question is what the patches do as a set.
+/// The runner makes the copy, applies the patches and runs every
+/// command; no agent takes part and no patch is written or merged.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CombinedOutcome {
+    /// The member findings, by stable id.
+    pub members: Vec<String>,
+    /// What the members share: an origin or an invariant.
+    pub shared: String,
+    /// The combined directory, relative to the run directory.
+    pub dir: String,
+    pub verdict: Verdict,
+    /// On a `candidate_fix` only, with the arm tally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub arm_tally: ArmTally,
+    pub reasons: Vec<String>,
+    /// Whether every member patch applied to the one copy, in order.
+    pub patches_apply_together: bool,
+    /// `reproduction`, `variant` and `functionality`. There is no
+    /// re-walk of a union, so no `root_cause` and no `relocation`.
+    pub arms: Vec<ArmResult>,
+    pub variants: Vec<arms::VariantResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<Partial>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub open_by_configuration: Vec<OpenByConfiguration>,
+    /// The member patches, relative to the run directory, in the order
+    /// they were applied.
+    pub patches: Vec<String>,
+    pub target_tree: TreeRecord,
+}
+
+/// One member of a combined record.
+pub struct CombinedMember<'a> {
+    pub confirmed: &'a Confirmed,
+    /// Its fix directory, relative to the run directory.
+    pub rel_dir: &'a str,
+}
+
+fn squeeze(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Where a finding's violation starts, as a key two findings can share:
+/// the origin's file with its function, or its line when it names none.
+fn origin_key(finding: &Value) -> Option<String> {
+    let origin = finding.get("origin")?;
+    let file = origin.get("file")?.as_str()?.trim();
+    let part = origin
+        .get("function")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            origin
+                .get("line_start")
+                .and_then(Value::as_u64)
+                .map(|n| n.to_string())
+        })?;
+    (!file.is_empty()).then(|| format!("{file}:{part}"))
+}
+
+fn invariant_key(finding: &Value) -> Option<String> {
+    finding
+        .get("invariant")
+        .and_then(Value::as_str)
+        .map(squeeze)
+        .filter(|s| !s.is_empty())
+}
+
+/// The findings to check together: among those whose own fix was
+/// rejected as partial, each set of two or more connected by a shared
+/// origin or a shared invariant, with what they share. Indexes are
+/// into `members`.
+pub fn combined_groups(members: &[(&Confirmed, &FixOutcome)]) -> Vec<(Vec<usize>, String)> {
+    let partial: Vec<usize> = (0..members.len())
+        .filter(|i| members[*i].1.partial.is_some())
+        .collect();
+    let shares = |a: usize, b: usize| -> Option<String> {
+        let (fa, fb) = (&members[a].0.finding, &members[b].0.finding);
+        match (origin_key(fa), origin_key(fb)) {
+            (Some(x), Some(y)) if x == y => return Some(format!("origin {x}")),
+            _ => {}
+        }
+        match (invariant_key(fa), invariant_key(fb)) {
+            (Some(x), Some(y)) if x == y => Some("the same invariant".to_string()),
+            _ => None,
+        }
+    };
+    let mut groups: Vec<(Vec<usize>, String)> = Vec::new();
+    let mut placed = vec![false; members.len()];
+    for &start in &partial {
+        if placed[start] {
+            continue;
+        }
+        let mut group = vec![start];
+        let mut shared: Option<String> = None;
+        placed[start] = true;
+        let mut i = 0;
+        while i < group.len() {
+            for &other in &partial {
+                if !placed[other]
+                    && let Some(why) = shares(group[i], other)
+                {
+                    placed[other] = true;
+                    group.push(other);
+                    shared.get_or_insert(why);
+                }
+            }
+            i += 1;
+        }
+        if let (true, Some(shared)) = (group.len() > 1, shared) {
+            group.sort_unstable();
+            groups.push((group, shared));
+        }
+    }
+    groups
+}
+
+/// The layout of a combined record: its one patched copy carries the
+/// harness of every walk any member's reproductions name.
+pub fn combined_layout(members: &[CombinedMember], run_id: &str, rel_dir: &str) -> Layout {
+    Layout::for_commands(
+        run_id,
+        rel_dir,
+        members.iter().flat_map(|m| {
+            std::iter::once(m.confirmed.reproduction.command.as_str())
+                .chain(m.confirmed.others.iter().map(|o| o.command.as_str()))
+        }),
+    )
+}
+
+/// A variant of a combined record with the member it came from.
+pub struct CombinedVariant {
+    pub spec: arms::VariantSpec,
+    /// The member's fix directory, and the variant's id there.
+    pub member_dir: String,
+    pub member_id: String,
+}
+
+/// Every variant the members have on record, once each by command: the
+/// members' other confirmed reproductions and the scripts their variant
+/// agents wrote. A member's own reproduction is not a variant here; the
+/// combined reproduction arm reads it.
+pub fn combined_variants(
+    members: &[CombinedMember],
+    run_dir: &Path,
+    run_id: &str,
+    observed: &[Observed],
+) -> Vec<CombinedVariant> {
+    let mut out: Vec<CombinedVariant> = Vec::new();
+    for m in members {
+        let layout = layout_for(m.confirmed, run_id, m.rel_dir);
+        let mut specs = carried_variants(m.confirmed, run_id);
+        specs.extend(arms::registered_variants(
+            &run_dir.join(m.rel_dir),
+            &layout,
+            observed,
+        ));
+        for spec in specs {
+            let is_reproduction = members
+                .iter()
+                .any(|x| x.confirmed.reproduction.command.trim() == spec.command.trim());
+            if is_reproduction || out.iter().any(|v| v.spec.command == spec.command) {
+                continue;
+            }
+            let member_id = spec.id.clone();
+            let id = match spec.source {
+                arms::VariantSource::Agent => {
+                    format!("{}/{}", slug(&m.confirmed.stable_id), spec.id)
+                }
+                arms::VariantSource::Reproduction => spec.id.clone(),
+            };
+            out.push(CombinedVariant {
+                spec: arms::VariantSpec { id, ..spec },
+                member_dir: m.rel_dir.to_string(),
+                member_id,
+            });
+        }
+    }
+    out
+}
+
+/// The commands of a combined record the runner composes itself, in
+/// the order it runs them: make the copies, apply each member patch,
+/// then every member reproduction, every other confirmed reproduction
+/// and the test command, in the baseline and in the combined copy.
+/// The first value is how many of them set the copy up. Scripts the
+/// variant agents wrote are not here; each is asked on its own.
+pub fn combined_plan(
+    members: &[CombinedMember],
+    run_id: &str,
+    layout: &Layout,
+    revision: &str,
+    functionality: &FunctionalityConfig,
+    variants: &[CombinedVariant],
+) -> (usize, Vec<String>) {
+    let mut out = vec![
+        layout.extract_baseline(revision),
+        layout.ensure_patched(revision),
+    ];
+    out.extend(layout.carry_into("baseline"));
+    out.extend(layout.carry_into("patched"));
+    for m in members {
+        out.push(arms::apply_member(
+            layout,
+            &Layout::new(run_id, m.rel_dir).dir,
+        ));
+    }
+    let setup = out.len();
+    for m in members {
+        let command = m.confirmed.reproduction.command.trim();
+        out.push(layout.in_copy("baseline", command));
+        out.push(layout.in_copy("patched", command));
+    }
+    for v in variants
+        .iter()
+        .filter(|v| v.spec.source == arms::VariantSource::Reproduction)
+    {
+        out.push(layout.in_copy("baseline", &v.spec.command));
+        out.push(layout.in_copy("patched", &v.spec.command));
+    }
+    if let Some(test) = &functionality.test_command {
+        out.push(layout.in_copy("baseline", test));
+        out.push(layout.in_copy("patched", test));
+    }
+    let mut seen = BTreeSet::new();
+    out.retain(|c| seen.insert(c.trim().to_string()));
+    (setup.min(out.len()), out)
+}
+
+/// What [`judge_combined`] reads.
+pub struct CombinedInput<'a> {
+    pub run_dir: &'a Path,
+    pub rel_dir: &'a str,
+    pub run_id: &'a str,
+    pub members: &'a [CombinedMember<'a>],
+    pub shared: &'a str,
+    pub observed: &'a [Observed],
+    pub target: &'a Path,
+    pub tree: &'a TreeRecord,
+    pub inputs: &'a FixInputs,
+    /// The most variants any member's own patch required.
+    pub variant_minimum: usize,
+}
+
+/// Judge a combined record from the runs on the log.
+pub fn judge_combined(input: &CombinedInput) -> CombinedOutcome {
+    let layout = combined_layout(input.members, input.run_id, input.rel_dir);
+    let log = arms::Log(input.observed);
+    let mut reasons = Vec::new();
+    // Each member patch has to have gone into the one copy.
+    let mut applied = true;
+    for m in input.members {
+        let dir = Layout::new(input.run_id, m.rel_dir).dir;
+        match log.run(&arms::apply_member(&layout, &dir)) {
+            arms::Run::Done { success: true, .. } => {}
+            arms::Run::Done { .. } => {
+                applied = false;
+                reasons.push(format!(
+                    "the member patches do not apply together: the patch of {} does not apply \
+                     on top of the ones before it",
+                    m.confirmed.stable_id
+                ));
+                break;
+            }
+            _ => {
+                applied = false;
+                reasons.push(format!(
+                    "the patch of {} was not applied to the combined copy",
+                    m.confirmed.stable_id
+                ));
+                break;
+            }
+        }
+    }
+    let variants = combined_variants(input.members, input.run_dir, input.run_id, input.observed);
+    let specs: Vec<arms::VariantSpec> = variants.iter().map(|v| v.spec.clone()).collect();
+    let reproductions: Vec<(&str, &str)> = input
+        .members
+        .iter()
+        .map(|m| {
+            (
+                m.confirmed.stable_id.as_str(),
+                m.confirmed.reproduction.command.trim(),
+            )
+        })
+        .collect();
+    let (arms_list, results) = if applied {
+        let reproduction = arms::combined_reproduction_arm(&log, &layout, &reproductions);
+        let commands: Vec<&str> = reproductions.iter().map(|(_, c)| *c).collect();
+        let (variant, _, results) = arms::variant_arm_in(
+            &log,
+            &layout,
+            &specs,
+            Ok(None),
+            &commands,
+            input.variant_minimum,
+            &|spec| {
+                let v = variants.iter().find(|v| v.spec.command == spec.command)?;
+                opt_out_set(
+                    &arms::VariantSpec {
+                        id: v.member_id.clone(),
+                        ..spec.clone()
+                    },
+                    &input.inputs.opt_outs,
+                    input.target,
+                    input.run_dir,
+                    &v.member_dir,
+                )
+            },
+            // The combined copy only ever holds the patches.
+            &|command| arms::poc(&log.run(command)),
+        );
+        let functionality = arms::combined_functionality_arm(
+            &log,
+            &layout,
+            input.inputs.functionality.test_command.as_deref(),
+        );
+        (vec![reproduction, variant, functionality], results)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    match input.tree {
+        TreeRecord::Unchanged => {}
+        TreeRecord::Changed => {
+            reasons.push("the target tree changed during the fix step".to_string())
+        }
+        TreeRecord::Unknown { reason } => reasons.push(format!(
+            "whether the target tree changed during the run is unknown: {reason}"
+        )),
+    }
+    let passed = |arm: &str| {
+        arms_list
+            .iter()
+            .any(|a| a.arm == arm && a.state == ArmState::Pass)
+    };
+    let open_paths: Vec<OpenPath> = results
+        .iter()
+        .filter(|v| v.outcome == "open")
+        .map(|v| OpenPath {
+            id: v.id.clone(),
+            path: v.path.clone(),
+            command: v.command.clone(),
+        })
+        .collect();
+    let partial =
+        (passed("reproduction") && !open_paths.is_empty()).then_some(Partial { open_paths });
+    if let Some(p) = &partial {
+        reasons.insert(
+            0,
+            format!(
+                "partial fix: no member's reproduction shows the defect with the patches \
+                 together and {} other path(s) still do: {}",
+                p.open_paths.len(),
+                p.open_paths
+                    .iter()
+                    .map(|o| o.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
+    let arm_tally = ArmTally::of(&arms_list);
+    let failed: Vec<&ArmResult> = arms_list
+        .iter()
+        .filter(|a| a.state == ArmState::Fail)
+        .collect();
+    let verdict = if !failed.is_empty() {
+        for a in &failed {
+            reasons.push(format!("{} arm failed: {}", a.arm, a.reasons.join("; ")));
+        }
+        Verdict::Rejected
+    } else if !applied || !passed("reproduction") || !passed("variant") || !reasons.is_empty() {
+        if applied && !passed("reproduction") {
+            reasons.push("the reproduction arm did not pass".to_string());
+        }
+        if applied && !passed("variant") {
+            reasons.push("the variant arm did not pass".to_string());
+        }
+        Verdict::Inconclusive
+    } else {
+        Verdict::CandidateFix
+    };
+    CombinedOutcome {
+        members: input
+            .members
+            .iter()
+            .map(|m| m.confirmed.stable_id.clone())
+            .collect(),
+        shared: input.shared.to_string(),
+        dir: input.rel_dir.to_string(),
+        verdict,
+        label: (verdict == Verdict::CandidateFix).then(|| candidate_label(&arm_tally)),
+        arm_tally,
+        reasons,
+        patches_apply_together: applied,
+        open_by_configuration: results
+            .iter()
+            .filter_map(|v| {
+                Some(OpenByConfiguration {
+                    id: v.id.clone(),
+                    path: v.path.clone(),
+                    command: v.command.clone(),
+                    setting: v.opt_out.clone()?,
+                })
+            })
+            .collect(),
+        arms: arms_list,
+        variants: results,
+        partial,
+        patches: input
+            .members
+            .iter()
+            .map(|m| format!("{}/fix.patch", m.rel_dir))
+            .collect(),
+        target_tree: input.tree.clone(),
     }
 }
 
@@ -429,6 +872,12 @@ pub struct FixInputs {
     /// The target's tracked files as they were at run start, as
     /// [`super::lyrik_git::tree_fingerprint`] reads them.
     pub tree: Result<String, String>,
+    /// `fix.explicit_opt_outs`: the settings by which an operator
+    /// switches the control under test off on purpose, each as the
+    /// text a script would carry (`ENFORCE_AUTH=false`). A variant
+    /// still open in the patched copy whose script sets one is
+    /// recorded as open by configuration.
+    pub opt_outs: Vec<String>,
 }
 
 /// Which run inputs differ on disk from what was read at run start.
@@ -484,6 +933,7 @@ impl FixInputs {
             functionality: functionality_config(config),
             patches: read_supplied_patches(target),
             tree: super::lyrik_git::tree_fingerprint(target),
+            opt_outs: explicit_opt_outs(config),
         }
     }
 
@@ -587,8 +1037,23 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
             arms::VariantSource::Reproduction => v.command.clone(),
         })
         .collect();
-    let (variant, untested_paths, variants) =
-        arms::variant_arm(&log, &layout, &specs, attack, command, variant_minimum);
+    let (variant, untested_paths, variants) = arms::variant_arm(
+        &log,
+        &layout,
+        &specs,
+        attack,
+        command,
+        variant_minimum,
+        &|spec| {
+            opt_out_set(
+                spec,
+                &input.inputs.opt_outs,
+                input.target,
+                input.run_dir,
+                input.rel_dir,
+            )
+        },
+    );
     claim.suspect = variant.state == ArmState::Fail;
     let (root_cause, symptom_patch) = arms::root_cause_arm(
         &shape,
@@ -782,6 +1247,17 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         fix_locality: locality,
         variant_minimum,
         root_cause_claim: claim,
+        open_by_configuration: variants
+            .iter()
+            .filter_map(|v| {
+                Some(OpenByConfiguration {
+                    id: v.id.clone(),
+                    path: v.path.clone(),
+                    command: v.command.clone(),
+                    setting: v.opt_out.clone()?,
+                })
+            })
+            .collect(),
         variants,
         partial,
         untested_paths,
@@ -933,11 +1409,18 @@ pub fn summary_line(summary: &Value) -> String {
 }
 
 /// Add `fixes` and `fix_summary` to a written `findings.json`.
-pub fn record_fixes(dest: &Path, outcomes: &[FixOutcome]) -> Result<()> {
+pub fn record_fixes(
+    dest: &Path,
+    outcomes: &[FixOutcome],
+    combined: &[CombinedOutcome],
+) -> Result<()> {
     let body = std::fs::read_to_string(dest).with_context(|| format!("read {}", dest.display()))?;
     let mut body: Value =
         serde_json::from_str(&body).with_context(|| format!("parse {}", dest.display()))?;
     body["fixes"] = serde_json::to_value(outcomes)?;
+    if !combined.is_empty() {
+        body["combined_fixes"] = serde_json::to_value(combined)?;
+    }
     body["fix_summary"] = summary(outcomes);
     std::fs::write(dest, serde_json::to_string_pretty(&body)?)
         .with_context(|| format!("write {}", dest.display()))?;
@@ -976,6 +1459,91 @@ pub fn log_rejections(log_path: &Path, outcomes: &[FixOutcome]) -> Result<usize>
             .with_context(|| format!("append to {}", log_path.display()))?;
     }
     Ok(count)
+}
+
+/// A declared opt-out shorter than this is not read: a few characters
+/// would match any script.
+const OPT_OUT_MIN_LEN: usize = 8;
+
+/// `fix.explicit_opt_outs` from `.lyrik/config.json`.
+pub fn explicit_opt_outs(config: &Value) -> Vec<String> {
+    config
+        .get("fix")
+        .and_then(|f| f.get("explicit_opt_outs"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| s.len() >= OPT_OUT_MIN_LEN)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The declared opt-out a variant's own script sets, if any. For an
+/// agent's variant the files of its directory are read; for another
+/// reproduction, the harness script its command names and the files
+/// beside it that the script mentions by name. The match is on text:
+/// the setting has to be in what runs.
+pub fn opt_out_set(
+    spec: &arms::VariantSpec,
+    opt_outs: &[String],
+    target: &Path,
+    run_dir: &Path,
+    rel_dir: &str,
+) -> Option<String> {
+    if opt_outs.is_empty() {
+        return None;
+    }
+    const MAX: u64 = 512 * 1024;
+    let read = |p: &Path| {
+        std::fs::metadata(p)
+            .ok()
+            .filter(|m| m.is_file() && m.len() <= MAX)
+            .and_then(|_| std::fs::read_to_string(p).ok())
+    };
+    let mut texts: Vec<String> = Vec::new();
+    match spec.source {
+        arms::VariantSource::Agent => {
+            let script = run_dir.join(rel_dir).join(&spec.id);
+            if let Some(dir) = script.parent()
+                && let Ok(entries) = std::fs::read_dir(dir)
+            {
+                texts.extend(
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| read(&e.path())),
+                );
+            }
+        }
+        arms::VariantSource::Reproduction => {
+            for token in spec.command.split_whitespace() {
+                if !token.starts_with(".lyrik/state/runs/") || token.contains("..") {
+                    continue;
+                }
+                let script = target.join(token);
+                let Some(text) = read(&script) else { continue };
+                if let Some(dir) = script.parent()
+                    && let Ok(entries) = std::fs::read_dir(dir)
+                {
+                    for e in entries.filter_map(|e| e.ok()) {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if e.path() != script && text.contains(&name) {
+                            texts.extend(read(&e.path()));
+                        }
+                    }
+                }
+                texts.push(text);
+            }
+        }
+    }
+    opt_outs
+        .iter()
+        .find(|setting| texts.iter().any(|t| t.contains(setting.as_str())))
+        .cloned()
 }
 
 /// The functionality commands `.lyrik/config.json` names under `fix`.
@@ -1142,7 +1710,11 @@ pub fn recheck_skill_text(run_id: &str, tools: &str) -> String {
          violation moved rather than removed, for example into a callback or a second \
          pointer, and for a new one. `scope` lists what you walked as `function at \
          file:line`. Each candidate is `{{\"title\", \"location\", \"kind\", \"command\"}}` with \
-         `kind` `new` or `relocated` and `location` as `file:line` in the patched copy. A \
+         `location` as `file:line` in the patched copy and `kind` one of `new` (a security \
+         defect the patch made), `relocated` (the finding's violation moved elsewhere) or \
+         `regression` (something that worked before the patch and does not after it, which \
+         is not a security defect: a refused legitimate request, a cluster that no longer \
+         forms). A regression is recorded under functionality, never as a relocation. A \
          candidate is your reading until a run shows it: write a proof of concept for it \
          under `relocation/<id>/` in the fix directory, under the contract above, run \
          `cd <baseline> && <interpreter> <up><script>` and then \
@@ -1253,6 +1825,46 @@ pub fn reproduction_commands(
     out.push(layout.in_copy("patched", command));
     out.push(layout.apply());
     (out, before_patch)
+}
+
+/// The commands the runner composes for one finding's arms, known
+/// before any agent of the fix step runs: the reproduction's sequence,
+/// the runner's own preparation, each of the finding's other confirmed
+/// reproductions in both copies, and the configured test and coverage
+/// commands. This is the plan the operator is shown and approves once.
+/// A script an agent writes later is not in it and is asked on its own.
+pub fn plan_commands(
+    confirmed: &Confirmed,
+    run_id: &str,
+    rel_dir: &str,
+    revision: &str,
+    functionality: &FunctionalityConfig,
+) -> Vec<String> {
+    let command = confirmed.reproduction.command.trim();
+    let (mut out, _) = reproduction_commands(
+        &Layout::for_reproduction(run_id, rel_dir, command),
+        command,
+        revision,
+    );
+    let layout = layout_for(confirmed, run_id, rel_dir);
+    out.push(layout.ensure_patched(revision));
+    out.extend(layout.carry_into("baseline"));
+    out.extend(layout.carry_into("patched"));
+    out.push(layout.ensure_applied());
+    for variant in carried_variants(confirmed, run_id) {
+        out.push(layout.in_copy("baseline", &variant.command));
+        out.push(layout.in_copy("patched", &variant.command));
+    }
+    if let Some(test) = &functionality.test_command {
+        out.push(layout.in_copy("baseline", test));
+        out.push(layout.in_copy("patched", test));
+    }
+    if let Some(coverage) = &functionality.coverage_command {
+        out.push(layout.in_copy("patched", coverage));
+    }
+    let mut seen = BTreeSet::new();
+    out.retain(|c| seen.insert(c.trim().to_string()));
+    out
 }
 
 fn numbered(commands: &[String]) -> String {
@@ -1577,6 +2189,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             tree: Ok("fingerprint".to_string()),
+            opt_outs: Vec::new(),
         }
     }
 
@@ -1800,6 +2413,409 @@ mod tests {
         );
         // No attack.json and no agent variant was needed for any of it.
         assert_eq!(out.artifacts.attack, None);
+    }
+
+    #[test]
+    fn a_variant_under_a_declared_opt_out_is_open_by_configuration_on_the_record() {
+        // The second variant still shows the defect in the patched copy,
+        // and its script switches the control off.
+        let case = Case::new(ORIGIN_PATCH).with_variants(true);
+        let run = case.tmp.path().join(REL).join("variants/v2/run.py");
+        std::fs::write(&run, "os.environ['APP_ENFORCE_AUTH'] = 'false'\n").unwrap();
+        let judged = |opt_outs: &[&str]| {
+            let mut i = inputs(None);
+            i.opt_outs =
+                explicit_opt_outs(&serde_json::json!({"fix": {"explicit_opt_outs": opt_outs}}));
+            judge(&JudgeInput {
+                run_dir: case.tmp.path(),
+                rel_dir: REL,
+                run_id: RUN,
+                confirmed: &case.confirmed,
+                revision: REV,
+                observed: &case.observed,
+                target: case.tmp.path(),
+                tree: &TreeRecord::Unchanged,
+                agents: &[],
+                fix_model: "some-model",
+                inputs: &i,
+                changes: &InputChanges::default(),
+            })
+        };
+        // Nothing declared: the open variant rejects the fix as partial.
+        let out = judged(&[]);
+        assert_eq!(out.verdict, Verdict::Rejected);
+        assert!(out.open_by_configuration.is_empty());
+        // Declared by the operator: recorded, and the arm does not fail.
+        let out = judged(&["APP_ENFORCE_AUTH'] = 'false'"]);
+        assert_ne!(
+            out.arms[1].state,
+            ArmState::Fail,
+            "{:?}",
+            out.arms[1].reasons
+        );
+        assert_eq!(out.partial, None);
+        assert_eq!(out.open_by_configuration.len(), 1);
+        assert_eq!(out.open_by_configuration[0].id, "variants/v2/run.py");
+        assert_eq!(
+            out.open_by_configuration[0].setting,
+            "APP_ENFORCE_AUTH'] = 'false'"
+        );
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["variants"][1]["outcome"], "open_by_configuration");
+        // A declaration the script does not carry changes nothing, and
+        // one too short to mean anything is not read.
+        assert_eq!(judged(&["OTHER_SETTING=off"]).verdict, Verdict::Rejected);
+        assert_eq!(judged(&["false"]).verdict, Verdict::Rejected);
+    }
+
+    #[test]
+    fn the_plan_is_the_runner_composed_commands_of_one_finding_and_no_others() {
+        let mut c = confirmed_findings(&body()).remove(0);
+        let keyless = format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/keyless.sh");
+        let mut other = c.reproduction.clone();
+        other.command = keyless.clone();
+        c.others.push(other);
+        let config = FunctionalityConfig {
+            test_command: Some("make check".into()),
+            coverage_command: Some("make cover".into()),
+        };
+        let plan = plan_commands(&c, RUN, REL, REV, &config);
+        let layout = layout_for(&c, RUN, REL);
+        // Every command the reproduction arm reads, in the order the agent runs them.
+        let (reproduction, _) =
+            reproduction_commands(&Layout::for_reproduction(RUN, REL, REPRO), REPRO, REV);
+        for command in &reproduction {
+            assert!(plan.contains(command), "{command}");
+        }
+        // The runner's own steps, the carried variant in both copies, the tests.
+        for command in [
+            layout.ensure_patched(REV),
+            layout.ensure_applied(),
+            layout.in_copy("baseline", &keyless),
+            layout.in_copy("patched", &keyless),
+            layout.in_copy("baseline", "make check"),
+            layout.in_copy("patched", "make check"),
+            layout.in_copy("patched", "make cover"),
+        ] {
+            assert!(plan.contains(&command), "{command}");
+        }
+        // No command is listed twice, though the agent runs some twice.
+        let mut unique = plan.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), plan.len());
+        // A script an agent writes later is not in the plan, nor is
+        // anything outside this finding's directory and the shared baseline.
+        let agent_variant =
+            layout.in_copy("patched", &format!("sh {}/variants/v1/run.sh", layout.dir));
+        assert!(!plan.contains(&agent_variant));
+        let other_finding = Layout::new(RUN, "staging/fix/another-finding");
+        assert!(!plan.contains(&other_finding.apply()));
+        for command in &plan {
+            assert!(
+                command.contains(&layout.dir) || command.contains(&layout.copy("baseline")),
+                "{command}"
+            );
+        }
+        // With no configured commands the plan has no test entries.
+        let bare = plan_commands(&c, RUN, REL, REV, &FunctionalityConfig::default());
+        assert!(!bare.iter().any(|x| x.contains("make ")));
+    }
+
+    /// Two findings of one run with the same origin: the keyed and the
+    /// keyless side of one missing check.
+    fn two_members() -> (Confirmed, Confirmed) {
+        let finding = |id: &str, invariant: &str| {
+            serde_json::json!({"stable_id": id, "invariant": invariant,
+                "location": {"file": "src/a.rs", "line_start": 10},
+                "origin": {"file": "src/gate.rs", "line_start": 4, "function": "install"}})
+        };
+        let record = |id: &str, script: &str| -> ReproductionRecord {
+            serde_json::from_value(serde_json::json!({
+                "stable_id": id, "expected": format!("{script} exits 1"), "observed": "exit 1",
+                "outcome": "reproduced", "code_revision": REV,
+                "command": format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/{script}"),
+            }))
+            .unwrap()
+        };
+        let a = Confirmed {
+            stable_id: "auth::src/a.rs:10".into(),
+            finding: finding("auth::src/a.rs:10", "every request is checked"),
+            reproduction: record("auth::src/a.rs:10", "keyed.sh"),
+            others: vec![record("auth::src/a.rs:10", "keyed_other_service.sh")],
+        };
+        let b = Confirmed {
+            stable_id: "auth::src/b.rs:20".into(),
+            finding: finding("auth::src/b.rs:20", "no credential never means access"),
+            reproduction: record("auth::src/b.rs:20", "keyless.sh"),
+            others: Vec::new(),
+        };
+        (a, b)
+    }
+
+    const A_DIR: &str = "staging/fix/auth-src-a.rs-10";
+    const B_DIR: &str = "staging/fix/auth-src-b.rs-20";
+    const UNION: &str = "staging/fix/_combined-1";
+
+    /// The log of a combined run: both patches applied, then each
+    /// command in both copies. `open` is a command still shown in the
+    /// combined copy; `second_applies` whether the second patch went in.
+    fn combined_log(
+        a: &Confirmed,
+        b: &Confirmed,
+        open: Option<&str>,
+        second_applies: bool,
+    ) -> Vec<Observed> {
+        let members = [
+            CombinedMember {
+                confirmed: a,
+                rel_dir: A_DIR,
+            },
+            CombinedMember {
+                confirmed: b,
+                rel_dir: B_DIR,
+            },
+        ];
+        let layout = combined_layout(&members, RUN, UNION);
+        let mut log: Vec<Observed> = Vec::new();
+        let mut add = |command: String, success: bool, output: &str| {
+            let seq = log.len();
+            log.push(Observed {
+                seq,
+                command,
+                success,
+                output: output.to_string(),
+            });
+        };
+        add(
+            arms::apply_member(&layout, &Layout::new(RUN, A_DIR).dir),
+            true,
+            "",
+        );
+        add(
+            arms::apply_member(&layout, &Layout::new(RUN, B_DIR).dir),
+            second_applies,
+            "",
+        );
+        let commands = [
+            a.reproduction.command.clone(),
+            b.reproduction.command.clone(),
+            a.others[0].command.clone(),
+        ];
+        for command in &commands {
+            add(layout.in_copy("baseline", command), false, &shown());
+            let still = open == Some(command.as_str());
+            add(
+                layout.in_copy("patched", command),
+                !still,
+                &if still { shown() } else { clean() },
+            );
+        }
+        add(layout.in_copy("baseline", "make check"), true, "ok");
+        add(layout.in_copy("patched", "make check"), true, "ok");
+        log
+    }
+
+    fn judge_union(
+        a: &Confirmed,
+        b: &Confirmed,
+        log: &[Observed],
+        minimum: usize,
+    ) -> CombinedOutcome {
+        let tmp = tempdir().unwrap();
+        let mut i = inputs(None);
+        i.functionality.test_command = Some("make check".into());
+        judge_combined(&CombinedInput {
+            run_dir: tmp.path(),
+            rel_dir: UNION,
+            run_id: RUN,
+            members: &[
+                CombinedMember {
+                    confirmed: a,
+                    rel_dir: A_DIR,
+                },
+                CombinedMember {
+                    confirmed: b,
+                    rel_dir: B_DIR,
+                },
+            ],
+            shared: "origin src/gate.rs:install",
+            observed: log,
+            target: tmp.path(),
+            tree: &TreeRecord::Unchanged,
+            inputs: &i,
+            variant_minimum: minimum,
+        })
+    }
+
+    #[test]
+    fn partial_fixes_that_share_an_origin_or_an_invariant_are_grouped() {
+        let (a, b) = two_members();
+        let partial = |stable_id: &str, is_partial: bool| {
+            let mut out = Case::new(ORIGIN_PATCH).with_variants(is_partial).judge();
+            out.stable_id = stable_id.to_string();
+            assert_eq!(out.partial.is_some(), is_partial);
+            out
+        };
+        let (pa, pb) = (partial(&a.stable_id, true), partial(&b.stable_id, true));
+        // The same origin.
+        assert_eq!(
+            combined_groups(&[(&a, &pa), (&b, &pb)]),
+            [(vec![0, 1], "origin src/gate.rs:install".to_string())]
+        );
+        // A member whose own fix was not partial is left out, and one alone is no group.
+        let whole = partial(&b.stable_id, false);
+        assert!(combined_groups(&[(&a, &pa), (&b, &whole)]).is_empty());
+        // Different origins and different invariants: nothing is shared.
+        let mut c = b.clone();
+        c.finding["origin"] = serde_json::json!({"file": "src/other.rs", "line_start": 9});
+        assert!(combined_groups(&[(&a, &pa), (&c, &pb)]).is_empty());
+        // Different origins, the same invariant in other spacing and case.
+        c.finding["invariant"] = serde_json::json!("Every  request is\nchecked");
+        assert_eq!(
+            combined_groups(&[(&a, &pa), (&c, &pb)]),
+            [(vec![0, 1], "the same invariant".to_string())]
+        );
+    }
+
+    #[test]
+    fn the_union_of_two_partial_patches_is_judged_on_its_own_runs() {
+        let (a, b) = two_members();
+        // Together the patches stop both reproductions and the other variant.
+        let out = judge_union(&a, &b, &combined_log(&a, &b, None, true), 1);
+        assert_eq!(out.verdict, Verdict::CandidateFix, "{:?}", out.reasons);
+        assert_eq!(out.members, ["auth::src/a.rs:10", "auth::src/b.rs:20"]);
+        assert!(out.patches_apply_together);
+        assert_eq!(
+            out.patches,
+            [format!("{A_DIR}/fix.patch"), format!("{B_DIR}/fix.patch")]
+        );
+        let states: Vec<(&str, ArmState)> = out.arms.iter().map(|x| (x.arm, x.state)).collect();
+        assert_eq!(
+            states,
+            [
+                ("reproduction", ArmState::Pass),
+                ("variant", ArmState::Pass),
+                ("functionality", ArmState::Inconclusive)
+            ]
+        );
+        assert_eq!(
+            out.label.as_deref(),
+            Some("candidate fix: 2 of 3 arms passed, 1 inconclusive, 0 not_run")
+        );
+        assert_eq!(out.variants.len(), 1);
+        assert_eq!(out.variants[0].outcome, "held");
+        // Fewer variants than the members' patches required: not a candidate.
+        let out = judge_union(&a, &b, &combined_log(&a, &b, None, true), 4);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        // A variant still open with both patches in: rejected, partial, the path named.
+        let other = a.others[0].command.clone();
+        let out = judge_union(&a, &b, &combined_log(&a, &b, Some(&other), true), 1);
+        assert_eq!(out.verdict, Verdict::Rejected);
+        let partial = out.partial.expect("partial");
+        assert_eq!(partial.open_paths[0].command, other);
+        assert!(
+            out.reasons[0].starts_with("partial fix: no member's reproduction shows the defect")
+        );
+        // A member's own reproduction still shown in the union: the reproduction arm fails.
+        let repro_b = b.reproduction.command.clone();
+        let out = judge_union(&a, &b, &combined_log(&a, &b, Some(&repro_b), true), 1);
+        assert_eq!(out.verdict, Verdict::Rejected);
+        assert_eq!(out.arms[0].state, ArmState::Fail);
+        assert!(
+            out.arms[0].reasons[0]
+                .contains("auth::src/b.rs:20 still shows the defect in the combined copy")
+        );
+        assert_eq!(out.partial, None);
+    }
+
+    #[test]
+    fn member_patches_that_do_not_apply_together_are_recorded_as_such() {
+        let (a, b) = two_members();
+        let out = judge_union(&a, &b, &combined_log(&a, &b, None, false), 1);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert!(!out.patches_apply_together);
+        assert!(
+            out.arms.is_empty(),
+            "no arm is read on a copy that is not the union"
+        );
+        assert_eq!(
+            out.reasons,
+            [
+                "the member patches do not apply together: the patch of auth::src/b.rs:20 does not \
+              apply on top of the ones before it"
+            ]
+        );
+        // Nothing on the log at all: said, not guessed.
+        let out = judge_union(&a, &b, &[], 1);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert_eq!(
+            out.reasons,
+            ["the patch of auth::src/a.rs:10 was not applied to the combined copy"]
+        );
+    }
+
+    #[test]
+    fn the_combined_plan_is_the_runner_composed_commands_and_no_agent_script() {
+        let (a, b) = two_members();
+        let tmp = tempdir().unwrap();
+        // The variant agent of the first member wrote a script.
+        let v = tmp.path().join(A_DIR).join("variants/other_shape");
+        std::fs::create_dir_all(&v).unwrap();
+        std::fs::write(v.join("run.sh"), "x").unwrap();
+        let members = [
+            CombinedMember {
+                confirmed: &a,
+                rel_dir: A_DIR,
+            },
+            CombinedMember {
+                confirmed: &b,
+                rel_dir: B_DIR,
+            },
+        ];
+        let layout = combined_layout(&members, RUN, UNION);
+        let variants = combined_variants(&members, tmp.path(), RUN, &[]);
+        let ids: Vec<&str> = variants.iter().map(|v| v.spec.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "reproduction:sink-walk/keyed_other_service.sh",
+                "auth-src-a.rs-10/variants/other_shape/run.sh"
+            ]
+        );
+        let config = FunctionalityConfig {
+            test_command: Some("make check".into()),
+            coverage_command: None,
+        };
+        let (setup, plan) = combined_plan(&members, RUN, &layout, REV, &config, &variants);
+        // Setup ends with each member patch applied, in member order.
+        assert_eq!(
+            &plan[setup - 2..setup],
+            [
+                arms::apply_member(&layout, &Layout::new(RUN, A_DIR).dir),
+                arms::apply_member(&layout, &Layout::new(RUN, B_DIR).dir)
+            ]
+        );
+        for command in [
+            &a.reproduction.command,
+            &b.reproduction.command,
+            &a.others[0].command,
+        ] {
+            assert!(
+                plan.contains(&layout.in_copy("baseline", command)),
+                "{command}"
+            );
+            assert!(
+                plan.contains(&layout.in_copy("patched", command)),
+                "{command}"
+            );
+        }
+        assert!(plan.contains(&layout.in_copy("patched", "make check")));
+        // The agent's script is asked on its own: it is not in the plan.
+        assert!(
+            !plan.iter().any(|c| c.contains("variants/other_shape")),
+            "{plan:?}"
+        );
     }
 
     #[test]
@@ -2313,7 +3329,7 @@ mod tests {
             Case::new(ORIGIN_PATCH).with_variants(true).judge(),
             Case::new("").judge(),
         ];
-        record_fixes(&dest, &outcomes).unwrap();
+        record_fixes(&dest, &outcomes, &[]).unwrap();
         let body: Value = serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(body["schema_version"], "1.1");
         assert_eq!(body["fixes"][0]["stable_id"], "auth::src/a.rs:10");
