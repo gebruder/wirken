@@ -194,8 +194,8 @@ impl LlmClient {
                         if let Some(parsed_usage) = super::llm::extract_openai_usage(&parsed) {
                             usage = Some(parsed_usage);
                         }
-                        if let Some(stop) = crate::llm::stop_reason_in(&parsed) {
-                            self.set_stop_reason(Some(stop));
+                        if let Some(raw) = crate::llm::stop_reason_raw_in(&parsed) {
+                            self.set_stop_reason(Some(raw));
                         }
 
                         if let Some(delta) = parsed
@@ -494,7 +494,7 @@ impl LlmClient {
                         if let Some(raw) =
                             data.pointer("/delta/stop_reason").and_then(|v| v.as_str())
                         {
-                            self.set_stop_reason(Some(crate::llm::StopReason::from_provider(raw)));
+                            self.set_stop_reason(Some(raw));
                         }
                         // The cumulative `usage.output_tokens`
                         // updates with each delta. Input and cache

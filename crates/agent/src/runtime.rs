@@ -3498,6 +3498,7 @@ impl Agent {
             let latency_ms = started.elapsed().as_millis() as u64;
             drop(meter);
             let stop = self.llm.last_stop_reason();
+            let stop_raw = self.llm.last_stop_reason_raw();
             let LlmResponseAttribution {
                 input_tokens,
                 output_tokens,
@@ -3513,6 +3514,7 @@ impl Agent {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
                     stop_reason: stop.map(|r| r.as_str().to_string()),
+                    stop_reason_raw: stop_raw,
                     input_tokens,
                     output_tokens,
                     cache_creation_input_tokens,
@@ -3908,6 +3910,7 @@ impl Agent {
             let latency_ms = started.elapsed().as_millis() as u64;
             drop(meter);
             let stop = self.llm.last_stop_reason();
+            let stop_raw = self.llm.last_stop_reason_raw();
             let LlmResponseAttribution {
                 input_tokens,
                 output_tokens,
@@ -3923,6 +3926,7 @@ impl Agent {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
                     stop_reason: stop.map(|r| r.as_str().to_string()),
+                    stop_reason_raw: stop_raw,
                     input_tokens,
                     output_tokens,
                     cache_creation_input_tokens,
@@ -6941,6 +6945,7 @@ pub fn side_call_response(
             request_id: request_id.to_string(),
             finish_reason: finish_reason_for(response).to_string(),
             stop_reason: None,
+            stop_reason_raw: None,
             input_tokens,
             output_tokens,
             cache_creation_input_tokens,

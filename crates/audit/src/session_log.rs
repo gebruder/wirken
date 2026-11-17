@@ -891,6 +891,12 @@ pub enum SessionEvent {
         /// reports none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<String>,
+        /// The provider's own word `stop_reason` was mapped from, cut
+        /// to 64 characters: `refusal`, `length`, `MAX_TOKENS`,
+        /// `content_filter` and so on. Present whenever `stop_reason`
+        /// is, so a mapped value can be checked against its source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason_raw: Option<String>,
         /// Defaulted so a pre-1.2.0 row carrying `tokens_in` (the
         /// pre-1.2.0 name, intentionally not aliased; see C4) reads
         /// as `input_tokens: 0` rather than failing. The legacy value

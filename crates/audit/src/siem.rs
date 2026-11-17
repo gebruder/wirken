@@ -2246,6 +2246,7 @@ mod identity_tests {
                     request_id: "r1".into(),
                     finish_reason: "stop".into(),
                     stop_reason: None,
+                    stop_reason_raw: None,
                     input_tokens: 1,
                     output_tokens: 1,
                     cache_creation_input_tokens: 0,

@@ -7951,6 +7951,7 @@ mod verify {
                 request_id: request_id.into(),
                 finish_reason: "text".into(),
                 stop_reason: None,
+                stop_reason_raw: None,
                 input_tokens: 0,
                 output_tokens: 0,
                 cache_creation_input_tokens: 0,
@@ -18411,6 +18412,23 @@ mod stop_reasons_and_rounds {
         assert_ne!(StopReason::MaxTokens.as_str(), StopReason::Refusal.as_str());
         assert_eq!(StopReason::MaxTokens.as_str(), "max_tokens");
         assert_eq!(StopReason::Refusal.as_str(), "refusal");
+        // The raw word is read from the same place, unmapped, and is bounded.
+        assert_eq!(
+            crate::llm::stop_reason_raw_in(&gemini("MAX_TOKENS")),
+            Some("MAX_TOKENS")
+        );
+        assert_eq!(crate::llm::bounded_raw(&"x".repeat(200)).len(), 64);
+        // The Anthropic default leaves room for a file in one reply.
+        assert_eq!(LlmConfig::anthropic("m").max_tokens, 16_000);
+        assert_eq!(
+            LlmConfig::from_provider("anthropic", "http://x", "m").max_tokens,
+            16_000
+        );
+        assert_eq!(
+            LlmConfig::from_provider("openai", "http://x", "m").max_tokens,
+            4096
+        );
+        assert_eq!(LlmConfig::openai("m").max_tokens, 4096);
     }
 
     #[test]
@@ -18492,6 +18510,17 @@ mod stop_reasons_and_rounds {
             stops,
             [Some("max_tokens".to_string()), Some("end_turn".to_string())]
         );
+        // The provider's own words sit beside the mapped ones.
+        let raws: Vec<Option<String>> = events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::LlmResponse {
+                    stop_reason_raw, ..
+                } => Some(stop_reason_raw.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raws, [Some("length".to_string()), Some("stop".to_string())]);
         let (output, success) = events
             .iter()
             .find_map(|e| match e {
@@ -18528,14 +18557,19 @@ mod stop_reasons_and_rounds {
         let stop = events(&log, "refused").into_iter().find_map(|e| match e {
             SessionEvent::LlmResponse {
                 stop_reason,
+                stop_reason_raw,
                 finish_reason,
                 ..
-            } => Some((stop_reason, finish_reason)),
+            } => Some((stop_reason, stop_reason_raw, finish_reason)),
             _ => None,
         });
         assert_eq!(
             stop,
-            Some((Some("refusal".to_string()), "text".to_string()))
+            Some((
+                Some("refusal".to_string()),
+                Some("content_filter".to_string()),
+                "text".to_string()
+            ))
         );
     }
 

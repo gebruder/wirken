@@ -115,7 +115,7 @@ impl LlmConfig {
             provider: "anthropic".into(),
             model: model.into(),
             base_url: "https://api.anthropic.com/v1".into(),
-            max_tokens: 4096,
+            max_tokens: ANTHROPIC_DEFAULT_MAX_TOKENS,
             temperature: 0.7,
             region: None,
             tools_enabled: true,
@@ -250,7 +250,11 @@ impl LlmConfig {
             provider: provider.into(),
             model: model.into(),
             base_url: base_url.into(),
-            max_tokens: 4096,
+            max_tokens: if provider == "anthropic" {
+                ANTHROPIC_DEFAULT_MAX_TOKENS
+            } else {
+                4096
+            },
             temperature: 0.7,
             region: None,
             tools_enabled: true,
@@ -308,6 +312,13 @@ pub struct Usage {
     pub cache_creation_input_tokens: u32,
     pub cache_read_input_tokens: u32,
 }
+
+/// Output tokens an Anthropic reply may use when nothing sets another
+/// limit. A reply that writes a file or a patch in one tool call does
+/// not fit in the 4096 the other providers default to, and a reply
+/// this long still returns inside the request timeout without
+/// streaming.
+pub const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 16_000;
 
 /// Why a provider says a reply ended, in one vocabulary across
 /// providers.
@@ -391,14 +402,24 @@ pub(crate) fn cache_conversation_prefix(messages: &mut [serde_json::Value]) {
 /// The stop reason in a provider's response body, whichever shape the
 /// body has. `None` when the body carries none.
 pub fn stop_reason_in(body: &serde_json::Value) -> Option<StopReason> {
-    let raw = body
-        .get("stop_reason")
+    stop_reason_raw_in(body).map(StopReason::from_provider)
+}
+
+/// The provider's own word for why the reply ended, as the body
+/// carries it. [`stop_reason_in`] maps it; this is the value mapped.
+pub fn stop_reason_raw_in(body: &serde_json::Value) -> Option<&str> {
+    body.get("stop_reason")
         .or_else(|| body.get("stopReason"))
         .or_else(|| body.get("done_reason"))
         .or_else(|| body.pointer("/choices/0/finish_reason"))
         .or_else(|| body.pointer("/candidates/0/finishReason"))
-        .and_then(|v| v.as_str())?;
-    Some(StopReason::from_provider(raw))
+        .and_then(|v| v.as_str())
+}
+
+/// A provider's stop word as it goes on the audit row: cut to a
+/// bounded length, since it is the provider's text.
+pub(crate) fn bounded_raw(raw: &str) -> String {
+    raw.chars().take(64).collect()
 }
 
 /// LLM client that makes completion requests.
@@ -415,7 +436,7 @@ pub struct LlmClient {
     observer: Mutex<Option<Arc<dyn RecoveryObserver>>>,
     /// The stop reason of the reply the last call returned. Set by
     /// each call, read by the runtime straight after it.
-    last_stop: Mutex<Option<StopReason>>,
+    last_stop: Mutex<Option<(StopReason, String)>>,
     /// Lazy-initialized tinfoil SDK client. Construction performs
     /// AMD SEV-SNP attestation + Sigstore verification + TLS pinning
     /// against the discovered enclave; the result is cached for the
@@ -613,11 +634,26 @@ impl LlmClient {
     /// Why the provider says the reply of the last call ended, when it
     /// said. Read it straight after the call it belongs to.
     pub fn last_stop_reason(&self) -> Option<StopReason> {
-        *self.last_stop.lock().unwrap_or_else(|e| e.into_inner())
+        self.last_stop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(reason, _)| *reason)
     }
 
-    pub(crate) fn set_stop_reason(&self, reason: Option<StopReason>) {
-        *self.last_stop.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+    /// The provider's own word the last stop reason was mapped from.
+    pub fn last_stop_reason_raw(&self) -> Option<String> {
+        self.last_stop
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(_, raw)| raw.clone())
+    }
+
+    /// Record the stop word of the reply just read, or clear it.
+    pub(crate) fn set_stop_reason(&self, raw: Option<&str>) {
+        *self.last_stop.lock().unwrap_or_else(|e| e.into_inner()) =
+            raw.map(|raw| (StopReason::from_provider(raw), bounded_raw(raw)));
     }
 
     pub async fn complete(
@@ -716,7 +752,7 @@ impl LlmClient {
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
-        self.set_stop_reason(stop_reason_in(&response_body));
+        self.set_stop_reason(stop_reason_raw_in(&response_body));
 
         parse_completion_response(&response_body)
     }
@@ -793,7 +829,7 @@ impl LlmClient {
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
-        self.set_stop_reason(stop_reason_in(&response_body));
+        self.set_stop_reason(stop_reason_raw_in(&response_body));
 
         parse_ollama_response(&response_body)
     }
@@ -835,7 +871,7 @@ impl LlmClient {
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
-        self.set_stop_reason(stop_reason_in(&response_body));
+        self.set_stop_reason(stop_reason_raw_in(&response_body));
 
         parse_completion_response(&response_body)
     }
@@ -989,7 +1025,7 @@ impl LlmClient {
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
-        self.set_stop_reason(stop_reason_in(&response_body));
+        self.set_stop_reason(stop_reason_raw_in(&response_body));
 
         parse_anthropic_response(&response_body)
     }
@@ -1127,7 +1163,7 @@ impl LlmClient {
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
-        self.set_stop_reason(stop_reason_in(&response_body));
+        self.set_stop_reason(stop_reason_raw_in(&response_body));
 
         parse_gemini_response(&response_body)
     }
@@ -1297,7 +1333,7 @@ impl LlmClient {
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
-        self.set_stop_reason(stop_reason_in(&response_body));
+        self.set_stop_reason(stop_reason_raw_in(&response_body));
 
         parse_bedrock_response(&response_body)
     }
