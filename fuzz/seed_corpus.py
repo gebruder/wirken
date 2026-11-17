@@ -48,6 +48,10 @@ def exec_classifier() -> int:
         entry = json.loads(line)
         if entry.get("tool") != "exec":
             continue
+        # A line that tests how a reply ended carries a command only as
+        # filler. It adds no shape the classifier has not seen.
+        if "stop_reason" in entry:
+            continue
         command = entry["args"].get("command")
         if isinstance(command, str):
             payload = command.encode()

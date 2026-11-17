@@ -61,8 +61,8 @@ tagged.
   `crates/agent/src/tests.rs`; [docs/cost-monitoring.md](docs/cost-monitoring.md#model-time)).
 
 - Lyrik's defender fix step checks each fix in five arms and records it as a
-  `candidate fix`. Beside the original reproduction in baseline, patched and
-  reverted copies: `variant` (proofs of concept by other paths to the same
+  `candidate fix`. Beside the original reproduction in a baseline and a
+  patched copy, and again with the patch taken out: `variant` (proofs of concept by other paths to the same
   sink; one that works on the patched code rejects the fix as partial),
   `root_cause` (a patch on the sink with the origin elsewhere is a
   `symptom_patch` and is rejected), `relocation` (a re-walk of everything

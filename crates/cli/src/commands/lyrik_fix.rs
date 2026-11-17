@@ -1026,7 +1026,7 @@ pub struct FixInputs {
     pub tree: Result<String, String>,
     /// `fix.explicit_opt_outs`: the settings by which an operator
     /// switches the control under test off on purpose, each as the
-    /// text a script would carry (`ENFORCE_AUTH=false`). A variant
+    /// text a script would carry (`STRICT_MODE=off`). A variant
     /// still open in the patched copy whose script sets one is
     /// recorded as open by configuration.
     pub opt_outs: Vec<String>,
@@ -1784,8 +1784,8 @@ const NO_VERDICT: &str = "You decide nothing. The runner reads each command's ex
      gives or the ones this text tells you to compose. It does not read your account of a \
      run, so do not write one. Run each such command through `exec` once, exactly as \
      written, one command per call, in the order given. Do not repair, wrap or repeat a \
-     command: a second run with a different result makes the arm inconclusive. The operator \
-     is asked before each command; a refused command is a step not taken, and you carry on \
+     command: a second run with a different result makes the arm inconclusive. A command \
+     may be refused at the gate; a refused command is a step not taken, and you carry on \
      with the next. You write only under the fix directory, and never into the project's \
      tree: not a source file, not a test, not a build artifact.";
 
@@ -2536,12 +2536,13 @@ mod tests {
             r["agreement"] = serde_json::json!(agreement);
             r
         };
-        let keyless = format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/keyless.sh");
+        let second =
+            format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/second_setup.sh");
         let caller =
             format!("sh .lyrik/state/runs/{RUN}/staging/chain-walk/harness/other_caller.sh");
         let disputed = format!("sh .lyrik/state/runs/{RUN}/staging/fuzz-walk/harness/disputed.sh");
         let reproductions = b["reproductions"].as_array_mut().unwrap();
-        reproductions.push(with(&keyless, "keyless deployment: exits 1", true));
+        reproductions.push(with(&second, "second setup: exits 1", true));
         reproductions.push(with(REPRO, "the same command again", true));
         reproductions.push(with(&caller, "second caller: exits 1", true));
         reproductions.push(with(&disputed, "not agreed", false));
@@ -2551,12 +2552,12 @@ mod tests {
         assert_eq!(
             carried.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
             [
-                "reproduction:sink-walk/keyless.sh",
+                "reproduction:sink-walk/second_setup.sh",
                 "reproduction:chain-walk/other_caller.sh"
             ]
         );
-        assert_eq!(carried[0].command, keyless);
-        assert_eq!(carried[0].path, "keyless deployment: exits 1");
+        assert_eq!(carried[0].command, second);
+        assert_eq!(carried[0].path, "second setup: exits 1");
         assert!(
             carried
                 .iter()
@@ -2574,7 +2575,7 @@ mod tests {
         // The attack prompt tells the agent these are already run.
         let prompt = build_attack_prompt(&c, RUN, REL, 2, 60);
         assert!(
-            prompt.contains(&format!("- `{keyless}`: keyless deployment: exits 1")),
+            prompt.contains(&format!("- `{second}`: second setup: exits 1")),
             "{prompt}"
         );
         assert!(prompt.contains("You have 60 tool rounds"), "{prompt}");
@@ -2583,16 +2584,17 @@ mod tests {
     #[test]
     fn a_carried_reproduction_still_open_in_the_patched_copy_makes_the_fix_partial() {
         let mut case = Case::new(ORIGIN_PATCH);
-        let keyless = format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/keyless.sh");
+        let second =
+            format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/second_setup.sh");
         let mut other = case.confirmed.reproduction.clone();
-        other.command = keyless.clone();
-        other.expected = "keyless deployment: the write is accepted".into();
+        other.command = second.clone();
+        other.expected = "second setup: the write is accepted".into();
         case.confirmed.others.push(other);
         let layout = layout_for(&case.confirmed, RUN, REL);
         // The runner's own steps: the patch in, then the variant twice.
         case.add(layout.ensure_applied(), true, "");
-        case.add(layout.in_copy("baseline", &keyless), false, &shown());
-        case.add(layout.in_copy("patched", &keyless), false, &shown());
+        case.add(layout.in_copy("baseline", &second), false, &shown());
+        case.add(layout.in_copy("patched", &second), false, &shown());
         let out = case.judge();
         assert_eq!(out.verdict, Verdict::Rejected, "{:?}", out.reasons);
         assert_eq!(
@@ -2606,13 +2608,13 @@ mod tests {
         let partial = out.partial.expect("partial");
         assert_eq!(
             partial.open_paths[0].id,
-            "reproduction:sink-walk/keyless.sh"
+            "reproduction:sink-walk/second_setup.sh"
         );
         assert_eq!(
             partial.open_paths[0].path,
-            "keyless deployment: the write is accepted"
+            "second setup: the write is accepted"
         );
-        assert_eq!(partial.open_paths[0].command, keyless);
+        assert_eq!(partial.open_paths[0].command, second);
         assert!(
             out.reasons[0].starts_with("partial fix: "),
             "{:?}",
@@ -2628,7 +2630,7 @@ mod tests {
         // and its script switches the control off.
         let case = Case::new(ORIGIN_PATCH).with_variants(true);
         let run = case.tmp.path().join(REL).join("variants/v2/run.py");
-        std::fs::write(&run, "os.environ['APP_ENFORCE_AUTH'] = 'false'\n").unwrap();
+        std::fs::write(&run, "os.environ['APP_STRICT_MODE'] = 'false'\n").unwrap();
         let judged = |opt_outs: &[&str]| {
             let mut i = inputs(None);
             i.opt_outs =
@@ -2653,7 +2655,7 @@ mod tests {
         assert_eq!(out.verdict, Verdict::Rejected);
         assert!(out.open_by_configuration.is_empty());
         // Declared by the operator: recorded, and the arm does not fail.
-        let out = judged(&["APP_ENFORCE_AUTH'] = 'false'"]);
+        let out = judged(&["APP_STRICT_MODE'] = 'false'"]);
         assert_ne!(
             out.arms[1].state,
             ArmState::Fail,
@@ -2665,7 +2667,7 @@ mod tests {
         assert_eq!(out.open_by_configuration[0].id, "variants/v2/run.py");
         assert_eq!(
             out.open_by_configuration[0].setting,
-            "APP_ENFORCE_AUTH'] = 'false'"
+            "APP_STRICT_MODE'] = 'false'"
         );
         let v = serde_json::to_value(&out).unwrap();
         assert_eq!(v["variants"][1]["outcome"], "open_by_configuration");
@@ -2678,9 +2680,10 @@ mod tests {
     #[test]
     fn the_plan_is_the_runner_composed_commands_of_one_finding_and_no_others() {
         let mut c = confirmed_findings(&body()).remove(0);
-        let keyless = format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/keyless.sh");
+        let second =
+            format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/second_setup.sh");
         let mut other = c.reproduction.clone();
-        other.command = keyless.clone();
+        other.command = second.clone();
         c.others.push(other);
         let config = FunctionalityConfig {
             test_command: Some("make check".into()),
@@ -2698,8 +2701,8 @@ mod tests {
         for command in [
             layout.ensure_patched(REV),
             layout.ensure_applied(),
-            layout.in_copy("baseline", &keyless),
-            layout.in_copy("patched", &keyless),
+            layout.in_copy("baseline", &second),
+            layout.in_copy("patched", &second),
             layout.in_copy("baseline", "make check"),
             layout.in_copy("patched", "make check"),
             layout.in_copy("patched", "make cover"),
@@ -2729,8 +2732,8 @@ mod tests {
         assert!(!bare.iter().any(|x| x.contains("make ")));
     }
 
-    /// Two findings of one run with the same origin: the keyed and the
-    /// keyless side of one missing check.
+    /// Two findings of one run with the same origin: two sides of one
+    /// missing check.
     fn two_members() -> (Confirmed, Confirmed) {
         let finding = |id: &str, invariant: &str| {
             serde_json::json!({"stable_id": id, "invariant": invariant,
@@ -2748,13 +2751,13 @@ mod tests {
         let a = Confirmed {
             stable_id: "auth::src/a.rs:10".into(),
             finding: finding("auth::src/a.rs:10", "every request is checked"),
-            reproduction: record("auth::src/a.rs:10", "keyed.sh"),
-            others: vec![record("auth::src/a.rs:10", "keyed_other_service.sh")],
+            reproduction: record("auth::src/a.rs:10", "first_setup.sh"),
+            others: vec![record("auth::src/a.rs:10", "first_other_entry.sh")],
         };
         let b = Confirmed {
             stable_id: "auth::src/b.rs:20".into(),
             finding: finding("auth::src/b.rs:20", "no credential never means access"),
-            reproduction: record("auth::src/b.rs:20", "keyless.sh"),
+            reproduction: record("auth::src/b.rs:20", "second_setup.sh"),
             others: Vec::new(),
         };
         (a, b)
@@ -2986,7 +2989,7 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "reproduction:sink-walk/keyed_other_service.sh",
+                "reproduction:sink-walk/first_other_entry.sh",
                 "auth-src-a.rs-10/variants/other_shape/run.sh"
             ]
         );

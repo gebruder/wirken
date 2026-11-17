@@ -2510,7 +2510,7 @@ impl FixRunner {
 
 /// Defender mode's fix step. Per confirmed finding, three agents with
 /// fresh contexts: one writes the patch and runs the reproduction in
-/// three copies, one attacks the patch by other routes, one re-walks
+/// the baseline and the patched copy, one attacks the patch by other routes, one re-walks
 /// the code the patch reaches and runs the functionality checks.
 /// Between them the runner itself runs, through the same gate, the
 /// finding's other confirmed reproductions and any variant script an

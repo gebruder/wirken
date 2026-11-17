@@ -2634,8 +2634,8 @@ mod tests {
     #[test]
     fn another_confirmed_reproduction_is_a_variant_the_runner_ran() {
         let specs = [
-            carried_spec("sink-walk", "internal_keyless.sh"),
-            carried_spec("chain-walk", "internal_keyed.sh"),
+            carried_spec("sink-walk", "second_setup.sh"),
+            carried_spec("chain-walk", "first_setup.sh"),
         ];
         let l = Layout::for_commands(
             "r1",
@@ -2649,7 +2649,7 @@ mod tests {
         // The command runs in a copy from the harness the copy carries.
         assert!(r.0.iter().any(|o| o.command
             == format!(
-                "cd {} && sh .lyrik/state/runs/r1/staging/sink-walk/harness/internal_keyless.sh",
+                "cd {} && sh .lyrik/state/runs/r1/staging/sink-walk/harness/second_setup.sh",
                 l.copy("patched")
             )));
         let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2, &|_| None);
@@ -2671,7 +2671,7 @@ mod tests {
         let l = layout();
         let specs = [
             agent_spec("v1", "p1"),
-            carried_spec("sink-walk", "internal_keyless.sh"),
+            carried_spec("sink-walk", "second_setup.sh"),
         ];
         let l2 = Layout::for_commands(
             "r1",
@@ -2686,9 +2686,9 @@ mod tests {
         assert_eq!(arm.basis, Some(Basis::Executed));
         assert!(
             arm.reasons.iter().any(|x| x.contains(
-                "reproduction:sink-walk/internal_keyless.sh: shows the defect in the baseline and \
+                "reproduction:sink-walk/second_setup.sh: shows the defect in the baseline and \
                  still shows it in the patched copy; the patch leaves this path open: \
-                 internal_keyless.sh as sink-walk wrote it"
+                 second_setup.sh as sink-walk wrote it"
             )),
             "{:?}",
             arm.reasons
@@ -2821,16 +2821,16 @@ mod tests {
         variant_runs(&mut r, &l, &specs[1], true, true);
         let declared = |v: &VariantSpec| {
             v.id.contains("opted_out")
-                .then(|| "ENFORCE_AUTH=false".to_string())
+                .then(|| "STRICT_MODE=off".to_string())
         };
         let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 1, &declared);
         assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
         assert_eq!(results[1].outcome, "open_by_configuration");
-        assert_eq!(results[1].opt_out.as_deref(), Some("ENFORCE_AUTH=false"));
+        assert_eq!(results[1].opt_out.as_deref(), Some("STRICT_MODE=off"));
         assert!(
             arm.reasons
                 .iter()
-                .any(|x| x.contains("open by configuration: it sets `ENFORCE_AUTH=false`"))
+                .any(|x| x.contains("open by configuration: it sets `STRICT_MODE=off`"))
         );
         // It is not counted as held either: one held variant, not two.
         let (arm, _, _) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2, &declared);
@@ -2936,16 +2936,13 @@ mod tests {
         std::fs::create_dir_all(v.join("unrun")).unwrap();
         std::fs::write(v.join("unrun/run.py"), "x").unwrap();
         // A script under another name that the agent ran itself.
-        std::fs::create_dir_all(v.join("keyless_delete")).unwrap();
-        std::fs::write(v.join("keyless_delete/internal_keyless_delete.sh"), "x").unwrap();
+        std::fs::create_dir_all(v.join("other_shape")).unwrap();
+        std::fs::write(v.join("other_shape/other_shape_delete.sh"), "x").unwrap();
         // A helper that nothing ran, and a directory with no script.
         std::fs::create_dir_all(v.join("_lib")).unwrap();
         std::fs::write(v.join("_lib/common.sh"), "x").unwrap();
         let mut r = Runs::new();
-        let ran = format!(
-            "sh {}/variants/keyless_delete/internal_keyless_delete.sh",
-            l.dir
-        );
+        let ran = format!("sh {}/variants/other_shape/other_shape_delete.sh", l.dir);
         r.add(l.in_copy("baseline", &ran), false, &shown());
         // Outside variants/, and a path that climbs out: neither is read.
         r.add(
@@ -2975,7 +2972,7 @@ mod tests {
             [
                 "variants/other_caller/run.sh",
                 "variants/unrun/run.py",
-                "variants/keyless_delete/internal_keyless_delete.sh"
+                "variants/other_shape/other_shape_delete.sh"
             ]
         );
         assert_eq!(specs[0].path, "the second caller, rotate.sh");
