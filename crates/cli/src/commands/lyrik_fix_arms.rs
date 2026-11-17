@@ -27,7 +27,7 @@
 //! the arm is inconclusive and the claim is recorded on it. An arm
 //! fails only on an executed run.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -246,18 +246,31 @@ impl Layout {
     /// at the same relative path, and the command runs in a copy
     /// exactly as it ran in the target.
     pub fn for_reproduction(run_id: &str, rel_dir: &str, command: &str) -> Self {
+        Self::for_commands(run_id, rel_dir, [command])
+    }
+
+    /// The layout whose copies carry the harness directory of every
+    /// walk any of `commands` names: the reproduction's and each
+    /// carried variant's.
+    pub fn for_commands<'a>(
+        run_id: &str,
+        rel_dir: &str,
+        commands: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
         let mut layout = Self::new(run_id, rel_dir);
         let staging = layout.staging();
-        for piece in command.split(&format!("{staging}/")).skip(1) {
-            if let Some((walk, rest)) = piece.split_once('/')
-                && rest.starts_with("harness")
-                && !walk.is_empty()
-                && walk
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                && !layout.carried.iter().any(|w| w == walk)
-            {
-                layout.carried.push(walk.to_string());
+        for command in commands {
+            for piece in command.split(&format!("{staging}/")).skip(1) {
+                if let Some((walk, rest)) = piece.split_once('/')
+                    && rest.starts_with("harness")
+                    && !walk.is_empty()
+                    && walk
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && !layout.carried.iter().any(|w| w == walk)
+                {
+                    layout.carried.push(walk.to_string());
+                }
             }
         }
         layout
@@ -315,6 +328,34 @@ impl Layout {
             out.push_str(&part);
         }
         out
+    }
+
+    /// Make this finding's patched copy if it is not there. The runner
+    /// runs this before its own variants, so they do not depend on the
+    /// fix agent having reached its own extract step.
+    pub fn ensure_patched(&self, revision: &str) -> String {
+        let p = self.copy("patched");
+        format!(
+            "[ -d {p} ] || {{ mkdir -p {p} && git archive --format=tar {revision} | tar -x -C {p}; }}"
+        )
+    }
+
+    /// Put every carried harness directory into one copy. `None` when
+    /// no command names a harness.
+    pub fn carry_into(&self, side: &str) -> Option<String> {
+        let parts = self.carry(&self.copy(side));
+        (!parts.is_empty()).then(|| parts.join(" && "))
+    }
+
+    /// Leave the patched copy with the patch in, whatever state it is
+    /// in: the reverse dry run succeeds exactly when the patch is
+    /// applied, and otherwise the patch is applied.
+    pub fn ensure_applied(&self) -> String {
+        let (p, d) = (self.copy("patched"), &self.dir);
+        format!(
+            "git apply -R --check --directory={p} {d}/fix.patch 2>/dev/null || git apply \
+             --directory={p} {d}/fix.patch"
+        )
     }
 
     /// The path from a copy's root back to the target root.
@@ -582,6 +623,11 @@ pub struct ArmResult {
     /// maintainer to read. A claim here never fails the arm.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub model_claims: Vec<String>,
+    /// Set when the agent that feeds this arm was stopped at its tool
+    /// round limit before it finished: what the arm holds is what the
+    /// agent got done, and it says how many rounds that was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete: Option<String>,
 }
 
 impl ArmResult {
@@ -593,6 +639,12 @@ impl ArmResult {
             "an arm fails on executed evidence, not on a claim"
         );
         self.model_claims = claims;
+        self
+    }
+
+    /// The arm marked as resting on an agent that ran out of rounds.
+    pub fn incomplete(mut self, why: &str) -> Self {
+        self.incomplete = Some(why.to_string());
         self
     }
 
@@ -619,6 +671,7 @@ impl ArmResult {
             basis,
             reasons,
             model_claims: Vec::new(),
+            incomplete: None,
         }
     }
 }
@@ -639,14 +692,14 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// `attack.json`: the paths that reach the same sink or invariant, and
-/// a proof of concept for some of them.
+/// `attack.json`: the paths the variant agent says reach the same sink
+/// or invariant. Optional. It names paths nothing was run for; which
+/// variants exist and what they showed is read from the scripts and
+/// the log, never from here.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Attack {
     #[serde(default)]
     pub paths: Vec<AttackPath>,
-    #[serde(default)]
-    pub variants: Vec<Variant>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -659,17 +712,6 @@ pub struct AttackPath {
     pub location: String,
     #[serde(default)]
     pub description: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Variant {
-    pub id: String,
-    /// The `paths` entry it goes through.
-    pub path: String,
-    /// The proof of concept, relative to the fix directory.
-    pub poc: String,
-    /// The command, as run from inside a copy.
-    pub command: String,
 }
 
 /// A path with no variant that held, listed and never assumed safe.
@@ -744,6 +786,136 @@ pub struct ClassSite {
     pub quote: String,
     #[serde(default)]
     pub guarded: bool,
+}
+
+/// Where a variant came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VariantSource {
+    /// Another confirmed reproduction of the same finding: another
+    /// deployment, another caller. Listed by the runner before any
+    /// agent ran and run by the runner.
+    Reproduction,
+    /// A proof of concept the variant agent wrote under `variants/`.
+    Agent,
+}
+
+/// One variant the arm reads. It exists because a script exists and
+/// ran, not because an agent listed it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VariantSpec {
+    pub id: String,
+    pub source: VariantSource,
+    /// What route it takes, in the words of whoever wrote it.
+    pub path: String,
+    /// The command as run from the project root. In a copy it runs as
+    /// [`Layout::in_copy`] makes it.
+    pub command: String,
+}
+
+/// What the runs of one variant showed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VariantResult {
+    pub id: String,
+    pub source: VariantSource,
+    pub path: String,
+    pub command: String,
+    /// `shown`, `not_shown`, or why neither can be said.
+    pub baseline: String,
+    pub patched: String,
+    /// `held`: shown in the baseline, not in the patched copy. `open`:
+    /// shown in both, the patch does not cover this path. `introduced`:
+    /// shown in the patched copy only. `not_a_variant`: not shown in
+    /// the baseline. `inconclusive` otherwise.
+    pub outcome: &'static str,
+}
+
+fn poc_word(p: &Poc) -> String {
+    match p {
+        Poc::Shown => "shown".into(),
+        Poc::NotShown => "not_shown".into(),
+        Poc::Inconclusive(why) | Poc::NotRun(why) => why.clone(),
+    }
+}
+
+/// The agent-written variants under `fix_dir`: every `variants/<id>/`
+/// holding a `run.sh` or `run.py`, and every script under `variants/`
+/// the log shows run in the baseline copy. A variant is registered by
+/// its script being there or having run; no list is read.
+pub fn registered_variants(
+    fix_dir: &Path,
+    layout: &Layout,
+    observed: &[Observed],
+) -> Vec<VariantSpec> {
+    let mut out: Vec<VariantSpec> = Vec::new();
+    let describe = |id_dir: &Path, fallback: &str| {
+        std::fs::read_to_string(id_dir.join("path.txt"))
+            .ok()
+            .and_then(|t| {
+                t.lines()
+                    .next()
+                    .map(|l| l.trim().chars().take(240).collect::<String>())
+            })
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    let mut names: Vec<String> = std::fs::read_dir(fix_dir.join("variants"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    for name in names {
+        let dir = fix_dir.join("variants").join(&name);
+        for (file, interpreter) in [("run.sh", "sh"), ("run.py", "python3")] {
+            if dir.join(file).is_file() {
+                out.push(VariantSpec {
+                    id: format!("variants/{name}/{file}"),
+                    source: VariantSource::Agent,
+                    path: describe(&dir, &name),
+                    command: format!("{interpreter} {}/variants/{name}/{file}", layout.dir),
+                });
+                break;
+            }
+        }
+    }
+    let prefix = format!("cd {} && ", layout.copy("baseline"));
+    let under = format!("{}{}/variants/", layout.up(), layout.dir);
+    for o in observed {
+        let Some(rest) = o.command.trim().strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((interpreter, script)) = rest.split_once(' ') else {
+            continue;
+        };
+        let Some(rel) = script.strip_prefix(&under) else {
+            continue;
+        };
+        if !matches!(interpreter, "sh" | "bash" | "python3")
+            || rel.split('/').any(|c| c.is_empty() || c == "..")
+            || rel.contains(char::is_whitespace)
+            || !fix_dir.join("variants").join(rel).is_file()
+        {
+            continue;
+        }
+        let command = format!("{interpreter} {}/variants/{rel}", layout.dir);
+        if out.iter().any(|v| v.command == command) {
+            continue;
+        }
+        let id_dir = fix_dir
+            .join("variants")
+            .join(rel.split('/').next().unwrap_or_default());
+        out.push(VariantSpec {
+            id: format!("variants/{rel}"),
+            source: VariantSource::Agent,
+            path: describe(&id_dir, rel),
+            command,
+        });
+    }
+    out
 }
 
 /// What the reproduction arm leaves for the arms after it.
@@ -915,7 +1087,16 @@ pub fn reproduction_arm(log: &Log, layout: &Layout, command: &str, revision: &st
         baseline: b,
         patched: p,
         baseline_output,
-        left_reverted: revert.is_some() && applies.last().is_none_or(|a| Some(*a) < revert),
+        left_reverted: {
+            // The patch went back in through the apply or through the
+            // runner's own ensure step.
+            let back_in = applies
+                .iter()
+                .chain(successes(log, &layout.ensure_applied()).iter())
+                .max()
+                .copied();
+            revert.is_some() && back_in < revert
+        },
     }
 }
 
@@ -923,124 +1104,180 @@ fn names_a_copy(command: &str) -> bool {
     SIDE_WORDS.iter().any(|s| command.contains(s))
 }
 
+/// Whether the patch was in the patched copy when the run at `seq`
+/// started: the last of the apply, the runner's ensure and the revert
+/// before it put the patch in.
+fn patch_in_at(log: &Log, layout: &Layout, seq: usize) -> bool {
+    let last = |command: &str| {
+        successes(log, command)
+            .into_iter()
+            .filter(|s| *s < seq)
+            .max()
+    };
+    let put_in = last(&layout.apply()).max(last(&layout.ensure_applied()));
+    put_in.is_some() && put_in > last(&layout.revert())
+}
+
+/// What `command` showed in the patched copy with the patch in.
+fn patched_poc(log: &Log, layout: &Layout, command: &str) -> Poc {
+    let runs = log.runs(command);
+    if runs.is_empty() {
+        return poc(&log.run(command));
+    }
+    let with_patch: Vec<&&Observed> = runs
+        .iter()
+        .filter(|o| patch_in_at(log, layout, o.seq))
+        .collect();
+    let Some(first) = with_patch.first() else {
+        return Poc::Inconclusive("it ran only while the patch was out of the copy".into());
+    };
+    if with_patch.iter().any(|o| o.success != first.success) {
+        return Poc::Inconclusive("its runs disagree".into());
+    }
+    poc(&as_run(first))
+}
+
 /// The variant arm: other routes to the same sink or invariant, each
-/// with its own proof of concept. A variant counts when it shows the
-/// defect in the baseline and not in the patched copy. One that shows
-/// it in the patched copy fails the arm: the fix is partial.
+/// with its own proof of concept. `specs` is every variant on record:
+/// the finding's other confirmed reproductions and the scripts under
+/// `variants/`. Each is read from the log alone. A variant holds when
+/// it shows the defect in the baseline and not in the patched copy.
+/// One that shows it in both fails the arm: the fix is partial, and
+/// the path is named. `attack` is the variant agent's own list of
+/// paths, when it wrote one; it adds the paths nothing was run for and
+/// nothing else.
 pub fn variant_arm(
     log: &Log,
     layout: &Layout,
+    specs: &[VariantSpec],
     attack: Result<Option<Attack>, String>,
     reproduction_command: &str,
     minimum: usize,
-    fix_dir: &Path,
-) -> (ArmResult, Vec<UntestedPath>) {
-    let attack = match attack {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            return (
-                ArmResult::new(
-                    "variant",
-                    ArmState::NotRun,
-                    None,
-                    vec!["no attack.json: no variant was attempted".into()],
-                ),
-                Vec::new(),
-            );
-        }
-        Err(e) => {
-            return (
-                ArmResult::new("variant", ArmState::Inconclusive, None, vec![e]),
-                Vec::new(),
-            );
-        }
-    };
+) -> (ArmResult, Vec<UntestedPath>, Vec<VariantResult>) {
     let mut reasons = Vec::new();
     let mut failed = false;
     let mut ran_any = false;
-    let mut held: BTreeSet<String> = BTreeSet::new();
-    let mut why_not: BTreeMap<String, String> = BTreeMap::new();
-    for v in &attack.variants {
-        let mut skip = |why: String, reasons: &mut Vec<String>| {
-            reasons.push(format!("variant {}: {why}", v.id));
-            why_not.insert(v.path.clone(), why);
+    let mut held: Vec<&VariantSpec> = Vec::new();
+    let mut results = Vec::with_capacity(specs.len());
+    for v in specs {
+        let result = |baseline: &Poc, patched: &Poc, outcome: &'static str| VariantResult {
+            id: v.id.clone(),
+            source: v.source,
+            path: v.path.clone(),
+            command: v.command.clone(),
+            baseline: poc_word(baseline),
+            patched: poc_word(patched),
+            outcome,
         };
-        if names_a_copy(&v.command) {
-            skip("its command names a copy".into(), &mut reasons);
+        let unread = Poc::NotRun("not read".into());
+        if v.source == VariantSource::Agent && names_a_copy(&v.command.replace(&layout.dir, "")) {
+            reasons.push(format!("variant {}: its command names a copy", v.id));
+            results.push(result(&unread, &unread, "inconclusive"));
             continue;
         }
         if layout.rebase(&v.command).trim() == layout.rebase(reproduction_command).trim() {
-            skip("it is the original reproduction".into(), &mut reasons);
-            continue;
-        }
-        if !fix_dir.join(&v.poc).is_file() {
-            skip(
-                format!("its proof of concept {} is missing", v.poc),
-                &mut reasons,
-            );
+            reasons.push(format!("variant {}: it is the original reproduction", v.id));
+            results.push(result(&unread, &unread, "inconclusive"));
             continue;
         }
         let base = poc(&log.run(&layout.in_copy("baseline", &v.command)));
-        let patched = poc(&log.run(&layout.in_copy("patched", &v.command)));
+        let patched = patched_poc(log, layout, &layout.in_copy("patched", &v.command));
         ran_any |= [&base, &patched]
             .iter()
             .any(|o| !matches!(o, Poc::NotRun(_)));
-        match (&base, &patched) {
+        let outcome = match (&base, &patched) {
+            (Poc::Shown, Poc::Shown) => {
+                failed = true;
+                reasons.push(format!(
+                    "variant {}: shows the defect in the baseline and still shows it in the \
+                     patched copy; the patch leaves this path open: {}",
+                    v.id, v.path
+                ));
+                "open"
+            }
             (_, Poc::Shown) => {
                 failed = true;
-                let also = if base == Poc::Shown {
-                    ""
-                } else {
-                    ", and not in the baseline"
-                };
-                skip(
-                    format!(
-                        "shows the defect in the patched copy through path {}{also}",
-                        v.path
-                    ),
-                    &mut reasons,
-                );
+                reasons.push(format!(
+                    "variant {}: shows the defect in the patched copy and not in the baseline",
+                    v.id
+                ));
+                "introduced"
             }
             (Poc::Shown, Poc::NotShown) => {
-                held.insert(v.path.clone());
+                held.push(v);
+                "held"
             }
-            (Poc::NotShown, _) => skip(
-                "does not show the defect in the baseline, so it is not a variant".into(),
-                &mut reasons,
-            ),
+            (Poc::NotShown, _) => {
+                reasons.push(format!(
+                    "variant {}: does not show the defect in the baseline, so it is not a variant",
+                    v.id
+                ));
+                "not_a_variant"
+            }
             (Poc::Inconclusive(w) | Poc::NotRun(w), _) => {
-                skip(format!("in the baseline copy: {w}"), &mut reasons)
+                reasons.push(format!("variant {}: in the baseline copy: {w}", v.id));
+                "inconclusive"
             }
             (Poc::Shown, Poc::Inconclusive(w) | Poc::NotRun(w)) => {
-                skip(format!("in the patched copy: {w}"), &mut reasons)
+                reasons.push(format!("variant {}: in the patched copy: {w}", v.id));
+                "inconclusive"
             }
-        }
+        };
+        results.push(result(&base, &patched, outcome));
     }
+    // The agent's list of paths names what nothing was run for. A list
+    // that does not parse costs the list, not the runs.
+    let attack = match attack {
+        Ok(a) => a.unwrap_or_default(),
+        Err(e) => {
+            reasons.push(format!("{e}; its list of paths is not read"));
+            Attack::default()
+        }
+    };
     let untested: Vec<UntestedPath> = attack
         .paths
         .iter()
-        .filter(|p| !held.contains(&p.id))
+        .filter(|p| !held.iter().any(|v| v.path == p.id || v.id.contains(&p.id)))
         .map(|p| UntestedPath {
             id: p.id.clone(),
             route: p.route.clone(),
             location: p.location.clone(),
             description: p.description.clone(),
-            reason: why_not
-                .get(&p.id)
-                .cloned()
-                .unwrap_or_else(|| "no proof of concept was attempted".into()),
+            reason: "no variant recorded for it held".into(),
         })
         .collect();
     let state = if failed {
         ArmState::Fail
     } else if held.len() >= minimum {
+        let carried = held
+            .iter()
+            .filter(|v| v.source == VariantSource::Reproduction)
+            .count();
+        reasons.push(format!(
+            "{} variant(s) held: {carried} other confirmed reproduction(s) of the finding and \
+             {} written by the variant agent. That they take different paths is their \
+             authors' claim; the runner does not check it",
+            held.len(),
+            held.len() - carried
+        ));
         ArmState::Pass
+    } else if specs.is_empty() {
+        reasons.push(
+            "no variant: the finding has no other confirmed reproduction and no script was \
+             written under variants/"
+                .into(),
+        );
+        ArmState::NotRun
     } else {
         reasons.push(format!(
-            "{} variant(s) by different paths held; {minimum} are required",
+            "{} variant(s) held; {minimum} are required",
             held.len()
         ));
-        ArmState::Inconclusive
+        if ran_any {
+            ArmState::Inconclusive
+        } else {
+            ArmState::NotRun
+        }
     };
     if state == ArmState::Pass && !untested.is_empty() {
         reasons.push(format!(
@@ -1048,12 +1285,12 @@ pub fn variant_arm(
             untested.len()
         ));
     }
-    let basis = if ran_any || state == ArmState::Pass {
-        Some(Basis::Executed)
-    } else {
-        None
-    };
-    (ArmResult::new("variant", state, basis, reasons), untested)
+    let basis = (ran_any || state == ArmState::Pass).then_some(Basis::Executed);
+    (
+        ArmResult::new("variant", state, basis, reasons),
+        untested,
+        results,
+    )
 }
 
 /// A `{file, line_start}` site on a finding.
@@ -2061,7 +2298,7 @@ mod tests {
         assert_eq!(repro(&Runs::new()).arm.state, ArmState::NotRun);
     }
 
-    fn attack(paths: &[&str], variants: &[(&str, &str)]) -> Attack {
+    fn attack(paths: &[&str]) -> Attack {
         Attack {
             paths: paths
                 .iter()
@@ -2072,121 +2309,189 @@ mod tests {
                     description: String::new(),
                 })
                 .collect(),
-            variants: variants
-                .iter()
-                .map(|(id, path)| Variant {
-                    id: id.to_string(),
-                    path: path.to_string(),
-                    poc: format!("variants/{id}.py"),
-                    command: format!("python3 ../variants/{id}.py"),
-                })
-                .collect(),
         }
     }
 
-    fn variant_runs(r: &mut Runs, id: &str, base_shown: bool, patched_shown: bool) {
-        let l = layout();
-        let cmd = format!("python3 ../variants/{id}.py");
+    /// An agent-written variant `variants/<id>/run.py`, whose path is `path`.
+    fn agent_spec(id: &str, path: &str) -> VariantSpec {
+        VariantSpec {
+            id: format!("variants/{id}/run.py"),
+            source: VariantSource::Agent,
+            path: path.to_string(),
+            command: format!("python3 {}/variants/{id}/run.py", layout().dir),
+        }
+    }
+
+    /// Another confirmed reproduction of the finding, from `walk`.
+    fn carried_spec(walk: &str, file: &str) -> VariantSpec {
+        VariantSpec {
+            id: format!("reproduction:{walk}/{file}"),
+            source: VariantSource::Reproduction,
+            path: format!("{file} as {walk} wrote it"),
+            command: format!("sh .lyrik/state/runs/r1/staging/{walk}/harness/{file}"),
+        }
+    }
+
+    /// The patch put in, then both runs of a variant.
+    fn variant_runs(
+        r: &mut Runs,
+        l: &Layout,
+        v: &VariantSpec,
+        base_shown: bool,
+        patched_shown: bool,
+    ) {
         let out = |s: bool| if s { shown() } else { clean() };
-        r.add(l.in_copy("baseline", &cmd), !base_shown, &out(base_shown));
+        if r.0.iter().all(|o| o.command != l.ensure_applied()) {
+            r.add(l.ensure_applied(), true, "");
+        }
         r.add(
-            l.in_copy("patched", &cmd),
+            l.in_copy("baseline", &v.command),
+            !base_shown,
+            &out(base_shown),
+        );
+        r.add(
+            l.in_copy("patched", &v.command),
             !patched_shown,
             &out(patched_shown),
         );
     }
 
-    fn fix_dir_with(variants: &[&str]) -> tempfile::TempDir {
-        let tmp = tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("variants")).unwrap();
-        for v in variants {
-            std::fs::write(tmp.path().join(format!("variants/{v}.py")), "x").unwrap();
-        }
-        tmp
-    }
-
     #[test]
-    fn the_variant_arm_passes_on_two_routes_and_lists_the_untested_path() {
-        let dir = fix_dir_with(&["v1", "v2"]);
+    fn the_variant_arm_passes_on_observed_runs_with_no_list_from_an_agent() {
+        let l = layout();
+        let specs = [agent_spec("v1", "p1"), agent_spec("v2", "p2")];
         let mut r = Runs::new();
-        variant_runs(&mut r, "v1", true, false);
-        variant_runs(&mut r, "v2", true, false);
-        let a = attack(&["p1", "p2", "p3"], &[("v1", "p1"), ("v2", "p2")]);
-        let (arm, untested) = variant_arm(&Log(&r.0), &layout(), Ok(Some(a)), REPRO, 2, dir.path());
+        variant_runs(&mut r, &l, &specs[0], true, false);
+        variant_runs(&mut r, &l, &specs[1], true, false);
+        // No attack.json at all: the runs alone carry the arm.
+        let (arm, untested, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2);
         assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
+        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert!(untested.is_empty());
+        assert_eq!(
+            results.iter().map(|v| v.outcome).collect::<Vec<_>>(),
+            ["held", "held"]
+        );
+        // With the agent's list of paths, the one nothing ran for is listed.
+        let a = attack(&["p1", "p2", "p3"]);
+        let (arm, untested, _) = variant_arm(&Log(&r.0), &l, &specs, Ok(Some(a)), REPRO, 2);
+        assert_eq!(arm.state, ArmState::Pass);
         assert_eq!(untested.len(), 1);
         assert_eq!(untested[0].id, "p3");
-        assert_eq!(untested[0].reason, "no proof of concept was attempted");
+        // A list that does not parse costs the list, not the runs.
+        let (arm, _, _) = variant_arm(
+            &Log(&r.0),
+            &l,
+            &specs,
+            Err("attack.json does not parse".into()),
+            REPRO,
+            2,
+        );
+        assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
     }
 
     #[test]
-    fn a_variant_that_works_on_the_patched_code_rejects_the_fix_as_partial() {
-        let dir = fix_dir_with(&["v1", "v2"]);
+    fn another_confirmed_reproduction_is_a_variant_the_runner_ran() {
+        let specs = [
+            carried_spec("sink-walk", "internal_keyless.sh"),
+            carried_spec("chain-walk", "internal_keyed.sh"),
+        ];
+        let l = Layout::for_commands(
+            "r1",
+            "staging/fix/f1",
+            specs.iter().map(|v| v.command.as_str()),
+        );
+        assert_eq!(l.carried, ["sink-walk", "chain-walk"]);
         let mut r = Runs::new();
-        variant_runs(&mut r, "v1", true, false);
-        variant_runs(&mut r, "v2", true, true);
-        let a = attack(&["p1", "p2"], &[("v1", "p1"), ("v2", "p2")]);
-        let (arm, untested) = variant_arm(&Log(&r.0), &layout(), Ok(Some(a)), REPRO, 2, dir.path());
-        assert_eq!(arm.state, ArmState::Fail);
+        variant_runs(&mut r, &l, &specs[0], true, false);
+        variant_runs(&mut r, &l, &specs[1], true, false);
+        // The command runs in a copy from the harness the copy carries.
+        assert!(r.0.iter().any(|o| o.command
+            == format!(
+                "cd {} && sh .lyrik/state/runs/r1/staging/sink-walk/harness/internal_keyless.sh",
+                l.copy("patched")
+            )));
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2);
+        assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
+        assert!(
+            results
+                .iter()
+                .all(|v| v.source == VariantSource::Reproduction)
+        );
         assert!(
             arm.reasons
                 .iter()
-                .any(|x| x.contains("variant v2: shows the defect in the patched copy")),
-            "{:?}",
-            arm.reasons
+                .any(|x| x.starts_with("2 variant(s) held: 2 other confirmed"))
         );
-        assert_eq!(untested.len(), 1);
-        assert_eq!(untested[0].id, "p2");
     }
 
     #[test]
-    fn a_variant_counts_only_when_it_holds_by_a_different_route() {
-        let dir = fix_dir_with(&["v1", "v2", "v3", "v5"]);
+    fn a_variant_shown_in_the_baseline_and_in_the_patched_copy_fails_the_arm_and_names_the_path() {
         let l = layout();
+        let specs = [
+            agent_spec("v1", "p1"),
+            carried_spec("sink-walk", "internal_keyless.sh"),
+        ];
+        let l2 = Layout::for_commands(
+            "r1",
+            "staging/fix/f1",
+            specs.iter().map(|v| v.command.as_str()),
+        );
         let mut r = Runs::new();
-        variant_runs(&mut r, "v1", true, false);
+        variant_runs(&mut r, &l2, &specs[0], true, false);
+        variant_runs(&mut r, &l2, &specs[1], true, true);
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l2, &specs, Ok(None), REPRO, 1);
+        assert_eq!(arm.state, ArmState::Fail);
+        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert!(
+            arm.reasons.iter().any(|x| x.contains(
+                "reproduction:sink-walk/internal_keyless.sh: shows the defect in the baseline and \
+                 still shows it in the patched copy; the patch leaves this path open: \
+                 internal_keyless.sh as sink-walk wrote it"
+            )),
+            "{:?}",
+            arm.reasons
+        );
+        assert_eq!(results[1].outcome, "open");
+        assert_eq!(
+            (results[1].baseline.as_str(), results[1].patched.as_str()),
+            ("shown", "shown")
+        );
+        // Shown in the patched copy only: the arm fails, and it is not "open".
+        let mut r = Runs::new();
+        variant_runs(&mut r, &l, &specs[0], false, true);
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1);
+        assert_eq!(arm.state, ArmState::Fail);
+        assert_eq!(results[0].outcome, "introduced");
+    }
+
+    #[test]
+    fn a_variant_counts_only_on_runs_that_saw_the_patch() {
+        let l = layout();
+        let specs = [
+            agent_spec("v1", "p1"),
+            agent_spec("v2", "p2"),
+            agent_spec("v3", "p3"),
+            agent_spec("v4", "p4"),
+        ];
+        let mut r = Runs::new();
+        variant_runs(&mut r, &l, &specs[0], true, false);
         // v2 never showed the defect in the baseline: not a variant.
-        variant_runs(&mut r, "v2", false, false);
-        // v3 goes through the path v1 already covers.
-        variant_runs(&mut r, "v3", true, false);
-        // v4 has no file. v5's baseline build broke.
+        variant_runs(&mut r, &l, &specs[1], false, false);
+        // v3's baseline harness broke. v4 ran in the baseline only.
         r.add(
-            l.in_copy("baseline", "python3 ../variants/v5.py"),
+            l.in_copy("baseline", &specs[2].command),
             false,
             "ModuleNotFoundError",
         );
-        let mut a = attack(
-            &["p1", "p2", "p4", "p5"],
-            &[
-                ("v1", "p1"),
-                ("v2", "p2"),
-                ("v3", "p1"),
-                ("v4", "p4"),
-                ("v5", "p5"),
-            ],
-        );
-        // A command that names a copy, and the original reproduction again.
-        a.variants.push(Variant {
-            id: "v6".into(),
-            path: "p6".into(),
-            poc: "variants/v1.py".into(),
-            command: "python3 ../patched/x.py".into(),
-        });
-        a.variants.push(Variant {
-            id: "v7".into(),
-            path: "p7".into(),
-            poc: "variants/v1.py".into(),
-            command: REPRO.into(),
-        });
-        let (arm, untested) = variant_arm(&Log(&r.0), &l, Ok(Some(a)), REPRO, 2, dir.path());
+        r.add(l.in_copy("baseline", &specs[3].command), false, &shown());
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2);
         assert_eq!(arm.state, ArmState::Inconclusive, "{:?}", arm.reasons);
         for want in [
-            "variant v2: does not show the defect in the baseline, so it is not a variant",
-            "variant v4: its proof of concept variants/v4.py is missing",
-            "variant v5: in the baseline copy: no LYRIK_REACHED line",
-            "variant v6: its command names a copy",
-            "variant v7: it is the original reproduction",
-            "1 variant(s) by different paths held; 2 are required",
+            "variant variants/v2/run.py: does not show the defect in the baseline, so it is not a variant",
+            "variant variants/v3/run.py: in the baseline copy: no LYRIK_REACHED line",
+            "variant variants/v4/run.py: in the patched copy: not run",
+            "1 variant(s) held; 2 are required",
         ] {
             assert!(
                 arm.reasons.iter().any(|x| x.starts_with(want)),
@@ -2194,25 +2499,133 @@ mod tests {
                 arm.reasons
             );
         }
-        let ids: Vec<&str> = untested.iter().map(|u| u.id.as_str()).collect();
-        assert_eq!(ids, ["p2", "p4", "p5"]);
+        assert_eq!(
+            results.iter().map(|v| v.outcome).collect::<Vec<_>>(),
+            ["held", "not_a_variant", "inconclusive", "inconclusive"]
+        );
+        // A patched run made while the patch was out says nothing.
+        let mut r = Runs::new();
+        r.add(l.apply(), true, "");
+        r.add(l.revert(), true, "");
+        r.add(l.in_copy("baseline", &specs[0].command), false, &shown());
+        r.add(l.in_copy("patched", &specs[0].command), false, &shown());
+        let (arm, _, results) = variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1);
+        assert_eq!(arm.state, ArmState::Inconclusive, "{:?}", arm.reasons);
+        assert_eq!(
+            results[0].patched,
+            "it ran only while the patch was out of the copy"
+        );
+        // The same two runs after the runner put the patch back count.
+        r.add(l.ensure_applied(), true, "");
+        r.add(l.in_copy("patched", &specs[0].command), true, &clean());
+        let (arm, _, _) = variant_arm(&Log(&r.0), &l, &specs[..1], Ok(None), REPRO, 1);
+        assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
+        // A command that names a copy, and the original reproduction again.
+        let mut copy_named = agent_spec("v5", "p5");
+        copy_named.command = "python3 ../patched/x.py".into();
+        let mut original = agent_spec("v6", "p6");
+        original.command = REPRO.into();
+        let (arm, _, _) = variant_arm(&Log(&[]), &l, &[copy_named, original], Ok(None), REPRO, 2);
+        assert_eq!(arm.state, ArmState::NotRun);
+        assert!(
+            arm.reasons
+                .iter()
+                .any(|x| x.ends_with("its command names a copy"))
+        );
+        assert!(
+            arm.reasons
+                .iter()
+                .any(|x| x.ends_with("it is the original reproduction"))
+        );
         // Two held variants do not meet a cross-cutting patch's four.
         let mut r = Runs::new();
-        variant_runs(&mut r, "v1", true, false);
-        variant_runs(&mut r, "v2", true, false);
-        let a = attack(&["p1", "p2"], &[("v1", "p1"), ("v2", "p2")]);
-        let (arm, _) = variant_arm(
+        variant_runs(&mut r, &l, &specs[0], true, false);
+        variant_runs(&mut r, &l, &specs[1], true, false);
+        let (arm, _, _) = variant_arm(
             &Log(&r.0),
             &l,
-            Ok(Some(a)),
+            &specs[..2],
+            Ok(None),
             REPRO,
             VARIANT_MIN_CROSS_CUTTING,
-            dir.path(),
         );
         assert_eq!(arm.state, ArmState::Inconclusive);
-        // No attack file: not run.
-        let (arm, _) = variant_arm(&Log(&[]), &l, Ok(None), REPRO, 2, dir.path());
+        // No variant on record at all: not run.
+        let (arm, _, results) = variant_arm(&Log(&[]), &l, &[], Ok(None), REPRO, 2);
         assert_eq!(arm.state, ArmState::NotRun);
+        assert_eq!(arm.basis, None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn a_variant_is_registered_by_its_script_not_by_a_list() {
+        let l = layout();
+        let tmp = tempdir().unwrap();
+        let v = tmp.path().join("variants");
+        std::fs::create_dir_all(v.join("other_caller")).unwrap();
+        std::fs::write(v.join("other_caller/run.sh"), "x").unwrap();
+        std::fs::write(
+            v.join("other_caller/path.txt"),
+            "the second caller, rotate.sh\nmore\n",
+        )
+        .unwrap();
+        // Written and never run, and with no path.txt.
+        std::fs::create_dir_all(v.join("unrun")).unwrap();
+        std::fs::write(v.join("unrun/run.py"), "x").unwrap();
+        // A script under another name that the agent ran itself.
+        std::fs::create_dir_all(v.join("keyless_delete")).unwrap();
+        std::fs::write(v.join("keyless_delete/internal_keyless_delete.sh"), "x").unwrap();
+        // A helper that nothing ran, and a directory with no script.
+        std::fs::create_dir_all(v.join("_lib")).unwrap();
+        std::fs::write(v.join("_lib/common.sh"), "x").unwrap();
+        let mut r = Runs::new();
+        let ran = format!(
+            "sh {}/variants/keyless_delete/internal_keyless_delete.sh",
+            l.dir
+        );
+        r.add(l.in_copy("baseline", &ran), false, &shown());
+        // Outside variants/, and a path that climbs out: neither is read.
+        r.add(
+            format!(
+                "cd {} && sh {}{}/variants/../fix.patch",
+                l.copy("baseline"),
+                l.up(),
+                l.dir
+            ),
+            true,
+            "",
+        );
+        r.add(
+            format!(
+                "cd {} && sh {}{}/relocation/x.sh",
+                l.copy("baseline"),
+                l.up(),
+                l.dir
+            ),
+            true,
+            "",
+        );
+        let specs = registered_variants(tmp.path(), &l, &r.0);
+        let ids: Vec<&str> = specs.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "variants/other_caller/run.sh",
+                "variants/unrun/run.py",
+                "variants/keyless_delete/internal_keyless_delete.sh"
+            ]
+        );
+        assert_eq!(specs[0].path, "the second caller, rotate.sh");
+        assert_eq!(specs[1].path, "unrun");
+        assert_eq!(
+            specs[1].command,
+            format!("python3 {}/variants/unrun/run.py", l.dir)
+        );
+        assert_eq!(specs[2].command, ran);
+        // The command the runner composes for a copy is the one the agent ran.
+        assert_eq!(l.in_copy("baseline", &specs[2].command), r.0[0].command);
+        // No variants directory: nothing registered.
+        assert!(registered_variants(&tmp.path().join("none"), &l, &[]).is_empty());
     }
 
     const SINK_PATCH: &str = "--- a/src/parse.rs\n+++ b/src/parse.rs\n\

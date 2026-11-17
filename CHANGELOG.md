@@ -76,6 +76,57 @@ tagged.
   `crates/cli/src/commands/mod.rs`;
   [docs/sandbox-properties.md](docs/sandbox-properties.md)).
 
+- The `llm_response` row carries `stop_reason`, the provider's own account of
+  why the reply ended: `end_turn`, `tool_use`, `max_tokens`, `refusal`,
+  `stop_sequence` or `other`, read from Anthropic, OpenAI-compatible, Gemini,
+  Bedrock and Ollama replies. Optional and additive: absent where the
+  provider reports none and on existing rows. A tool call at the end of a
+  reply cut off at the output token limit does not run on the arguments that
+  arrived; its result row says `truncated` and names the limit
+  (`a_tool_call_cut_off_at_the_output_limit_is_recorded_as_truncated_and_does_not_run`,
+  `a_refusal_is_on_the_row_as_a_refusal`,
+  `every_provider_shape_is_read_into_one_vocabulary`,
+  `crates/agent/src/tests.rs`; [docs/cost-monitoring.md](docs/cost-monitoring.md)).
+
+- Lyrik's variant arm reads variants from the runs on the session log. Every
+  other confirmed reproduction of a finding is a variant the runner runs
+  itself, in the baseline and the patched copy, through the same gated
+  `exec`; a script the variant agent writes under `variants/<id>/` is on
+  record from the moment it exists, and the runner runs any the agent did not.
+  No list written by an agent is needed. A variant shown in the baseline and
+  still shown in the patched copy fails the arm, and the fix record carries
+  `partial` with the open paths. The record lists every variant and what its
+  runs showed under `variants`
+  (`a_carried_reproduction_still_open_in_the_patched_copy_makes_the_fix_partial`,
+  `the_other_confirmed_reproductions_are_variants_fixed_before_any_agent_runs`,
+  `crates/cli/src/commands/lyrik_fix.rs`;
+  `a_variant_is_registered_by_its_script_not_by_a_list`,
+  `a_variant_counts_only_on_runs_that_saw_the_patch`,
+  `crates/cli/src/commands/lyrik_fix_arms.rs`;
+  [docs/lyrik.md](docs/lyrik.md#defender-fix-step)).
+
+- The agents of Lyrik's defender fix step get 60 tool rounds each, and the
+  operator sets another number as `fix_tool_rounds` in the data directory's
+  `lyrik.json`. An agent stopped at its limit is recorded as `incomplete`
+  with the count on its `lyrik.fix.completed` row, under `agents` on the fix
+  record, and on each arm it feeds
+  (`an_agent_stopped_at_its_round_limit_is_on_the_arm_it_feeds_with_the_count`,
+  `crates/cli/src/commands/lyrik_fix.rs`;
+  `fix_tool_rounds_come_from_the_data_directory_only`,
+  `crates/cli/src/commands/lyrik_walks.rs`;
+  `a_turn_stopped_at_its_round_limit_says_so_with_the_count`,
+  `crates/agent/src/tests.rs`).
+
+- A Lyrik fix record carries `target_tree`: whether the target's tracked
+  files changed during the run, read from a digest of them at run start and
+  after the fix step. It needs no comparison with HEAD, so it works on a
+  modified tree and under any git attribute. `unknown` is stated with its
+  reason and makes the verdict `inconclusive`
+  (`an_unknown_tree_state_is_on_the_record_and_is_not_a_candidate`,
+  `crates/cli/src/commands/lyrik_fix.rs`;
+  `tree_fingerprint_tells_whether_tracked_files_changed`,
+  `crates/cli/src/commands/lyrik_git.rs`).
+
 - A Lyrik model pin may set `max_tokens`, the output tokens allowed per
   reply. Absent, the limit is 4096 as before, which cuts off a fix agent's
   patch when the patch and the reasoning before it do not fit in one reply.
@@ -84,6 +135,31 @@ tagged.
   `crates/cli/src/commands/lyrik.rs`).
 
 ### Changed
+
+- Anthropic requests mark the end of the conversation as a prompt-cache
+  breakpoint, beside the system prompt and the tool definitions. Each call of
+  a tool loop reads the earlier rounds from the cache; before, only the
+  system prompt and tools were cached and the conversation was sent as fresh
+  input on every round. The input cost on an `llm_response` row now prices
+  cache writes at 1.25 times the input price and cache reads at 0.1 times
+  it; before, cached tokens were recorded and not priced, so a USD budget
+  ceiling undercounted a cached call
+  (`the_end_of_the_conversation_is_a_cache_breakpoint`,
+  `crates/agent/src/tests.rs`;
+  `cache_writes_and_reads_are_priced_into_the_input_cost`,
+  `crates/audit/src/pricing.rs`).
+
+- Lyrik's `target_dirty` is no longer null for a repository whose git
+  attributes declare a content conversion and whose files are unmodified. A
+  file whose bytes are the committed ones is unchanged whatever is declared;
+  line-ending conversion is compared with CRLF read as LF; only a file that
+  differs under a filter, `ident` or an encoding leaves the state unknown
+  (`a_clean_tree_under_a_declared_conversion_is_not_dirty`,
+  `line_ending_conversion_is_compared_with_line_endings_normalised`,
+  `crates/cli/src/commands/lyrik_git.rs`).
+
+- A turn stopped at its tool round limit reports
+  `exceeded N tool call rounds; possible loop` with the limit in force.
 
 - The uncosted-call warning names the USD ceiling as the one that is
   pass-through, says whether a model-time ceiling still applies, and is not

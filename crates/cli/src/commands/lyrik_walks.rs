@@ -52,6 +52,21 @@ pub struct WalksConfig {
 pub struct OperatorSettings {
     /// The walks directory for every target that does not set its own.
     pub walks_dir: Option<String>,
+    /// Tool rounds each agent of the defender fix step gets: the model
+    /// calls one of them may make before it is stopped. Absent, 60. A
+    /// target's `.lyrik/config.json` does not set this.
+    pub fix_tool_rounds: Option<u32>,
+}
+
+impl OperatorSettings {
+    /// The fix step's round limit: the operator's, else the default.
+    /// Zero is read as the default.
+    pub fn fix_tool_rounds(&self) -> usize {
+        match self.fix_tool_rounds {
+            Some(n) if n > 0 => n as usize,
+            _ => super::lyrik_fix::FIX_TOOL_ROUNDS_DEFAULT,
+        }
+    }
 }
 
 pub fn operator_settings_path(data_dir: &Path) -> PathBuf {
@@ -876,6 +891,58 @@ mod tests {
 
     fn minimal_walk_body(name: &str) -> String {
         format!("---\nname: {name}\ndescription: stub for tests\n---\n\n# {name}\n\nbody.\n")
+    }
+
+    /// The fix step's round limit is the operator's: `lyrik.json` in
+    /// the data directory sets it, and nothing in a target does.
+    #[test]
+    fn fix_tool_rounds_come_from_the_data_directory_only() {
+        let data = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_operator_settings(data.path())
+                .unwrap()
+                .fix_tool_rounds(),
+            super::super::lyrik_fix::FIX_TOOL_ROUNDS_DEFAULT
+        );
+        std::fs::write(
+            operator_settings_path(data.path()),
+            r#"{"fix_tool_rounds": 90}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_operator_settings(data.path())
+                .unwrap()
+                .fix_tool_rounds(),
+            90
+        );
+        // Zero is not a limit an agent can work under: the default.
+        std::fs::write(
+            operator_settings_path(data.path()),
+            r#"{"fix_tool_rounds": 0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_operator_settings(data.path())
+                .unwrap()
+                .fix_tool_rounds(),
+            super::super::lyrik_fix::FIX_TOOL_ROUNDS_DEFAULT
+        );
+        // A target's .lyrik/config.json is never where it is read from:
+        // the loader takes the data directory and nothing else.
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(target.path().join(".lyrik")).unwrap();
+        std::fs::write(
+            target.path().join(".lyrik/config.json"),
+            r#"{"fix_tool_rounds": 500, "fix": {"tool_rounds": 500}}"#,
+        )
+        .unwrap();
+        std::fs::remove_file(operator_settings_path(data.path())).unwrap();
+        assert_eq!(
+            load_operator_settings(data.path())
+                .unwrap()
+                .fix_tool_rounds(),
+            super::super::lyrik_fix::FIX_TOOL_ROUNDS_DEFAULT
+        );
     }
 
     #[test]

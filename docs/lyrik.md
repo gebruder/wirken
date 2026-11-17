@@ -178,7 +178,7 @@ committed; run state lives under `.lyrik/state/`.
 |---|---|
 | Wirken vault | provider API keys |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<data_dir>/lyrik.json` | the operator's `walks_dir` |
+| `<data_dir>/lyrik.json` | the operator's `walks_dir` and `fix_tool_rounds` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
@@ -419,8 +419,10 @@ verified: the record lists what was checked, how, and what was not.
 staged skills `fix`, `fix-attack` and `fix-recheck`. Each carries the project
 context and the target's threat model the walks were given, when the run has
 them. None of them judges
-anything. The runner composes each command an arm rests on, the agents run
-them through `exec`, and the runner reads the exit status and output of
+anything. The runner composes each command an arm rests on. The agents run
+them through `exec`, and the runner runs some itself, with no model, through
+the same `exec` tool, sandbox and approval prompt (it asks as `fix-runner`).
+The runner reads the exit status and output of
 exactly those commands from the run's session log. What an agent writes about
 a run is not read. No model grades a patch, its own or another's. Where a step
 does rest on a model's reading it is recorded as `model_judged`. Such a step
@@ -503,19 +505,41 @@ The arms, in `arms` order:
 | Arm | Passes when | Fails when |
 |---|---|---|
 | `reproduction` | The original reproduction shows the defect in the `baseline` copy of the scanned revision, does not in the `patched` copy, and shows it again in that copy after the patch is taken back out and every tracked file there is as the scanned revision has it | It still shows the defect in the patched copy |
-| `variant` | At least two proofs of concept by different paths (another caller, another input shape, a cleanup or error path) each show the defect in the baseline and not in the patched copy | Any variant shows the defect in the patched copy: the fix is partial |
+| `variant` | At least two variants (another deployment, another caller, another input shape, a cleanup or error path) each show the defect in the baseline and not in the patched copy | Any variant shows the defect in the patched copy. Shown in the baseline too, the fix is partial and the record names the path |
 | `root_cause` | The patch touches the finding's `origin`, the root-cause claim is confirmed by an executed run, and the reproduction reached its assertion in the patched copy | The patch touches the sink at `location` and not the origin, and a variant by another path still shows the defect in the patched copy: `symptom_patch` |
 | `relocation` | The re-walk reported no candidate and a bounded fuzz run over the patched functions executed clean | A candidate's proof of concept shows it in the patched copy, or the fuzz run shows a defect there |
 | `functionality` | The test suite passes in both copies, a coverage report shows each patched file exercised, and the benign-input output is identical in both copies when that differential ran | The suite passes in the baseline and fails in the patched copy, or benign-input output differs |
 
-- **Variant.** The `fix-attack` agent lists every caller and path it finds
-  that reaches the same sink or invariant, from the code and the run's
-  `graph-walk` and `chain-walk` step records, and writes a proof of concept
-  for some. A variant that does not show the defect in the baseline is not a
-  variant and does not count. Every listed path with no variant that held is
-  in `untested_paths` with the reason; it is not assumed safe. The list of
-  paths is a model's, so a passing arm says the tested paths held, not that
-  the list is complete.
+- **Variant.** A variant is credited from the runs on the session log, never
+  from a list an agent wrote. There are two kinds.
+  The finding's other confirmed reproductions: every reproduction of the same
+  finding the replay agreed with, other than the one the reproduction arm
+  uses, is a variant (another deployment, another caller). The list is fixed
+  from `findings.json` before any fix agent runs and is on the
+  `lyrik.fix.started` row. Once the patch exists the runner makes sure both
+  copies are there and the patch is in, then runs each in the baseline and,
+  where it shows the defect there, in the patched copy.
+  Agent-written variants: the `fix-attack` agent writes one directory per
+  variant, `variants/<id>/` with `run.sh` or `run.py` and a one-line
+  `path.txt`, and runs it in both copies before starting the next. A variant
+  is on record from the moment its run file exists. After the agent stops,
+  for whatever reason, the runner runs any registered variant that has a run
+  missing, so an agent that ran out of rounds keeps every variant it wrote.
+  A script under `variants/` the agent ran under another name is read the
+  same way.
+  `variants` on the record lists each one with its source (`reproduction` or
+  `agent`), its command, what the baseline and the patched run showed, and
+  its outcome: `held`, `open` (shown in both: the patch does not cover it),
+  `introduced` (shown in the patched copy only), `not_a_variant` (not shown
+  in the baseline) or `inconclusive`. A patched run counts only if the patch
+  was in the copy when it ran.
+  When the reproduction arm passes and a variant is `open`, the record
+  carries `partial` with `open_paths`, each path's id, description and
+  command, and the first of `reasons` says so. The verdict is `rejected`.
+  `attack.json` is optional: the agent's list of paths, read only to fill
+  `untested_paths` with the paths nothing was run for. That the held variants
+  take different paths is their authors' claim; the runner counts distinct
+  commands and does not check it.
 - **Root cause.** The comparison is of the patch's hunks against `origin` and
   `location`. With no `origin` on the finding, or a patch that touches
   neither site, the arm is `inconclusive`. It is also `inconclusive` when the
@@ -571,8 +595,8 @@ The arms, in `arms` order:
 2. Otherwise `inconclusive` when any of these holds: the `reproduction` arm
    is not `pass`; the `variant` arm is not `pass`; `fix.patch` is missing or
    holds no hunk; the patch in the fix directory is not the supplied patch
-   read at run start; a run input changed during the run; a target tree that
-   was clean at run start is dirty after the step.
+   read at run start; a run input changed during the run; the target's
+   tracked files changed during the run, or whether they did is unknown.
 3. Otherwise `candidate_fix`.
 
 So a `candidate_fix` has stopped the original reproduction and the required
@@ -588,11 +612,32 @@ reason `candidate_fix` is never shown without the arm tally. `label` reads
 `inconclusive` or `not_run` carries the label `functionality_unverified`
 and is counted as such in the summary.
 
+**Target tree.** `target_tree` on the record is `unchanged`, `changed` or
+`unknown` with the reason. It compares a digest of every tracked file as it
+is on disk at run start with the same digest after the fix step. Nothing is
+compared with HEAD, so it works on a tree that was already modified and on a
+repository whose git attributes declare a filter or a line-ending
+conversion. `unknown` means the target is not a git work tree or a file
+could not be read; the verdict is then `inconclusive` and the record says
+the tree state was unknown.
+
+**Tool rounds.** Each of the three agents may make 60 model calls in its
+turn. The operator sets another number as `fix_tool_rounds` in the data
+directory's `lyrik.json`; a target's `.lyrik/config.json` does not set it.
+`agents` on the record lists each agent's `rounds`, `round_limit` and
+`incomplete`. An agent stopped at the limit is recorded on its
+`lyrik.fix.completed` row with `status` `incomplete` and the counts, and
+each arm it feeds carries `incomplete` with the same statement: `fix` feeds
+`reproduction`, `fix-attack` feeds `variant`, `fix-recheck` feeds
+`relocation` and `functionality`. The arm's state is still what the runs it
+did get show. `fix_summary.agents_stopped_at_round_limit` counts them.
+
 **Run summary.** `fix_summary.by_verdict.candidate_fix` is an object, not a
 count: `count`, `all_arms_passed`, `functionality_unverified` (candidates
 whose functionality arm did not pass) and `arms` with `passed`,
 `inconclusive` and `not_run` summed over the candidates. `rejected` and
-`inconclusive` are counts, and `by_arm` counts fixes in each state of each
+`inconclusive` are counts, `partial` counts the rejected fixes that are
+partial, and `by_arm` counts fixes in each state of each
 arm. The terminal line prints the same: `1 candidate (their arms: 3 passed,
 1 inconclusive, 1 not_run; 0 with all arms passed; 1 functionality
 unverified), 0 rejected, 0 inconclusive`.
@@ -861,8 +906,9 @@ change them:
   `verdict` (`candidate_fix`, `rejected` or `inconclusive`), `label` (on a
   `candidate_fix` only, always with the arm tally), `arm_tally`,
   `patch_source` (`supplied` or `generated`), `inputs`, `reasons`, `labels`,
-  `arms`, `fix_locality`, `variant_minimum`, `root_cause_claim`,
-  `untested_paths`, `class_open_sites`, `patch`, `fix_model` and `artifacts`.
+  `arms`, `fix_locality`, `variant_minimum`, `root_cause_claim`, `variants`,
+  `partial` (when the fix is partial), `untested_paths`, `class_open_sites`,
+  `patch`, `fix_model`, `target_tree`, `agents` and `artifacts`.
   A `verdict` of `fix` in a `findings.json` from 3.3.1 or earlier was read
   from the fix agent's own report and is unverified. See
   [Defender fix step](#defender-fix-step).
@@ -928,11 +974,15 @@ NDJSON only and are not signed.
 - `target_sha`: HEAD of the repository the target sits in.
 - `target_dirty`: whether any tracked file differs from HEAD in content,
   executable bit or kind, or a checked-out submodule sits at a different
-  commit. Untracked files do not count. Files are compared byte for byte.
-  Where git would convert content (a clean filter, LFS, line-ending, `ident`
-  or encoding conversion, or `core.autocrlf`), the work-tree bytes are not the
-  committed ones, so no comparison is made: `target_dirty` is null and a
-  `lyrik.provenance.unavailable` row gives the reason.
+  commit. Untracked files do not count. Files are compared byte for byte, and
+  a file whose bytes are the committed ones is unchanged whatever its git
+  attributes declare. A file that differs under line-ending conversion alone
+  (`text`, `eol`, `crlf`, `core.autocrlf`) is compared again with CRLF read
+  as LF. A file that differs under a clean filter, LFS, `ident` or an
+  encoding conversion cannot be compared without running the conversion,
+  which the runner does not do: when such files are the only differences,
+  `target_dirty` is null and a `lyrik.provenance.unavailable` row gives the
+  reason.
 - `audit_log_ref`: the run's `audit.log`, relative to the target.
 
 The SARIF report carries all three in its invocation properties. A target

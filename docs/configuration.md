@@ -25,7 +25,7 @@ moves every process at once.
 | `cron.db` | Scheduled cron jobs | `wirken cron create` |
 | `memory.db` | Labelled cross-channel memory entries | `wirken run` |
 | `imported.db` | Imported assistant archives | `wirken import` |
-| `lyrik.json` | Lyrik settings. Key read: `walks_dir`, the walks directory for targets that do not set their own (default `lyrik/walks/`); see [lyrik.md](lyrik.md#lyrikconfigjson) | Manual |
+| `lyrik.json` | Lyrik settings. Keys read: `walks_dir`, the walks directory for targets that do not set their own (default `lyrik/walks/`), and `fix_tool_rounds`, the model calls each agent of the defender fix step may make (default 60); see [lyrik.md](lyrik.md#lyrikconfigjson) | Manual |
 | `update.json` | `wirken update` settings. Key read: `mirror`, a local mirror of the release files used instead of GitHub; see [update.md](update.md#mirrors) | Manual |
 | `sandbox.json` | Sandbox settings. Keys read: `mode`, `image`, `network`, `shell`, `sidecar_binary`, `memory_mb`, `pids_limit`, `timeout_secs`; any other key is named in a startup warning and ignored. `mode` is `exec-only`, `gvisor` or `off`. With no file, or no `mode` key, the mode is `exec-only`. A `mode` that is none of the three, or a file that cannot be read or parsed, is refused with an error naming the file and the value: `wirken run`, `wirken ask`, `wirken lyrik` and the MCP proxy do not start | `wirken setup` or manual |
 | `siem.json` | SIEM forwarding config | Manual or org config |

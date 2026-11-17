@@ -1668,6 +1668,9 @@ async fn dispatch_via_agent_runtime(
                 .flatten()
                 .collect::<Vec<_>>()
                 .join("\n"),
+            // The operator's, from the data directory. The target's
+            // own configuration does not set it.
+            super::lyrik_walks::load_operator_settings(&cfg.data_dir)?.fix_tool_rounds(),
             terminal.clone(),
             audit,
         )
@@ -2278,14 +2281,25 @@ struct FixAgentCtx {
     walks_staged_dir: PathBuf,
     terminal:
         Option<Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>>,
+    /// Tool rounds each agent gets.
+    max_rounds: usize,
 }
 
-/// One fresh agent, one prompt. Returns the calls the gate refused.
-async fn fix_agent_turn(
-    ctx: &FixAgentCtx,
-    asker: &str,
-    prompt: String,
-) -> std::result::Result<Vec<String>, String> {
+/// How one fix-step agent's turn ended.
+struct FixTurn {
+    /// The calls the gate refused.
+    denials: Vec<String>,
+    /// Model calls made, and the limit.
+    rounds: usize,
+    limit: usize,
+    /// Stopped at the limit, not finished.
+    exhausted: bool,
+    /// Why the turn failed, when it did for another reason.
+    error: Option<String>,
+}
+
+/// An agent of the fix step, built like a walk's, asking as `asker`.
+fn fix_agent(ctx: &FixAgentCtx, asker: &str) -> std::result::Result<Agent, String> {
     let mut agent = Agent::new_with_sandbox(
         ctx.agent_id.clone(),
         ctx.target.clone(),
@@ -2299,26 +2313,148 @@ async fn fix_agent_turn(
     .map_err(|e| format!("agent_construct: {e}"))?;
     agent.set_agent_id(ctx.agent_id.clone());
     agent.set_leak_matcher(ctx.leak_matcher.clone());
+    agent.set_max_tool_rounds(ctx.max_rounds);
     attach_terminal_gate(&mut agent, asker, ctx.terminal.clone());
     lyrik_run_skills(&ctx.lyrik_staged_dir, Some(&ctx.walks_staged_dir))
         .map_err(|e| format!("{e:#}"))
         .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()))
         .map_err(|e| format!("attach_skills: {e}"))?;
+    Ok(agent)
+}
+
+/// One fresh agent, one prompt.
+async fn fix_agent_turn(ctx: &FixAgentCtx, asker: &str, prompt: String) -> FixTurn {
+    let mut turn = FixTurn {
+        denials: Vec::new(),
+        rounds: 0,
+        limit: ctx.max_rounds,
+        exhausted: false,
+        error: None,
+    };
+    let mut agent = match fix_agent(ctx, asker) {
+        Ok(a) => a,
+        Err(e) => {
+            turn.error = Some(e);
+            return turn;
+        }
+    };
     let inbound_id = format!("lyrik-{asker}-{}", uuid::Uuid::new_v4());
-    let r = agent
-        .process_message(&prompt, inbound_id)
-        .await
-        .map_err(|e| format!("turn: {e}"))?;
-    Ok(r.denials
-        .iter()
-        .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
-        .collect())
+    let result = agent.process_message(&prompt, inbound_id).await;
+    turn.rounds = agent.last_turn_rounds();
+    turn.exhausted = agent.last_turn_exhausted();
+    match result {
+        Ok(r) => {
+            turn.denials = r
+                .denials
+                .iter()
+                .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
+                .collect();
+        }
+        // Running out of rounds is its own outcome, recorded with the
+        // count; any other failure is carried as it came.
+        Err(_) if turn.exhausted => {}
+        Err(e) => turn.error = Some(format!("turn: {e}")),
+    }
+    turn
+}
+
+/// The asker the operator sees for a command the runner itself runs.
+const FIX_RUNNER: &str = "fix-runner";
+
+/// The fix step's own commands, run with no model: through the same
+/// `exec` tool, sandbox and approval prompt as an agent's, and onto
+/// the same session log the arms read.
+struct FixRunner {
+    agent: Agent,
+    session_log: Arc<dyn wirken_audit::SessionLog>,
+    agent_id: String,
+}
+
+impl FixRunner {
+    fn new(ctx: &FixAgentCtx) -> std::result::Result<Self, String> {
+        Ok(Self {
+            agent: fix_agent(ctx, FIX_RUNNER)?,
+            session_log: ctx.session_log.clone(),
+            agent_id: ctx.agent_id.clone(),
+        })
+    }
+
+    /// Run `command`. `None` when it could not be run at all.
+    async fn exec(&mut self, command: &str) -> Option<wirken_agent::tool::ToolResult> {
+        self.agent
+            .run_tool_as_harness(
+                "exec",
+                &serde_json::json!({ "command": command }),
+                "The fix step's runner composed this command. No model asked for it.",
+            )
+            .await
+            .ok()
+    }
+
+    /// Every `exec` result on the run's session log so far.
+    fn observed(&self) -> Vec<lyrik_fix_arms::Observed> {
+        let handle = self
+            .session_log
+            .handle_for(wirken_audit::SessionId::new(self.agent_id.clone()));
+        self.session_log
+            .get_since(&handle, 0)
+            .map(|events| lyrik_fix_arms::observed_execs(events.iter().map(|e| &e.event)))
+            .unwrap_or_default()
+    }
+
+    /// Make sure both copies exist, carry every harness a variant
+    /// names, and leave the patch in. `false` when the patch is not in
+    /// the patched copy at the end, in which case no variant is run.
+    async fn prepare(&mut self, layout: &lyrik_fix_arms::Layout, revision: &str) -> bool {
+        let mut steps = vec![
+            layout.extract_baseline(revision),
+            layout.ensure_patched(revision),
+        ];
+        steps.extend(layout.carry_into("baseline"));
+        steps.extend(layout.carry_into("patched"));
+        for step in steps {
+            if !self.exec(&step).await.is_some_and(|r| r.success) {
+                return false;
+            }
+        }
+        self.exec(&layout.ensure_applied())
+            .await
+            .is_some_and(|r| r.success)
+    }
+
+    /// Run each of `specs` in the baseline copy and, when it shows the
+    /// defect there, in the patched copy. A command the log already
+    /// holds a run of is not run again.
+    async fn run_variants(
+        &mut self,
+        layout: &lyrik_fix_arms::Layout,
+        specs: &[lyrik_fix_arms::VariantSpec],
+    ) {
+        for spec in specs {
+            let observed = self.observed();
+            let log = lyrik_fix_arms::Log(&observed);
+            let baseline = layout.in_copy("baseline", &spec.command);
+            let patched = layout.in_copy("patched", &spec.command);
+            if log.runs(&baseline).is_empty() && self.exec(&baseline).await.is_none() {
+                continue;
+            }
+            let observed = self.observed();
+            let log = lyrik_fix_arms::Log(&observed);
+            let shown = lyrik_fix_arms::poc(&log.run(&baseline)) == lyrik_fix_arms::Poc::Shown;
+            if shown && log.runs(&patched).is_empty() {
+                self.exec(&patched).await;
+            }
+        }
+    }
 }
 
 /// Defender mode's fix step. Per confirmed finding, three agents with
 /// fresh contexts: one writes the patch and runs the reproduction in
 /// three copies, one attacks the patch by other routes, one re-walks
-/// the code the patch reaches and runs the functionality checks. The
+/// the code the patch reaches and runs the functionality checks.
+/// Between them the runner itself runs, through the same gate, the
+/// finding's other confirmed reproductions and any variant script an
+/// agent wrote and did not run, in both copies. The
 /// runner then judges each fix from the `exec` results on the session
 /// log, never from what an agent wrote about a run, and writes the
 /// records into `findings.json` under `fixes`. A patch supplied under
@@ -2347,6 +2483,7 @@ async fn dispatch_fixes(
     exec_available: bool,
     inputs: &lyrik_fix::FixInputs,
     project_sections: String,
+    fix_tool_rounds: usize,
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
@@ -2374,9 +2511,6 @@ async fn dispatch_fixes(
         }
         return Ok(());
     }
-    let dirty_before = extras
-        .get("target_dirty")
-        .and_then(serde_json::Value::as_bool);
     let code_revision = extras
         .get("target_sha")
         .and_then(serde_json::Value::as_str)
@@ -2417,6 +2551,7 @@ async fn dispatch_fixes(
         lyrik_staged_dir,
         walks_staged_dir,
         terminal,
+        max_rounds: fix_tool_rounds,
     };
     use tokio::sync::Semaphore;
     // One finding at a time. The baseline copy is shared by the run,
@@ -2449,6 +2584,12 @@ async fn dispatch_fixes(
                 "patch_source": if supplied { "supplied" } else { "generated" },
                 "config_sha256": inputs.config_sha256,
                 "supplied_patch_sha256": supplied_sha256,
+                "tool_rounds": fix_tool_rounds,
+                // Fixed here, before any agent of the fix step runs.
+                "carried_variants": lyrik_fix::carried_variants(&c, &run_id)
+                    .iter()
+                    .map(|v| v.command.clone())
+                    .collect::<Vec<_>>(),
             }),
         )?;
         let revision = code_revision
@@ -2461,7 +2602,9 @@ async fn dispatch_fixes(
         let h = tokio::spawn(async move {
             let _permit = sem_handle.acquire_owned().await.expect("semaphore closed");
             let mut steps = Vec::with_capacity(lyrik_fix::FIX_SKILLS.len());
-            let prompt = lyrik_fix::build_fix_prompt(&c, &run_id_t, &revision, &rel_dir, supplied);
+            let rounds = ctx_t.max_rounds;
+            let prompt =
+                lyrik_fix::build_fix_prompt(&c, &run_id_t, &revision, &rel_dir, supplied, rounds);
             steps.push(("fix", fix_agent_turn(&ctx_t, "fix", prompt).await));
             // The other two agents have a patch to look at or do not run.
             let shape = std::fs::read_to_string(fix_dir.join("fix.patch"))
@@ -2474,17 +2617,40 @@ async fn dispatch_fixes(
                 } else {
                     lyrik_fix_arms::VARIANT_MIN_LOCALIZED
                 };
-                let prompt = lyrik_fix::build_attack_prompt(&c, &run_id_t, &rel_dir, minimum);
+                // The runner's own variants: every other confirmed
+                // reproduction of the finding, in both copies. It
+                // makes sure of the copies and the patch itself, so
+                // these run whatever the fix agent got done.
+                let layout = lyrik_fix::layout_for(&c, &run_id_t, &rel_dir);
+                let mut runner = FixRunner::new(&ctx_t).ok();
+                if let Some(runner) = runner.as_mut()
+                    && runner.prepare(&layout, &revision).await
+                {
+                    let carried = lyrik_fix::carried_variants(&c, &run_id_t);
+                    runner.run_variants(&layout, &carried).await;
+                }
+                let prompt =
+                    lyrik_fix::build_attack_prompt(&c, &run_id_t, &rel_dir, minimum, rounds);
                 steps.push((
                     "fix-attack",
                     fix_agent_turn(&ctx_t, "fix-attack", prompt).await,
                 ));
+                // Whatever the variant agent wrote and did not run, the
+                // runner runs: a variant is on record once its script is.
+                if let Some(runner) = runner.as_mut()
+                    && runner.prepare(&layout, &revision).await
+                {
+                    let registered =
+                        lyrik_fix_arms::registered_variants(&fix_dir, &layout, &runner.observed());
+                    runner.run_variants(&layout, &registered).await;
+                }
                 let prompt = lyrik_fix::build_recheck_prompt(
                     &c,
                     &run_id_t,
                     &rel_dir,
                     &functionality_t,
                     cross,
+                    rounds,
                 );
                 steps.push((
                     "fix-recheck",
@@ -2507,10 +2673,24 @@ async fn dispatch_fixes(
                 continue;
             }
         };
-        for (step, result) in steps {
-            let (status, reason, skipped) = match result {
-                Ok(skipped) => ("success", None, skipped),
-                Err(reason) => ("transient_failure", Some(reason), Vec::new()),
+        let mut agents = Vec::with_capacity(steps.len());
+        for (step, turn) in steps {
+            // Stopped at the round limit is `incomplete`, with the
+            // count: not a success, and not a transient failure.
+            let status = if turn.exhausted {
+                "incomplete"
+            } else if turn.error.is_some() {
+                "transient_failure"
+            } else {
+                "success"
+            };
+            let reason = if turn.exhausted {
+                Some(format!(
+                    "stopped at the limit of {} tool rounds before finishing",
+                    turn.limit
+                ))
+            } else {
+                turn.error.clone()
             };
             audit.emit(
                 "lyrik.fix.completed",
@@ -2520,19 +2700,35 @@ async fn dispatch_fixes(
                     "step": step,
                     "status": status,
                     "reason": reason,
-                    "skipped": skipped,
+                    "skipped": turn.denials,
+                    "rounds": turn.rounds,
+                    "round_limit": turn.limit,
                 }),
             )?;
+            agents.push(lyrik_fix::AgentRounds {
+                step: step.to_string(),
+                rounds: turn.rounds,
+                round_limit: turn.limit,
+                incomplete: turn.exhausted,
+            });
         }
-        finished.push((c, rel_dir, revision));
+        finished.push((c, rel_dir, revision, agents));
     }
-    // A fix may not touch the target tree. A tree that was clean at
-    // run start and is dirty now was written to; a tree already dirty
-    // at start cannot be told apart, and the verdict says nothing.
-    let dirty_after = super::lyrik_git::provenance(&target).dirty;
-    let target_modified = dirty_before == Some(false) && dirty_after == Some(true);
-    if target_modified {
-        audit.emit("lyrik.fix.target_modified", serde_json::json!({}))?;
+    // A fix may not touch the target tree. The tracked files as they
+    // are now against the fingerprint taken at run start: the same
+    // means untouched, whatever state the tree was in and whatever
+    // conversion its attributes declare.
+    let tree =
+        lyrik_fix::TreeRecord::of(&inputs.tree, &super::lyrik_git::tree_fingerprint(&target));
+    match &tree {
+        lyrik_fix::TreeRecord::Unchanged => {}
+        lyrik_fix::TreeRecord::Changed => {
+            audit.emit("lyrik.fix.target_modified", serde_json::json!({}))?
+        }
+        lyrik_fix::TreeRecord::Unknown { reason } => audit.emit(
+            "lyrik.fix.target_state_unknown",
+            serde_json::json!({ "reason": reason }),
+        )?,
     }
     // The inputs read at run start against what is on disk now. A
     // difference means something wrote there mid-run; the arms that
@@ -2555,7 +2751,7 @@ async fn dispatch_fixes(
         .context("read the run's session log for the fix step's commands")?;
     let observed = lyrik_fix_arms::observed_execs(events.iter().map(|e| &e.event));
     let mut outcomes = Vec::with_capacity(finished.len());
-    for (c, rel_dir, revision) in finished {
+    for (c, rel_dir, revision, agents) in finished {
         let layout = lyrik_fix_arms::Layout::new(&run_id, &rel_dir);
         lyrik_fix::save_observed(&run_dir.join(&rel_dir), &layout, &observed)?;
         let out = lyrik_fix::judge(&lyrik_fix::JudgeInput {
@@ -2566,7 +2762,8 @@ async fn dispatch_fixes(
             revision: &revision,
             observed: &observed,
             target: &target,
-            target_modified,
+            tree: &tree,
+            agents: &agents,
             fix_model: &llm_config.model,
             inputs,
             changes: &changes,
@@ -2585,6 +2782,9 @@ async fn dispatch_fixes(
                 "labels": out.labels,
                 "arms": out.arms,
                 "fix_locality": out.fix_locality,
+                "partial": out.partial,
+                "target_tree": out.target_tree,
+                "agents": out.agents,
                 "class_open_sites": out.class_open_sites.count,
                 "untested_paths": out.untested_paths.len(),
             }),

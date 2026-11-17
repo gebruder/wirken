@@ -10,9 +10,13 @@
 //! them decides anything. The `fix` agent writes `fix.patch` for the
 //! invariant the finding names, unless a patch was supplied for the
 //! finding under `.lyrik/fix-patches/`, and runs the reproduction in
-//! three copies of the scanned revision. The `fix-attack` agent lists
-//! the other paths to the same sink or invariant and writes a proof of
-//! concept for some of them. The `fix-recheck` agent re-walks the code
+//! two copies of the scanned revision. The runner then runs, itself,
+//! every other confirmed reproduction of the same finding in both
+//! copies: another deployment or another caller is a variant no agent
+//! has to think of. The `fix-attack` agent writes proofs of concept
+//! for other paths to the same sink or invariant, one directory each,
+//! and the runner runs any it wrote and did not get to run. The
+//! `fix-recheck` agent re-walks the code
 //! reachable from the patched functions, runs the project's tests and
 //! a benign-input differential, and lists the same pattern elsewhere.
 //!
@@ -64,6 +68,10 @@ pub struct Confirmed {
     pub stable_id: String,
     pub finding: Value,
     pub reproduction: ReproductionRecord,
+    /// The finding's other reproductions the replay agreed with, each
+    /// by a different command: other deployments, other callers. The
+    /// runner runs each as a variant.
+    pub others: Vec<ReproductionRecord>,
 }
 
 /// The kept findings backed by a reproduction the replay agreed with,
@@ -83,7 +91,7 @@ pub fn confirmed_findings(body: &Value) -> Vec<Confirmed> {
         .iter()
         .filter_map(|f| {
             let stable_id = f.get("stable_id")?.as_str()?.to_string();
-            let repro = reproductions.iter().find_map(|r| {
+            let mut agreed = reproductions.iter().filter_map(|r| {
                 if r.get("stable_id")?.as_str()? != stable_id {
                     return None;
                 }
@@ -92,14 +100,63 @@ pub fn confirmed_findings(body: &Value) -> Vec<Confirmed> {
                 }
                 let record: ReproductionRecord = serde_json::from_value(r.clone()).ok()?;
                 (record.outcome == ReproductionOutcome::Reproduced).then_some(record)
-            })?;
+            });
+            let repro = agreed.next()?;
+            let mut others: Vec<ReproductionRecord> = Vec::new();
+            for record in agreed {
+                let command = record.command.trim();
+                if command != repro.command.trim()
+                    && !others.iter().any(|o| o.command.trim() == command)
+                {
+                    others.push(record);
+                }
+            }
             Some(Confirmed {
                 stable_id,
                 finding: f.clone(),
                 reproduction: repro,
+                others,
             })
         })
         .collect()
+}
+
+/// The finding's other confirmed reproductions as variants. The list
+/// is fixed by `findings.json` before any fix agent runs.
+pub fn carried_variants(confirmed: &Confirmed, run_id: &str) -> Vec<arms::VariantSpec> {
+    let staging = format!(".lyrik/state/runs/{run_id}/staging/");
+    confirmed
+        .others
+        .iter()
+        .enumerate()
+        .map(|(i, record)| {
+            // `<walk>/<script>` when the command names a walk's harness.
+            let name = record
+                .command
+                .split(&staging)
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(|path| path.replacen("/harness/", "/", 1))
+                .unwrap_or_else(|| format!("{}", i + 1));
+            arms::VariantSpec {
+                id: format!("reproduction:{name}"),
+                source: arms::VariantSource::Reproduction,
+                path: record.expected.chars().take(240).collect(),
+                command: record.command.trim().to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The layout for a finding: its copies carry the harness of every
+/// walk the reproduction or a carried variant names.
+pub fn layout_for(confirmed: &Confirmed, run_id: &str, rel_dir: &str) -> Layout {
+    Layout::for_commands(
+        run_id,
+        rel_dir,
+        std::iter::once(confirmed.reproduction.command.as_str())
+            .chain(confirmed.others.iter().map(|o| o.command.as_str())),
+    )
 }
 
 /// A directory name for a finding: its stable id with every byte
@@ -172,7 +229,8 @@ pub struct Artifacts {
     pub reproduction_command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reproduction_harness: Option<String>,
-    /// The variants' proofs of concept.
+    /// The variants: an agent's proof of concept as a path, another
+    /// reproduction as its command.
     pub variants: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attack: Option<String>,
@@ -212,6 +270,13 @@ pub struct FixOutcome {
     /// Variants by different paths the variant arm required.
     pub variant_minimum: usize,
     pub root_cause_claim: RootCauseClaim,
+    /// Every variant on record and what its runs showed.
+    pub variants: Vec<arms::VariantResult>,
+    /// Set when the reproduction no longer shows the defect and a
+    /// variant still does: the patch closes one path and leaves the
+    /// ones named here open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<Partial>,
     /// Paths to the same sink or invariant with no variant that held.
     pub untested_paths: Vec<UntestedPath>,
     pub class_open_sites: ClassOpenSites,
@@ -219,8 +284,78 @@ pub struct FixOutcome {
     /// The model that produced the patch, or that ran the arms on a
     /// supplied one.
     pub fix_model: String,
+    /// Whether the tracked files of the target changed during the run.
+    pub target_tree: TreeRecord,
+    /// The fix step's agents: how many tool rounds each used, its
+    /// limit, and whether it was stopped at the limit.
+    pub agents: Vec<AgentRounds>,
     pub artifacts: Artifacts,
 }
+
+/// The paths a partial fix leaves open.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Partial {
+    pub open_paths: Vec<OpenPath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OpenPath {
+    pub id: String,
+    pub path: String,
+    pub command: String,
+}
+
+/// Whether the target's tracked files changed between run start and
+/// the end of the fix step, read from two fingerprints of them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TreeRecord {
+    Unchanged,
+    Changed,
+    /// It could not be told, and why.
+    Unknown {
+        reason: String,
+    },
+}
+
+impl TreeRecord {
+    /// From the fingerprint taken at run start and the one taken now.
+    pub fn of(before: &Result<String, String>, after: &Result<String, String>) -> Self {
+        match (before, after) {
+            (Ok(a), Ok(b)) if a == b => TreeRecord::Unchanged,
+            (Ok(_), Ok(_)) => TreeRecord::Changed,
+            (Err(e), _) | (_, Err(e)) => TreeRecord::Unknown { reason: e.clone() },
+        }
+    }
+}
+
+/// One fix-step agent's use of its tool rounds.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentRounds {
+    /// `fix`, `fix-attack` or `fix-recheck`.
+    pub step: String,
+    /// Model calls the agent made.
+    pub rounds: usize,
+    pub round_limit: usize,
+    /// True when the agent was stopped at the limit, not finished.
+    pub incomplete: bool,
+}
+
+impl AgentRounds {
+    fn note(&self) -> String {
+        format!(
+            "the {} agent was stopped at its limit of {} tool rounds before it finished",
+            self.step, self.round_limit
+        )
+    }
+}
+
+/// The tool rounds a fix-step agent gets when the operator sets none.
+pub const FIX_TOOL_ROUNDS_DEFAULT: usize = 60;
+
+// More than a turn gets anywhere else: these agents read a codebase,
+// write a patch or several scripts, and run them.
+const _: () = assert!(FIX_TOOL_ROUNDS_DEFAULT > wirken_agent::runtime::MAX_TOOL_ROUNDS);
 
 /// How many of a fix's arms ended in each state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
@@ -291,6 +426,9 @@ pub struct FixInputs {
     pub functionality: FunctionalityConfig,
     /// By slug.
     pub patches: BTreeMap<String, SuppliedPatch>,
+    /// The target's tracked files as they were at run start, as
+    /// [`super::lyrik_git::tree_fingerprint`] reads them.
+    pub tree: Result<String, String>,
 }
 
 /// Which run inputs differ on disk from what was read at run start.
@@ -345,6 +483,7 @@ impl FixInputs {
             config_sha256: sha256_hex(config_body.as_bytes()),
             functionality: functionality_config(config),
             patches: read_supplied_patches(target),
+            tree: super::lyrik_git::tree_fingerprint(target),
         }
     }
 
@@ -378,8 +517,10 @@ pub struct JudgeInput<'a> {
     /// Every `exec` result the session log holds for the run.
     pub observed: &'a [Observed],
     pub target: &'a Path,
-    /// Whether the target tree changed during the fix step.
-    pub target_modified: bool,
+    /// Whether the target's tracked files changed during the run.
+    pub tree: &'a TreeRecord,
+    /// The fix step's agents and their tool rounds.
+    pub agents: &'a [AgentRounds],
     pub fix_model: &'a str,
     /// The run's inputs as read at run start.
     pub inputs: &'a FixInputs,
@@ -399,11 +540,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// directory.
 pub fn judge(input: &JudgeInput) -> FixOutcome {
     let fix_dir = input.run_dir.join(input.rel_dir);
-    let layout = Layout::for_reproduction(
-        input.run_id,
-        input.rel_dir,
-        &input.confirmed.reproduction.command,
-    );
+    let layout = layout_for(input.confirmed, input.run_id, input.rel_dir);
     let log = arms::Log(input.observed);
     let mut reasons = Vec::new();
 
@@ -428,23 +565,30 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     };
 
     let command = input.confirmed.reproduction.command.trim();
-    let reproduction = arms::reproduction_arm(&log, &layout, command, input.revision);
+    // The fix agent ran the reproduction's own commands, composed for
+    // the copies as the reproduction alone needs them.
+    let reproduction = arms::reproduction_arm(
+        &log,
+        &Layout::for_reproduction(input.run_id, input.rel_dir, command),
+        command,
+        input.revision,
+    );
     let left_reverted = reproduction.left_reverted;
     let mut claim = arms::root_cause_claim(&input.confirmed.finding, &reproduction);
     let attack = arms::read_json::<arms::Attack>(&fix_dir.join("attack.json"));
-    let variant_files: Vec<String> = attack
-        .as_ref()
-        .ok()
-        .and_then(|a| a.as_ref())
-        .map(|a| {
-            a.variants
-                .iter()
-                .map(|v| format!("{}/{}", input.rel_dir, v.poc))
-                .collect()
+    // The variants on record: the finding's other confirmed
+    // reproductions, then the scripts under variants/.
+    let mut specs = carried_variants(input.confirmed, input.run_id);
+    specs.extend(arms::registered_variants(&fix_dir, &layout, input.observed));
+    let variant_files: Vec<String> = specs
+        .iter()
+        .map(|v| match v.source {
+            arms::VariantSource::Agent => format!("{}/{}", input.rel_dir, v.id),
+            arms::VariantSource::Reproduction => v.command.clone(),
         })
-        .unwrap_or_default();
-    let (variant, untested_paths) =
-        arms::variant_arm(&log, &layout, attack, command, variant_minimum, &fix_dir);
+        .collect();
+    let (variant, untested_paths, variants) =
+        arms::variant_arm(&log, &layout, &specs, attack, command, variant_minimum);
     claim.suspect = variant.state == ArmState::Fail;
     let (root_cause, symptom_patch) = arms::root_cause_arm(
         &shape,
@@ -467,8 +611,14 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     };
     let class_open_sites = arms::class_report(&recheck, input.target);
 
-    if input.target_modified {
-        reasons.push("the target tree changed during the fix step".to_string());
+    match input.tree {
+        TreeRecord::Unchanged => {}
+        TreeRecord::Changed => {
+            reasons.push("the target tree changed during the fix step".to_string())
+        }
+        TreeRecord::Unknown { reason } => reasons.push(format!(
+            "whether the target tree changed during the run is unknown: {reason}"
+        )),
     }
     let mut labels = Vec::new();
     if symptom_patch {
@@ -534,6 +684,26 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
             })
             .collect();
     }
+    // An agent stopped at its round limit left the arms it feeds
+    // short of what it would have run. The arm says so; its state is
+    // still what the runs it did get show.
+    for agent in input.agents.iter().filter(|a| a.incomplete) {
+        let fed: &[&str] = match agent.step.as_str() {
+            "fix" => &["reproduction"],
+            "fix-attack" => &["variant"],
+            _ => &["relocation", "functionality"],
+        };
+        arms_list = arms_list
+            .into_iter()
+            .map(|a| {
+                if fed.contains(&a.arm) {
+                    a.incomplete(&agent.note())
+                } else {
+                    a
+                }
+            })
+            .collect();
+    }
     let reproduction_passed = arms_list[0].state == ArmState::Pass;
     let variant_passed = arms_list[1].state == ArmState::Pass;
     let arm_tally = ArmTally::of(&arms_list);
@@ -557,6 +727,34 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     } else {
         Verdict::CandidateFix
     };
+    // Partial: the reproduction is stopped and a variant is not.
+    let open_paths: Vec<OpenPath> = variants
+        .iter()
+        .filter(|v| v.outcome == "open")
+        .map(|v| OpenPath {
+            id: v.id.clone(),
+            path: v.path.clone(),
+            command: v.command.clone(),
+        })
+        .collect();
+    let partial =
+        (reproduction_passed && arms_list[1].state == ArmState::Fail && !open_paths.is_empty())
+            .then_some(Partial { open_paths });
+    if let Some(p) = &partial {
+        reasons.insert(
+            0,
+            format!(
+                "partial fix: the reproduction no longer shows the defect and {} other path(s) \
+                 still do: {}",
+                p.open_paths.len(),
+                p.open_paths
+                    .iter()
+                    .map(|o| o.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
     let exists = |name: &str| {
         fix_dir
             .join(name)
@@ -584,6 +782,8 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         fix_locality: locality,
         variant_minimum,
         root_cause_claim: claim,
+        variants,
+        partial,
         untested_paths,
         class_open_sites,
         patch: PatchInfo {
@@ -598,6 +798,8 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
             files: shape.files,
         },
         fix_model: input.fix_model.to_string(),
+        target_tree: input.tree.clone(),
+        agents: input.agents.to_vec(),
         artifacts: Artifacts {
             apply_script: format!("{}/apply.sh", input.rel_dir),
             reproduction_command: command.to_string(),
@@ -674,6 +876,12 @@ pub fn summary(outcomes: &[FixOutcome]) -> Value {
             "rejected": count(Verdict::Rejected),
             "inconclusive": count(Verdict::Inconclusive),
         },
+        "partial": outcomes.iter().filter(|o| o.partial.is_some()).count(),
+        "agents_stopped_at_round_limit": outcomes
+            .iter()
+            .flat_map(|o| o.agents.iter())
+            .filter(|a| a.incomplete)
+            .count(),
         "by_arm": arms::count_by_arm(outcomes.iter().flat_map(|o| o.arms.iter())),
     })
 }
@@ -695,6 +903,18 @@ pub fn summary_line(summary: &Value) -> String {
         n(by_verdict, "rejected"),
         n(by_verdict, "inconclusive")
     );
+    if n(summary, "partial") > 0 {
+        line.push_str(&format!(
+            " ({} of the rejected partial)",
+            n(summary, "partial")
+        ));
+    }
+    if n(summary, "agents_stopped_at_round_limit") > 0 {
+        line.push_str(&format!(
+            "; {} agent(s) stopped at the tool round limit",
+            n(summary, "agents_stopped_at_round_limit")
+        ));
+    }
     if let Some(by_arm) = summary["by_arm"].as_object() {
         for (arm, states) in by_arm {
             line.push_str(&format!(
@@ -859,7 +1079,8 @@ pub fn attack_skill_text(run_id: &str, tools: &str) -> String {
         "{}# Fix attack\n\n\
          A patch has been written for one confirmed finding. You did not write it and you \
          have a fresh context. Your job is to reach the same sink, or violate the same \
-         invariant, by a route the patch may not cover.\n\n\
+         invariant, by a route the patch may not cover. You have a limited number of tool \
+         rounds, named in the prompt: spend them on variants, not on reading.\n\n\
          {NO_VERDICT}\n\n\
          {}\n\n\
          Steps, in order:\n\n\
@@ -869,27 +1090,30 @@ pub fn attack_skill_text(run_id: &str, tools: &str) -> String {
          invariant: sibling call sites, alternate entry points, callbacks, cleanup, \
          teardown and error paths, other input shapes. Each is one entry of `paths`.\n\
          2. For at least the number of paths the prompt names, each by a different route \
-         from the original reproduction and from each other (another caller, another input \
-         shape, a cleanup or error path), write a proof of concept under \
-         `variants/<id>/` in the fix directory. Derive each from the root cause. Changing \
-         only a literal, a file name or a size is not another route unless that boundary \
-         is the invariant.\n\
-         3. For each variant run `cd <baseline> && <interpreter> <up><script>` and then \
-         `cd <patched> && <interpreter> <up><script>`. `<baseline>`, `<patched>` and `<up>` \
-         are exactly as the prompt gives them; `<script>` is the proof's path from the \
-         project root, `<fix-dir>/variants/<id>/<file>`; `<interpreter>` is `sh`, `bash` or \
-         `python3`. The baseline copy is shared by the whole run: do not write into it.\n\
-         4. Write `attack.json` in the fix directory: `paths`, a list of \
-         `{{\"id\", \"route\", \"location\", \"description\"}}` with `route` one of `caller`, \
-         `input_shape`, `cleanup`, `error_path`, `other` and `location` as `file:line`; and \
-         `variants`, a list of `{{\"id\", \"path\", \"poc\", \"command\"}}` with `path` the id of \
-         the path it goes through, `poc` the file relative to the fix directory and \
-         `command` the command without `<up>`, as it would run from the project root: \
-         `<interpreter> <script>`. List every path you found, \
-         including those you wrote nothing for: a path with no attempt is reported as \
-         untested.\n\n\
+         from the original reproduction, from the variants the prompt says the runner has \
+         already run, and from each other (another caller, another input shape, a cleanup \
+         or error path), write a proof of concept. Derive each from the root cause. \
+         Changing only a literal, a file name or a size is not another route unless that \
+         boundary is the invariant.\n\
+         3. One variant at a time, finished before the next is started. A variant is one \
+         directory, `variants/<id>/` in the fix directory, holding `run.sh` (or `run.py`) \
+         and `path.txt`, one line saying which path it takes. Write both, then run \
+         `cd <baseline> && <interpreter> <up><fix-dir>/variants/<id>/run.sh` and then \
+         `cd <patched> && <interpreter> <up><fix-dir>/variants/<id>/run.sh`, with \
+         `<baseline>`, `<patched>` and `<up>` exactly as the prompt gives them and \
+         `<interpreter>` `sh` for `run.sh` or `python3` for `run.py`. The variant is on \
+         record from the moment its run file exists: if you stop before running it, the \
+         runner runs it in both copies itself. So a variant you finished counts whatever \
+         happens to the ones after it, and a half-written run file is run as it is; do \
+         not leave one. The baseline copy is shared by the whole run: do not write into \
+         it.\n\
+         4. Last, and only if rounds remain, write `attack.json` in the fix directory: \
+         `paths`, a list of `{{\"id\", \"route\", \"location\", \"description\"}}` with `route` \
+         one of `caller`, `input_shape`, `cleanup`, `error_path`, `other` and `location` \
+         as `file:line`, for every path you found including those you wrote nothing for. \
+         It only names paths nothing was run for. No variant depends on it.\n\n\
          Do not edit the copies' source or the patch. Your reply is one sentence saying \
-         `attack.json` was written.\n",
+         how many variants you wrote.\n",
         frontmatter(
             "fix-attack",
             "List the other paths to a patched finding's sink and write a proof of concept for some",
@@ -1048,6 +1272,7 @@ pub fn build_fix_prompt(
     revision: &str,
     fix_dir_rel: &str,
     supplied: bool,
+    rounds: usize,
 ) -> String {
     let layout = Layout::for_reproduction(run_id, fix_dir_rel, &confirmed.reproduction.command);
     let invariant = confirmed
@@ -1078,13 +1303,15 @@ pub fn build_fix_prompt(
         reproduction_commands(&layout, &confirmed.reproduction.command, revision);
     format!(
         "/fix Write a candidate fix for this confirmed finding. Run-id: `{run_id}`. \
-         Code revision: `{revision}`. Fix directory: `{}`. {invariant} {origin} {patch}\n\n\
+         Code revision: `{revision}`. Fix directory: `{}`. {invariant} {origin} {patch} \
+         You have {rounds} tool rounds; the commands below take {} of them.\n\n\
          The copies are `{}` (baseline, shared by the run) and `{}` (patched). \
          Commands, in this order, each exactly as written. The first {before_patch} before \
          the patch, the rest after it:\n\n{}\n\n\
          Finding:\n```json\n{}\n```\n\n\
          Reproduction:\n```json\n{}\n```",
         layout.dir,
+        commands.len(),
         layout.copy("baseline"),
         layout.copy("patched"),
         numbered(&commands),
@@ -1099,15 +1326,31 @@ pub fn build_attack_prompt(
     run_id: &str,
     fix_dir_rel: &str,
     minimum: usize,
+    rounds: usize,
 ) -> String {
-    let layout = Layout::for_reproduction(run_id, fix_dir_rel, &confirmed.reproduction.command);
+    let layout = layout_for(confirmed, run_id, fix_dir_rel);
+    let carried = carried_variants(confirmed, run_id);
+    let already = if carried.is_empty() {
+        "The runner has run no variant of its own.".to_string()
+    } else {
+        format!(
+            "The runner has already run these as variants, in both copies; do not repeat \
+             them:\n{}",
+            carried
+                .iter()
+                .map(|v| format!("- `{}`: {}", v.command, v.path))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
     format!(
         "/fix-attack Find other routes to this patched finding. Run-id: `{run_id}`. Fix \
          directory: `{0}`. The patch is `{0}/fix.patch`. `<baseline>` is `{3}`, \
          `<patched>` is `{4}`, and `<up>` is `{5}`. Step records are in \
          `.lyrik/state/runs/{run_id}/findings.json`. \
          Write a proof of concept for at least {minimum} paths by different routes. The \
-         original reproduction's command is `{1}`; a variant is not that command.\n\n\
+         original reproduction's command is `{1}`; a variant is not that command. You have \
+         {rounds} tool rounds.\n\n{already}\n\n\
          Finding:\n```json\n{2}\n```",
         layout.dir,
         confirmed.reproduction.command,
@@ -1125,8 +1368,9 @@ pub fn build_recheck_prompt(
     fix_dir_rel: &str,
     functionality: &FunctionalityConfig,
     benign_required: bool,
+    rounds: usize,
 ) -> String {
-    let layout = Layout::for_reproduction(run_id, fix_dir_rel, &confirmed.reproduction.command);
+    let layout = layout_for(confirmed, run_id, fix_dir_rel);
     let named = |what: &str, cmd: &Option<String>| match cmd {
         Some(c) => format!("The {what} command is `{c}`; use it as given."),
         None => format!("The run's configuration names no {what} command."),
@@ -1139,7 +1383,8 @@ pub fn build_recheck_prompt(
     format!(
         "/fix-recheck Recheck the code around this patched finding. Run-id: `{run_id}`. Fix \
          directory: `{0}`. The patch is `{0}/fix.patch`. `<baseline>` is `{4}`, \
-         `<patched>` is `{5}`, and `<up>` is `{6}`. {1} {2} {benign}\n\n\
+         `<patched>` is `{5}`, and `<up>` is `{6}`. {1} {2} {benign} You have {rounds} tool \
+         rounds: run the functionality commands first, then the re-walk.\n\n\
          Finding:\n```json\n{3}\n```",
         layout.dir,
         named("test", &functionality.test_command),
@@ -1257,9 +1502,13 @@ mod tests {
         fn with_variants(mut self, second_shown_on_patched: bool) -> Self {
             let layout = Layout::for_reproduction(RUN, REL, REPRO);
             let dir = self.tmp.path().join(REL);
-            for (id, patched_shown) in [("v1", false), ("v2", second_shown_on_patched)] {
-                std::fs::write(dir.join(format!("variants/{id}.py")), "x").unwrap();
-                let cmd = format!("python3 ../variants/{id}.py");
+            for (id, path, patched_shown) in
+                [("v1", "p1", false), ("v2", "p2", second_shown_on_patched)]
+            {
+                std::fs::create_dir_all(dir.join(format!("variants/{id}"))).unwrap();
+                std::fs::write(dir.join(format!("variants/{id}/run.py")), "x").unwrap();
+                std::fs::write(dir.join(format!("variants/{id}/path.txt")), path).unwrap();
+                let cmd = format!("python3 {}/variants/{id}/run.py", layout.dir);
                 self.add(layout.in_copy("baseline", &cmd), false, &shown());
                 let out = if patched_shown { shown() } else { clean() };
                 self.add(layout.in_copy("patched", &cmd), !patched_shown, &out);
@@ -1268,9 +1517,7 @@ mod tests {
                 dir.join("attack.json"),
                 r#"{"paths":[{"id":"p1","route":"caller","location":"src/c.rs:3"},
                              {"id":"p2","route":"error_path","location":"src/d.rs:9"},
-                             {"id":"p3","route":"cleanup","location":"src/e.rs:2"}],
-                    "variants":[{"id":"v1","path":"p1","poc":"variants/v1.py","command":"python3 ../variants/v1.py"},
-                                {"id":"v2","path":"p2","poc":"variants/v2.py","command":"python3 ../variants/v2.py"}]}"#,
+                             {"id":"p3","route":"cleanup","location":"src/e.rs:2"}]}"#,
             )
             .unwrap();
             self
@@ -1299,7 +1546,12 @@ mod tests {
                 revision: REV,
                 observed: &self.observed,
                 target: self.tmp.path(),
-                target_modified,
+                tree: &if target_modified {
+                    TreeRecord::Changed
+                } else {
+                    TreeRecord::Unchanged
+                },
+                agents: &[],
                 fix_model: "some-model",
                 inputs: &inputs(supplied),
                 changes,
@@ -1324,6 +1576,7 @@ mod tests {
                 })
                 .into_iter()
                 .collect(),
+            tree: Ok("fingerprint".to_string()),
         }
     }
 
@@ -1405,7 +1658,7 @@ mod tests {
         );
         assert_eq!(
             v["artifacts"]["variants"][0],
-            format!("{REL}/variants/v1.py")
+            format!("{REL}/variants/v1/run.py")
         );
         let text = v.to_string();
         assert!(
@@ -1421,10 +1674,263 @@ mod tests {
         assert_eq!(out.label, None);
         assert!(out.root_cause_claim.suspect);
         assert!(out.labels.contains(&"root_cause_suspect"));
+        // Partial: the reproduction is stopped, one other path is not.
         assert!(
-            out.reasons[0].starts_with("variant arm failed: variant v2: shows the defect"),
+            out.reasons[0].starts_with(
+                "partial fix: the reproduction no longer shows the defect and 1 other path(s) \
+                 still do: variants/v2/run.py"
+            ),
             "{:?}",
             out.reasons
+        );
+        assert!(
+            out.reasons[1].starts_with(
+                "variant arm failed: variant variants/v2/run.py: shows the defect in the baseline \
+                 and still shows it in the patched copy; the patch leaves this path open: p2"
+            ),
+            "{:?}",
+            out.reasons
+        );
+        let partial = out.partial.expect("the record says partial");
+        assert_eq!(partial.open_paths.len(), 1);
+        assert_eq!(partial.open_paths[0].path, "p2");
+        assert_eq!(out.variants[0].outcome, "held");
+        assert_eq!(out.variants[1].outcome, "open");
+        // A fix every variant held under is not partial.
+        assert_eq!(
+            Case::new(ORIGIN_PATCH).with_variants(false).judge().partial,
+            None
+        );
+    }
+
+    #[test]
+    fn the_other_confirmed_reproductions_are_variants_fixed_before_any_agent_runs() {
+        // Three agreeing reproductions of one finding, one a repeat of
+        // the first command, and one the replay did not agree with.
+        let mut b = body();
+        let first = b["reproductions"][0].clone();
+        let with = |command: &str, expected: &str, agreement: bool| {
+            let mut r = first.clone();
+            r["command"] = serde_json::json!(command);
+            r["expected"] = serde_json::json!(expected);
+            r["agreement"] = serde_json::json!(agreement);
+            r
+        };
+        let keyless = format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/keyless.sh");
+        let caller =
+            format!("sh .lyrik/state/runs/{RUN}/staging/chain-walk/harness/other_caller.sh");
+        let disputed = format!("sh .lyrik/state/runs/{RUN}/staging/fuzz-walk/harness/disputed.sh");
+        let reproductions = b["reproductions"].as_array_mut().unwrap();
+        reproductions.push(with(&keyless, "keyless deployment: exits 1", true));
+        reproductions.push(with(REPRO, "the same command again", true));
+        reproductions.push(with(&caller, "second caller: exits 1", true));
+        reproductions.push(with(&disputed, "not agreed", false));
+        let c = confirmed_findings(&b).remove(0);
+        assert_eq!(c.reproduction.command, REPRO);
+        let carried = carried_variants(&c, RUN);
+        assert_eq!(
+            carried.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            [
+                "reproduction:sink-walk/keyless.sh",
+                "reproduction:chain-walk/other_caller.sh"
+            ]
+        );
+        assert_eq!(carried[0].command, keyless);
+        assert_eq!(carried[0].path, "keyless deployment: exits 1");
+        assert!(
+            carried
+                .iter()
+                .all(|v| v.source == arms::VariantSource::Reproduction)
+        );
+        // Each copy carries the harness of every walk a variant names.
+        let layout = layout_for(&c, RUN, REL);
+        for walk in ["sink-walk", "chain-walk"] {
+            assert!(
+                layout.carried.iter().any(|w| w == walk),
+                "{:?}",
+                layout.carried
+            );
+        }
+        // The attack prompt tells the agent these are already run.
+        let prompt = build_attack_prompt(&c, RUN, REL, 2, 60);
+        assert!(
+            prompt.contains(&format!("- `{keyless}`: keyless deployment: exits 1")),
+            "{prompt}"
+        );
+        assert!(prompt.contains("You have 60 tool rounds"), "{prompt}");
+    }
+
+    #[test]
+    fn a_carried_reproduction_still_open_in_the_patched_copy_makes_the_fix_partial() {
+        let mut case = Case::new(ORIGIN_PATCH);
+        let keyless = format!("sh .lyrik/state/runs/{RUN}/staging/sink-walk/harness/keyless.sh");
+        let mut other = case.confirmed.reproduction.clone();
+        other.command = keyless.clone();
+        other.expected = "keyless deployment: the write is accepted".into();
+        case.confirmed.others.push(other);
+        let layout = layout_for(&case.confirmed, RUN, REL);
+        // The runner's own steps: the patch in, then the variant twice.
+        case.add(layout.ensure_applied(), true, "");
+        case.add(layout.in_copy("baseline", &keyless), false, &shown());
+        case.add(layout.in_copy("patched", &keyless), false, &shown());
+        let out = case.judge();
+        assert_eq!(out.verdict, Verdict::Rejected, "{:?}", out.reasons);
+        assert_eq!(
+            out.arms[0].state,
+            ArmState::Pass,
+            "{:?}",
+            out.arms[0].reasons
+        );
+        assert_eq!(out.arms[1].state, ArmState::Fail);
+        assert_eq!(out.arms[1].basis, Some(arms::Basis::Executed));
+        let partial = out.partial.expect("partial");
+        assert_eq!(
+            partial.open_paths[0].id,
+            "reproduction:sink-walk/keyless.sh"
+        );
+        assert_eq!(
+            partial.open_paths[0].path,
+            "keyless deployment: the write is accepted"
+        );
+        assert_eq!(partial.open_paths[0].command, keyless);
+        assert!(
+            out.reasons[0].starts_with("partial fix: "),
+            "{:?}",
+            out.reasons
+        );
+        // No attack.json and no agent variant was needed for any of it.
+        assert_eq!(out.artifacts.attack, None);
+    }
+
+    #[test]
+    fn an_agent_stopped_at_its_round_limit_is_on_the_arm_it_feeds_with_the_count() {
+        let case = Case::new(ORIGIN_PATCH).with_variants(false);
+        let agents = [
+            AgentRounds {
+                step: "fix".into(),
+                rounds: 14,
+                round_limit: 60,
+                incomplete: false,
+            },
+            AgentRounds {
+                step: "fix-attack".into(),
+                rounds: 60,
+                round_limit: 60,
+                incomplete: true,
+            },
+            AgentRounds {
+                step: "fix-recheck".into(),
+                rounds: 60,
+                round_limit: 60,
+                incomplete: true,
+            },
+        ];
+        let out = judge(&JudgeInput {
+            run_dir: case.tmp.path(),
+            rel_dir: REL,
+            run_id: RUN,
+            confirmed: &case.confirmed,
+            revision: REV,
+            observed: &case.observed,
+            target: case.tmp.path(),
+            tree: &TreeRecord::Unchanged,
+            agents: &agents,
+            fix_model: "some-model",
+            inputs: &inputs(None),
+            changes: &InputChanges::default(),
+        });
+        let incomplete = |arm: &str| {
+            out.arms
+                .iter()
+                .find(|a| a.arm == arm)
+                .unwrap()
+                .incomplete
+                .clone()
+        };
+        assert_eq!(incomplete("reproduction"), None);
+        assert_eq!(incomplete("root_cause"), None);
+        assert_eq!(
+            incomplete("variant").as_deref(),
+            Some(
+                "the fix-attack agent was stopped at its limit of 60 tool rounds before it finished"
+            )
+        );
+        for arm in ["relocation", "functionality"] {
+            assert_eq!(
+                incomplete(arm).as_deref(),
+                Some(
+                    "the fix-recheck agent was stopped at its limit of 60 tool rounds before it finished"
+                )
+            );
+        }
+        // What the variant agent got run before it stopped still counts.
+        assert_eq!(
+            out.arms[1].state,
+            ArmState::Pass,
+            "{:?}",
+            out.arms[1].reasons
+        );
+        assert_eq!(out.agents, agents);
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["agents"][1]["rounds"], 60);
+        assert_eq!(v["agents"][1]["incomplete"], true);
+        assert!(v["arms"][0].get("incomplete").is_none());
+        let s = summary(std::slice::from_ref(&out));
+        assert_eq!(s["agents_stopped_at_round_limit"], 2);
+        assert!(
+            summary_line(&s).ends_with("; 2 agent(s) stopped at the tool round limit")
+                || summary_line(&s).contains("2 agent(s) stopped at the tool round limit")
+        );
+    }
+
+    #[test]
+    fn an_unknown_tree_state_is_on_the_record_and_is_not_a_candidate() {
+        let case = Case::new(ORIGIN_PATCH).with_variants(false);
+        let judged = |tree: TreeRecord| {
+            judge(&JudgeInput {
+                run_dir: case.tmp.path(),
+                rel_dir: REL,
+                run_id: RUN,
+                confirmed: &case.confirmed,
+                revision: REV,
+                observed: &case.observed,
+                target: case.tmp.path(),
+                tree: &tree,
+                agents: &[],
+                fix_model: "some-model",
+                inputs: &inputs(None),
+                changes: &InputChanges::default(),
+            })
+        };
+        let out = judged(TreeRecord::Unchanged);
+        assert_eq!(out.verdict, Verdict::CandidateFix, "{:?}", out.reasons);
+        assert_eq!(
+            serde_json::to_value(&out).unwrap()["target_tree"]["state"],
+            "unchanged"
+        );
+        let out = judged(TreeRecord::Unknown {
+            reason: "not a git work tree".into(),
+        });
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert_eq!(
+            out.reasons,
+            ["whether the target tree changed during the run is unknown: not a git work tree"]
+        );
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["target_tree"]["state"], "unknown");
+        assert_eq!(v["target_tree"]["reason"], "not a git work tree");
+        let out = judged(TreeRecord::Changed);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert_eq!(out.reasons, ["the target tree changed during the fix step"]);
+        // The record is read from two fingerprints.
+        let (a, b) = (Ok("x".to_string()), Ok("y".to_string()));
+        assert_eq!(TreeRecord::of(&a, &a), TreeRecord::Unchanged);
+        assert_eq!(TreeRecord::of(&a, &b), TreeRecord::Changed);
+        assert_eq!(
+            TreeRecord::of(&Err("no repo".to_string()), &a),
+            TreeRecord::Unknown {
+                reason: "no repo".into()
+            }
         );
     }
 
@@ -1830,7 +2336,8 @@ mod tests {
         assert!(
             summary_line(s).starts_with(
                 "1 candidate (their arms: 3 passed, 0 inconclusive, 2 not_run; 0 with all arms \
-                 passed; 1 functionality unverified), 1 rejected, 1 inconclusive; "
+                 passed; 1 functionality unverified), 1 rejected, 1 inconclusive (1 of the rejected \
+                 partial); "
             ),
             "{}",
             summary_line(s)
@@ -1846,7 +2353,12 @@ mod tests {
         assert_eq!(line["kind"], "fix");
         assert_eq!(line["arm"], "variant");
         assert_eq!(line["stable_id"], "auth::src/a.rs:10");
-        assert!(line["reason"].as_str().unwrap().contains("variant v2"));
+        assert!(
+            line["reason"]
+                .as_str()
+                .unwrap()
+                .contains("variant variants/v2/run.py")
+        );
     }
 
     #[test]
@@ -1890,7 +2402,7 @@ mod tests {
     fn the_prompts_carry_the_exact_commands_the_arms_read() {
         let c = confirmed_findings(&body()).remove(0);
         let layout = Layout::for_reproduction(RUN, REL, REPRO);
-        let p = build_fix_prompt(&c, RUN, REV, REL, false);
+        let p = build_fix_prompt(&c, RUN, REV, REL, false, 60);
         assert!(p.starts_with("/fix "), "{p}");
         assert!(p.contains("Invariant: len is bounded"), "{p}");
         assert!(p.contains("Code revision: `abc`"), "{p}");
@@ -1912,12 +2424,12 @@ mod tests {
             "one string for the patched and reverted runs"
         );
         assert!(p.contains("Write the patch to `fix.patch`"), "{p}");
-        let supplied = build_fix_prompt(&c, RUN, REV, REL, true);
+        let supplied = build_fix_prompt(&c, RUN, REV, REL, true, 60);
         assert!(
             supplied.contains("Do not write or edit a patch"),
             "{supplied}"
         );
-        let a = build_attack_prompt(&c, RUN, REL, 4);
+        let a = build_attack_prompt(&c, RUN, REL, 4, 60);
         assert!(a.starts_with("/fix-attack "), "{a}");
         assert!(a.contains("at least 4 paths"), "{a}");
         assert!(a.contains(&layout.dir), "{a}");
@@ -1925,7 +2437,7 @@ mod tests {
             test_command: Some("make check".into()),
             coverage_command: None,
         };
-        let r = build_recheck_prompt(&c, RUN, REL, &config, true);
+        let r = build_recheck_prompt(&c, RUN, REL, &config, true, 60);
         assert!(r.starts_with("/fix-recheck "), "{r}");
         assert!(r.contains("The test command is `make check`"), "{r}");
         assert!(r.contains("names no coverage command"), "{r}");
@@ -2082,6 +2594,8 @@ mod tests {
                 let fix = p.fix_dir();
                 write(&fix.join("variants/v1/poc.sh"), &poc("b.sh", "99"));
                 write(&fix.join("variants/v2/poc.sh"), &poc("a.sh", "0099"));
+                write(&fix.join("variants/v1/path.txt"), "p1\n");
+                write(&fix.join("variants/v2/path.txt"), "p2\n");
                 write(
                     &fix.join("attack.json"),
                     r#"{"paths":[
@@ -2147,6 +2661,7 @@ mod tests {
                         "observed": "exit 1", "outcome": "reproduced", "code_revision": "HEAD"
                     }))
                     .unwrap(),
+                    others: Vec::new(),
                 };
                 let run_dir = self.root().join(".lyrik/state/runs").join(RUN);
                 save_observed(&self.fix_dir(), &layout, &self.observed).unwrap();
@@ -2158,7 +2673,8 @@ mod tests {
                     revision: "HEAD",
                     observed: &self.observed,
                     target: self.root(),
-                    target_modified: false,
+                    tree: &TreeRecord::Unchanged,
+                    agents: &[],
                     fix_model: "none: commands run by the test",
                     inputs: &inputs(None),
                     changes: &InputChanges::default(),
