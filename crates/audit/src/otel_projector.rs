@@ -1379,6 +1379,7 @@ mod tests {
         SessionEvent::LlmResponse {
             request_id: request_id.to_string(),
             finish_reason: "stop".to_string(),
+            stop_reason: None,
             input_tokens,
             output_tokens,
             cache_creation_input_tokens: 0,

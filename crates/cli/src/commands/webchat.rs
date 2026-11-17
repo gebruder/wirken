@@ -6588,6 +6588,7 @@ mod tests {
                 SessionEvent::LlmResponse {
                     request_id: "r1".into(),
                     finish_reason: "stop".into(),
+                    stop_reason: None,
                     input_tokens: 100,
                     output_tokens: 20,
                     cache_creation_input_tokens: 0,

@@ -882,6 +882,15 @@ pub enum SessionEvent {
     LlmResponse {
         request_id: String,
         finish_reason: String,
+        /// Why the provider says the reply ended, when it says:
+        /// `end_turn`, `tool_use`, `max_tokens` (the reply was cut off
+        /// at the output token limit), `refusal`, `stop_sequence` or
+        /// `other`. `finish_reason` is what the runtime made of the
+        /// reply; this is the provider's own account. Absent on rows
+        /// written before the field existed and for a provider that
+        /// reports none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
         /// Defaulted so a pre-1.2.0 row carrying `tokens_in` (the
         /// pre-1.2.0 name, intentionally not aliased; see C4) reads
         /// as `input_tokens: 0` rather than failing. The legacy value

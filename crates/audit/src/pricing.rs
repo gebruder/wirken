@@ -83,11 +83,42 @@ pub fn cost_micros(
     input_tokens: u32,
     output_tokens: u32,
 ) -> (Option<u64>, Option<u64>, Option<u64>) {
+    cost_micros_cached(provider, model, input_tokens, output_tokens, 0, 0)
+}
+
+/// What a prompt-cache write costs against the input price, at the
+/// default five-minute lifetime, and what a cache read costs.
+pub const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
+pub const CACHE_READ_MULTIPLIER: f64 = 0.1;
+
+/// [`cost_micros`] for a call that wrote to or read from a prompt
+/// cache. A provider that reports cache counters reports `input_tokens`
+/// without them, so the input cost is the three together: uncached
+/// input at the input price, cache writes at
+/// [`CACHE_WRITE_MULTIPLIER`] times it and cache reads at
+/// [`CACHE_READ_MULTIPLIER`] times it. Left out, a cached conversation
+/// would be recorded at a fraction of what it cost.
+pub fn cost_micros_cached(
+    provider: &str,
+    model: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+) -> (Option<u64>, Option<u64>, Option<u64>) {
     let key = (provider.to_string(), model.to_string());
     let Some(p) = table().get(&key) else {
         return (None, None, None);
     };
-    let input = compute_one(input_tokens, p.input_per_million_usd);
+    let input = compute_one(input_tokens, p.input_per_million_usd)
+        .saturating_add(compute_one(
+            cache_creation_input_tokens,
+            p.input_per_million_usd * CACHE_WRITE_MULTIPLIER,
+        ))
+        .saturating_add(compute_one(
+            cache_read_input_tokens,
+            p.input_per_million_usd * CACHE_READ_MULTIPLIER,
+        ));
     let output = compute_one(output_tokens, p.output_per_million_usd);
     let total = input.saturating_add(output);
     (Some(input), Some(output), Some(total))
@@ -122,6 +153,26 @@ mod tests {
         // before runtime.
         let t = table();
         assert!(!t.is_empty(), "baked pricing table is empty");
+    }
+
+    #[test]
+    fn cache_writes_and_reads_are_priced_into_the_input_cost() {
+        // $15 / 1M input. 1000 uncached, 1000 written, 10000 read:
+        // 15_000 + 18_750 + 15_000 micros.
+        let (inp, out, total) =
+            cost_micros_cached("anthropic", "claude-opus-4-7", 1_000, 0, 1_000, 10_000);
+        assert_eq!(inp, Some(48_750));
+        assert_eq!(out, Some(0));
+        assert_eq!(total, Some(48_750));
+        // With no cache counters it is the plain price.
+        assert_eq!(
+            cost_micros_cached("anthropic", "claude-opus-4-7", 1_000, 0, 0, 0),
+            cost_micros("anthropic", "claude-opus-4-7", 1_000, 0)
+        );
+        assert_eq!(
+            cost_micros_cached("nonexistent", "model", 1, 1, 1, 1),
+            (None, None, None)
+        );
     }
 
     #[test]

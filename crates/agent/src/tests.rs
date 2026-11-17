@@ -7950,6 +7950,7 @@ mod verify {
             SessionEvent::LlmResponse {
                 request_id: request_id.into(),
                 finish_reason: "text".into(),
+                stop_reason: None,
                 input_tokens: 0,
                 output_tokens: 0,
                 cache_creation_input_tokens: 0,
@@ -18236,5 +18237,397 @@ mod exec_runtime_unavailable {
             !workspace.join("ran-anyway").exists(),
             "the command did not run on the host or under another runtime"
         );
+    }
+}
+
+/// The provider's stop reason on the response row, a reply cut off at
+/// the output limit, the settable round limit, and the harness's own
+/// tool call.
+mod stop_reasons_and_rounds {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use crate::approval_gate::ApprovalOutcome;
+    use crate::approval_gate::test_support::ScriptedGate;
+    use crate::llm::{LlmConfig, StopReason, stop_reason_in};
+
+    /// Answers each chat completion with the next `(message, finish_reason)`.
+    async fn stub(
+        replies: Vec<(serde_json::Value, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for (message, finish) in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = vec![0u8; 16384];
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let body = serde_json::json!({
+                    "id": "chatcmpl-test", "object": "chat.completion", "created": 0, "model": "stub",
+                    "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+        (format!("http://{addr}/v1"), task)
+    }
+
+    fn agent(
+        base_url: String,
+        id: &str,
+    ) -> (crate::runtime::Agent, Arc<SqliteSessionLog>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let mut agent = crate::runtime::Agent::new(
+            id.to_string(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+        (agent, log, tmp)
+    }
+
+    fn events(log: &SqliteSessionLog, id: &str) -> Vec<SessionEvent> {
+        log.get_since(&log.handle_for(SessionId::new(id.to_string())), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect()
+    }
+
+    fn tool_call(id: &str, name: &str, arguments: &str) -> serde_json::Value {
+        serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": id, "type": "function",
+                            "function": {"name": name, "arguments": arguments}}],
+        })
+    }
+
+    #[test]
+    fn every_provider_shape_is_read_into_one_vocabulary() {
+        let read = |body: serde_json::Value| stop_reason_in(&body);
+        // Anthropic.
+        assert_eq!(
+            read(serde_json::json!({"stop_reason": "max_tokens"})),
+            Some(StopReason::MaxTokens)
+        );
+        assert_eq!(
+            read(serde_json::json!({"stop_reason": "refusal"})),
+            Some(StopReason::Refusal)
+        );
+        assert_eq!(
+            read(serde_json::json!({"stop_reason": "tool_use"})),
+            Some(StopReason::ToolUse)
+        );
+        assert_eq!(
+            read(serde_json::json!({"stop_reason": "end_turn"})),
+            Some(StopReason::EndTurn)
+        );
+        assert_eq!(
+            read(serde_json::json!({"stop_reason": "pause_turn"})),
+            Some(StopReason::Other)
+        );
+        // OpenAI-compatible.
+        let openai = |f: &str| serde_json::json!({"choices": [{"finish_reason": f}]});
+        assert_eq!(read(openai("length")), Some(StopReason::MaxTokens));
+        assert_eq!(read(openai("content_filter")), Some(StopReason::Refusal));
+        assert_eq!(read(openai("tool_calls")), Some(StopReason::ToolUse));
+        assert_eq!(read(openai("stop")), Some(StopReason::EndTurn));
+        // Gemini, Bedrock Converse, Ollama.
+        let gemini = |f: &str| serde_json::json!({"candidates": [{"finishReason": f}]});
+        assert_eq!(read(gemini("MAX_TOKENS")), Some(StopReason::MaxTokens));
+        assert_eq!(read(gemini("SAFETY")), Some(StopReason::Refusal));
+        assert_eq!(
+            read(serde_json::json!({"stopReason": "max_tokens"})),
+            Some(StopReason::MaxTokens)
+        );
+        assert_eq!(
+            read(serde_json::json!({"stopReason": "guardrail_intervened"})),
+            Some(StopReason::Refusal)
+        );
+        assert_eq!(
+            read(serde_json::json!({"done_reason": "length"})),
+            Some(StopReason::MaxTokens)
+        );
+        // A body that says nothing.
+        assert_eq!(
+            read(serde_json::json!({"choices": [{"finish_reason": null}]})),
+            None
+        );
+        assert_eq!(read(serde_json::json!({})), None);
+        // Truncation and refusal are distinct, and distinct from the rest.
+        assert_ne!(StopReason::MaxTokens.as_str(), StopReason::Refusal.as_str());
+        assert_eq!(StopReason::MaxTokens.as_str(), "max_tokens");
+        assert_eq!(StopReason::Refusal.as_str(), "refusal");
+    }
+
+    #[test]
+    fn the_end_of_the_conversation_is_a_cache_breakpoint() {
+        let mark = |mut messages: Vec<serde_json::Value>| {
+            crate::llm::cache_conversation_prefix(&mut messages);
+            messages
+        };
+        let ephemeral = serde_json::json!({"type": "ephemeral"});
+        // A string becomes one text block carrying the mark.
+        let m = mark(vec![
+            serde_json::json!({"role": "user", "content": "hello"}),
+        ]);
+        assert_eq!(
+            m[0]["content"],
+            serde_json::json!([{"type": "text", "text": "hello", "cache_control": ephemeral}])
+        );
+        // In a tool loop the last message is the tool result: only it is marked.
+        let m = mark(vec![
+            serde_json::json!({"role": "user", "content": "go"}),
+            serde_json::json!({"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "exec", "input": {}}]}),
+            serde_json::json!({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "out"}]}),
+        ]);
+        assert_eq!(m[2]["content"][0]["cache_control"], ephemeral);
+        assert_eq!(m[0]["content"], "go");
+        assert!(m[1]["content"][0].get("cache_control").is_none());
+        // Nothing to mark.
+        assert!(mark(Vec::new()).is_empty());
+        let m = mark(vec![serde_json::json!({"role": "user", "content": ""})]);
+        assert_eq!(m[0]["content"], "");
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_cut_off_at_the_output_limit_is_recorded_as_truncated_and_does_not_run() {
+        // The reply ends inside write_file: the path arrived, the content did not.
+        let (base_url, server) = stub(vec![
+            (
+                tool_call("call_cut", "write_file", "{\"path\": \"out.txt\"}"),
+                "length",
+            ),
+            (
+                serde_json::json!({"role": "assistant", "content": "Written in parts next time."}),
+                "stop",
+            ),
+        ])
+        .await;
+        let (mut agent, log, tmp) = agent(base_url, "truncated");
+        // Any call that reached the gate would be approved and counted.
+        let gate = Arc::new(ScriptedGate::new(vec![ApprovalOutcome::Approved {
+            actor: None,
+        }]));
+        agent.set_approval_gate(gate.clone());
+        let result = agent
+            .process_message("write the file", "m-1".into())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(result.response, "Written in parts next time.");
+        assert!(
+            gate.calls.lock().unwrap().is_empty(),
+            "the truncated call never reached the gate"
+        );
+        assert!(
+            !tmp.path().join("out.txt").exists(),
+            "the truncated call did not run"
+        );
+
+        let events = events(&log, "truncated");
+        let stops: Vec<Option<String>> = events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::LlmResponse { stop_reason, .. } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stops,
+            [Some("max_tokens".to_string()), Some("end_turn".to_string())]
+        );
+        let (output, success) = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::ToolResult {
+                    call_id,
+                    output,
+                    success,
+                    ..
+                } if call_id == "call_cut" => Some((output.clone(), *success)),
+                _ => None,
+            })
+            .expect("the truncated call has a result row");
+        assert!(!success);
+        assert!(
+            output.starts_with("truncated: the reply reached the output token limit (256 tokens)"),
+            "{output}"
+        );
+        assert!(
+            !output.contains("missing"),
+            "not a missing-argument error: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_on_the_row_as_a_refusal() {
+        let (base_url, server) = stub(vec![(
+            serde_json::json!({"role": "assistant", "content": "I can't help with that."}),
+            "content_filter",
+        )])
+        .await;
+        let (mut agent, log, _tmp) = agent(base_url, "refused");
+        agent.process_message("hello", "m-1".into()).await.unwrap();
+        server.await.unwrap();
+        let stop = events(&log, "refused").into_iter().find_map(|e| match e {
+            SessionEvent::LlmResponse {
+                stop_reason,
+                finish_reason,
+                ..
+            } => Some((stop_reason, finish_reason)),
+            _ => None,
+        });
+        assert_eq!(
+            stop,
+            Some((Some("refusal".to_string()), "text".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_stopped_at_its_round_limit_says_so_with_the_count() {
+        let call = |i: usize| {
+            (
+                tool_call(&format!("c{i}"), "no_such_tool", "{}"),
+                "tool_calls",
+            )
+        };
+        // Three replies offered; a limit of two means the third is never asked for.
+        let (base_url, server) = stub(vec![call(1), call(2), call(3)]).await;
+        let (mut agent, _log, _tmp) = agent(base_url, "rounds");
+        assert_eq!(agent.max_tool_rounds(), crate::runtime::MAX_TOOL_ROUNDS);
+        agent.set_max_tool_rounds(2);
+        agent.set_approval_gate(Arc::new(ScriptedGate::new(vec![
+            ApprovalOutcome::Approved { actor: None },
+            ApprovalOutcome::Approved { actor: None },
+        ])));
+        let err = agent
+            .process_message("loop", "m-1".into())
+            .await
+            .err()
+            .expect("stopped");
+        server.abort();
+        assert!(
+            err.to_string().contains("exceeded 2 tool call rounds"),
+            "{err}"
+        );
+        assert!(agent.last_turn_exhausted());
+        assert_eq!(agent.last_turn_rounds(), 2);
+
+        // A turn that finishes inside its limit is not exhausted.
+        let (base_url, server) = stub(vec![(
+            serde_json::json!({"role": "assistant", "content": "done"}),
+            "stop",
+        )])
+        .await;
+        let (mut agent, _log, _tmp) = agent_fresh(base_url);
+        agent.set_max_tool_rounds(2);
+        agent.process_message("hi", "m-1".into()).await.unwrap();
+        server.await.unwrap();
+        assert!(!agent.last_turn_exhausted());
+        assert_eq!(agent.last_turn_rounds(), 1);
+    }
+
+    fn agent_fresh(base_url: String) -> (crate::runtime::Agent, Arc<SqliteSessionLog>, TempDir) {
+        agent(base_url, "rounds-ok")
+    }
+
+    #[tokio::test]
+    async fn a_harness_tool_call_goes_through_the_gate_and_onto_the_log_with_no_model_call() {
+        let (mut agent, log, _tmp) = agent("http://127.0.0.1:1/v1".into(), "harness");
+        let gate = Arc::new(ScriptedGate::new(vec![ApprovalOutcome::Approved {
+            actor: None,
+        }]));
+        agent.set_approval_gate(gate.clone());
+        let result = agent
+            .run_tool_as_harness(
+                "no_such_tool",
+                &serde_json::json!({"x": 1}),
+                "the runner's own step",
+            )
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert_eq!(
+            *gate.calls.lock().unwrap(),
+            vec!["no_such_tool".to_string()]
+        );
+        let events = events(&log, "harness");
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                SessionEvent::LlmRequest { .. } | SessionEvent::LlmResponse { .. }
+            )),
+            "no model was called"
+        );
+        let asked = events.iter().find_map(|e| match e {
+            SessionEvent::AssistantToolCalls { calls, text, .. } => {
+                Some((calls.clone(), text.clone()))
+            }
+            _ => None,
+        });
+        let (calls, text) = asked.expect("the call is on the log before it runs");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "no_such_tool");
+        assert_eq!(text.as_deref(), Some("the runner's own step"));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SessionEvent::ToolResult { call_id, success: false, .. } if *call_id == calls[0].id
+        )));
     }
 }

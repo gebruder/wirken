@@ -309,6 +309,98 @@ pub struct Usage {
     pub cache_read_input_tokens: u32,
 }
 
+/// Why a provider says a reply ended, in one vocabulary across
+/// providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    EndTurn,
+    ToolUse,
+    /// The reply reached the output token limit and is cut off. A tool
+    /// call at the end of it may hold only part of its arguments.
+    MaxTokens,
+    /// The provider or its safety system declined to answer.
+    Refusal,
+    StopSequence,
+    /// A reason this table does not name.
+    Other,
+}
+
+impl StopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::EndTurn => "end_turn",
+            StopReason::ToolUse => "tool_use",
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::Refusal => "refusal",
+            StopReason::StopSequence => "stop_sequence",
+            StopReason::Other => "other",
+        }
+    }
+
+    /// A provider's own word for it. Anthropic: `stop_reason`.
+    /// OpenAI-compatible: `finish_reason`. Gemini: `finishReason`.
+    /// Bedrock Converse: `stopReason`. Ollama: `done_reason`.
+    pub fn from_provider(raw: &str) -> Self {
+        match raw.to_ascii_lowercase().as_str() {
+            "end_turn" | "stop" | "eos" | "complete" => StopReason::EndTurn,
+            "tool_use" | "tool_calls" | "function_call" => StopReason::ToolUse,
+            "max_tokens" | "length" | "model_context_window_exceeded" => StopReason::MaxTokens,
+            "refusal"
+            | "content_filter"
+            | "content_filtered"
+            | "guardrail_intervened"
+            | "safety"
+            | "recitation"
+            | "blocklist"
+            | "prohibited_content"
+            | "spii" => StopReason::Refusal,
+            "stop_sequence" => StopReason::StopSequence,
+            _ => StopReason::Other,
+        }
+    }
+}
+
+/// Mark the end of an Anthropic conversation as a cache breakpoint: the
+/// last content block of the last message. The provider caches
+/// everything up to a breakpoint, so each call of a tool loop reads the
+/// calls before it from the cache and writes only what the last round
+/// added. Without it only the system prompt and the tool definitions
+/// are cached and the whole conversation is billed as fresh input on
+/// every round. A message whose content is a string is rewritten as one
+/// text block, which is the same message to the provider.
+pub(crate) fn cache_conversation_prefix(messages: &mut [serde_json::Value]) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    let Some(content) = last.get_mut("content") else {
+        return;
+    };
+    if let Some(text) = content.as_str() {
+        if text.is_empty() {
+            return;
+        }
+        *content = serde_json::json!([{ "type": "text", "text": text }]);
+    }
+    if let Some(block) = content.as_array_mut().and_then(|blocks| blocks.last_mut())
+        && block.is_object()
+    {
+        block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+    }
+}
+
+/// The stop reason in a provider's response body, whichever shape the
+/// body has. `None` when the body carries none.
+pub fn stop_reason_in(body: &serde_json::Value) -> Option<StopReason> {
+    let raw = body
+        .get("stop_reason")
+        .or_else(|| body.get("stopReason"))
+        .or_else(|| body.get("done_reason"))
+        .or_else(|| body.pointer("/choices/0/finish_reason"))
+        .or_else(|| body.pointer("/candidates/0/finishReason"))
+        .and_then(|v| v.as_str())?;
+    Some(StopReason::from_provider(raw))
+}
+
 /// LLM client that makes completion requests.
 pub struct LlmClient {
     config: LlmConfig,
@@ -321,6 +413,9 @@ pub struct LlmClient {
     /// awaits — the lock is acquired, the inner `Arc` cloned out, and
     /// released before the observer's hooks run.
     observer: Mutex<Option<Arc<dyn RecoveryObserver>>>,
+    /// The stop reason of the reply the last call returned. Set by
+    /// each call, read by the runtime straight after it.
+    last_stop: Mutex<Option<StopReason>>,
     /// Lazy-initialized tinfoil SDK client. Construction performs
     /// AMD SEV-SNP attestation + Sigstore verification + TLS pinning
     /// against the discovered enclave; the result is cached for the
@@ -374,6 +469,7 @@ impl LlmClient {
             config,
             http,
             observer: Mutex::new(None),
+            last_stop: Mutex::new(None),
             tinfoil: tokio::sync::Mutex::new(None),
             leak_matcher: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
             plan_source: None,
@@ -514,6 +610,16 @@ impl LlmClient {
     /// Returns the response paired with the usage metadata extracted from
     /// the provider's `usage` block. Endpoints without a usage block yield
     /// `Usage::default()`.
+    /// Why the provider says the reply of the last call ended, when it
+    /// said. Read it straight after the call it belongs to.
+    pub fn last_stop_reason(&self) -> Option<StopReason> {
+        *self.last_stop.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn set_stop_reason(&self, reason: Option<StopReason>) {
+        *self.last_stop.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+    }
+
     pub async fn complete(
         &self,
         messages: &[Message],
@@ -521,6 +627,7 @@ impl LlmClient {
         api_key: Option<&str>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         self.refuse_leaked_request(messages, tools)?;
+        self.set_stop_reason(None);
         if self.config.auth.is_plan() {
             return self.complete_plan(messages, tools, None).await;
         }
@@ -609,6 +716,8 @@ impl LlmClient {
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
+        self.set_stop_reason(stop_reason_in(&response_body));
+
         parse_completion_response(&response_body)
     }
 
@@ -684,6 +793,8 @@ impl LlmClient {
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
+        self.set_stop_reason(stop_reason_in(&response_body));
+
         parse_ollama_response(&response_body)
     }
 
@@ -723,6 +834,8 @@ impl LlmClient {
             .json()
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        self.set_stop_reason(stop_reason_in(&response_body));
 
         parse_completion_response(&response_body)
     }
@@ -810,6 +923,8 @@ impl LlmClient {
             })
             .collect();
 
+        let mut messages_json = messages_json;
+        cache_conversation_prefix(&mut messages_json);
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages_json,
@@ -873,6 +988,8 @@ impl LlmClient {
             .json()
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        self.set_stop_reason(stop_reason_in(&response_body));
 
         parse_anthropic_response(&response_body)
     }
@@ -1009,6 +1126,8 @@ impl LlmClient {
             .json()
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        self.set_stop_reason(stop_reason_in(&response_body));
 
         parse_gemini_response(&response_body)
     }
@@ -1177,6 +1296,8 @@ impl LlmClient {
             .json()
             .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        self.set_stop_reason(stop_reason_in(&response_body));
 
         parse_bedrock_response(&response_body)
     }

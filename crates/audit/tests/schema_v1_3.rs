@@ -435,6 +435,7 @@ fn llm_response_with_credential_id_round_trips() {
     let original = SessionEvent::LlmResponse {
         request_id: "req-1".into(),
         finish_reason: "end_turn".into(),
+        stop_reason: None,
         input_tokens: 100,
         output_tokens: 50,
         cache_creation_input_tokens: 0,
@@ -705,6 +706,7 @@ fn snapshot_llm_response_renames_tokens_and_carries_agent_id() {
     let ev = SessionEvent::LlmResponse {
         request_id: "req-1".into(),
         finish_reason: "end_turn".into(),
+        stop_reason: None,
         input_tokens: 100,
         output_tokens: 50,
         cache_creation_input_tokens: 0,

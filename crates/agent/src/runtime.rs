@@ -328,6 +328,13 @@ pub struct Agent {
     /// currently being dispatched. Set when the response is taken
     /// apart, read by the row and by the approval gate.
     current_assistant_text: Option<String>,
+    /// Model calls one turn may make before it is stopped.
+    /// [`MAX_TOOL_ROUNDS`] unless the harness sets another.
+    max_tool_rounds: usize,
+    /// Model calls the last turn made.
+    last_turn_rounds: usize,
+    /// Whether the last turn was stopped at `max_tool_rounds`.
+    last_turn_exhausted: bool,
     /// Platform-side identity (adapter + sender) of the inbound that
     /// triggered the current processing round. Set at the top of
     /// `process_message_inner` / `process_message_stream_with` so
@@ -819,6 +826,9 @@ impl Agent {
             org_permissions: None,
             current_trigger: None,
             current_assistant_text: None,
+            max_tool_rounds: MAX_TOOL_ROUNDS,
+            last_turn_rounds: 0,
+            last_turn_exhausted: false,
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -931,6 +941,9 @@ impl Agent {
             org_permissions: None,
             current_trigger: None,
             current_assistant_text: None,
+            max_tool_rounds: MAX_TOOL_ROUNDS,
+            last_turn_rounds: 0,
+            last_turn_exhausted: false,
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -1171,6 +1184,61 @@ impl Agent {
     /// own.
     pub fn set_agent_id(&mut self, agent_id: impl Into<String>) {
         self.agent_id = Some(agent_id.into());
+    }
+
+    /// How many model calls one turn may make. The default is
+    /// [`MAX_TOOL_ROUNDS`]; zero is read as one.
+    pub fn set_max_tool_rounds(&mut self, rounds: usize) {
+        self.max_tool_rounds = rounds.max(1);
+    }
+
+    pub fn max_tool_rounds(&self) -> usize {
+        self.max_tool_rounds
+    }
+
+    /// Model calls the last turn made.
+    pub fn last_turn_rounds(&self) -> usize {
+        self.last_turn_rounds
+    }
+
+    /// Whether the last turn ended because it reached the round limit,
+    /// not because the model finished.
+    pub fn last_turn_exhausted(&self) -> bool {
+        self.last_turn_exhausted
+    }
+
+    /// Run one tool call that no model asked for, as the harness's own
+    /// step: the same permission gate, sandbox, output mediation and
+    /// session-log rows a model's call gets, with `note` in place of
+    /// the model's sentence. The conversation is not touched.
+    pub async fn run_tool_as_harness(
+        &mut self,
+        name: &str,
+        arguments: &serde_json::Value,
+        note: &str,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        self.refuse_if_stopped()?;
+        let call = crate::conversation::ToolCallRequest {
+            id: format!("harness-{}", uuid::Uuid::new_v4()),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        };
+        self.current_assistant_text = Some(note.to_string());
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::AssistantToolCalls {
+                calls: Self::calls_to_records(std::slice::from_ref(&call)),
+                text: Some(note.to_string()),
+                reasoning: None,
+                agent_id: self.audited_agent_id(),
+                adapter_id: self.current_inbound.adapter_id.clone(),
+                sender_id: self.current_inbound.sender_id.clone(),
+            },
+        )?;
+        let mut denials = Vec::new();
+        let result = self.execute_and_record_tool(&call, &mut denials).await?;
+        self.record_tool_result(&call.id, &call.name, &result)?;
+        Ok(result)
     }
 
     /// `Err(AgentStopped)` when the operator has stopped this agent,
@@ -3352,11 +3420,14 @@ impl Agent {
 
         loop {
             rounds += 1;
-            if rounds > MAX_TOOL_ROUNDS {
+            self.last_turn_exhausted = rounds > self.max_tool_rounds;
+            if self.last_turn_exhausted {
                 return Err(AgentError::Tool(format!(
-                    "exceeded {MAX_TOOL_ROUNDS} tool call rounds — possible loop"
+                    "exceeded {} tool call rounds; possible loop",
+                    self.max_tool_rounds
                 )));
             }
+            self.last_turn_rounds = rounds;
             if let Some(budget) = max_rounds_budget
                 && rounds > budget
             {
@@ -3426,6 +3497,7 @@ impl Agent {
                 .map_err(|e| self.fail_llm_request(&request_id, started, e))?;
             let latency_ms = started.elapsed().as_millis() as u64;
             drop(meter);
+            let stop = self.llm.last_stop_reason();
             let LlmResponseAttribution {
                 input_tokens,
                 output_tokens,
@@ -3440,6 +3512,7 @@ impl Agent {
                 SessionEvent::LlmResponse {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
+                    stop_reason: stop.map(|r| r.as_str().to_string()),
                     input_tokens,
                     output_tokens,
                     cache_creation_input_tokens,
@@ -3481,6 +3554,7 @@ impl Agent {
                     // arguments carry a stored secret is recorded with
                     // the refusal in their place and does not run.
                     let (calls, refused) = self.refuse_leaked_arguments(calls).await;
+                    let truncated = truncated_call(stop, &calls);
                     let text = text.map(|t| self.withhold_leaked_reply(t).0);
                     // The provider's reasoning for the same message,
                     // recorded beside the calls and read by nothing.
@@ -3520,6 +3594,21 @@ impl Agent {
                         self.record_tool_result(&call.id, &call.name, &result)?;
                     }
 
+                    // A reply cut off at the output limit ends inside its
+                    // last call. That call is recorded as truncated and
+                    // does not run on whatever arguments arrived.
+                    if let Some(call) = calls
+                        .iter()
+                        .find(|c| truncated.as_deref() == Some(c.id.as_str()))
+                        .filter(|c| !refused.contains_key(&c.id))
+                    {
+                        let result = truncated_tool_result(self.llm.config().max_tokens);
+                        turn_calls.note(&call.name, &result, false);
+                        self.conversation
+                            .add_tool_result(&call.id, &call.name, &result.output);
+                        self.record_tool_result(&call.id, &call.name, &result)?;
+                    }
+
                     // Partition into regular and spawn calls.
                     // Regular calls execute sequentially first
                     // (they may have ordering-dependent side effects).
@@ -3527,6 +3616,7 @@ impl Agent {
                     let (spawn_calls, regular_calls): (Vec<_>, Vec<_>) = calls
                         .iter()
                         .filter(|c| !refused.contains_key(&c.id))
+                        .filter(|c| truncated.as_deref() != Some(c.id.as_str()))
                         .partition(|c| c.name == SPAWN_SUBAGENT_TOOL);
 
                     // Phase 1: execute regular tool calls sequentially.
@@ -3720,11 +3810,14 @@ impl Agent {
 
         loop {
             rounds += 1;
-            if rounds > MAX_TOOL_ROUNDS {
+            self.last_turn_exhausted = rounds > self.max_tool_rounds;
+            if self.last_turn_exhausted {
                 return Err(AgentError::Tool(format!(
-                    "exceeded {MAX_TOOL_ROUNDS} tool call rounds — possible loop"
+                    "exceeded {} tool call rounds; possible loop",
+                    self.max_tool_rounds
                 )));
             }
+            self.last_turn_rounds = rounds;
 
             // Refit before every LLM call inside the tool loop.
             let fit_result = self.context_engine.fit(
@@ -3814,6 +3907,7 @@ impl Agent {
             };
             let latency_ms = started.elapsed().as_millis() as u64;
             drop(meter);
+            let stop = self.llm.last_stop_reason();
             let LlmResponseAttribution {
                 input_tokens,
                 output_tokens,
@@ -3828,6 +3922,7 @@ impl Agent {
                 SessionEvent::LlmResponse {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
+                    stop_reason: stop.map(|r| r.as_str().to_string()),
                     input_tokens,
                     output_tokens,
                     cache_creation_input_tokens,
@@ -3874,6 +3969,7 @@ impl Agent {
                     reasoning,
                 } => {
                     let (calls, refused) = self.refuse_leaked_arguments(calls).await;
+                    let truncated = truncated_call(stop, &calls);
                     let reasoning = reasoning.map(|r| self.withhold_leaked_reply(r).0);
                     let text = match text {
                         Some(t) => {
@@ -3922,6 +4018,9 @@ impl Agent {
                         let denied_before = denials.len();
                         let result = match refused.get(&call.id) {
                             Some(credential) => refused_tool_result(credential),
+                            None if truncated.as_deref() == Some(call.id.as_str()) => {
+                                truncated_tool_result(self.llm.config().max_tokens)
+                            }
                             None => self.execute_and_record_tool(call, &mut denials).await?,
                         };
                         turn_calls.note(
@@ -6841,6 +6940,7 @@ pub fn side_call_response(
         SessionEvent::LlmResponse {
             request_id: request_id.to_string(),
             finish_reason: finish_reason_for(response).to_string(),
+            stop_reason: None,
             input_tokens,
             output_tokens,
             cache_creation_input_tokens,
@@ -6907,6 +7007,30 @@ fn refused_deny_message(ctx: &PermissionDenialContext, reason: &str) -> String {
     )
 }
 
+/// The call a reply cut off at the output token limit ends inside: the
+/// last one. `None` when the reply was not cut off.
+fn truncated_call(
+    stop: Option<crate::llm::StopReason>,
+    calls: &[crate::conversation::ToolCallRequest],
+) -> Option<String> {
+    (stop == Some(crate::llm::StopReason::MaxTokens))
+        .then(|| calls.last().map(|c| c.id.clone()))
+        .flatten()
+}
+
+/// What a truncated call is answered with. The call did not run.
+fn truncated_tool_result(max_tokens: u32) -> crate::tool::ToolResult {
+    crate::tool::ToolResult {
+        output: format!(
+            "truncated: the reply reached the output token limit ({max_tokens} tokens) before \
+             this call's arguments were complete, so the call did not run. Issue it again with \
+             less in one call, for example a long file written in parts."
+        ),
+        success: false,
+        sandbox: None,
+    }
+}
+
 fn finish_reason_for(response: &LlmResponse) -> &'static str {
     match response {
         LlmResponse::Text(_) => "text",
@@ -6923,10 +7047,16 @@ fn finish_reason_for(response: &LlmResponse) -> &'static str {
 fn resolve_cost_micros(
     provider: &str,
     model: &str,
-    input_tokens: u32,
-    output_tokens: u32,
+    usage: &crate::llm::Usage,
 ) -> (Option<u64>, Option<u64>, Option<u64>) {
-    let result = wirken_audit::pricing::cost_micros(provider, model, input_tokens, output_tokens);
+    let result = wirken_audit::pricing::cost_micros_cached(
+        provider,
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_read_input_tokens,
+    );
     if result.0.is_none() {
         tracing::warn!(
             provider = provider,
@@ -6984,7 +7114,7 @@ pub(crate) fn attribute_llm_usage(
     match usage {
         Some(u) => {
             let (input_cost_usd_micros, output_cost_usd_micros, total_cost_usd_micros) =
-                resolve_cost_micros(provider, model, u.input_tokens, u.output_tokens);
+                resolve_cost_micros(provider, model, &u);
             LlmResponseAttribution {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,

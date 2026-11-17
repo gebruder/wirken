@@ -69,6 +69,7 @@ impl LlmClient {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         self.refuse_leaked_request(messages, tools)?;
+        self.set_stop_reason(None);
         if self.config().auth.is_plan() {
             return self.complete_plan(messages, tools, Some(&tx)).await;
         }
@@ -192,6 +193,9 @@ impl LlmClient {
                         // `Some(Usage)` when the block is present.
                         if let Some(parsed_usage) = super::llm::extract_openai_usage(&parsed) {
                             usage = Some(parsed_usage);
+                        }
+                        if let Some(stop) = crate::llm::stop_reason_in(&parsed) {
+                            self.set_stop_reason(Some(stop));
                         }
 
                         if let Some(delta) = parsed
@@ -352,6 +356,8 @@ impl LlmClient {
             })
             .collect();
 
+        let mut messages_json = messages_json;
+        crate::llm::cache_conversation_prefix(&mut messages_json);
         let mut body = serde_json::json!({
             "model": self.config().model,
             "messages": messages_json,
@@ -485,6 +491,11 @@ impl LlmClient {
                         }
                     }
                     "message_delta" => {
+                        if let Some(raw) =
+                            data.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                        {
+                            self.set_stop_reason(Some(crate::llm::StopReason::from_provider(raw)));
+                        }
                         // The cumulative `usage.output_tokens`
                         // updates with each delta. Input and cache
                         // fields are fixed by `message_start`; keep

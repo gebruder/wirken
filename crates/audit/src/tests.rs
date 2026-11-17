@@ -1116,6 +1116,7 @@ mod session {
                 SessionEvent::LlmResponse {
                     request_id: "req-1".into(),
                     finish_reason: "end_turn".into(),
+                    stop_reason: None,
                     input_tokens: 100,
                     output_tokens: 50,
                     cache_creation_input_tokens: 0,
@@ -1504,6 +1505,7 @@ mod session {
             SessionEvent::LlmResponse {
                 request_id: "req-cache".into(),
                 finish_reason: "end_turn".into(),
+                stop_reason: None,
                 input_tokens: 1234,
                 output_tokens: 567,
                 cache_creation_input_tokens: 800,
@@ -1572,6 +1574,7 @@ mod session {
             SessionEvent::LlmResponse {
                 request_id: "req-cost".into(),
                 finish_reason: "end_turn".into(),
+                stop_reason: None,
                 input_tokens: 1_000,
                 output_tokens: 500,
                 cache_creation_input_tokens: 0,
@@ -1635,6 +1638,7 @@ mod session {
         let event = SessionEvent::LlmResponse {
             request_id: "r".into(),
             finish_reason: "end_turn".into(),
+            stop_reason: None,
             input_tokens: 10,
             output_tokens: 5,
             cache_creation_input_tokens: 0,
@@ -1687,6 +1691,7 @@ mod session {
             SessionEvent::LlmResponse {
                 request_id: "req-verify".into(),
                 finish_reason: "end_turn".into(),
+                stop_reason: None,
                 input_tokens: 7,
                 output_tokens: 3,
                 cache_creation_input_tokens: 0,
@@ -1717,6 +1722,7 @@ mod session {
         let event = SessionEvent::LlmResponse {
             request_id: "r".into(),
             finish_reason: "end_turn".into(),
+            stop_reason: None,
             input_tokens: 10,
             output_tokens: 5,
             cache_creation_input_tokens: 0,
@@ -3339,6 +3345,7 @@ fn every_session_event() -> Vec<SessionEvent> {
         SessionEvent::LlmResponse {
             request_id: String::new(),
             finish_reason: String::new(),
+            stop_reason: None,
             input_tokens: 0,
             output_tokens: 0,
             cache_creation_input_tokens: 0,

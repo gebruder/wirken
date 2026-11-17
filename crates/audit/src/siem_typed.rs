@@ -1035,6 +1035,7 @@ mod tests {
         let resp = SessionEvent::LlmResponse {
             request_id: "r1".into(),
             finish_reason: "stop".into(),
+            stop_reason: None,
             input_tokens: 1,
             output_tokens: 2,
             cache_creation_input_tokens: 0,
