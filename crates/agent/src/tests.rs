@@ -18535,13 +18535,107 @@ mod stop_reasons_and_rounds {
             .expect("the truncated call has a result row");
         assert!(!success);
         assert!(
-            output.starts_with("truncated: the reply reached the output token limit (256 tokens)"),
+            output.starts_with(
+                "withheld: this call was not run. Stop reason max_tokens (provider: `length`): the \
+                 reply reached the output token limit (256 tokens)"
+            ),
             "{output}"
         );
         assert!(
             !output.contains("missing"),
             "not a missing-argument error: {output}"
         );
+    }
+
+    #[tokio::test]
+    async fn no_tool_call_of_a_refused_reply_is_dispatched_or_asked_about() {
+        // The provider ends the reply as a refusal, and the reply
+        // carries two complete tool calls.
+        let refused = serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+                {"id": "call_a", "type": "function",
+                 "function": {"name": "write_file", "arguments": "{\"path\": \"a.txt\", \"content\": \"x\"}"}},
+                {"id": "call_b", "type": "function",
+                 "function": {"name": "exec", "arguments": "{\"command\": \"touch b.txt\"}"}},
+            ],
+        });
+        let (base_url, server) = stub(vec![
+            (refused, "content_filter"),
+            (
+                serde_json::json!({"role": "assistant", "content": "Understood."}),
+                "stop",
+            ),
+        ])
+        .await;
+        let (mut agent, log, tmp) = agent(base_url, "refused-calls");
+        // A call that reached the gate would be approved, and counted.
+        let gate = Arc::new(ScriptedGate::new(vec![
+            ApprovalOutcome::Approved { actor: None },
+            ApprovalOutcome::Approved { actor: None },
+        ]));
+        agent.set_approval_gate(gate.clone());
+        let result = agent.process_message("do it", "m-1".into()).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(result.response, "Understood.");
+        assert!(
+            result.denials.is_empty(),
+            "a withheld call is not a permission denial"
+        );
+        assert!(
+            gate.calls.lock().unwrap().is_empty(),
+            "no approval was asked for a withheld call"
+        );
+        assert!(!tmp.path().join("a.txt").exists() && !tmp.path().join("b.txt").exists());
+
+        let events = events(&log, "refused-calls");
+        // The calls are on the chain as the model sent them, then each
+        // has a result that says it was withheld, with both stop words.
+        let results: Vec<(String, bool, String)> = events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::ToolResult {
+                    call_id,
+                    success,
+                    output,
+                    ..
+                } => Some((call_id.clone(), *success, output.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        for (id, success, output) in &results {
+            assert!(!success, "{id}");
+            assert_eq!(
+                output,
+                "withheld: this call was not run. Stop reason refusal (provider: `content_filter`): \
+                 the provider ended the reply as a refusal, so no tool call in it was run."
+            );
+        }
+        assert_eq!(results[0].0, "call_a");
+        assert_eq!(results[1].0, "call_b");
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                SessionEvent::PermissionApproved { .. } | SessionEvent::PermissionDenied { .. }
+            )),
+            "nothing reached the permission gate"
+        );
+        // The decision is one pure function of the stop reason.
+        let ids = ["x", "y", "z"];
+        let all = crate::runtime::withheld_calls(Some(StopReason::Refusal), ids);
+        assert_eq!(all.len(), 3);
+        let last = crate::runtime::withheld_calls(Some(StopReason::MaxTokens), ids);
+        assert_eq!(last.into_iter().collect::<Vec<_>>(), ["z"]);
+        for stop in [
+            Some(StopReason::ToolUse),
+            Some(StopReason::EndTurn),
+            Some(StopReason::Other),
+            None,
+        ] {
+            assert!(crate::runtime::withheld_calls(stop, ids).is_empty());
+        }
     }
 
     #[tokio::test]

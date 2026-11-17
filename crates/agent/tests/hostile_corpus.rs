@@ -1019,6 +1019,59 @@ fn approval_cards_show_the_arguments_as_sent() {
     assert!(replayed > 0, "no line in {CORPUS_PATH} carries 'card'");
 }
 
+/// Every line with `stop_reason`: whether a call is dispatched at all,
+/// given how the provider says the reply that carried it ended. A
+/// refused reply's calls and a cut-off reply's last call are withheld
+/// before the permission gate sees them.
+#[test]
+fn a_call_in_a_refused_or_cut_off_reply_is_withheld_before_the_gate() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixtures = build_fixtures(scratch.path());
+    let mut seen = BTreeSet::new();
+    for entry in parse_corpus(&fixtures) {
+        let Some(raw) = entry.raw.get("stop_reason").and_then(|a| a.as_str()) else {
+            continue;
+        };
+        let expect = entry
+            .raw
+            .get("dispatch")
+            .and_then(|a| a.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{CORPUS_PATH}:{} has stop_reason and no dispatch",
+                    entry.lineno
+                )
+            });
+        let stop = wirken_agent::llm::StopReason::from_provider(raw);
+        let withheld = wirken_agent::runtime::withheld_calls(Some(stop), [entry.id.as_str()]);
+        let observed = if withheld.contains(&entry.id) {
+            "withheld"
+        } else {
+            "dispatched"
+        };
+        assert_eq!(
+            observed,
+            expect,
+            "\n{CORPUS_PATH}:{}  id={}\n  stop      {raw} (mapped {})\n  why       {}\n",
+            entry.lineno,
+            entry.id,
+            stop.as_str(),
+            entry.why,
+        );
+        seen.insert((stop.as_str(), observed));
+    }
+    for want in [
+        ("refusal", "withheld"),
+        ("max_tokens", "withheld"),
+        ("tool_use", "dispatched"),
+    ] {
+        assert!(
+            seen.contains(&want),
+            "no line in {CORPUS_PATH} replays to {want:?}"
+        );
+    }
+}
+
 /// Every line with `ask`: whether the call can be put to an operator
 /// at all. The runtime refuses, before any surface renders it, a call
 /// whose arguments the card would cut.

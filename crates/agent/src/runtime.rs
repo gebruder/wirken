@@ -3499,6 +3499,7 @@ impl Agent {
             drop(meter);
             let stop = self.llm.last_stop_reason();
             let stop_raw = self.llm.last_stop_reason_raw();
+            let stop_raw_for_calls = stop_raw.clone();
             let LlmResponseAttribution {
                 input_tokens,
                 output_tokens,
@@ -3556,7 +3557,7 @@ impl Agent {
                     // arguments carry a stored secret is recorded with
                     // the refusal in their place and does not run.
                     let (calls, refused) = self.refuse_leaked_arguments(calls).await;
-                    let truncated = truncated_call(stop, &calls);
+                    let withheld = withheld_calls(stop, calls.iter().map(|c| c.id.as_str()));
                     let text = text.map(|t| self.withhold_leaked_reply(t).0);
                     // The provider's reasoning for the same message,
                     // recorded beside the calls and read by nothing.
@@ -3596,15 +3597,21 @@ impl Agent {
                         self.record_tool_result(&call.id, &call.name, &result)?;
                     }
 
-                    // A reply cut off at the output limit ends inside its
-                    // last call. That call is recorded as truncated and
-                    // does not run on whatever arguments arrived.
-                    if let Some(call) = calls
+                    // A reply the provider ended as a refusal, or cut off at
+                    // the output limit, is not acted on: every call of a
+                    // refused reply, and the last call of a cut-off one, is
+                    // answered here with why it was withheld. This is ahead
+                    // of the permission gate, so nobody is asked to approve
+                    // a call that will not run.
+                    for call in calls
                         .iter()
-                        .find(|c| truncated.as_deref() == Some(c.id.as_str()))
-                        .filter(|c| !refused.contains_key(&c.id))
+                        .filter(|c| withheld.contains(&c.id) && !refused.contains_key(&c.id))
                     {
-                        let result = truncated_tool_result(self.llm.config().max_tokens);
+                        let result = withheld_tool_result(
+                            stop,
+                            stop_raw_for_calls.as_deref(),
+                            self.llm.config().max_tokens,
+                        );
                         turn_calls.note(&call.name, &result, false);
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
@@ -3618,7 +3625,7 @@ impl Agent {
                     let (spawn_calls, regular_calls): (Vec<_>, Vec<_>) = calls
                         .iter()
                         .filter(|c| !refused.contains_key(&c.id))
-                        .filter(|c| truncated.as_deref() != Some(c.id.as_str()))
+                        .filter(|c| !withheld.contains(&c.id))
                         .partition(|c| c.name == SPAWN_SUBAGENT_TOOL);
 
                     // Phase 1: execute regular tool calls sequentially.
@@ -3911,6 +3918,7 @@ impl Agent {
             drop(meter);
             let stop = self.llm.last_stop_reason();
             let stop_raw = self.llm.last_stop_reason_raw();
+            let stop_raw_for_calls = stop_raw.clone();
             let LlmResponseAttribution {
                 input_tokens,
                 output_tokens,
@@ -3973,7 +3981,7 @@ impl Agent {
                     reasoning,
                 } => {
                     let (calls, refused) = self.refuse_leaked_arguments(calls).await;
-                    let truncated = truncated_call(stop, &calls);
+                    let withheld = withheld_calls(stop, calls.iter().map(|c| c.id.as_str()));
                     let reasoning = reasoning.map(|r| self.withhold_leaked_reply(r).0);
                     let text = match text {
                         Some(t) => {
@@ -4022,9 +4030,11 @@ impl Agent {
                         let denied_before = denials.len();
                         let result = match refused.get(&call.id) {
                             Some(credential) => refused_tool_result(credential),
-                            None if truncated.as_deref() == Some(call.id.as_str()) => {
-                                truncated_tool_result(self.llm.config().max_tokens)
-                            }
+                            None if withheld.contains(&call.id) => withheld_tool_result(
+                                stop,
+                                stop_raw_for_calls.as_deref(),
+                                self.llm.config().max_tokens,
+                            ),
                             None => self.execute_and_record_tool(call, &mut denials).await?,
                         };
                         turn_calls.note(
@@ -7012,24 +7022,46 @@ fn refused_deny_message(ctx: &PermissionDenialContext, reason: &str) -> String {
     )
 }
 
-/// The call a reply cut off at the output token limit ends inside: the
-/// last one. `None` when the reply was not cut off.
-fn truncated_call(
+/// The calls of a reply that are not dispatched because of how the
+/// provider says the reply ended. A refusal withholds every call: the
+/// provider declined the reply, and what it carried is not acted on. A
+/// reply cut off at the output token limit withholds its last call,
+/// the one the cut fell in. Any other ending withholds nothing.
+pub fn withheld_calls<'a>(
     stop: Option<crate::llm::StopReason>,
-    calls: &[crate::conversation::ToolCallRequest],
-) -> Option<String> {
-    (stop == Some(crate::llm::StopReason::MaxTokens))
-        .then(|| calls.last().map(|c| c.id.clone()))
-        .flatten()
+    call_ids: impl IntoIterator<Item = &'a str>,
+) -> std::collections::BTreeSet<String> {
+    let ids = call_ids.into_iter();
+    match stop {
+        Some(crate::llm::StopReason::Refusal) => ids.map(str::to_string).collect(),
+        Some(crate::llm::StopReason::MaxTokens) => {
+            ids.last().map(str::to_string).into_iter().collect()
+        }
+        _ => Default::default(),
+    }
 }
 
-/// What a truncated call is answered with. The call did not run.
-fn truncated_tool_result(max_tokens: u32) -> crate::tool::ToolResult {
+/// What a withheld call is answered with, to the model and on the
+/// chain. It names the mapped stop reason and the provider's own word,
+/// and says the call did not run.
+fn withheld_tool_result(
+    stop: Option<crate::llm::StopReason>,
+    raw: Option<&str>,
+    max_tokens: u32,
+) -> crate::tool::ToolResult {
+    let mapped = stop.map(|s| s.as_str()).unwrap_or("unknown");
+    let raw = raw.unwrap_or("none given");
+    let why = match stop {
+        Some(crate::llm::StopReason::MaxTokens) => format!(
+            "the reply reached the output token limit ({max_tokens} tokens) before this \
+             call's arguments were complete. Issue it again with less in one call, for \
+             example a long file written in parts"
+        ),
+        _ => "the provider ended the reply as a refusal, so no tool call in it was run".to_string(),
+    };
     crate::tool::ToolResult {
         output: format!(
-            "truncated: the reply reached the output token limit ({max_tokens} tokens) before \
-             this call's arguments were complete, so the call did not run. Issue it again with \
-             less in one call, for example a long file written in parts."
+            "withheld: this call was not run. Stop reason {mapped} (provider: `{raw}`): {why}."
         ),
         success: false,
         sandbox: None,
