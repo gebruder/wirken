@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-11-17
+
 ### Operator notes
 
 - Nothing in this release needs a configuration change or a migration.
@@ -38,6 +40,43 @@ tagged.
   another class is written as schema 1.2.
 - A Lyrik run on a repository that tracks agent configuration with a
   start-up command now reports a finding for it.
+
+### Security
+
+- The output of an `exec` call is cut at a character boundary. The cut at
+  32,000 bytes was made at that byte whatever it held, and a cut inside a
+  multi-byte character panicked the task running the call, on the host
+  path and in a container alike. A command printing more than 32,000 bytes
+  of non-ASCII text was enough. The join of stdout and stderr is now one
+  function for both paths
+  (`exec_output`, `crates/agent/src/sandbox.rs`; the cut is exercised in
+  `the_marker_is_read_from_stdout_only_as_exec_records_the_streams`,
+  `crates/cli/src/commands/lyrik_fix_arms.rs`).
+
+- block-buffer 0.12.0 to 0.12.1, for GHSA-qwgh-2vcv-g2f7: a caught panic
+  inside a hash or cipher block callback could leave the buffer position
+  corrupt. The crate is in the shipped binary under `digest` 0.11 and
+  `cipher` 0.5. The advisory has no RustSec id, so `cargo deny` did not
+  report it.
+
+### Lyrik 1.0.0
+
+Lyrik now has a version of its own, apart from the Wirken version that
+carries it. This release is Lyrik 1.0.0, and the Lyrik entries under Added,
+Changed and Fixed below are what it contains.
+
+- The version is the first line of the sign-off summary
+  (`Lyrik 1.0.0 run <id> on <target>`), a `lyrik_version` field at the top
+  of `findings.json`, and a `lyrik_version` field on the
+  `lyrik.run.started` row beside `driver_version`, which stays the Wirken
+  version. The `findings.json` field is outside the pinned schema, and a
+  consumer pinned to `schema-v1.1` or `schema-v1.2` validates as before
+  (`findings_and_the_run_started_row_carry_the_lyrik_version`,
+  `crates/cli/src/commands/lyrik.rs`).
+- What the number covers: the tag-pinned findings schema is stable and has
+  its own version. Subcommands, flags, run output and the fields outside
+  the pinned schema may change in any Wirken minor release, and the Lyrik
+  version changes when they do.
 
 ### Added
 
@@ -337,6 +376,17 @@ tagged.
   `a_patch_written_into_the_supplied_directory_during_the_run_is_refused`,
   `crates/cli/src/commands/lyrik_fix.rs`).
 
+- The workspace's own time handling is on `jiff`, in a new `wirken-time`
+  crate, in place of `chrono`, which RUSTSEC-2026-0543 reports as
+  unmaintained. Every timestamp Wirken stores or prints as RFC 3339 keeps
+  its text byte for byte: audit rows, vault and session stores, cron jobs,
+  SIEM output, and the no-expiry value of a session grant. An operator has
+  nothing to do, and a store written by 3.3.1 reads as before
+  (`the_text_forms_are_the_ones_stored_rows_carry`,
+  `a_grant_with_no_expiry_reads_and_writes_as_older_builds_wrote_it`,
+  `crates/time/src/lib.rs`). Two error messages about a signed organisation
+  config now print their times in RFC 3339.
+
 ### Fixed
 
 - A walk finding of a class other than `auth` or `injection` is no longer
@@ -365,14 +415,23 @@ tagged.
   `a_childs_own_entry_does_not_apply_to_its_sub_agent_session`,
   `crates/agent/src/tests.rs`).
 
+### Dependencies
+
+- `chrono` 0.4.45 stays in the build through `cron` 0.17, `feed-rs` 3,
+  `oauth2` 5, `serenity` 0.12 and `teloxide-core` 0.13, which take or
+  return its types, and in `wirken-gateway`'s `cron.rs` at the `cron`
+  crate's boundary. RUSTSEC-2026-0543 is an unmaintained notice, not a
+  vulnerability, and is ignored in `deny.toml` with those paths as its
+  reason.
+- `jiff` 0.2 is now a direct dependency.
+
 ### Deferred
 
 - Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
   serenity 0.12.5 in the Discord adapter, stay open as in 3.3.1. #27 is
   RUSTSEC-2026-0346 and #28 is RUSTSEC-2026-0349, both ignored in `deny.toml`
   with their reachability written there. #26 is RUSTSEC-2026-0348, which
-  RustSec marks as not affecting rustls below 0.23.9. The lockfile and
-  `deny.toml` are unchanged since 3.3.1. The fix for all three is serenity on
+  RustSec marks as not affecting rustls below 0.23.9. The fix for all three is serenity on
   rustls 0.23, held until the migrated adapter passes a live Discord
   round-trip.
 
