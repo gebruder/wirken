@@ -27,11 +27,18 @@
 //!   command-line option switches off for every driver. Whether the
 //!   work tree matches HEAD is decided here instead, by hashing each
 //!   tracked file as a git blob and comparing it with HEAD's tree.
-//! - Where git would convert content (a filter, LFS, line-ending or
-//!   encoding conversion), the work-tree bytes are not the blob's, so
-//!   no comparison is made and the reason is returned instead. `git
-//!   config --get` and `git check-attr` tell; both only read config
-//!   and attributes files.
+//! - Where git would convert content, the work-tree bytes need not be
+//!   the blob's. A file whose bytes are the blob's is unchanged
+//!   whatever is declared for it. One that differs under line-ending
+//!   conversion alone is compared again with its line endings
+//!   normalised, which is all that conversion does. One that differs
+//!   under a filter (LFS among them), `ident` or an encoding cannot
+//!   be compared without running the conversion, so it is not, and
+//!   the reason is returned. `git config --get` and `git check-attr`
+//!   tell which applies; both only read config and attributes files.
+//! - Whether the tracked files changed between two moments needs no
+//!   comparison with HEAD at all: [`tree_fingerprint`] hashes them as
+//!   they are on disk, and two fingerprints are compared.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -68,19 +75,9 @@ pub fn provenance(target: &Path) -> Provenance {
         Ok(sha) => sha,
         Err(reason) => return Provenance::unavailable(reason),
     };
-    let dirty = repo.head_entries().and_then(|entries| {
-        let paths: Vec<&Path> = entries
-            .iter()
-            .filter(|e| e.kind == "blob")
-            .map(|e| e.path.as_path())
-            .collect();
-        if let Some(conversion) = conversion_declared(&repo.toplevel, &paths)? {
-            return Err(format!(
-                "content conversion declared ({conversion}); tracked files not compared"
-            ));
-        }
-        repo.tracked_changes(&entries)
-    });
+    let dirty = repo
+        .head_entries()
+        .and_then(|entries| repo.tracked_changes(&entries));
     match dirty {
         Ok(dirty) => Provenance {
             sha: Some(sha),
@@ -109,11 +106,12 @@ const CONVERSION_ATTRIBUTES: &[&str] = &[
     "working-tree-encoding",
 ];
 
-/// The first content conversion that applies to any of `paths`
-/// (relative to `dir`), through `core.autocrlf` or an attribute from
-/// any attributes file. `git config` and `git check-attr` only read
-/// config and attributes files; neither runs a filter.
-fn conversion_declared(dir: &Path, paths: &[&Path]) -> Result<Option<String>, String> {
+/// Attributes that hand content to something this process will not
+/// run or reproduce: a filter program, `$Id$` expansion, re-encoding.
+const EXTERNAL_CONVERSIONS: &[&str] = &["filter", "ident", "working-tree-encoding"];
+
+/// `core.autocrlf` when it is set to anything but `false`.
+fn autocrlf(dir: &Path) -> Result<Option<String>, String> {
     let out = git(dir)
         .args(["config", "--get", "core.autocrlf"])
         .output()
@@ -121,23 +119,27 @@ fn conversion_declared(dir: &Path, paths: &[&Path]) -> Result<Option<String>, St
     match out.status.code() {
         Some(0) => {
             let value = trimmed(out.stdout);
-            if value != "false" {
-                return Ok(Some(format!("core.autocrlf={value}")));
-            }
+            Ok((value != "false").then_some(value))
         }
         // Unset.
-        Some(1) => {}
-        _ => {
-            return Err(format!(
-                "git config --get core.autocrlf: {}",
-                trimmed(out.stderr)
-            ));
-        }
+        Some(1) => Ok(None),
+        _ => Err(format!(
+            "git config --get core.autocrlf: {}",
+            trimmed(out.stderr)
+        )),
     }
-    if paths.is_empty() {
-        return Ok(None);
-    }
+}
 
+/// Every conversion attribute set on any of `paths` (relative to
+/// `dir`), as `(path, attribute, value)`, in `git check-attr` order.
+/// `git check-attr` only reads attributes files; it runs no filter.
+fn conversion_attributes(
+    dir: &Path,
+    paths: &[&Path],
+) -> Result<Vec<(PathBuf, String, String)>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut input = Vec::new();
     for p in paths {
         input.extend_from_slice(p.as_os_str().as_encoded_bytes());
@@ -168,17 +170,69 @@ fn conversion_declared(dir: &Path, paths: &[&Path]) -> Result<Option<String>, St
     written.map_err(|e| format!("git check-attr input: {e}"))?;
     // `<path>\0<attribute>\0<value>\0` per path and attribute.
     let fields: Vec<&[u8]> = out.stdout.split(|b| *b == 0).collect();
+    let mut set = Vec::new();
     for [path, attribute, value] in fields.as_chunks::<3>().0 {
         let value = String::from_utf8_lossy(value);
         if value != "unspecified" && value != "unset" {
-            return Ok(Some(format!(
-                "{}={value} on {}",
-                String::from_utf8_lossy(attribute),
-                String::from_utf8_lossy(path)
-            )));
+            set.push((
+                path_from_bytes(path),
+                String::from_utf8_lossy(attribute).into_owned(),
+                value.into_owned(),
+            ));
         }
     }
-    Ok(None)
+    Ok(set)
+}
+
+/// The first content conversion that applies to any of `paths`
+/// (relative to `dir`), through `core.autocrlf` or an attribute from
+/// any attributes file.
+fn conversion_declared(dir: &Path, paths: &[&Path]) -> Result<Option<String>, String> {
+    if let Some(value) = autocrlf(dir)? {
+        return Ok(Some(format!("core.autocrlf={value}")));
+    }
+    Ok(conversion_attributes(dir, paths)?
+        .into_iter()
+        .next()
+        .map(|(path, attribute, value)| format!("{attribute}={value} on {}", path.display())))
+}
+
+/// A digest of every tracked file as it is on disk now: its path, what
+/// kind of thing is there and its bytes, and for a submodule the commit
+/// it is at. Two digests taken at two moments are equal exactly when no
+/// tracked file changed between them. Nothing is compared with HEAD
+/// and no content is converted, so a filter, a line-ending rule or a
+/// tree that was already modified does not stand in the way.
+pub fn tree_fingerprint(target: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let repo = Repo::open(target)?;
+    repo.head()?;
+    let mut h = Sha256::new();
+    for entry in repo.head_entries()? {
+        let path = repo.toplevel.join(&entry.path);
+        h.update(entry.path.as_os_str().as_encoded_bytes());
+        h.update([0]);
+        let state = match entry.kind.as_str() {
+            "blob" => match repo.work_bytes(&entry, &path)? {
+                Some(bytes) => blob_id(repo.format, &bytes),
+                None => "not as tracked".to_string(),
+            },
+            "commit" => match path.join(".git").exists() {
+                false => "not checked out".to_string(),
+                true => run_git(
+                    &path,
+                    &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                    None,
+                )
+                .map(trimmed)
+                .unwrap_or_else(|_| "no commit".to_string()),
+            },
+            other => return Err(format!("unexpected tree entry kind {other}")),
+        };
+        h.update(state.as_bytes());
+        h.update([0]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Whether `rel` (relative to `target`) is in HEAD's tree with exactly
@@ -310,47 +364,119 @@ impl Repo {
 
     /// Whether any of `entries` differs from the work tree: missing, a
     /// different kind of file, a different executable bit, different
-    /// bytes, or a submodule at a different commit.
+    /// bytes, or a submodule at a different commit. A file under a
+    /// declared conversion is compared as the module doc says; `Err`
+    /// when the only differences found are ones that cannot be told
+    /// from the conversion's own doing.
     fn tracked_changes(&self, entries: &[TreeEntry]) -> Result<bool, String> {
+        let blobs: Vec<&Path> = entries
+            .iter()
+            .filter(|e| e.kind == "blob")
+            .map(|e| e.path.as_path())
+            .collect();
+        let autocrlf = autocrlf(&self.toplevel)?;
+        let mut declared: std::collections::HashMap<PathBuf, Vec<(String, String)>> =
+            std::collections::HashMap::new();
+        for (path, attribute, value) in conversion_attributes(&self.toplevel, &blobs)? {
+            declared.entry(path).or_default().push((attribute, value));
+        }
+        let mut uncompared: Vec<String> = Vec::new();
         for entry in entries {
             let path = self.toplevel.join(&entry.path);
-            let differs = match entry.kind.as_str() {
-                "blob" => self.blob_differs(entry, &path)?,
-                "commit" => submodule_differs(entry, &path)?,
+            match entry.kind.as_str() {
+                "blob" => {
+                    let Some(bytes) = self.work_bytes(entry, &path)? else {
+                        return Ok(true);
+                    };
+                    if blob_id(self.format, &bytes) == entry.oid {
+                        continue;
+                    }
+                    let attributes = declared.get(&entry.path);
+                    if let Some((attribute, value)) = attributes.and_then(|set| {
+                        set.iter()
+                            .find(|(a, _)| EXTERNAL_CONVERSIONS.contains(&a.as_str()))
+                    }) {
+                        uncompared.push(format!("{attribute}={value} on {}", entry.path.display()));
+                        continue;
+                    }
+                    // Line-ending conversion is all that is left, and
+                    // all it does is turn LF into CRLF on the way out.
+                    let line_endings = attributes.is_some() || autocrlf.is_some();
+                    if line_endings && blob_id(self.format, &lf_only(&bytes)) == entry.oid {
+                        continue;
+                    }
+                    return Ok(true);
+                }
+                "commit" => {
+                    if submodule_differs(entry, &path)? {
+                        return Ok(true);
+                    }
+                }
                 other => return Err(format!("unexpected tree entry kind {other}")),
-            };
-            if differs {
-                return Ok(true);
             }
         }
-        Ok(false)
+        match uncompared.first() {
+            None => Ok(false),
+            Some(first) => Err(format!(
+                "content conversion declared ({first}); {} tracked file(s) differ from HEAD's \
+                 bytes and cannot be compared without running the conversion",
+                uncompared.len()
+            )),
+        }
     }
 
-    fn blob_differs(&self, entry: &TreeEntry, path: &Path) -> Result<bool, String> {
+    /// The bytes git would hash for `entry` as it is in the work tree:
+    /// a file's content or a symlink's target. `None` when what is
+    /// there is missing, another kind of file, or has another
+    /// executable bit.
+    fn work_bytes(&self, entry: &TreeEntry, path: &Path) -> Result<Option<Vec<u8>>, String> {
         let meta = match std::fs::symlink_metadata(path) {
             Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(format!("stat {}: {e}", entry.path.display())),
         };
-        let bytes = match entry.mode.as_str() {
+        match entry.mode.as_str() {
             "120000" => {
                 if !meta.file_type().is_symlink() {
-                    return Ok(true);
+                    return Ok(None);
                 }
                 let link = std::fs::read_link(path)
                     .map_err(|e| format!("readlink {}: {e}", entry.path.display()))?;
-                link.into_os_string().into_encoded_bytes()
+                Ok(Some(link.into_os_string().into_encoded_bytes()))
             }
             "100644" | "100755" => {
                 if !meta.file_type().is_file() || executable(&meta) != (entry.mode == "100755") {
-                    return Ok(true);
+                    return Ok(None);
                 }
-                std::fs::read(path).map_err(|e| format!("read {}: {e}", entry.path.display()))?
+                std::fs::read(path)
+                    .map(Some)
+                    .map_err(|e| format!("read {}: {e}", entry.path.display()))
             }
-            other => return Err(format!("unexpected blob mode {other}")),
-        };
-        Ok(blob_id(self.format, &bytes) != entry.oid)
+            other => Err(format!("unexpected blob mode {other}")),
+        }
     }
+
+    fn blob_differs(&self, entry: &TreeEntry, path: &Path) -> Result<bool, String> {
+        Ok(match self.work_bytes(entry, path)? {
+            Some(bytes) => blob_id(self.format, &bytes) != entry.oid,
+            None => true,
+        })
+    }
+}
+
+/// `bytes` with every CRLF turned into LF.
+fn lf_only(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 #[cfg(unix)]
@@ -693,44 +819,102 @@ pub(crate) mod tests {
         );
     }
 
-    /// A filter, line-ending conversion or LFS on any tracked path
-    /// leaves `dirty` unknown, with the reason; `-text` does not.
+    /// A declared conversion does not leave a clean tree unknown: a
+    /// file whose bytes are the blob's is unchanged whatever is
+    /// declared for it.
     #[test]
-    fn declared_content_conversion_leaves_dirty_unknown() {
-        for (attributes, expected) in [
-            (
-                "*.rs filter=lfs diff=lfs merge=lfs -text\n",
-                Some("filter=lfs on src/a.rs"),
-            ),
-            ("* text=auto\n", Some("text=auto on ")),
-            ("*.sh eol=crlf\n", Some("eol=crlf on run.sh")),
-            ("*.rs ident\n", Some("ident=set on src/a.rs")),
-            ("*.rs -text\n", None),
+    fn a_clean_tree_under_a_declared_conversion_is_not_dirty() {
+        for attributes in [
+            "*.rs filter=lfs diff=lfs merge=lfs -text\n",
+            "* text=auto\n",
+            "*.sh eol=crlf\n",
+            "*.rs ident\n",
+            "*.rs -text\n",
         ] {
             let tmp = tempdir().unwrap();
             std::fs::write(tmp.path().join(".gitattributes"), attributes).unwrap();
             committed_repo(tmp.path());
             let p = provenance(tmp.path());
-            match expected {
-                Some(reason) => {
-                    assert_eq!(p.dirty, None, "{attributes}: {p:?}");
-                    assert!(p.sha.is_some());
-                    let why = p.unavailable.unwrap();
-                    assert!(
-                        why.starts_with("content conversion declared (") && why.contains(reason),
-                        "{attributes}: {why}"
-                    );
-                }
-                None => assert_eq!(p.dirty, Some(false), "{attributes}: {p:?}"),
-            }
+            assert_eq!(p.dirty, Some(false), "{attributes}: {p:?}");
+            assert!(p.sha.is_some());
         }
-
         let tmp = tempdir().unwrap();
         committed_repo(tmp.path());
         setup_git(tmp.path(), &["config", "core.autocrlf", "input"]);
+        assert_eq!(provenance(tmp.path()).dirty, Some(false));
+    }
+
+    /// Under line-ending conversion a file that differs only in its
+    /// line endings is unchanged and one with other bytes is dirty.
+    #[test]
+    fn line_ending_conversion_is_compared_with_line_endings_normalised() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitattributes"), "*.sh text eol=crlf\n").unwrap();
+        committed_repo(tmp.path());
+        let script = tmp.path().join("run.sh");
+        let lf = std::fs::read_to_string(&script).unwrap();
+        assert!(!lf.contains('\r'));
+        std::fs::write(&script, lf.replace('\n', "\r\n")).unwrap();
+        assert_eq!(provenance(tmp.path()).dirty, Some(false));
+        std::fs::write(
+            &script,
+            format!("{}echo more\r\n", lf.replace('\n', "\r\n")),
+        )
+        .unwrap();
+        assert_eq!(provenance(tmp.path()).dirty, Some(true));
+
+        // With no conversion declared, CRLF in place of LF is a change.
+        let plain = tempdir().unwrap();
+        committed_repo(plain.path());
+        let script = plain.path().join("run.sh");
+        let lf = std::fs::read_to_string(&script).unwrap();
+        std::fs::write(&script, lf.replace('\n', "\r\n")).unwrap();
+        assert_eq!(provenance(plain.path()).dirty, Some(true));
+    }
+
+    /// A file that differs under a filter cannot be told from the
+    /// filter's own output: unknown, with the reason. A changed file
+    /// under no filter in the same tree still reads as dirty.
+    #[test]
+    fn a_difference_under_a_filter_is_unknown_and_one_outside_it_is_dirty() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitattributes"), "*.rs filter=lfs -text\n").unwrap();
+        committed_repo(tmp.path());
+        std::fs::write(tmp.path().join("src/a.rs"), "fn other() {}\n").unwrap();
         let p = provenance(tmp.path());
-        assert_eq!(p.dirty, None);
-        assert!(p.unavailable.unwrap().contains("core.autocrlf=input"));
+        assert_eq!(p.dirty, None, "{p:?}");
+        let why = p.unavailable.unwrap();
+        assert!(
+            why.starts_with("content conversion declared (filter=lfs on src/a.rs)"),
+            "{why}"
+        );
+        let script = tmp.path().join("run.sh");
+        let body = std::fs::read_to_string(&script).unwrap();
+        std::fs::write(&script, format!("{body}echo more\n")).unwrap();
+        assert_eq!(provenance(tmp.path()).dirty, Some(true));
+    }
+
+    /// The fingerprint changes when a tracked file's bytes, kind or
+    /// executable bit change and at no other time: not for an untracked
+    /// file, and it needs no clean tree and no comparable content.
+    #[test]
+    fn tree_fingerprint_tells_whether_tracked_files_changed() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitattributes"), "*.rs filter=lfs -text\n").unwrap();
+        committed_repo(tmp.path());
+        // Already modified under a filter: HEAD comparison is unknown.
+        std::fs::write(tmp.path().join("src/a.rs"), "fn other() {}\n").unwrap();
+        assert_eq!(provenance(tmp.path()).dirty, None);
+        let before = tree_fingerprint(tmp.path()).unwrap();
+        assert_eq!(tree_fingerprint(tmp.path()).unwrap(), before);
+        std::fs::write(tmp.path().join("untracked.txt"), "x").unwrap();
+        assert_eq!(tree_fingerprint(tmp.path()).unwrap(), before);
+        std::fs::write(tmp.path().join("src/a.rs"), "fn third() {}\n").unwrap();
+        let edited = tree_fingerprint(tmp.path()).unwrap();
+        assert_ne!(edited, before);
+        std::fs::remove_file(tmp.path().join("run.sh")).unwrap();
+        assert_ne!(tree_fingerprint(tmp.path()).unwrap(), edited);
+        assert!(tree_fingerprint(&tmp.path().join("nowhere")).is_err());
     }
 
     /// A conversion on the compared path makes `unmodified_at_head`
