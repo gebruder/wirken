@@ -208,7 +208,8 @@ else `phases.recon`, and every model call in the run, the preflight probe and
 each walk included, goes to it. Other keys, including `articulate`, `rubric`
 and `exploit`, are accepted and not read; no exploit phase runs. A pin may
 carry `max_tokens`, the output tokens allowed per model reply; absent,
-Wirken's own default of 4096 applies. A reply that writes a whole file in one
+Wirken's own default applies, 16,000 for the `anthropic` provider and 4096
+for every other. A reply that writes a whole file in one
 tool call, as the fix step's patch does, is cut off at the limit, so a run
 whose fixes are more than a few lines sets it higher. The sign-off summary
 names the limit when the pin sets one.
@@ -442,22 +443,26 @@ known fix earns nothing: in the 1Password study the reference fix itself
 carried an off-by-one that a third of the generated patches reproduced and the
 grader took as equivalent ([FLAWED] 4.4).
 
-**Run inputs.** The fix step takes two inputs from the target:
-`fix.test_command` and `fix.coverage_command` in `.lyrik/config.json`, and the
-patches under `.lyrik/fix-patches/`. Both are read once, at run start, before
-any agent runs, and nothing reads them again except to compare. A patch or a
-command that appears there during the run is never used. `write_file` cannot
+**Run inputs.** The fix step takes three inputs from the target: the `fix`
+keys in `.lyrik/config.json` (`test_command`, `coverage_command`,
+`explicit_opt_outs`), the patches under `.lyrik/fix-patches/`, and the
+reproductions under `.lyrik/fix-reproductions/`. All are read once, at run
+start, before any agent runs, and nothing reads them again except to compare.
+A patch, a reproduction or a command that appears there during the run is
+never used. `write_file` cannot
 reach either path: every staged skill's `write_paths` is the run's own
 directory. An approved `exec` runs with the target mounted read-write, so
 after the fix agents finish the runner hashes both again. A changed
 `.lyrik/config.json` makes the functionality arm `inconclusive`; a changed,
 added or removed patch for a finding makes every arm of that finding
-`inconclusive`; the run records `lyrik.fix.input_changed`. A changed
+`inconclusive`, and so does a changed supplied reproduction the arms ran on;
+the run records `lyrik.fix.input_changed`. A changed
 `.lyrik/config.json` also fails the run, as it always has. Each fix record
 carries `inputs` with `config_sha256` and, for a supplied patch,
-`supplied_patch_sha256`, as read at run start; the `lyrik.fix.started` and
-`lyrik.fix.verdict` rows carry the same digests. A link under
-`.lyrik/fix-patches/` is not read.
+`supplied_patch_sha256`, and for a supplied reproduction
+`supplied_reproduction_sha256`, as read at run start; the `lyrik.fix.started`
+and `lyrik.fix.verdict` rows carry the config and patch digests. A link under
+`.lyrik/fix-patches/` or `.lyrik/fix-reproductions/` is not read.
 
 **The contract for a command that shows a defect.** It prints `LYRIK_REACHED`
 on a line of its own on stdout immediately before its assertion, once the
@@ -490,8 +495,9 @@ unchanged in each copy.
 under the run's staging directory and names its own files by their path from
 the project root. A copy of the scanned revision does not hold the run's
 state, so each copy is given the `harness/` directory of every walk the
-reproduction command names, at the same relative path, and the command runs
-in the copy exactly as it ran in the target. The wrapper tells walks to keep
+reproduction command or one of the finding's other confirmed reproductions
+names, at the same relative path, and the command runs in the copy exactly as
+it ran in the target. The wrapper tells walks to keep
 a harness's inputs, markers and scratch output under its own `harness/`
 directory or in a temporary directory.
 
@@ -507,8 +513,8 @@ The arms, in `arms` order:
 | `reproduction` | The original reproduction shows the defect in the `baseline` copy of the scanned revision, does not in the `patched` copy, and shows it again in that copy after the patch is taken back out and every tracked file there is as the scanned revision has it | It still shows the defect in the patched copy |
 | `variant` | At least two variants (another deployment, another caller, another input shape, a cleanup or error path) each show the defect in the baseline and not in the patched copy | Any variant shows the defect in the patched copy. Shown in the baseline too, the fix is partial and the record names the path |
 | `root_cause` | The patch touches the finding's `origin`, the root-cause claim is confirmed by an executed run, and the reproduction reached its assertion in the patched copy | The patch touches the sink at `location` and not the origin, and a variant by another path still shows the defect in the patched copy: `symptom_patch` |
-| `relocation` | The re-walk reported no candidate and a bounded fuzz run over the patched functions executed clean | A candidate's proof of concept shows it in the patched copy, or the fuzz run shows a defect there |
-| `functionality` | The test suite passes in both copies, a coverage report shows each patched file exercised, and the benign-input output is identical in both copies when that differential ran | The suite passes in the baseline and fails in the patched copy, or benign-input output differs |
+| `relocation` | The re-walk reported no candidate and a bounded fuzz run over the patched functions executed clean | A security candidate's proof of concept shows it in the patched copy and not in the baseline, or the fuzz run shows a defect in the patched copy |
+| `functionality` | The test suite passes in both copies, a coverage report shows each patched file exercised, and the benign-input output is identical in both copies when that differential ran | The suite passes in the baseline and fails in the patched copy, benign-input output differs, or a regression the re-walk reported has a proof that shows in the patched copy and not in the baseline |
 
 - **Variant.** A variant is credited from the runs on the session log, never
   from a list an agent wrote. There are two kinds.
@@ -561,10 +567,16 @@ The arms, in `arms` order:
   functions, not only the patched lines, looking for the violation moved
   rather than removed, for example into a callback. A candidate it reports is
   a claim. The agent is told to write a proof of concept for each under
-  `relocation/<id>/` and run it in both copies; only a candidate whose proof
-  shows it in the patched copy fails the arm. One with no proof, or whose
-  proof does not show it, is listed under `model_claims`, the arm is
-  `inconclusive`, and the fix is not rejected for it. Without a fuzz harness
+  `relocation/<id>/` and run it in both copies, and to give each candidate a
+  `kind`: `new` or `relocated` for a security defect, `regression` for
+  something that worked before the patch and does not after it. This arm
+  fails only on a security candidate whose proof shows it in the patched copy
+  and not in the baseline. One shown in both copies was there before the
+  patch; one with no proof, with no baseline run, or whose proof does not
+  show it, is listed under `model_claims`, the arm is `inconclusive`, and the
+  fix is not rejected for it. A `regression` candidate is read by the
+  functionality arm, never by this one. The kind is the agent's label: it
+  decides which arm a confirmed proof fails, not whether the fix is rejected. Without a fuzz harness
   the arm cannot pass: a re-walk that reports nothing is a model's reading,
   and the arm is `inconclusive`, `model_judged`.
 - **Functionality.** The suite and coverage commands come from `fix` in
@@ -607,7 +619,9 @@ closed says nothing about the others. The other three arms do not decide
 the verdict unless they fail: a `candidate_fix` may carry `root_cause`,
 `relocation` or `functionality` as `inconclusive` or `not_run`. For that
 reason `candidate_fix` is never shown without the arm tally. `label` reads
-`candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run`, and
+`candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run` (the label of
+`unbounded_length::b.sh:3` in the `toy-slotcopy` run quoted under
+[Reading a fix record](#reading-a-fix-record)), and
 `arm_tally` holds the counts. A fix whose `functionality` arm is
 `inconclusive` or `not_run` carries the label `functionality_unverified`
 and is counted as such in the summary.
@@ -638,9 +652,31 @@ whose functionality arm did not pass) and `arms` with `passed`,
 `inconclusive` and `not_run` summed over the candidates. `rejected` and
 `inconclusive` are counts, `partial` counts the rejected fixes that are
 partial, and `by_arm` counts fixes in each state of each
-arm. The terminal line prints the same: `1 candidate (their arms: 3 passed,
-1 inconclusive, 1 not_run; 0 with all arms passed; 1 functionality
-unverified), 0 rejected, 0 inconclusive`.
+arm. The terminal line prints the same. From the `toy-slotcopy` run:
+`1 candidate (their arms: 3 passed, 2 inconclusive, 0 not_run; 0 with all
+arms passed; 0 functionality unverified), 2 rejected, 0 inconclusive (1 of
+the rejected partial)`, followed by the per-arm counts.
+
+**Combined record.** When two or more findings of a run share an origin (the
+same file and function, or line where the finding names no function) or
+state the same invariant, and each one's own fix was rejected as partial, the
+runner checks their patches together. It makes one more patched copy under
+`staging/fix/_combined-<n>/`, applies each member's `fix.patch` to it in
+finding order, and runs, itself, every member's reproduction, every variant
+the members have on record and the configured test command, in the baseline
+and in that copy. No agent takes part and no patch is written or merged. The
+result is a record under `combined_fixes` in `findings.json`: `members`,
+`shared`, `patches_apply_together`, the three arms it has (`reproduction`,
+`variant`, `functionality`; there is no re-walk of a union, so no
+`root_cause` and no `relocation`), `variants`, `partial` and a `verdict`
+under the same rule. Member patches that do not apply on top of one another
+are recorded as such and the verdict is `inconclusive`. In the
+`toy-combined-3` run on the `slotcopy` test target described under
+[Reading a fix record](#reading-a-fix-record), two supplied patches
+that each guarded one tool were each rejected as partial; together they
+stopped both reproductions and eleven of twelve variants, and the combined
+record was `rejected` and `partial`, naming the one variant still open, a
+direct call to the shared decoder.
 
 **Rejections.** Each failed arm of a rejected fix is appended to
 `rejections.jsonl` as `{"kind": "fix", "stable_id", "arm", "basis",
@@ -648,23 +684,35 @@ unverified), 0 rejected, 0 inconclusive`.
 
 **What is left for a maintainer.** Under `staging/fix/<slug>/`: `fix.patch`,
 `apply.sh` to run from the project root, `variants/` and `attack.json`,
-`benign/` and `recheck.json`, and `observed.json`, every command the arms read
+`benign/` and `recheck.json`, `supplied/` when a reproduction was supplied,
+and `observed.json`, every command the arms read
 with its exit status and output. `artifacts` on the record has the paths and
 the reproduction command. `patch` has the files touched, any test files and
 any dependency manifests among them.
 
-**Exec** is gated as everywhere under `wirken lyrik`: the operator is asked
-before each command, an approval is a one-shot bypass that stores no grant,
-and a refused command is an arm not run. The step prints the command words it
-uses (`mkdir`, `git archive`, `tar`, `cp`, `git apply`, `diff`) before the first
-prompt. Nothing is written into the project's tree. With the sandbox off no
+**Exec** is gated as everywhere under `wirken lyrik`, with one difference in
+how the operator is asked. For each finding the runner shows the commands it
+composes for that finding's arms as one numbered plan and asks once:
+`approve plan? [y/N]`. A yes covers exactly those command strings, for that
+finding, in that run; it is held in memory and nothing is stored. A command
+that differs by a byte, and every command an agent originates (reading code,
+checking a patch, running a variant script it wrote), is asked on its own,
+and so is every command when the plan is refused. A combined record has its
+own plan. An approval is a one-shot bypass that stores no grant, and a
+refused command is an arm not run. Each command that ran under a plan has
+its own `permission_approved` row on the session log, approved by
+`lyrik-fix-plan`, and the `lyrik.fix.plan` audit row carries the plan, the
+answer and what ran under it. In the `toy-slotcopy` run each of the three
+findings had one plan of 14 commands. The step prints the command words it
+uses (`mkdir`, `git archive`, `tar`, `cp`, `git apply`, `diff`) before the
+first prompt. Nothing is written into the project's tree. With the sandbox off no
 replay runs, so no finding is confirmed and the run records
 `lyrik.fix.none_confirmed`; `lyrik.fix.skipped` is written per finding when
 findings were confirmed and `exec` is unavailable. The audit log carries
-`lyrik.fix.started`, `lyrik.fix.completed` per agent with its `step`,
-`lyrik.fix.input_changed`, `lyrik.fix.verdict` with the label, the arm
-tally, the arms, `patch_source` and the input digests, and
-`lyrik.fix.summary`.
+`lyrik.fix.started`, `lyrik.fix.plan`, `lyrik.fix.supplied_reproduction`,
+`lyrik.fix.completed` per agent with its `step`, `lyrik.fix.input_changed`,
+`lyrik.fix.verdict` with the label, the arm tally, the arms, `patch_source`
+and the input digests, `lyrik.fix.combined`, and `lyrik.fix.summary`.
 
 **What the arms do not catch.**
 
@@ -804,9 +852,9 @@ Each entry under `fixes` in `findings.json`:
 }
 ```
 
-This record is from the `toy-slotcopy` run in the bundled `slotcopy` test
-target (`a.sh` and `b.sh` each copy a header-declared length into an 8-byte
-slot without a bound check). The reproduction and both executed arms
+This record is from the `toy-slotcopy` run on `slotcopy`, a small test target
+kept outside this repository: two shell tools, `a.sh` and `b.sh`, that each
+copy a header-declared length into an 8-byte slot without a bound check. The reproduction and both executed arms
 (reproduction, variant, functionality) passed, so the verdict is a candidate
 fix, with the tally `3 of 5`; `root_cause` and `relocation` stayed
 `inconclusive` on a model's reading because no executed run settled them. In

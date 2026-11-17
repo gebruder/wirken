@@ -10,6 +10,35 @@ tagged.
 
 ## [Unreleased]
 
+### Operator notes
+
+- Nothing in this release needs a configuration change or a migration.
+  Existing `sandbox.json`, `budget.json`, `lyrik.json` and
+  `.lyrik/config.json` files load as before, and the audit chain gains
+  optional fields only.
+- Recorded cost rises for Anthropic calls that use the prompt cache, because
+  cached tokens are now priced. A USD budget ceiling on such an agent is
+  reached sooner for the same traffic.
+- An Anthropic reply may now use up to 16,000 output tokens where the limit
+  was 4096.
+- A tool call in a reply the provider ended as a refusal no longer runs and
+  no longer raises an approval prompt. The model is told the call was
+  withheld. Ollama and the subscription-plan path report no refusal, so
+  nothing changes there.
+- The exec sandbox keeps its limits of 512 MB, 256 processes and 300 seconds
+  unless the data directory's `sandbox.json` sets `memory_mb`, `pids_limit`
+  or `timeout_secs`. No file in a target or a skill can set them.
+- Every `fixes` entry with `verdict: "fix"` written by Lyrik 2.5.1 through
+  3.3.1 is unverified. Treat it as an unchecked patch.
+- In a Lyrik defender run the operator is asked once per finding to approve
+  the runner's plan of commands, where each command was asked before.
+  Commands an agent originates are still asked one by one.
+- A consumer pinned to `schema-v1.1` keeps validating a `findings.json`
+  whose findings are all `auth` or `injection`. A document with a finding of
+  another class is written as schema 1.2.
+- A Lyrik run on a repository that tracks agent configuration with a
+  start-up command now reports a finding for it.
+
 ### Added
 
 - A model-time ceiling on the per-agent budget. `ceiling_model_seconds` on a
@@ -222,13 +251,15 @@ tagged.
   breakpoint, beside the system prompt and the tool definitions. Each call of
   a tool loop reads the earlier rounds from the cache; before, only the
   system prompt and tools were cached and the conversation was sent as fresh
-  input on every round. The input cost on an `llm_response` row now prices
-  cache writes at 1.25 times the input price and cache reads at 0.1 times
-  it; before, cached tokens were recorded and not priced, so a USD budget
-  ceiling undercounted a cached call
+  input on every round
   (`the_end_of_the_conversation_is_a_cache_breakpoint`,
-  `crates/agent/src/tests.rs`;
-  `cache_writes_and_reads_are_priced_into_the_input_cost`,
+  `crates/agent/src/tests.rs`).
+
+- The input cost on an `llm_response` row prices cache writes at 1.25 times
+  the input price and cache reads at 0.1 times it. Before, cached tokens were
+  recorded and not priced, so recorded cost and a USD budget ceiling
+  undercounted a cached call. Rows already written are not repriced
+  (`cache_writes_and_reads_are_priced_into_the_input_cost`,
   `crates/audit/src/pricing.rs`).
 
 - Lyrik's `target_dirty` is no longer null for a repository whose git
@@ -333,6 +364,17 @@ tagged.
   (`a_child_with_no_budget_entry_is_refused_at_the_parents_ceiling`,
   `a_childs_own_entry_does_not_apply_to_its_sub_agent_session`,
   `crates/agent/src/tests.rs`).
+
+### Deferred
+
+- Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
+  serenity 0.12.5 in the Discord adapter, stay open as in 3.3.1. #27 is
+  RUSTSEC-2026-0346 and #28 is RUSTSEC-2026-0349, both ignored in `deny.toml`
+  with their reachability written there. #26 is RUSTSEC-2026-0348, which
+  RustSec marks as not affecting rustls below 0.23.9. The lockfile and
+  `deny.toml` are unchanged since 3.3.1. The fix for all three is serenity on
+  rustls 0.23, held until the migrated adapter passes a live Discord
+  round-trip.
 
 ## [3.3.1] - 2026-11-12
 
