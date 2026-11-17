@@ -19,6 +19,7 @@ pub mod import;
 pub mod inbound_scan;
 pub mod live_reload;
 pub mod lyrik;
+pub mod lyrik_agent_config;
 pub mod lyrik_brocards;
 pub mod lyrik_citation;
 pub mod lyrik_fix;

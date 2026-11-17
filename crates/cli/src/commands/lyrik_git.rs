@@ -197,6 +197,21 @@ fn conversion_declared(dir: &Path, paths: &[&Path]) -> Result<Option<String>, St
         .map(|(path, attribute, value)| format!("{attribute}={value} on {}", path.display())))
 }
 
+/// The repository top level and every tracked file at HEAD as
+/// `(mode, path from the top level)`. Mode `120000` is a symlink.
+/// Read from HEAD's tree; no file is opened and nothing is run.
+pub fn tracked_files(target: &Path) -> Result<(PathBuf, Vec<(String, String)>), String> {
+    let repo = Repo::open(target)?;
+    repo.head()?;
+    let files = repo
+        .head_entries()?
+        .into_iter()
+        .filter(|e| e.kind == "blob")
+        .map(|e| (e.mode, e.path.to_string_lossy().into_owned()))
+        .collect();
+    Ok((repo.toplevel, files))
+}
+
 /// A digest of every tracked file as it is on disk now: its path, what
 /// kind of thing is there and its bytes, and for a submodule the commit
 /// it is at. Two digests taken at two moments are equal exactly when no
