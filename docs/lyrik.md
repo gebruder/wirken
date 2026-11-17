@@ -841,6 +841,35 @@ in place of writing one, records `patch_source` `supplied`, and runs the same
 arms. Matching a known-good fix earns nothing: the arms still have to pass on
 the runs.
 
+### How-to: supply a reproduction
+
+When you already have a script that shows a defect, give it to the run. Put it
+at `.lyrik/fix-reproductions/<slug>.sh` (or `<slug>.py`) in the target, with
+`<slug>` formed as for a supplied patch. It follows the same contract as any
+proof of concept: it prints `LYRIK_REACHED` on its own line on stdout once the
+code under test has run, then exits non-zero when the defect shows and zero
+when it does not, and it must run unchanged from the root of any copy of the
+source.
+
+The file is read once at run start and its SHA-256 goes on the record; it is a
+regular file or it is not read. The runner copies those bytes into the run
+directory and runs them itself in the baseline copy, before any fix agent
+starts, through the same `exec` prompt as every other command. What it
+observes is recorded under `supplied_reproductions` in `findings.json` and on
+a `lyrik.fix.supplied_reproduction` audit row:
+
+- `confirmed`: the marker, then a non-zero exit. The finding is treated as
+  confirmed, the supplied script is the reproduction the arms run, and any
+  reproduction the walks had confirmed for the same finding becomes a variant.
+- `not_shown`: the marker, then a zero exit.
+- `inconclusive`: it was refused, timed out, was not run, or never printed the
+  marker.
+
+A supplied script is never counted as confirmed without that observed run. If
+the file changes during the run, every arm that rested on it is withdrawn and
+the verdict is `inconclusive`. A supplied reproduction and a supplied patch for
+the same finding can be used together.
+
 ### How-to: the test and coverage commands
 
 Set them under `fix` in `.lyrik/config.json`:
@@ -891,6 +920,36 @@ An agent stopped at its limit is recorded `incomplete` with the count, and each
 arm it feeds carries that note; the arm's state is still what the commands that
 did run show.
 
+
+## Agent configuration in the scanned repository
+
+Some tracked files make an agent or editor session that is opened in a
+checkout run a program before the person has asked for anything: a hook, a
+status-line or key-helper command, a tool server started with the session. A
+repository that tracks one hands that program to everyone who opens it.
+
+Every run reads the scanned revision's tracked files for these and reports
+each declared program as a finding of class `agent_config`, tier `MEDIUM`,
+with the file, the line, the kind of declaration and the command, bounded to
+400 characters. The files read are the project-level settings, hook and
+tool-server files of the coding agents and editors in common use, at the top
+level or under any directory; the exact paths are `CONFIG_PATHS` in
+`crates/cli/src/commands/lyrik_agent_config.rs`. A tracked symlink is reported too when it makes such a
+file appear at one of those paths, whether the link is the file or a directory
+that holds it, and when a link at one of those paths points out of the
+repository. The finding's `agent_config` object carries `kind`, `command`,
+`via_symlink` and `executed: false`.
+
+Nothing is executed. The tracked paths come from HEAD's tree, a file is read
+as bytes and parsed as JSON, and a symlink is read with `readlink` and followed
+by path arithmetic, never opened through the link. Each declaration is also a
+`lyrik.agent_config.declared` audit row. The findings are staged beside the
+walks' and pass the same gates; they carry `detection_source`
+`static_prescreen` and are counted in the funnel under `agent-config`.
+
+The scan reads configuration that is tracked. A file that is present and
+untracked, a command reached through a script the declared command runs, and
+agent configuration in a format other than those listed are not reported.
 
 ## Writing the scoring guide
 

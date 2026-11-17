@@ -154,6 +154,10 @@ const NO_TERMINAL_FOR_APPROVAL: &str = "no terminal for approval";
 /// The prompt gate for `asker` when there is a terminal. Without one,
 /// every call that needs approval is refused as before, and its row
 /// says why.
+/// The name findings of the tracked agent-configuration scan are
+/// staged and counted under, beside the walks.
+const AGENT_CONFIG_SOURCE: &str = "agent-config";
+
 fn attach_terminal_gate(
     agent: &mut wirken_agent::Agent,
     asker: &str,
@@ -1577,6 +1581,46 @@ async fn dispatch_via_agent_runtime(
     )
     .context("aggregate rubric")?;
     let mut finding_sources: Vec<(Option<String>, PathBuf)> = Vec::new();
+    // Tracked agent configuration that runs a program when a session
+    // starts in a checkout, and tracked symlinks that resolve to it.
+    // Read, never run. Each declared command is a finding, staged like
+    // a walk's so it passes the same gates.
+    match super::lyrik_agent_config::scan(target) {
+        Ok(declared) if !declared.is_empty() => {
+            let dir = staging.join(AGENT_CONFIG_SOURCE).join("findings");
+            std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+            for (i, d) in declared.iter().enumerate() {
+                let path = dir.join(format!("finding-{:03}.json", i + 1));
+                std::fs::write(
+                    &path,
+                    serde_json::to_string_pretty(&super::lyrik_agent_config::finding(d, i))?,
+                )
+                .with_context(|| format!("write {}", path.display()))?;
+                audit.emit(
+                    "lyrik.agent_config.declared",
+                    serde_json::json!({
+                        "file": d.file,
+                        "line": d.line,
+                        "kind": d.kind,
+                        "command": d.command,
+                        "via_symlink": d.via_symlink,
+                        "executed": false,
+                    }),
+                )?;
+            }
+            eprintln!(
+                "  agent configuration: {} tracked declaration(s) of a program run at session \
+                 start; each is reported as a finding and none was run",
+                declared.len()
+            );
+            finding_sources.push((Some(AGENT_CONFIG_SOURCE.to_string()), dir));
+        }
+        Ok(_) => {}
+        Err(reason) => audit.emit(
+            "lyrik.agent_config.unavailable",
+            serde_json::json!({ "reason": reason }),
+        )?,
+    }
     let top_findings = staging.join("findings");
     if top_findings.is_dir() {
         finding_sources.push((None, top_findings));
@@ -2513,12 +2557,47 @@ async fn dispatch_fixes(
             .with_context(|| format!("read {}", findings_path.display()))?,
     )
     .with_context(|| format!("parse {}", findings_path.display()))?;
-    let confirmed = lyrik_fix::confirmed_findings(&body);
-    if confirmed.is_empty() {
+    let mut confirmed = lyrik_fix::confirmed_findings(&body);
+    // Findings the operator supplied a reproduction for, by stable id.
+    // The script is a claim until the runner has run it.
+    let supplied_for: Vec<String> = body
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .map(|findings| {
+            findings
+                .iter()
+                .filter_map(|f| f.get("stable_id")?.as_str())
+                .filter(|id| inputs.reproductions.contains_key(&lyrik_fix::slug(id)))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if confirmed.is_empty() && supplied_for.is_empty() {
         audit.emit("lyrik.fix.none_confirmed", serde_json::json!({}))?;
         return Ok(());
     }
     if !exec_available {
+        // Nothing can be run, so no supplied script is confirmed.
+        let records: Vec<lyrik_fix::SuppliedReproductionRecord> = supplied_for
+            .iter()
+            .filter_map(|id| {
+                let slug = lyrik_fix::slug(id);
+                let script = inputs.reproductions.get(&slug)?;
+                let (_, command) = lyrik_fix::supplied_reproduction_paths(
+                    &run_id,
+                    &format!("staging/fix/{slug}"),
+                    script,
+                );
+                Some(lyrik_fix::SuppliedReproductionRecord {
+                    stable_id: id.clone(),
+                    sha256: script.sha256.clone(),
+                    command,
+                    status: lyrik_fix::SuppliedStatus::Inconclusive,
+                    detail: Some("exec unavailable: it was not run".to_string()),
+                })
+            })
+            .collect();
+        lyrik_fix::record_supplied_reproductions(findings_path, &records)?;
         for c in &confirmed {
             audit.emit(
                 "lyrik.fix.skipped",
@@ -2571,6 +2650,93 @@ async fn dispatch_fixes(
         max_rounds: fix_tool_rounds,
         plan: None,
     };
+    // Each supplied reproduction, run once by the runner in the
+    // baseline copy, before any agent of the fix step. Only one that is
+    // observed to show the defect there makes its finding confirmed.
+    let mut supplied_records = Vec::with_capacity(supplied_for.len());
+    for stable_id in &supplied_for {
+        let slug = lyrik_fix::slug(stable_id);
+        let Some(script) = inputs.reproductions.get(&slug) else {
+            continue;
+        };
+        let rel_dir = format!("staging/fix/{slug}");
+        let (rel_script, command) =
+            lyrik_fix::supplied_reproduction_paths(&run_id, &rel_dir, script);
+        // The bytes read at run start, written where the runner runs
+        // them from. The operator's file is not read again.
+        let dest = run_dir.join(&rel_script);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        std::fs::write(&dest, &script.bytes)
+            .with_context(|| format!("write {}", dest.display()))?;
+        let revision = code_revision.clone().unwrap_or_else(|| "HEAD".to_string());
+        let layout = lyrik_fix_arms::Layout::for_reproduction(&run_id, &rel_dir, &command);
+        let baseline = layout.in_copy("baseline", &command);
+        let run = match FixRunner::new(&ctx) {
+            Ok(mut runner) => {
+                let made = runner
+                    .exec(&layout.extract_baseline(&revision))
+                    .await
+                    .is_some_and(|r| r.success);
+                if made {
+                    runner.exec(&baseline).await;
+                }
+                lyrik_fix_arms::Log(&runner.observed()).run(&baseline)
+            }
+            Err(_) => lyrik_fix_arms::Run::Never,
+        };
+        let (status, detail) = lyrik_fix::supplied_status(&run);
+        audit.emit(
+            "lyrik.fix.supplied_reproduction",
+            serde_json::json!({
+                "stable_id": stable_id,
+                "sha256": script.sha256,
+                "command": command,
+                "status": status,
+                "detail": detail,
+            }),
+        )?;
+        if status == lyrik_fix::SuppliedStatus::Confirmed {
+            let walk = confirmed.iter().position(|c| &c.stable_id == stable_id);
+            if let Some(c) = lyrik_fix::confirm_with_supplied(
+                &body,
+                walk.map(|i| &confirmed[i]),
+                stable_id,
+                &command,
+                &revision,
+            ) {
+                match walk {
+                    Some(i) => confirmed[i] = c,
+                    None => confirmed.push(c),
+                }
+            }
+        }
+        supplied_records.push(lyrik_fix::SuppliedReproductionRecord {
+            stable_id: stable_id.clone(),
+            sha256: script.sha256.clone(),
+            command,
+            status,
+            detail,
+        });
+    }
+    lyrik_fix::record_supplied_reproductions(findings_path, &supplied_records)?;
+    if !supplied_records.is_empty() {
+        let count = |s: lyrik_fix::SuppliedStatus| {
+            supplied_records.iter().filter(|r| r.status == s).count()
+        };
+        eprintln!(
+            "  supplied reproductions: {} confirmed, {} not shown, {} inconclusive",
+            count(lyrik_fix::SuppliedStatus::Confirmed),
+            count(lyrik_fix::SuppliedStatus::NotShown),
+            count(lyrik_fix::SuppliedStatus::Inconclusive)
+        );
+    }
+    if confirmed.is_empty() {
+        audit.emit("lyrik.fix.none_confirmed", serde_json::json!({}))?;
+        return Ok(());
+    }
     use tokio::sync::Semaphore;
     // One finding at a time. The baseline copy is shared by the run,
     // and so is whatever the toolchain built in it: findings that ran

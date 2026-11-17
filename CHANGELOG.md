@@ -76,6 +76,40 @@ tagged.
   `crates/cli/src/commands/mod.rs`;
   [docs/sandbox-properties.md](docs/sandbox-properties.md)).
 
+- A reply the provider ends as a refusal is not acted on, for every agent.
+  None of its tool calls is dispatched: each gets a `withheld` result on the
+  chain naming the mapped stop reason and the provider's own word, the model
+  receives the same result, and no approval is asked, because the call never
+  reaches the permission gate. The last call of a reply cut off at the output
+  token limit is withheld the same way. A refusal is seen where the provider
+  reports one: Anthropic, OpenAI-compatible endpoints, Gemini and Bedrock.
+  Ollama and the subscription-plan path report none
+  (`no_tool_call_of_a_refused_reply_is_dispatched_or_asked_about`,
+  `crates/agent/src/tests.rs`;
+  `a_call_in_a_refused_or_cut_off_reply_is_withheld_before_the_gate`,
+  `crates/agent/tests/hostile_corpus.rs`;
+  [docs/security-properties.md](docs/security-properties.md)).
+
+- Lyrik takes a reproduction supplied by the operator for a finding, at
+  `.lyrik/fix-reproductions/<slug>.sh` or `.py`: read once at run start,
+  hashed on the record, a regular file only. The runner runs it in the
+  baseline copy and records `confirmed`, `not_shown` or `inconclusive` under
+  `supplied_reproductions`; only an observed run that shows the defect makes
+  the finding confirmed
+  (`a_supplied_reproduction_is_confirmed_only_by_an_observed_run`,
+  `a_supplied_reproduction_is_read_once_hashed_and_only_a_regular_file`,
+  `crates/cli/src/commands/lyrik_fix.rs`;
+  [docs/lyrik.md](docs/lyrik.md#how-to-supply-a-reproduction)).
+
+- Lyrik reports tracked agent configuration that runs a program when a
+  session starts in a checkout, and tracked symlinks that resolve to it, as
+  findings of class `agent_config` with the file and the declared command.
+  The files are read; nothing they declare is run
+  (`tracked_hooks_helpers_and_tool_servers_are_reported_with_their_commands`,
+  `a_tracked_symlink_that_resolves_to_agent_configuration_is_reported`,
+  `crates/cli/src/commands/lyrik_agent_config.rs`;
+  [docs/lyrik.md](docs/lyrik.md#agent-configuration-in-the-scanned-repository)).
+
 - The Anthropic `max_tokens` default for non-streaming calls is 16,000, up
   from 4096. A reply that writes a file or a patch in one tool call did not
   fit in 4096 and was cut off; the other providers keep the 4096 default. A
@@ -129,7 +163,8 @@ tagged.
   `content_filter`, `MAX_TOKENS`), so a mapped value can be checked against
   its source. A tool call at the end of a
   reply cut off at the output token limit does not run on the arguments that
-  arrived; its result row says `truncated` and names the limit
+  arrived; its result row says `withheld` and names the stop reason and the
+  limit
   (`a_tool_call_cut_off_at_the_output_limit_is_recorded_as_truncated_and_does_not_run`,
   `a_refusal_is_on_the_row_as_a_refusal`,
   `every_provider_shape_is_read_into_one_vocabulary`,

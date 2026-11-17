@@ -62,6 +62,11 @@ pub const FIX_SKILLS: [&str; 3] = ["fix", "fix-attack", "fix-recheck"];
 /// own, relative to the target root: `<slug>.patch` per finding.
 pub const SUPPLIED_PATCH_DIR: &str = ".lyrik/fix-patches";
 
+/// Where an operator puts a reproduction for a finding:
+/// `<slug>.sh` or `<slug>.py`, under the same rules as a supplied
+/// patch. Read once at run start; what is there later is only compared.
+pub const SUPPLIED_REPRODUCTION_DIR: &str = ".lyrik/fix-reproductions";
+
 /// A finding the fix step takes on, with the reproduction that confirms it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Confirmed {
@@ -847,6 +852,151 @@ pub struct InputDigests {
     /// The supplied patch as read at run start, when one was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supplied_patch_sha256: Option<String>,
+    /// The supplied reproduction as read at run start, when the arms
+    /// ran on one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supplied_reproduction_sha256: Option<String>,
+}
+
+/// A reproduction supplied for a finding, as read at run start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuppliedReproduction {
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+    /// `sh` for a `.sh` file, `python3` for a `.py` file.
+    pub interpreter: &'static str,
+    /// `sh` or `py`.
+    pub extension: &'static str,
+}
+
+/// What the runner observed when it ran a supplied reproduction on the
+/// baseline copy. A supplied script is a claim until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppliedStatus {
+    /// It printed the marker and exited non-zero: the defect shows.
+    Confirmed,
+    /// It printed the marker and exited zero.
+    NotShown,
+    /// It was not run, was refused, timed out, or never reached its
+    /// assertion.
+    Inconclusive,
+}
+
+/// One supplied reproduction on the run's record.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SuppliedReproductionRecord {
+    pub stable_id: String,
+    /// The script as read at run start.
+    pub sha256: String,
+    /// The command the runner composed for it, from the project root.
+    pub command: String,
+    pub status: SuppliedStatus,
+    /// Why it is not `confirmed`, when it is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// The status of a supplied reproduction from the run the log holds
+/// for it on the baseline copy. With no run there is no confirmation.
+pub fn supplied_status(run: &arms::Run) -> (SuppliedStatus, Option<String>) {
+    match arms::poc(run) {
+        arms::Poc::Shown => (SuppliedStatus::Confirmed, None),
+        arms::Poc::NotShown => (
+            SuppliedStatus::NotShown,
+            Some("it reached its assertion and exited zero in the baseline copy".to_string()),
+        ),
+        arms::Poc::Inconclusive(why) | arms::Poc::NotRun(why) => {
+            (SuppliedStatus::Inconclusive, Some(why))
+        }
+    }
+}
+
+/// Where the runner puts a supplied reproduction for a finding, and
+/// the command that runs it from the project root.
+pub fn supplied_reproduction_paths(
+    run_id: &str,
+    rel_dir: &str,
+    script: &SuppliedReproduction,
+) -> (String, String) {
+    let rel = format!("{rel_dir}/supplied/reproduction.{}", script.extension);
+    let command = format!("{} .lyrik/state/runs/{run_id}/{rel}", script.interpreter);
+    (rel, command)
+}
+
+/// The finding `stable_id` names as a confirmed finding whose
+/// reproduction is the supplied script, observed to show the defect.
+/// Reproductions the walks confirmed for the same finding become its
+/// variants.
+pub fn confirm_with_supplied(
+    body: &Value,
+    walk_confirmed: Option<&Confirmed>,
+    stable_id: &str,
+    command: &str,
+    revision: &str,
+) -> Option<Confirmed> {
+    let finding = body
+        .get("findings")?
+        .as_array()?
+        .iter()
+        .find(|f| f.get("stable_id").and_then(Value::as_str) == Some(stable_id))?
+        .clone();
+    let reproduction: ReproductionRecord = serde_json::from_value(serde_json::json!({
+        "stable_id": stable_id,
+        "command": command,
+        "expected": "supplied by the operator: prints the marker and exits non-zero when the defect shows",
+        "observed": "the runner ran it in the baseline copy: the marker, then a non-zero exit",
+        "outcome": "reproduced",
+        "code_revision": revision,
+    }))
+    .ok()?;
+    let mut others = Vec::new();
+    if let Some(c) = walk_confirmed {
+        others.push(c.reproduction.clone());
+        others.extend(c.others.iter().cloned());
+    }
+    Some(Confirmed {
+        stable_id: stable_id.to_string(),
+        finding,
+        reproduction,
+        others,
+    })
+}
+
+fn read_supplied_reproductions(target: &Path) -> BTreeMap<String, SuppliedReproduction> {
+    let dir = target.join(SUPPLIED_REPRODUCTION_DIR);
+    let mut out = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let mut paths: Vec<std::path::PathBuf> =
+        entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        // A regular file only: a link could point anywhere.
+        let regular = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file());
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let (slug, interpreter, extension) = if let Some(s) = name.strip_suffix(".sh") {
+            (s, "sh", "sh")
+        } else if let Some(s) = name.strip_suffix(".py") {
+            (s, "python3", "py")
+        } else {
+            continue;
+        };
+        if let (true, Ok(bytes)) = (regular, std::fs::read(&path)) {
+            // With both a .sh and a .py for one finding, the .py, read
+            // first, stands.
+            out.entry(slug.to_string()).or_insert(SuppliedReproduction {
+                sha256: sha256_hex(&bytes),
+                bytes,
+                interpreter,
+                extension,
+            });
+        }
+    }
+    out
 }
 
 /// A patch supplied for a finding, as read at run start.
@@ -869,6 +1019,8 @@ pub struct FixInputs {
     pub functionality: FunctionalityConfig,
     /// By slug.
     pub patches: BTreeMap<String, SuppliedPatch>,
+    /// Reproductions the operator supplied, by slug.
+    pub reproductions: BTreeMap<String, SuppliedReproduction>,
     /// The target's tracked files as they were at run start, as
     /// [`super::lyrik_git::tree_fingerprint`] reads them.
     pub tree: Result<String, String>,
@@ -886,11 +1038,13 @@ pub struct InputChanges {
     pub config: bool,
     /// Slugs whose supplied patch changed, appeared or went away.
     pub patches: BTreeSet<String>,
+    /// Slugs whose supplied reproduction changed, appeared or went away.
+    pub reproductions: BTreeSet<String>,
 }
 
 impl InputChanges {
     pub fn any(&self) -> bool {
-        self.config || !self.patches.is_empty()
+        self.config || !self.patches.is_empty() || !self.reproductions.is_empty()
     }
 }
 
@@ -932,6 +1086,7 @@ impl FixInputs {
             config_sha256: sha256_hex(config_body.as_bytes()),
             functionality: functionality_config(config),
             patches: read_supplied_patches(target),
+            reproductions: read_supplied_reproductions(target),
             tree: super::lyrik_git::tree_fingerprint(target),
             opt_outs: explicit_opt_outs(config),
         }
@@ -952,7 +1107,22 @@ impl FixInputs {
             })
             .cloned()
             .collect();
-        InputChanges { config, patches }
+        let now = read_supplied_reproductions(target);
+        let reproductions = self
+            .reproductions
+            .keys()
+            .chain(now.keys())
+            .filter(|slug| {
+                self.reproductions.get(*slug).map(|p| &p.sha256)
+                    != now.get(*slug).map(|p| &p.sha256)
+            })
+            .cloned()
+            .collect();
+        InputChanges {
+            config,
+            patches,
+            reproductions,
+        }
     }
 }
 
@@ -1008,6 +1178,12 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
     {
         reasons.push("the supplied patch was changed during the fix step".to_string());
     }
+    // The arms ran on a supplied reproduction when the finding's
+    // reproduction is the command the runner composed for one.
+    let supplied_reproduction = input.inputs.reproductions.get(&slug).filter(|r| {
+        supplied_reproduction_paths(input.run_id, input.rel_dir, r).1
+            == input.confirmed.reproduction.command.trim()
+    });
     let locality = (!shape.hunks.is_empty()).then(|| shape.locality());
     let variant_minimum = match locality {
         Some(Locality::CrossCutting) => arms::VARIANT_MIN_CROSS_CUTTING,
@@ -1127,6 +1303,17 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
             .collect();
         reasons.push(PATCH_CHANGED.to_string());
     }
+    // The same for a reproduction the operator supplied: every arm was
+    // run on, or beside, the script read at run start.
+    if supplied_reproduction.is_some() && input.changes.reproductions.contains(&slug) {
+        const REPRODUCTION_CHANGED: &str =
+            "the reproduction supplied for this finding changed during the run";
+        arms_list = arms_list
+            .into_iter()
+            .map(|a| a.withheld(REPRODUCTION_CHANGED))
+            .collect();
+        reasons.push(REPRODUCTION_CHANGED.to_string());
+    }
     if input.changes.config {
         reasons.push(CONFIG_CHANGED.to_string());
     }
@@ -1240,6 +1427,7 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         inputs: InputDigests {
             config_sha256: input.inputs.config_sha256.clone(),
             supplied_patch_sha256: supplied.map(str::to_string),
+            supplied_reproduction_sha256: supplied_reproduction.map(|r| r.sha256.clone()),
         },
         reasons,
         labels,
@@ -1409,6 +1597,24 @@ pub fn summary_line(summary: &Value) -> String {
 }
 
 /// Add `fixes` and `fix_summary` to a written `findings.json`.
+/// Add `supplied_reproductions` to a written `findings.json`: each
+/// script the operator supplied and what the runner observed of it.
+pub fn record_supplied_reproductions(
+    dest: &Path,
+    records: &[SuppliedReproductionRecord],
+) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let body = std::fs::read_to_string(dest).with_context(|| format!("read {}", dest.display()))?;
+    let mut body: Value =
+        serde_json::from_str(&body).with_context(|| format!("parse {}", dest.display()))?;
+    body["supplied_reproductions"] = serde_json::to_value(records)?;
+    std::fs::write(dest, serde_json::to_string_pretty(&body)?)
+        .with_context(|| format!("write {}", dest.display()))?;
+    Ok(())
+}
+
 pub fn record_fixes(
     dest: &Path,
     outcomes: &[FixOutcome],
@@ -2190,6 +2396,7 @@ mod tests {
                 .collect(),
             tree: Ok("fingerprint".to_string()),
             opt_outs: Vec::new(),
+            reproductions: BTreeMap::new(),
         }
     }
 
@@ -2816,6 +3023,166 @@ mod tests {
             !plan.iter().any(|c| c.contains("variants/other_shape")),
             "{plan:?}"
         );
+    }
+
+    #[test]
+    fn a_supplied_reproduction_is_read_once_hashed_and_only_a_regular_file() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join(SUPPLIED_REPRODUCTION_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".lyrik")).unwrap();
+        std::fs::write(tmp.path().join(".lyrik/config.json"), "{}").unwrap();
+        std::fs::write(dir.join("auth-src-a.rs-10.sh"), "echo first\n").unwrap();
+        std::fs::write(dir.join("auth-src-b.rs-5.py"), "print(1)\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a script").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hostname", dir.join("auth-src-c.rs-1.sh")).unwrap();
+        let inputs = FixInputs::capture(tmp.path(), "{}", &serde_json::json!({}));
+        let keys: Vec<&String> = inputs.reproductions.keys().collect();
+        assert_eq!(keys, ["auth-src-a.rs-10", "auth-src-b.rs-5"]);
+        let a = &inputs.reproductions["auth-src-a.rs-10"];
+        assert_eq!((a.interpreter, a.extension), ("sh", "sh"));
+        assert_eq!(a.sha256, sha256_hex(b"echo first\n"));
+        assert_eq!(
+            inputs.reproductions["auth-src-b.rs-5"].interpreter,
+            "python3"
+        );
+        // The command the runner composes for it, and where it is put.
+        let (rel, command) = supplied_reproduction_paths(RUN, REL, a);
+        assert_eq!(rel, format!("{REL}/supplied/reproduction.sh"));
+        assert_eq!(
+            command,
+            format!("sh .lyrik/state/runs/{RUN}/{REL}/supplied/reproduction.sh")
+        );
+        // Nothing changed yet; then the script is edited mid-run and
+        // another appears.
+        assert!(!inputs.changes(tmp.path()).any());
+        std::fs::write(dir.join("auth-src-a.rs-10.sh"), "echo second\n").unwrap();
+        std::fs::write(dir.join("auth-src-d.rs-2.sh"), "echo new\n").unwrap();
+        let changes = inputs.changes(tmp.path());
+        assert!(changes.any());
+        let changed: Vec<&String> = changes.reproductions.iter().collect();
+        assert_eq!(changed, ["auth-src-a.rs-10", "auth-src-d.rs-2"]);
+        // What was read at run start is still what the run holds.
+        assert_eq!(
+            inputs.reproductions["auth-src-a.rs-10"].bytes,
+            b"echo first\n"
+        );
+    }
+
+    #[test]
+    fn a_supplied_reproduction_is_confirmed_only_by_an_observed_run() {
+        let done = |success: bool, output: &str| arms::Run::Done {
+            success,
+            output: output.to_string(),
+            seq: 0,
+        };
+        // Never run, refused, or timed out: no confirmation.
+        for run in [arms::Run::Never, arms::Run::Refused, arms::Run::TimedOut] {
+            let (status, detail) = supplied_status(&run);
+            assert_eq!(status, SuppliedStatus::Inconclusive, "{run:?}");
+            assert!(detail.is_some());
+        }
+        // Ran and never reached its assertion: no confirmation either,
+        // whatever it exited with.
+        assert_eq!(
+            supplied_status(&done(false, "sh: not found")).0,
+            SuppliedStatus::Inconclusive
+        );
+        // The marker and a zero exit: the defect is not shown.
+        assert_eq!(
+            supplied_status(&done(true, &clean())).0,
+            SuppliedStatus::NotShown
+        );
+        // The marker and a non-zero exit: confirmed.
+        assert_eq!(
+            supplied_status(&done(false, &shown())),
+            (SuppliedStatus::Confirmed, None)
+        );
+    }
+
+    #[test]
+    fn a_confirmed_supplied_reproduction_becomes_the_reproduction_the_arms_run() {
+        let b = body();
+        let command = format!(
+            "sh .lyrik/state/runs/{RUN}/staging/fix/auth-src-b.rs-5/supplied/reproduction.sh"
+        );
+        // The second finding has no reproduction the replay agreed with.
+        let walk = confirmed_findings(&b);
+        assert!(walk.iter().all(|c| c.stable_id != "auth::src/b.rs:5"));
+        let c = confirm_with_supplied(&b, None, "auth::src/b.rs:5", &command, REV).unwrap();
+        assert_eq!(c.reproduction.command, command);
+        assert!(c.others.is_empty());
+        assert_eq!(c.finding["title"], "u");
+        // A finding the walks did confirm keeps their reproduction as a variant.
+        let first = &walk[0];
+        let command_a = format!("sh .lyrik/state/runs/{RUN}/{REL}/supplied/reproduction.sh");
+        let c = confirm_with_supplied(&b, Some(first), &first.stable_id, &command_a, REV).unwrap();
+        assert_eq!(c.reproduction.command, command_a);
+        assert_eq!(c.others.len(), 1);
+        assert_eq!(c.others[0].command, REPRO);
+        let carried = carried_variants(&c, RUN);
+        assert_eq!(carried[0].command, REPRO);
+        // A stable id that names no finding confirms nothing.
+        assert!(confirm_with_supplied(&b, None, "auth::src/none.rs:1", &command, REV).is_none());
+    }
+
+    #[test]
+    fn a_supplied_reproduction_that_changed_during_the_run_withdraws_the_arms() {
+        // The case's reproduction is the supplied script's command.
+        let mut case = Case::new(ORIGIN_PATCH).with_variants(false);
+        let script = SuppliedReproduction {
+            bytes: b"x".to_vec(),
+            sha256: sha256_hex(b"x"),
+            interpreter: "sh",
+            extension: "sh",
+        };
+        let (_, command) = supplied_reproduction_paths(RUN, REL, &script);
+        let judged = |case: &Case, changed: bool| {
+            let mut i = inputs(None);
+            i.reproductions
+                .insert(slug("auth::src/a.rs:10"), script.clone());
+            let mut changes = InputChanges::default();
+            if changed {
+                changes.reproductions.insert(slug("auth::src/a.rs:10"));
+            }
+            judge(&JudgeInput {
+                run_dir: case.tmp.path(),
+                rel_dir: REL,
+                run_id: RUN,
+                confirmed: &case.confirmed,
+                revision: REV,
+                observed: &case.observed,
+                target: case.tmp.path(),
+                tree: &TreeRecord::Unchanged,
+                agents: &[],
+                fix_model: "some-model",
+                inputs: &i,
+                changes: &changes,
+            })
+        };
+        // The arms ran on the walk's reproduction: a supplied script
+        // for the same finding is not what they rested on.
+        let out = judged(&case, true);
+        assert_eq!(out.inputs.supplied_reproduction_sha256, None);
+        assert_eq!(out.verdict, Verdict::CandidateFix, "{:?}", out.reasons);
+        // The arms ran on the supplied script.
+        case.confirmed.reproduction.command = command.clone();
+        let out = judged(&case, false);
+        assert_eq!(
+            out.inputs.supplied_reproduction_sha256.as_deref(),
+            Some(script.sha256.as_str())
+        );
+        let out = judged(&case, true);
+        assert_eq!(out.verdict, Verdict::Inconclusive);
+        assert!(
+            out.reasons
+                .iter()
+                .any(|r| r == "the reproduction supplied for this finding changed during the run"),
+            "{:?}",
+            out.reasons
+        );
+        assert!(out.arms.iter().all(|a| a.state == ArmState::Inconclusive));
     }
 
     #[test]
