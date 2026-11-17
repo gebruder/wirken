@@ -247,6 +247,8 @@ flags that relax a default are listed in
 
 Lyrik records every candidate it declines with the rule and reason. A rejected candidate stays in `findings.json` under `rejected_candidates` and in SARIF as a suppressed result, and the run prints the rejections by rule at its end. The eight rules, and how the `mode` key in `.lyrik/config.json` decides whether a rejection demotes or removes a finding, are in [docs/lyrik-brocards.md](docs/lyrik-brocards.md).
 
+In defender mode Lyrik also checks a fix. For each confirmed finding it writes (or takes a supplied) patch and runs it in a baseline and a patched copy of the scanned revision, under a set of arms that each rest on a command the runner composed and ran: that the original reproduction and the finding's other reproductions stop, that other paths to the same sink stay closed, that the patch sits at the root cause, that nothing moved, and that the tests and benign inputs are unchanged. No model grades a patch; every arm state comes from the exit status of commands on the run's own session log. A fix is recorded as a `candidate fix` with its arm tally, never as fixed or verified. You can hand Lyrik a maintainer's patch or an upstream fix to check the same way. See the [defender fix step](docs/lyrik.md#defender-fix-step) and [how to read a fix record](docs/lyrik.md#reading-a-fix-record).
+
 ## Documentation
 
 **Start here**
@@ -279,7 +281,7 @@ Lyrik records every candidate it declines with the rule and reason. A rejected c
 **Extending**
 [Skills](docs/skills.md) ·
 [MCP setup](docs/mcp.md) ·
-[Lyrik](docs/lyrik.md) (security-assessment skill) ·
+[Lyrik](docs/lyrik.md) (security-assessment skill; [defender fix step](docs/lyrik.md#defender-fix-step) and [reading a fix record](docs/lyrik.md#reading-a-fix-record)) ·
 [Zirkel](docs/zirkel.md) (research aggregator preset)
 
 **Maintaining**

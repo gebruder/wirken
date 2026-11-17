@@ -76,11 +76,58 @@ tagged.
   `crates/cli/src/commands/mod.rs`;
   [docs/sandbox-properties.md](docs/sandbox-properties.md)).
 
+- The Anthropic `max_tokens` default for non-streaming calls is 16,000, up
+  from 4096. A reply that writes a file or a patch in one tool call did not
+  fit in 4096 and was cut off; the other providers keep the 4096 default. A
+  Lyrik model pin's `max_tokens` still overrides it
+  (`every_provider_shape_is_read_into_one_vocabulary` checks the default,
+  `crates/agent/src/tests.rs`; `ANTHROPIC_DEFAULT_MAX_TOKENS`,
+  `crates/agent/src/llm.rs`).
+
+- The fix step shows the commands its runner composes for one finding's arms
+  as a single plan and asks once; the grant covers exactly those command
+  strings, for that finding, in that run, and is held in memory only. A
+  command an agent writes is still asked on its own. Each command that ran
+  under the grant has its own `permission_approved` row, approved by
+  `lyrik-fix-plan`, and `lyrik.fix.plan` records the plan and what ran under
+  it (`a_plan_grant_covers_exactly_its_command_strings`,
+  `crates/cli/src/commands/stdin_approval.rs`;
+  `the_plan_is_the_runner_composed_commands_of_one_finding_and_no_others`,
+  `crates/cli/src/commands/lyrik_fix.rs`).
+
+- The relocation arm fails only on a security defect the patch newly shows or
+  moves: a candidate's proof has to show it in the patched copy and not in
+  the baseline. A functional regression (something that worked before the
+  patch and does not after, such as a cluster that no longer forms) is read
+  by the functionality arm instead, under the `regression` candidate kind
+  (`a_functional_regression_fails_functionality_and_not_relocation`,
+  `crates/cli/src/commands/lyrik_fix_arms.rs`).
+
+- A variant still open in the patched copy only because its script sets a
+  setting the run declares an explicit opt-out of the control
+  (`fix.explicit_opt_outs` in `.lyrik/config.json`) is recorded as
+  `open_by_configuration` and does not fail the variant arm
+  (`a_variant_open_under_an_operator_declared_opt_out_does_not_fail_the_arm`,
+  `crates/cli/src/commands/lyrik_fix_arms.rs`;
+  `a_variant_under_a_declared_opt_out_is_open_by_configuration_on_the_record`,
+  `crates/cli/src/commands/lyrik_fix.rs`).
+
+- When findings of one run share an origin or an invariant and each one's own
+  patch was rejected as partial, the runner applies the patches together to
+  one copy and runs the arms on the union, recording a combined fix record in
+  `combined_fixes` that names the member findings. No agent takes part and no
+  patch is merged (`the_union_of_two_partial_patches_is_judged_on_its_own_runs`,
+  `partial_fixes_that_share_an_origin_or_an_invariant_are_grouped`,
+  `crates/cli/src/commands/lyrik_fix.rs`).
+
 - The `llm_response` row carries `stop_reason`, the provider's own account of
   why the reply ended: `end_turn`, `tool_use`, `max_tokens`, `refusal`,
   `stop_sequence` or `other`, read from Anthropic, OpenAI-compatible, Gemini,
   Bedrock and Ollama replies. Optional and additive: absent where the
-  provider reports none and on existing rows. A tool call at the end of a
+  provider reports none and on existing rows. The row also carries
+  `stop_reason_raw`, the provider's own word before mapping (`length`,
+  `content_filter`, `MAX_TOKENS`), so a mapped value can be checked against
+  its source. A tool call at the end of a
   reply cut off at the output token limit does not run on the arguments that
   arrived; its result row says `truncated` and names the limit
   (`a_tool_call_cut_off_at_the_output_limit_is_recorded_as_truncated_and_does_not_run`,

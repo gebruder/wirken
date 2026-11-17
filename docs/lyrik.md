@@ -723,6 +723,175 @@ tally, the arms, `patch_source` and the input digests, and
 [fp-1p]: https://www.flyingpenguin.com/disinformation-pushed-by-1password-ai-patching-report-is-false/
 [fp-oc]: https://www.flyingpenguin.com/openclaw-is-cooked-433-cves-patched-by-agents-that-cant-fix-whats-broken/
 
+## Reading a fix record
+
+This section is plain-language: what the fix arms are for, and how to read one
+record. The mechanics are in [Defender fix step](#defender-fix-step) above.
+
+### What the arms are for
+
+A patch can stop the one input that was reported and leave the hole open. The
+arms exist so that "this fix works" is never a model's word for it; each arm is
+a question answered by running a command and reading its exit status.
+
+- **reproduction**: does the exact input that was reported still get through?
+  The runner runs the walk's own reproduction in a copy with the patch and a
+  copy without it. The patch has to stop it in the patched copy and the defect
+  has to come back when the patch is taken out.
+- **variant**: does any *other* way in still get through? A finding often has
+  more than one reproduction (the same hole from another entry point, another
+  deployment); each of those is run against the patch. The fix-attack agent may
+  add more. A patch that closes the reported input but not a sibling is a
+  partial fix.
+- **root_cause**: does the patch sit where the violation starts, or at the
+  place it happened to surface? A guard bolted on at the crash site, with the
+  bad value still produced upstream, is a symptom patch.
+- **relocation**: did the patch move the defect somewhere else, or open a new
+  one? The fix-recheck agent re-walks the patched code. This arm fails only on
+  a *security* defect newly shown or moved; a functional regression (something
+  that worked before and does not now) is the functionality arm's.
+- **functionality**: does the patched code still do its job? The project's
+  own tests run in both copies, and, when they exist, a coverage report and a
+  benign-input check. A fix that breaks a legitimate path fails here.
+
+No arm "passes" on a model's reading. Where only a model's judgement is
+available (no proof of concept was run), the arm is `inconclusive` and the
+claim is kept beside it under `model_claims`; it never rejects a fix on its
+own.
+
+### The verdict, and why a candidate fix is not a verified fix
+
+- **rejected**: an arm failed. The patch is wrong or incomplete, and the
+  failing arm's reason says how.
+- **candidate_fix**: the reproduction and variant arms passed, no arm failed,
+  and the patch and the target did not change under the run. It is the
+  strongest thing a run says, and it still is not "verified": the other three
+  arms may be `inconclusive` (for example no coverage tool exists), which is
+  why a candidate fix is always printed with its arm tally and never alone.
+- **inconclusive**: nothing failed, but the reproduction or variant arm did
+  not pass, or an input changed, or the tree state could not be read.
+
+### A record, field by field
+
+Each entry under `fixes` in `findings.json`:
+
+```json
+{
+  "stable_id": "unbounded_length::b.sh:3",
+  "dir": "staging/fix/unbounded_length-b.sh-3",
+  "verdict": "candidate_fix",
+  "label": "candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run",
+  "patch_source": "generated",
+  "arms": [
+    { "arm": "reproduction", "state": "pass",         "basis": "executed" },
+    { "arm": "variant",      "state": "pass",         "basis": "executed" },
+    { "arm": "root_cause",   "state": "inconclusive", "basis": "model_judged" },
+    { "arm": "relocation",   "state": "inconclusive", "basis": "model_judged" },
+    { "arm": "functionality","state": "pass",         "basis": "executed" }
+  ],
+  "variants": [
+    { "outcome": "held", "source": "agent", "id": "variants/v1_sibling_a/run.sh" },
+    { "outcome": "held", "source": "agent", "id": "variants/v4_direct_decode_len/run.sh" }
+  ],
+  "fix_locality": "cross_cutting",
+  "target_tree": { "state": "unchanged" },
+  "agents": [
+    { "step": "fix",         "rounds": 6,  "round_limit": 60, "incomplete": false },
+    { "step": "fix-attack",  "rounds": 16, "round_limit": 60, "incomplete": false },
+    { "step": "fix-recheck", "rounds": 12, "round_limit": 60, "incomplete": false }
+  ],
+  "patch": { "files": ["len.sh", "a.sh", "b.sh"] }
+}
+```
+
+This record is from the `toy-slotcopy` run in the bundled `slotcopy` test
+target (`a.sh` and `b.sh` each copy a header-declared length into an 8-byte
+slot without a bound check). The reproduction and both executed arms
+(reproduction, variant, functionality) passed, so the verdict is a candidate
+fix, with the tally `3 of 5`; `root_cause` and `relocation` stayed
+`inconclusive` on a model's reading because no executed run settled them. In
+the same run the sibling finding `unbounded_length::a.sh:3` was rejected, its
+first reason:
+
+```
+partial fix: the reproduction no longer shows the defect and 1 other path(s) still do: variants/v3-cwd-source/run.sh
+```
+
+Reading it: `verdict` and `label` first (the label carries the tally). `arms`
+is the five arms with each one's `state`, its `basis` (`executed` or
+`model_judged`), and `reasons`. `variants` lists every variant that ran, where
+it came from (`reproduction` or `agent`) and its `outcome` (`held`, `open`,
+`open_by_configuration`, `introduced`, `not_a_variant`, `inconclusive`).
+`partial`, when present, names the paths a fix closed one reproduction but left
+open. `target_tree` is whether the tree changed. `agents` is each fix-step
+agent's tool-round use. Everything an arm read is in
+`staging/fix/<slug>/observed.json`, each command with its exit status.
+
+When several findings share an origin or an invariant and each one's own patch
+was rejected as partial, the run also writes a `combined_fixes` record: the
+member patches applied together to one copy, with the arms run on the union.
+
+### How-to: check your own patch, or an upstream fix
+
+The arms take any patch, not only one Lyrik wrote. Put it at
+`.lyrik/fix-patches/<slug>.patch` in the target, where `<slug>` is the
+finding's `stable_id` with every run of bytes outside `[A-Za-z0-9._]` replaced
+by `-` (the run prints each finding's `stable_id`). The run checks that patch
+in place of writing one, records `patch_source` `supplied`, and runs the same
+arms. Matching a known-good fix earns nothing: the arms still have to pass on
+the runs.
+
+### How-to: the test and coverage commands
+
+Set them under `fix` in `.lyrik/config.json`:
+
+```json
+"fix": {
+  "test_command": "sh test.sh",
+  "coverage_command": "bash cover.sh"
+}
+```
+
+`test_command` is run in the baseline and the patched copy; a fix that makes it
+fail is rejected by the functionality arm. `coverage_command` is run in the
+patched copy and its output has to show each patched file exercised; without it
+the functionality arm is `functionality_unverified` even when the tests pass.
+A patch that edits a test file makes the suite unusable as a before/after
+check, and the arm says so.
+
+If a variant works only because the operator switched the control off on
+purpose, list that setting under `fix.explicit_opt_outs` (each as the text a
+script would carry); such a variant is recorded `open_by_configuration` and
+does not fail the variant arm.
+
+### How-to: sandbox limits for the arms
+
+The arms build and run the target, which can need more than the exec sandbox's
+defaults (512 MB of memory, 256 processes, 300 s a command). Raise them in the
+data directory's `sandbox.json` (operator-only; a target cannot set them):
+
+```json
+{ "mode": "exec-only", "memory_mb": 2048, "pids_limit": 1024, "timeout_secs": 300 }
+```
+
+Non-default limits appear in the sign-off banner and on the audit rows. See
+[sandbox properties](sandbox-properties.md).
+
+### How-to: fix-step round limits
+
+Each fix-step agent may make 60 model calls by default. A large codebase can
+need more; set `fix_tool_rounds` in the data directory's `lyrik.json`
+(operator-only):
+
+```json
+{ "fix_tool_rounds": 90 }
+```
+
+An agent stopped at its limit is recorded `incomplete` with the count, and each
+arm it feeds carries that note; the arm's state is still what the commands that
+did run show.
+
+
 ## Writing the scoring guide
 
 A markdown file at `.lyrik/rubric.md` in the repo being assessed, or a file
