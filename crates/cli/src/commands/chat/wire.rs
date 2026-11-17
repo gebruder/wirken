@@ -170,7 +170,7 @@ pub(crate) fn message(conversation: &str, text: &str, sender: &str) -> Builder<H
         m.set_channel(CHANNEL);
         m.set_conversation_id(conversation);
         m.set_text(text);
-        m.set_timestamp(chrono::Utc::now().timestamp_millis());
+        m.set_timestamp(wirken_time::now().as_millisecond());
         m.set_metadata("{}");
     }
     msg

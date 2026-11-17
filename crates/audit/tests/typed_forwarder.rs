@@ -19,7 +19,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use chrono::{TimeZone, Utc};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -98,7 +97,7 @@ fn stored_at_seq(event: SessionEvent, seq: u64) -> wirken_audit::StoredSessionEv
         id: seq as i64,
         session_id: SessionId::new("sess-1"),
         seq,
-        ts: Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap(),
+        ts: "2026-05-11T12:00:00Z".parse().unwrap(),
         trust: TrustLevel::System,
         event,
         leaf_hash: wirken_audit::HashHex("aa".repeat(32)),

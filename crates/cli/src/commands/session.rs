@@ -60,7 +60,8 @@ pub struct SessionRow {
     pub log_id: String,
     pub channel: String,
     pub message_count: i64,
-    pub last_activity: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub last_activity: wirken_time::Timestamp,
 }
 
 /// Gather active sessions (optionally filtered by channel) as structured
@@ -224,7 +225,7 @@ pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()>
             truncate_for_display(&row.log_id, 40),
             row.channel,
             row.message_count,
-            row.last_activity.format("%Y-%m-%d %H:%M:%S"),
+            row.last_activity.strftime("%Y-%m-%d %H:%M:%S"),
         );
     }
 

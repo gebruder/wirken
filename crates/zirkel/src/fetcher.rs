@@ -33,7 +33,6 @@
 //!   the orchestrator level.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use thiserror::Error;
 use wirken_agent::egress::{EgressClient, HttpAccessDenied};
 
@@ -354,7 +353,7 @@ pub fn parse_feed(
         let published_at = entry
             .published
             .or(entry.updated)
-            .map(format_rfc3339)
+            .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
         out.push(FetchedItem {
             source_name: source_name.to_string(),
@@ -366,10 +365,6 @@ pub fn parse_feed(
         });
     }
     Ok(out)
-}
-
-fn format_rfc3339(dt: DateTime<Utc>) -> String {
-    dt.to_rfc3339()
 }
 
 #[cfg(test)]

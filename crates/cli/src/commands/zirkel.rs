@@ -438,7 +438,7 @@ pub async fn auth_list() -> Result<()> {
             .strip_prefix("zirkel-")
             .and_then(|s| s.strip_suffix("-api-key"))
             .unwrap_or(&e.name);
-        println!("  {source} (stored {})", e.created_at.format("%Y-%m-%d"));
+        println!("  {source} (stored {})", e.created_at.strftime("%Y-%m-%d"));
     }
     Ok(())
 }
@@ -851,7 +851,11 @@ async fn push_digest_for_run(
         return Ok(DigestPush::Empty);
     }
     let opts = RenderOptions {
-        date: Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
+        date: Some(
+            wirken_time::jiff::Zoned::now()
+                .strftime("%Y-%m-%d")
+                .to_string(),
+        ),
         ..RenderOptions::default()
     };
     let rendered =

@@ -98,9 +98,9 @@ fn personal_message_to_inbound() {
             );
             assert_eq!(m.get_text().unwrap().to_str().unwrap(), "Hello from Teams");
             // 2026-03-25T10:30:00Z
-            let expected_ts = chrono::DateTime::parse_from_rfc3339("2026-03-25T10:30:00Z")
+            let expected_ts = wirken_time::parse_rfc3339("2026-03-25T10:30:00Z")
                 .unwrap()
-                .timestamp_millis();
+                .as_millisecond();
             assert_eq!(m.get_timestamp(), expected_ts);
             assert!(!m.get_is_group());
         }
@@ -562,11 +562,11 @@ mod jwt {
     }
 
     fn exp_future() -> i64 {
-        chrono::Utc::now().timestamp() + 3600
+        wirken_time::now().as_second() + 3600
     }
 
     fn exp_past() -> i64 {
-        chrono::Utc::now().timestamp() - 3600
+        wirken_time::now().as_second() - 3600
     }
 
     #[tokio::test]

@@ -26,6 +26,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use wirken_time::TimestampExt;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -90,7 +91,7 @@ pub async fn run(archive: &Path, sealed: bool) -> Result<()> {
     // before any write.
     let source_account = first_account(&mut reader)?;
 
-    let imported_at = chrono::Utc::now().to_rfc3339();
+    let imported_at = wirken_time::now().to_rfc3339();
     let decl = SourceDeclaration {
         provider: Provider::Anthropic,
         source_account: source_account.clone(),

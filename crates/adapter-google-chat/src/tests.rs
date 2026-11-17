@@ -45,9 +45,9 @@ fn parse_google_chat_message() {
     assert!(msg.is_dm);
 
     // 2024-01-01T00:00:00Z in millis
-    let expected_ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+    let expected_ts = wirken_time::parse_rfc3339("2024-01-01T00:00:00Z")
         .unwrap()
-        .timestamp_millis();
+        .as_millisecond();
     assert_eq!(msg.timestamp, expected_ts);
 }
 
@@ -554,11 +554,11 @@ mod jwt {
     }
 
     fn exp_future() -> i64 {
-        chrono::Utc::now().timestamp() + 3600
+        wirken_time::now().as_second() + 3600
     }
 
     fn exp_past() -> i64 {
-        chrono::Utc::now().timestamp() - 3600
+        wirken_time::now().as_second() - 3600
     }
 
     #[tokio::test]

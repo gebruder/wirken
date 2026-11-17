@@ -1,5 +1,5 @@
-use chrono::{Duration, Utc};
 use tempfile::TempDir;
+use wirken_time::{Timestamp, TimestampExt};
 
 use crate::event::{ActorKind, AuditEvent};
 // Every field type `every_session_event` has to name. Imported rather
@@ -229,8 +229,8 @@ fn prune_old_events() {
     // is safe here because the prune logic filters on ts alone and
     // nothing calls verify() afterwards.
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let old_ts = (Utc::now() - Duration::days(100)).to_rfc3339();
-    let recent_ts = Utc::now().to_rfc3339();
+    let old_ts = (Timestamp::now() - wirken_time::days(100)).to_rfc3339();
+    let recent_ts = Timestamp::now().to_rfc3339();
 
     for i in 0..5u64 {
         conn.execute(
@@ -300,7 +300,7 @@ fn migration_of_legacy_table_copies_rows_under_sentinel() {
              );",
         )
         .unwrap();
-        let ts = Utc::now().to_rfc3339();
+        let ts = Timestamp::now().to_rfc3339();
         for i in 0..3 {
             conn.execute(
                 "INSERT INTO audit_events
@@ -369,7 +369,7 @@ fn migration_is_idempotent_across_repeated_opens() {
             "INSERT INTO audit_events
                  (ts, actor, action, target, channel, session, detail, hash)
              VALUES (?1, 'a', 'x', 't', '', '', 'null', 'h')",
-            rusqlite::params![Utc::now().to_rfc3339()],
+            rusqlite::params![Timestamp::now().to_rfc3339()],
         )
         .unwrap();
     }
@@ -740,7 +740,7 @@ mod session {
             "INSERT INTO session_events
                  (session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash)
              VALUES ('sess-drift', 999, ?1, 'totally_unknown', ?2, '', '', 'h')",
-            rusqlite::params![Utc::now().to_rfc3339(), payload],
+            rusqlite::params![Timestamp::now().to_rfc3339(), payload],
         )
         .unwrap();
         drop(conn);
@@ -2538,7 +2538,7 @@ mod chain_head_signing {
                 rusqlite::params![
                     h.id().as_str(),
                     seq,
-                    chrono::Utc::now().to_rfc3339(),
+                    wirken_time::TimestampExt::to_rfc3339(&wirken_time::now()),
                     payload,
                     leaf,
                     prev_hash,
@@ -3454,8 +3454,8 @@ fn every_session_event() -> Vec<SessionEvent> {
             action_key: String::new(),
             agent_id: String::new(),
             approved_by: String::new(),
-            previous_expires_at: Utc::now(),
-            expires_at: Utc::now(),
+            previous_expires_at: Timestamp::now(),
+            expires_at: Timestamp::now(),
             approved_via: None,
             adapter_id: None,
             sender_id: None,
@@ -3466,7 +3466,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             agent_id: String::new(),
             tool: None,
             tier: None,
-            expired_at: Utc::now(),
+            expired_at: Timestamp::now(),
             detected_by: GrantExpiryDetection::ToolCall,
             adapter_id: None,
             sender_id: None,
@@ -3475,7 +3475,7 @@ fn every_session_event() -> Vec<SessionEvent> {
         SessionEvent::PermissionGrantPruned {
             action_key: String::new(),
             agent_id: String::new(),
-            expires_at: Utc::now(),
+            expires_at: Timestamp::now(),
             channel: None,
         },
         SessionEvent::SubagentSessionBound {

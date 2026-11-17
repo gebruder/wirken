@@ -378,7 +378,7 @@ impl RefreshService {
                 .map_err(|_| "vault mutex poisoned".to_string())?;
             load_oauth(&store, name).map_err(|e| e.to_string())?
         };
-        let now = chrono::Utc::now().timestamp() as u64;
+        let now = wirken_time::now().as_second() as u64;
         if cred.expires_at > now + 60 {
             return Ok(cred);
         }
@@ -518,7 +518,7 @@ mod tests {
             Ok(OAuthCredential {
                 access_token: "AT-2".into(),
                 refresh_token: "RT-2".into(),
-                expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+                expires_at: wirken_time::now().as_second() as u64 + 3600,
                 scope: cred.scope.clone(),
                 provider: cred.provider.clone(),
                 ..Default::default()
@@ -881,7 +881,7 @@ mod tests {
             Ok(OAuthCredential {
                 access_token: "AT-refreshed-0003".into(),
                 refresh_token: "RT-refreshed-0003".into(),
-                expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+                expires_at: wirken_time::now().as_second() as u64 + 3600,
                 scope: cred.scope.clone(),
                 provider: cred.provider.clone(),
                 ..Default::default()
@@ -1143,7 +1143,7 @@ mod tests {
                         &OAuthCredential {
                             access_token: "AT-NEW".into(),
                             refresh_token: "RT-NEW".into(),
-                            expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+                            expires_at: wirken_time::now().as_second() as u64 + 3600,
                             scope: "read".into(),
                             provider: "linear".into(),
                             ..Default::default()
@@ -1155,7 +1155,7 @@ mod tests {
             Ok(OAuthCredential {
                 access_token: "AT-OLD-LINE".into(),
                 refresh_token: "RT-OLD-LINE".into(),
-                expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+                expires_at: wirken_time::now().as_second() as u64 + 3600,
                 scope: cred.scope.clone(),
                 provider: cred.provider.clone(),
                 ..Default::default()

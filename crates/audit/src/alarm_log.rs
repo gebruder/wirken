@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use wirken_time::TimestampExt;
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -284,9 +285,7 @@ impl AlarmLog {
         if !self.path.exists() {
             return Ok(None);
         }
-        let ts = chrono::Utc::now()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-            .replace(':', "-");
+        let ts = wirken_time::now().to_rfc3339_secs_z().replace(':', "-");
         let filename = self
             .path
             .file_name()
@@ -413,7 +412,7 @@ pub fn hostname_best_effort() -> String {
 
 /// RFC 3339 UTC timestamp at second precision.
 pub fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    wirken_time::now().to_rfc3339_secs_z()
 }
 
 #[cfg(test)]

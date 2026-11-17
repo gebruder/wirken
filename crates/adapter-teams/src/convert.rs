@@ -91,8 +91,8 @@ pub fn activity_to_inbound(
     let ts_millis = activity
         .timestamp
         .as_deref()
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.timestamp_millis())
+        .and_then(|ts| wirken_time::parse_rfc3339(ts).ok())
+        .map(|dt| dt.as_millisecond())
         .unwrap_or(0);
     inbound.set_timestamp(ts_millis);
 

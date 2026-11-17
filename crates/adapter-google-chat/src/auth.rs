@@ -199,7 +199,7 @@ impl JwksCache {
         let claims: Claims = serde_json::from_slice(&parsed.payload)
             .map_err(|e| AuthError::JwtValidation(format!("claims parse: {e}")))?;
 
-        let now = chrono::Utc::now().timestamp();
+        let now = wirken_time::now().as_second();
         if claims.exp + EXP_LEEWAY_SECS < now {
             return Err(AuthError::JwtValidation("token expired".into()));
         }

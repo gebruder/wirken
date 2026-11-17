@@ -24,7 +24,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 toml = "1.1"
 feed-rs = "3"
-chrono = { workspace = true }
+wirken-time = { path = "../time" }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 hdbscan = "0.12"

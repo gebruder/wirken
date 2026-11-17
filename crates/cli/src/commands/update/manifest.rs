@@ -12,10 +12,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use wirken_gateway::release_keys::MANIFEST_NAMESPACE;
 use wirken_gateway::sshsig;
+use wirken_time::Timestamp;
 
 /// The largest manifest accepted. A manifest lists every release with
 /// five artifacts; at a few hundred bytes an entry this leaves room for
@@ -57,7 +57,8 @@ impl std::fmt::Display for Version {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Release {
     pub version: String,
-    pub issued_at: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub issued_at: Timestamp,
     pub security: bool,
     pub summary: String,
     /// Artifact name (`wirken-<target>`) to its sha256, lowercase hex.
@@ -74,7 +75,8 @@ impl Release {
 /// formed. Releases are ordered newest first.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Manifest {
-    pub issued_at: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub issued_at: Timestamp,
     pub releases: Vec<Release>,
 }
 
@@ -143,7 +145,8 @@ pub fn verify(body: &[u8], signature: &[u8], keys: &[[u8; 32]]) -> Result<Verifi
 /// is refused later.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FreezeState {
-    pub issued_at: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub issued_at: Timestamp,
     pub key_fingerprint: String,
 }
 
@@ -368,7 +371,7 @@ pub(crate) mod tests {
             serde_json::from_slice(&std::fs::read(freeze_state_path(tmp.path())).unwrap()).unwrap();
         assert_eq!(
             state.issued_at,
-            "2026-10-21T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+            "2026-10-21T00:00:00Z".parse::<Timestamp>().unwrap()
         );
         // And the one that was newest before is now stale too.
         assert!(check_and_record_freshness(tmp.path(), &verified("2026-10-20T00:00:00Z")).is_err());

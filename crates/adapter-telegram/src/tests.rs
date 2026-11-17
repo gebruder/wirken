@@ -260,7 +260,7 @@ async fn full_message_flow_simulation() {
         m.set_channel("telegram");
         m.set_conversation_id("-1001234500");
         m.set_text("What's the weather?");
-        m.set_timestamp(chrono::Utc::now().timestamp_millis());
+        m.set_timestamp(wirken_time::now().as_millisecond());
         m.set_is_group(false);
         m.set_reply_to_id("");
         m.set_metadata("{}");

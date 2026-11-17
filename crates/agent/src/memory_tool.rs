@@ -15,6 +15,7 @@
 //! write and the crossing land on the hash chain.
 
 use std::sync::{Arc, Mutex};
+use wirken_time::TimestampExt;
 
 use wirken_audit::{OwnSession, SessionEvent, SessionHandle, SessionLog, TrustLevel};
 use wirken_gateway::memory::{MemoryStore, OriginLabels};
@@ -86,7 +87,7 @@ fn write(ctx: &MemoryContext, args: &serde_json::Value) -> Result<ToolResult, Ag
     };
     // Labels come from the turn, never from `args`. A model that
     // passes a `channel` or `sender_id` argument is ignored.
-    let created_at = chrono::Utc::now().to_rfc3339();
+    let created_at = wirken_time::now().to_rfc3339();
     let written = ctx
         .store
         .lock()

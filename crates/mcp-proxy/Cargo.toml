@@ -23,7 +23,7 @@ thiserror = { workspace = true }
 reqwest = { workspace = true }
 oauth2 = { workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
+wirken-time = { path = "../time" }
 open = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }

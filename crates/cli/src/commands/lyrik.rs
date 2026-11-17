@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use wirken_time::TimestampExt;
 
 use wirken_agent::Agent;
 use wirken_agent::AgentError;
@@ -975,7 +976,7 @@ fn write_empty_findings(path: &Path, run_id: &str, extras: &Extras) -> Result<()
         serde_json::json!({
             "schema_version": "1.1",
             "run_id": run_id,
-            "produced_at": chrono::Utc::now().to_rfc3339(),
+            "produced_at": wirken_time::now().to_rfc3339(),
             "findings": [],
             "rejected_candidates": [],
         }),
@@ -4013,7 +4014,7 @@ fn aggregate_findings_multi(
     let body = serde_json::json!({
         "schema_version": super::lyrik_validate::schema_version_for(&findings),
         "run_id": run_id,
-        "produced_at": chrono::Utc::now().to_rfc3339(),
+        "produced_at": wirken_time::now().to_rfc3339(),
         "citation_check": {
             "literal_claim": {
                 "resolved": literal_claim_resolved,
@@ -4799,7 +4800,7 @@ fn aggregate_findings(source: &Path, dest: &Path, run_id: &str) -> Result<()> {
     let body = serde_json::json!({
         "schema_version": super::lyrik_validate::schema_version_for(&findings),
         "run_id": run_id,
-        "produced_at": chrono::Utc::now().to_rfc3339(),
+        "produced_at": wirken_time::now().to_rfc3339(),
         "findings": findings,
     });
     if let Some(parent) = dest.parent() {
@@ -5023,7 +5024,7 @@ impl AuditLogger {
     }
 
     fn emit(&mut self, event: &str, detail: serde_json::Value) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = wirken_time::now().to_rfc3339();
         let record = serde_json::json!({
             "event": event,
             "run_id": self.run_id,

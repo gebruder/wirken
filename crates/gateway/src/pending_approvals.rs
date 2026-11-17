@@ -27,9 +27,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
 use tokio::sync::oneshot;
 use uuid::Uuid;
+use wirken_time::Timestamp;
 
 /// Who decided an approval request. `id` is the verified identity
 /// (`approved_by` / `denied_by`); `display` is an unverified label,
@@ -107,7 +107,7 @@ pub struct PendingRequest {
 /// here when `resolve` is called.
 struct Entry {
     request: PendingRequest,
-    requested_at: DateTime<Utc>,
+    requested_at: Timestamp,
     requested_instant: Instant,
     tx: oneshot::Sender<PendingDecision>,
 }
@@ -151,7 +151,7 @@ pub struct PendingDetail {
     pub exec_runtime: Option<String>,
     /// Where the prompt was posted; see [`PendingRequest::prompt_conversation`].
     pub prompt_conversation: Option<String>,
-    pub requested_at: DateTime<Utc>,
+    pub requested_at: Timestamp,
     pub age_seconds: u64,
 }
 
@@ -164,7 +164,7 @@ pub struct PendingSummary {
     pub tool_name: String,
     pub action_key: String,
     pub requested_tier: String,
-    pub requested_at: DateTime<Utc>,
+    pub requested_at: Timestamp,
     pub age_seconds: u64,
 }
 
@@ -224,7 +224,7 @@ impl PendingApprovalQueue {
         let (tx, rx) = oneshot::channel();
         let entry = Entry {
             request,
-            requested_at: Utc::now(),
+            requested_at: Timestamp::now(),
             requested_instant: Instant::now(),
             tx,
         };

@@ -183,7 +183,7 @@ pub fn migrate(edit: Option<std::path::PathBuf>) -> Result<()> {
     println!("  Stop `wirken run` before migrating; it cannot use the vault until this is done.");
 
     // 1. Backup, before anything touches the vault.
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let stamp = wirken_time::now().strftime("%Y%m%dT%H%M%SZ");
     let backup = db.with_file_name(format!("vault.db.pre-binding-{stamp}.bak"));
     let live_rows = {
         let conn =

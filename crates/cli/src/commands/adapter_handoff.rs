@@ -486,7 +486,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kc = AgeFileKeychain::new(dir.path().join("keychain"), "test-passphrase".into());
         let store = CredentialStore::open(&dir.path().join("vault.db"), &kc).unwrap();
-        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+        let past = wirken_time::now() - wirken_time::SignedDuration::from_hours(1);
         store
             .store(
                 "signal-token",

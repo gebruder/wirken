@@ -112,7 +112,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             let keychain = probe_keychain(&data, move || pp);
             let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
                 .context("Failed to open credential store")?;
-            let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+            let rotation_due = wirken_time::now() + wirken_time::days(90);
             super::destinations::store_provider_key(
                 &store,
                 &format!("{}-api-key", choice.provider),

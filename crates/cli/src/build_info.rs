@@ -19,17 +19,17 @@ pub const TARGET: &str = env!("WIRKEN_BUILD_TARGET");
 pub const COMMIT_TIME: &str = env!("WIRKEN_BUILD_COMMIT_TIME");
 
 /// When the commit this binary was built from was made.
-pub fn commit_time() -> Option<chrono::DateTime<chrono::Utc>> {
+pub fn commit_time() -> Option<wirken_time::Timestamp> {
     parse_commit_time(COMMIT_TIME)
 }
 
-fn parse_commit_time(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::from_timestamp(raw.parse().ok()?, 0)
+fn parse_commit_time(raw: &str) -> Option<wirken_time::Timestamp> {
+    wirken_time::from_unix_secs(raw.parse().ok()?)
 }
 
 /// What `wirken status` prints: the build, and its age at `now` from
 /// the commit's timestamp. No network.
-pub fn status_text(now: chrono::DateTime<chrono::Utc>) -> String {
+pub fn status_text(now: wirken_time::Timestamp) -> String {
     status_lines(
         VERSION,
         COMMIT,
@@ -46,20 +46,20 @@ fn status_lines(
     commit: &str,
     dirty: &str,
     target: &str,
-    commit_time: Option<chrono::DateTime<chrono::Utc>>,
-    now: chrono::DateTime<chrono::Utc>,
+    commit_time: Option<wirken_time::Timestamp>,
+    now: wirken_time::Timestamp,
     binary: &str,
 ) -> String {
     let age = match commit_time {
         Some(t) => {
-            let days = (now - t).num_days();
+            let days = now.duration_since(t).as_hours() / 24;
             let age = match days {
                 d if d < 0 => "in the future; check this host's clock".to_string(),
                 0 => "less than a day old".to_string(),
                 1 => "1 day old".to_string(),
                 d => format!("{d} days old"),
             };
-            format!("{}, {age}", t.format("%Y-%m-%d"))
+            format!("{}, {age}", t.strftime("%Y-%m-%d"))
         }
         None => "unknown (built without the commit's timestamp)".to_string(),
     };
@@ -163,8 +163,8 @@ mod tests {
 
     #[test]
     fn status_reports_age_from_the_commit_timestamp() {
-        let t = chrono::DateTime::from_timestamp(1_760_000_000, 0).unwrap();
-        let now = t + chrono::Duration::days(12) + chrono::Duration::hours(3);
+        let t = wirken_time::from_unix_secs(1_760_000_000).unwrap();
+        let now = t + wirken_time::days(12) + wirken_time::SignedDuration::from_hours(3);
         let text = status_lines(
             "2.3.0",
             "abc1234",
@@ -177,7 +177,7 @@ mod tests {
         assert!(text.contains("wirken 2.3.0"), "{text}");
         assert!(text.contains("commit   abc1234 (clean)"), "{text}");
         assert!(
-            text.contains(&format!("{}, 12 days old", t.format("%Y-%m-%d"))),
+            text.contains(&format!("{}, 12 days old", t.strftime("%Y-%m-%d"))),
             "{text}"
         );
         assert!(

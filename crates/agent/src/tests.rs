@@ -3483,8 +3483,9 @@ mod subagent {
     /// `approve_by_key_with_expiry` accepts is a day, and a
     /// zero-day window is refused precisely so this state cannot be
     /// created on purpose in production.
-    fn make_agent_with_lapsed_ls_grant() -> (Agent, TempDir, chrono::DateTime<chrono::Utc>) {
+    fn make_agent_with_lapsed_ls_grant() -> (Agent, TempDir, wirken_time::Timestamp) {
         use rusqlite::params;
+        use wirken_time::TimestampExt;
         let tmp = TempDir::new().unwrap();
         let log = make_log();
         let mut agent = Agent::new(
@@ -3510,7 +3511,7 @@ mod subagent {
         // reproduces is a grant that lapses while a long-running
         // store is already open, which is the case the sweep cannot
         // reach.
-        let expired_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        let expired_at = wirken_time::now() - wirken_time::SignedDuration::from_hours(1);
         let conn = rusqlite::Connection::open(&perm_path).unwrap();
         conn.execute(
             "INSERT INTO approvals (action_key, agent_id, channel, approved_at, approved_by, expires_at)
@@ -3518,7 +3519,7 @@ mod subagent {
             params![
                 "shell:ls",
                 "lapsed",
-                (expired_at - chrono::Duration::days(30)).to_rfc3339(),
+                (expired_at - wirken_time::days(30)).to_rfc3339(),
                 "test-operator",
                 expired_at.to_rfc3339()
             ],
@@ -3926,7 +3927,7 @@ mod subagent {
         assert_eq!(lapses[0].2.as_deref(), Some("exec"));
         assert_eq!(lapses[0].3.as_deref(), Some("tier2"));
         assert!(
-            (lapses[0].4 - expired_at).num_seconds().abs() <= 1,
+            lapses[0].4.duration_since(expired_at).as_secs().abs() <= 1,
             "the row carries the window the dropped grant held",
         );
     }
@@ -10060,11 +10061,11 @@ mod phase_overlay {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use chrono::Utc;
     use tempfile::TempDir;
     use wirken_audit::{
         PhaseExitReason, SessionEvent, SessionId, SessionLog, SkillDeniedReason, SqliteSessionLog,
     };
+    use wirken_time::Timestamp;
 
     use crate::llm::LlmConfig;
     use crate::skill_perms::PhaseDenyOverlay;
@@ -10172,7 +10173,7 @@ mod phase_overlay {
         PhaseDenyOverlay {
             skill_id: "test-skill".to_string(),
             phase_name: phase_name.to_string(),
-            entered_at: Utc::now(),
+            entered_at: Timestamp::now(),
             tools,
             ..Default::default()
         }

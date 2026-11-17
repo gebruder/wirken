@@ -1,5 +1,5 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
+use wirken_time::Timestamp;
 
 /// Who triggered an audit event. Splits the pre-1.2.0 free-form
 /// `actor: String` into a typed kind + an id so SIEM consumers can
@@ -37,7 +37,8 @@ fn classify_legacy_actor(actor: &str) -> ActorKind {
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEvent {
     /// Timestamp of the event.
-    pub ts: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub ts: Timestamp,
     /// Kind of the actor that triggered the event.
     pub actor_kind: ActorKind,
     /// Stable id of the actor (sender id, agent id, service literal).
@@ -66,7 +67,8 @@ pub struct AuditEvent {
 /// the row hashes are already sealed.
 #[derive(Deserialize)]
 struct AuditEventWire {
-    ts: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    ts: Timestamp,
     #[serde(default)]
     actor_kind: Option<ActorKind>,
     #[serde(default)]
@@ -118,7 +120,7 @@ impl AuditEvent {
         target: impl Into<String>,
     ) -> Self {
         Self {
-            ts: Utc::now(),
+            ts: Timestamp::now(),
             actor_kind,
             actor_id: actor_id.into(),
             action: action.into(),

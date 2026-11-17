@@ -243,7 +243,7 @@ pub fn refused(channel: Option<&str>, limit: usize) -> Result<()> {
         };
         println!(
             "{:<20}  {:<12}  {:<28}  {:<28}  {:<20}  {suppressed}",
-            ts.format("%Y-%m-%dT%H:%M:%SZ"),
+            ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
             channel,
             sender,
             conversation,

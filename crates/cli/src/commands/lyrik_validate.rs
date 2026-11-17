@@ -154,7 +154,7 @@ pub fn validate_value(root: &serde_json::Value) -> Vec<ValidationError> {
     }
     match obj.get("produced_at").and_then(|v| v.as_str()) {
         Some(s) => {
-            if chrono::DateTime::parse_from_rfc3339(s).is_err() {
+            if wirken_time::parse_rfc3339(s).is_err() {
                 errs.push(ValidationError {
                     path: "/produced_at".into(),
                     message: format!("must be an RFC 3339 timestamp, got {s:?}"),

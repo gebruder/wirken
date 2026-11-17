@@ -49,8 +49,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use rand::TryRng;
+use wirken_time::Timestamp;
 
 use crate::otel_exporter::OtelConfig;
 use crate::session_log::{SessionEvent, SessionId, ToolCallRecord};
@@ -382,7 +382,7 @@ impl OtelProjector {
         &mut self,
         event: &SessionEvent,
         session_id: &SessionId,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
         identity_attributes: &[(String, String)],
     ) -> Vec<Span> {
         match event {
@@ -711,7 +711,7 @@ impl OtelProjector {
     fn open_run(
         &mut self,
         session_id: &SessionId,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
         user_message: String,
         adapter_id: Option<String>,
         sender_id: Option<String>,
@@ -752,7 +752,7 @@ impl OtelProjector {
     fn start_chat(
         &mut self,
         session_id: &SessionId,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
         request_id: &str,
         provider: &str,
         model: &str,
@@ -787,7 +787,7 @@ impl OtelProjector {
     fn finish_chat(
         &mut self,
         session_id: &SessionId,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
         request_id: &str,
         input_tokens: u32,
         output_tokens: u32,
@@ -822,7 +822,7 @@ impl OtelProjector {
     fn start_execute_tools(
         &mut self,
         session_id: &SessionId,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
         calls: &[ToolCallRecord],
     ) {
         let Some(buf) = self.runs.get_mut(session_id) else {
@@ -858,7 +858,7 @@ impl OtelProjector {
     fn finish_execute_tool(
         &mut self,
         session_id: &SessionId,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
         call_id: &str,
         tool_name: &str,
         output: &str,
@@ -896,7 +896,7 @@ impl OtelProjector {
     fn close_run(
         &mut self,
         session_id: &SessionId,
-        timestamp: DateTime<Utc>,
+        timestamp: Timestamp,
         assistant_message: &str,
         identity_attributes: &[(String, String)],
     ) -> Vec<Span> {
@@ -1287,10 +1287,8 @@ impl OtelProjector {
     }
 }
 
-fn datetime_to_unix_nanos(ts: DateTime<Utc>) -> u128 {
-    let secs = ts.timestamp() as i128;
-    let nanos = ts.timestamp_subsec_nanos() as i128;
-    (secs * 1_000_000_000 + nanos) as u128
+fn datetime_to_unix_nanos(ts: Timestamp) -> u128 {
+    ts.as_nanosecond() as u128
 }
 
 #[cfg(test)]
@@ -1326,8 +1324,8 @@ mod tests {
         }
     }
 
-    fn at(seconds_since_epoch: i64) -> DateTime<Utc> {
-        DateTime::<Utc>::from_timestamp(seconds_since_epoch, 0).unwrap()
+    fn at(seconds_since_epoch: i64) -> Timestamp {
+        Timestamp::from_second(seconds_since_epoch).unwrap()
     }
 
     fn user_message(content: &str, adapter: Option<&str>) -> SessionEvent {
@@ -1809,7 +1807,7 @@ mod tests {
 
     #[test]
     fn datetime_to_unix_nanos_combines_seconds_and_subsecond_nanos() {
-        let ts = DateTime::<Utc>::from_timestamp(1_700_000_000, 250_000_000).unwrap();
+        let ts = Timestamp::new(1_700_000_000, 250_000_000).unwrap();
         let nanos = datetime_to_unix_nanos(ts);
         assert_eq!(nanos, 1_700_000_000 * 1_000_000_000 + 250_000_000);
     }

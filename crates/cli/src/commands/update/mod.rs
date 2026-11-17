@@ -67,8 +67,8 @@ impl CheckReport {
             self.current,
             self.target,
             latest.version,
-            latest.issued_at.format("%Y-%m-%d"),
-            m.issued_at.format("%Y-%m-%dT%H:%M:%SZ"),
+            latest.issued_at.strftime("%Y-%m-%d"),
+            m.issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
             self.source,
             self.verified.key_fingerprint,
         );
@@ -185,7 +185,7 @@ pub async fn check(
     let verified = manifest::verify(&body, &sig, keys)?;
     tracing::info!(
         key = %verified.key_fingerprint,
-        issued_at = %verified.manifest.issued_at.format("%Y-%m-%dT%H:%M:%SZ"),
+        issued_at = %verified.manifest.issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         releases = verified.manifest.releases.len(),
         "update: manifest signature verified"
     );
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(
             state.issued_at,
             "2026-10-21T00:00:00Z"
-                .parse::<chrono::DateTime<chrono::Utc>>()
+                .parse::<wirken_time::Timestamp>()
                 .unwrap()
         );
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

@@ -37,7 +37,6 @@
 //!   Any field-ordering drift between the body the signer hashed
 //!   and the body the HTTP client wrote would diverge.
 
-use chrono::{TimeZone, Utc};
 use serde_json::Value;
 
 use wirken_audit::{
@@ -855,7 +854,7 @@ fn snapshot_audit_event_uses_actor_kind_and_optional_channel() {
 
 fn fixture_event() -> AuditEvent {
     AuditEvent {
-        ts: Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap(),
+        ts: "2026-05-11T12:00:00Z".parse().unwrap(),
         actor_kind: ActorKind::Agent,
         actor_id: "agent-1".into(),
         action: "message.outbound".into(),

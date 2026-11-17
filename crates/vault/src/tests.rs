@@ -1,5 +1,5 @@
-use chrono::{Duration, Utc};
 use tempfile::TempDir;
+use wirken_time::{Timestamp, TimestampExt};
 
 use crate::crypto::{decrypt, derive_key_from_passphrase, encrypt, generate_key};
 use crate::keychain::{AgeFileKeychain, Keychain};
@@ -386,7 +386,7 @@ fn pre_migration_credential_reads_as_unbound() {
         conn.execute(
             "INSERT INTO credentials (name, channel, encrypted_value, created_at)
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params!["legacy", "openai", enc, Utc::now().to_rfc3339()],
+            rusqlite::params!["legacy", "openai", enc, Timestamp::now().to_rfc3339()],
         )
         .unwrap();
     }
@@ -496,7 +496,7 @@ fn expired_credential_returns_error() {
     let store = test_store(&tmp);
 
     let secret = VaultSecret::new("expired-value".into());
-    let past = Utc::now() - Duration::hours(1);
+    let past = Timestamp::now() - wirken_time::SignedDuration::from_hours(1);
     store
         .store("expired", "chan", &secret, Some(past), None)
         .unwrap();
@@ -511,7 +511,7 @@ fn rotation_due_flagged() {
     let store = test_store(&tmp);
 
     let secret = VaultSecret::new("value".into());
-    let past = Utc::now() - Duration::hours(1);
+    let past = Timestamp::now() - wirken_time::SignedDuration::from_hours(1);
     store
         .store("rotate-me", "chan", &secret, None, Some(past))
         .unwrap();
@@ -527,7 +527,7 @@ fn rotation_not_due_yet() {
     let store = test_store(&tmp);
 
     let secret = VaultSecret::new("value".into());
-    let future = Utc::now() + Duration::days(90);
+    let future = Timestamp::now() + wirken_time::days(90);
     store
         .store("fresh", "chan", &secret, None, Some(future))
         .unwrap();
@@ -659,7 +659,7 @@ fn rotate_credential() {
     store.store("rotating", "openai", &old, None, None).unwrap();
 
     let new = VaultSecret::new("new-key".into());
-    let future = Utc::now() + Duration::days(90);
+    let future = Timestamp::now() + wirken_time::days(90);
     store.rotate("rotating", &new, Some(future)).unwrap();
 
     let (retrieved, meta) = store.retrieve("rotating").unwrap();
@@ -952,7 +952,7 @@ fn the_kind_migration_marks_the_builtin_identifiers_and_nothing_else() {
             conn.execute(
                 "INSERT INTO credentials (name, channel, encrypted_value, created_at)
                  VALUES (?1, '', ?2, ?3)",
-                rusqlite::params![name, enc, Utc::now().to_rfc3339()],
+                rusqlite::params![name, enc, Timestamp::now().to_rfc3339()],
             )
             .unwrap();
         }
@@ -1510,7 +1510,7 @@ mod destination_binding {
             conn.execute(
                 "INSERT INTO credentials (name, channel, encrypted_value, created_at, kind)
                  VALUES (?1, '', ?2, ?3, 'secret')",
-                rusqlite::params![name, enc, Utc::now().to_rfc3339()],
+                rusqlite::params![name, enc, Timestamp::now().to_rfc3339()],
             )
             .unwrap();
         }

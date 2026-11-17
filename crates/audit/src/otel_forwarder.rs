@@ -351,7 +351,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use chrono::{DateTime, Utc};
+    use wirken_time::Timestamp;
 
     use super::*;
     use crate::otel_exporter::StaticFederatedIdentity;
@@ -464,7 +464,7 @@ mod tests {
             id: seq as i64,
             session_id: SessionId::new("sess-1"),
             seq,
-            ts: DateTime::<Utc>::from_timestamp(ts_seconds, 0).unwrap(),
+            ts: Timestamp::from_second(ts_seconds).unwrap(),
             trust: TrustLevel::System,
             event,
             leaf_hash: zero.clone(),

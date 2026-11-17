@@ -1179,9 +1179,9 @@ pub enum UpsertOutcome {
 /// verbatim, so it is the source of truth for whether a stored record
 /// could be ordered, and no schema change is needed to ask.
 fn normalize_timestamp(raw: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(raw)
+    wirken_time::parse_rfc3339(raw)
         .ok()
-        .map(|dt| dt.timestamp_micros())
+        .map(|dt| dt.as_microsecond())
 }
 
 /// Turn a match-syntax failure into a refusal that says so.

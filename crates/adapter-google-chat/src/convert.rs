@@ -220,9 +220,9 @@ pub fn extract_message(json: &serde_json::Value) -> Option<GoogleChatInbound> {
         .and_then(|t| t.as_str())
         .and_then(|ts| {
             // Parse RFC 3339 timestamp to Unix millis
-            chrono::DateTime::parse_from_rfc3339(ts)
+            wirken_time::parse_rfc3339(ts)
                 .ok()
-                .map(|dt| dt.timestamp_millis())
+                .map(|dt| dt.as_millisecond())
         })
         .unwrap_or(0);
 

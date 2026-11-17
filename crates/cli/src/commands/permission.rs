@@ -361,8 +361,8 @@ pub async fn list(agent: &str) -> Result<()> {
             approval.channel,
             "persisted",
             approval.approved_by,
-            approval.approved_at.format("%Y-%m-%d %H:%M:%S"),
-            approval.expires_at.format("%Y-%m-%d %H:%M:%S"),
+            approval.approved_at.strftime("%Y-%m-%d %H:%M:%S"),
+            approval.expires_at.strftime("%Y-%m-%d %H:%M:%S"),
         );
     }
     for grant in &session_scoped {
@@ -372,7 +372,7 @@ pub async fn list(agent: &str) -> Result<()> {
             wirken_gateway::permissions::channel_of_session(&grant.session_id).unwrap_or("-"),
             "session",
             grant.approved_by,
-            grant.approved_at.format("%Y-%m-%d %H:%M:%S"),
+            grant.approved_at.strftime("%Y-%m-%d %H:%M:%S"),
             grant.session_id,
         );
     }
@@ -413,7 +413,7 @@ pub async fn revoke(key: &str, agent: &str, channel: &str) -> Result<()> {
     match removed {
         Some(until) => println!(
             "  Permission '{key}' revoked for agent '{agent}' on {channel} (its window ran to {}).",
-            until.format("%Y-%m-%d %H:%M:%S UTC")
+            until.strftime("%Y-%m-%d %H:%M:%S UTC")
         ),
         None => println!(
             "  Permission '{key}' was not granted for agent '{agent}' on {channel}; nothing to revoke."
@@ -490,7 +490,7 @@ pub async fn approve(
                 approval.action_key,
                 approval.agent_id,
                 approval.channel,
-                approval.expires_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                approval.expires_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
             );
         }
         Some(session_id) => {

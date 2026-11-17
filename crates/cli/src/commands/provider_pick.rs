@@ -625,7 +625,7 @@ mod tests {
                 "anthropic-api-key",
                 "anthropic",
                 &VaultSecret::new("sk-old".into()),
-                Some(chrono::Utc::now() - chrono::Duration::days(1)),
+                Some(wirken_time::now() - wirken_time::days(1)),
                 None,
             )
             .unwrap();

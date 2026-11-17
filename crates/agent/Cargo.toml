@@ -25,7 +25,7 @@ serde-saphyr = { version = "2.0", default-features = false, features = ["deseria
 toml = "1.1"
 tracing = { workspace = true }
 thiserror = { workspace = true }
-chrono = { workspace = true }
+wirken-time = { path = "../time" }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 uuid = { version = "1", features = ["v4"] }

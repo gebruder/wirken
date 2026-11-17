@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use wirken_time::TimestampExt;
 
 use anyhow::{Context, Result};
 // UnixListener/UnixStream are still used for the orchestrator-push
@@ -3112,17 +3113,13 @@ static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// Whether the audit writer has stored an `action` row at or after
 /// `at`, asked for up to two seconds.
-async fn stored_since(
-    db: &std::path::Path,
-    action: &str,
-    at: chrono::DateTime<chrono::Utc>,
-) -> bool {
+async fn stored_since(db: &std::path::Path, action: &str, at: wirken_time::Timestamp) -> bool {
     let Ok(log) = wirken_audit::AuditLog::open(db) else {
         return false;
     };
     let query = wirken_audit::AuditQuery {
         action: Some(action.to_string()),
-        since: Some(at - chrono::Duration::milliseconds(1)),
+        since: Some(at - wirken_time::SignedDuration::from_millis(1)),
         limit: Some(1),
         ..Default::default()
     };

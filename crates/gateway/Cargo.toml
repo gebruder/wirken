@@ -16,7 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-chrono = { workspace = true }
+wirken-time = { path = "../time" }
 rusqlite = { workspace = true }
 zip = { workspace = true }
 flate2 = { workspace = true }
@@ -25,6 +25,9 @@ rand = { workspace = true }
 sha2 = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 cron = { workspace = true }
+# The `cron` crate takes and returns this type. Used in `cron.rs` only,
+# at that boundary.
+chrono = { version = "0.4", default-features = false }
 reqwest = { workspace = true }
 base64 = "0.23"
 async-trait = { workspace = true }

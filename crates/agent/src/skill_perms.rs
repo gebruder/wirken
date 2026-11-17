@@ -27,9 +27,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use thiserror::Error;
+use wirken_time::Timestamp;
 
 const WILDCARD: &str = "*";
 /// Token in `filesystem.{read,write}_paths` that resolves to the agent's
@@ -677,7 +677,7 @@ pub fn effective_for_skills(
 pub struct PhaseDenyOverlay {
     pub skill_id: String,
     pub phase_name: String,
-    pub entered_at: DateTime<Utc>,
+    pub entered_at: Timestamp,
     pub tools: BTreeSet<String>,
     pub egress_hosts: BTreeSet<String>,
     pub paths_read: BTreeSet<PathBuf>,
@@ -1504,7 +1504,7 @@ inference:
         PhaseDenyOverlay {
             skill_id: "test-skill".to_string(),
             phase_name: phase_name.to_string(),
-            entered_at: Utc::now(),
+            entered_at: Timestamp::now(),
             tools,
             ..Default::default()
         }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use wirken_time::TimestampExt;
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3440,7 +3441,7 @@ async fn route_verify(req: &Request<'_>, shared: &Shared) -> Response {
     let Some(_verify_claim) = VerifyClaim::claim(&shared.verify_running) else {
         return Response::Complete(json_conflict(r#"{"result":"busy"}"#));
     };
-    let started_at = chrono::Utc::now();
+    let started_at = wirken_time::now();
     let started = std::time::Instant::now();
     let outcome = verify_chain_off_runtime(shared.cfg.clone()).await;
     // The claim is released by `_verify_claim` going out of scope at
@@ -3810,7 +3811,7 @@ pub async fn status_snapshot(
         .and_then(|c| c.resolve("default"))
     {
         Some(b) => {
-            let now = chrono::Utc::now().timestamp();
+            let now = wirken_time::now().as_second();
             let window_start = b.window.window_start(now);
             let store = wirken_gateway::budget::BudgetStore::open(&cfg.budget_db_path()).ok();
             let spent = store
@@ -3823,7 +3824,7 @@ pub async fn status_snapshot(
             json!({
                 "mode": format!("{:?}", b.mode).to_ascii_lowercase(),
                 "window": b.window.label(),
-                "window_start": chrono::DateTime::from_timestamp(window_start, 0).map(|d| d.to_rfc3339()),
+                "window_start": wirken_time::from_unix_secs(window_start).map(|d| d.to_rfc3339()),
                 "ceiling_usd_micros": b.ceiling_usd_micros,
                 "spent_usd_micros": micros_to_json(spent),
                 "remaining_usd_micros": micros_to_json(spent.zip(b.ceiling_usd_micros).map(|(s, ceiling)| ceiling.saturating_sub(s))),
@@ -3971,7 +3972,7 @@ pub async fn status_snapshot(
         .collect();
 
     json!({
-        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "generated_at": wirken_time::now().to_rfc3339(),
         "gateway": { "version": env!("CARGO_PKG_VERSION"), "loopback_only": true,
         "session_expiry_secs": cfg.session_expiry_secs, "port": port },
         "agent": agent,
@@ -4254,7 +4255,7 @@ pub fn session_events(
         Err(_) => return json!({ "error": "session log unreadable" }),
     };
 
-    let mut call_started: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    let mut call_started: HashMap<String, wirken_time::Timestamp> = HashMap::new();
     let mut events: Vec<Value> = Vec::new();
     let (mut input_tokens, mut output_tokens, mut cost_micros) = (0u64, 0u64, 0u64);
     let mut cost_known = true;
@@ -4304,7 +4305,7 @@ pub fn session_events(
             } => {
                 let elapsed = call_started
                     .get(call_id)
-                    .map(|started| (row.ts - *started).num_milliseconds());
+                    .map(|started| row.ts.duration_since(*started).as_millis() as i64);
                 Some(json!({
                     "kind": "tool_result",
                     "call_id": call_id,
@@ -5138,7 +5139,7 @@ pub const VERIFY_CAVEAT: &str = "Report-only: no operator trust anchor was consu
 /// along whatever the verdict.
 pub fn verify_result_json(
     result: &VerifyResult,
-    started_at: chrono::DateTime<chrono::Utc>,
+    started_at: wirken_time::Timestamp,
     duration_ms: u64,
 ) -> serde_json::Value {
     use serde_json::json;
@@ -6509,10 +6510,7 @@ mod tests {
         let id = "default/webchat/webchat-default";
         let handle = log.handle_for(SessionId::new(id.to_string()));
         let agent = || "default".to_string();
-        let stamp = |s: &str| {
-            s.parse::<chrono::DateTime<chrono::Utc>>()
-                .expect("a timestamp")
-        };
+        let stamp = |s: &str| s.parse::<wirken_time::Timestamp>().expect("a timestamp");
         let rows = vec![
             (
                 TrustLevel::User,
@@ -7191,7 +7189,7 @@ mod tests {
     #[test]
     fn every_verify_verdict_maps_with_its_caveat() {
         use wirken_audit::{SessionId, VerifyResult};
-        let at = chrono::Utc::now();
+        let at = wirken_time::now();
         let sid = SessionId::new("default/webchat/webchat-default".to_string());
         let cases = vec![
             (
@@ -7892,7 +7890,7 @@ mod tests {
         assert_eq!(grants[0]["action_key"], "shell:ls");
         assert_eq!(grants[0]["approved_by"], "operator");
         assert!(
-            chrono::DateTime::parse_from_rfc3339(grants[0]["expires_at"].as_str().unwrap()).is_ok(),
+            wirken_time::parse_rfc3339(grants[0]["expires_at"].as_str().unwrap()).is_ok(),
             "expiry is a timestamp, not a duration"
         );
         let skills = snap["skills"].as_array().expect("skills listed");

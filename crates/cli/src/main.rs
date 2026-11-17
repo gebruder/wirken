@@ -2225,7 +2225,7 @@ async fn main() -> Result<()> {
         Commands::Import { archive, sealed } => commands::import::run(&archive, sealed).await,
         Commands::Doctor => commands::doctor::run().await,
         Commands::Status => {
-            print!("{}", build_info::status_text(chrono::Utc::now()));
+            print!("{}", build_info::status_text(wirken_time::now()));
             Ok(())
         }
         Commands::Update {

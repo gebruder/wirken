@@ -268,7 +268,7 @@ async fn full_message_flow_simulation() {
         m.set_channel("discord");
         m.set_conversation_id("1234567890");
         m.set_text("@WirkenBot what time is it?");
-        m.set_timestamp(chrono::Utc::now().timestamp_millis());
+        m.set_timestamp(wirken_time::now().as_millisecond());
         m.set_is_group(true);
         m.set_reply_to_id("");
         m.set_metadata("{\"guild_id\":\"999\",\"bot_mentioned\":true}");

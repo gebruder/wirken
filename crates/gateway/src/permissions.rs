@@ -1,10 +1,10 @@
-use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use wirken_time::{Timestamp, TimestampExt};
 
 use crate::error::GatewayError;
 
@@ -420,9 +420,11 @@ pub struct Approval {
     /// Channel the grant applies on.
     #[serde(default)]
     pub channel: String,
-    pub approved_at: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub approved_at: Timestamp,
     pub approved_by: String,
-    pub expires_at: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub expires_at: Timestamp,
     /// Storage lifetime. Defaulted on deserialize so rows persisted
     /// before this field existed read back as `ApprovalScope::Persisted`,
     /// which is the only form the pre-slice-1 emit path produced.
@@ -452,7 +454,7 @@ pub struct GrantOutcome {
     /// because the window happened to close first would be the same
     /// gap this field exists to close. Always `None` for
     /// session-scoped writes.
-    pub renewed_from: Option<DateTime<Utc>>,
+    pub renewed_from: Option<Timestamp>,
 }
 
 /// Normalize a runtime `agent_id` to the logical agent id used in
@@ -486,7 +488,7 @@ pub struct StaleGrant {
     /// The window the row carried. In the past for a lapsed grant;
     /// possibly in the future for a not-storable one, which is part
     /// of why it read as live.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 /// What [`PermissionStore::sweep_stale_grants`] removed.
@@ -729,7 +731,7 @@ impl PermissionStore {
     /// to touch each key. Idempotent: a second run over a swept
     /// store reports nothing.
     pub fn sweep_stale_grants(&mut self) -> Result<SweepReport, GatewayError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut report = SweepReport::default();
         {
             let mut select = self
@@ -900,7 +902,7 @@ impl PermissionStore {
                 let key = action.approval_key();
                 match self.get_approval(&key, agent_id, channel)? {
                     Some(approval) => {
-                        if Utc::now() > approval.expires_at {
+                        if Timestamp::now() > approval.expires_at {
                             // Expired, so re-approval is needed. The
                             // row is dropped here and its expiry is
                             // handed back on `lapsed_at`, because
@@ -973,7 +975,7 @@ impl PermissionStore {
     /// Session-scoped approvals do not have a meaningful time-based
     /// expiry; the cache lookup in [`Self::check`] does not consult
     /// `expires_at`. The field is populated with
-    /// `DateTime::<Utc>::MAX_UTC` as a sentinel so a future caller
+    /// `wirken_time::FOREVER` as a sentinel so a future caller
     /// reading the `Approval` directly does not interpret a stale
     /// 30-day window as "still valid" or "already expired"; both are
     /// wrong, and a far-future value makes the intent explicit.
@@ -1027,7 +1029,7 @@ impl PermissionStore {
     ///
     /// `expires_in_days` is ignored for `ApprovalScope::Session`:
     /// session grants end with the session and carry the
-    /// `DateTime::<Utc>::MAX_UTC` sentinel rather than a window, so
+    /// `wirken_time::FOREVER` sentinel rather than a window, so
     /// there is nothing for a day count to shorten. Session writes
     /// likewise always report `renewed_from: None`; re-granting one
     /// is idempotent, not a renewal.
@@ -1089,7 +1091,7 @@ impl PermissionStore {
                  of the session; Tier 1 is allowed without a grant."
             )));
         }
-        let now = Utc::now();
+        let now = Timestamp::now();
         let approval = Approval {
             action_key: action_key.to_string(),
             agent_id: agent_id.to_string(),
@@ -1098,7 +1100,7 @@ impl PermissionStore {
                 .to_string(),
             approved_at: now,
             approved_by: approved_by.to_string(),
-            expires_at: DateTime::<Utc>::MAX_UTC,
+            expires_at: wirken_time::FOREVER,
             scope: ApprovalScope::Session {
                 session_id: session_id.clone(),
             },
@@ -1144,7 +1146,7 @@ impl PermissionStore {
         agent_id: String,
         approved_by: String,
         session_id: String,
-        approved_at: DateTime<Utc>,
+        approved_at: Timestamp,
     ) {
         let approval = Approval {
             action_key: action_key.clone(),
@@ -1154,7 +1156,7 @@ impl PermissionStore {
                 .to_string(),
             approved_at,
             approved_by,
-            expires_at: DateTime::<Utc>::MAX_UTC,
+            expires_at: wirken_time::FOREVER,
             scope: ApprovalScope::Session {
                 session_id: session_id.clone(),
             },
@@ -1240,9 +1242,9 @@ impl PermissionStore {
         }
 
         let agent_id = canonical_agent_id(agent_id);
-        let now = Utc::now();
+        let now = Timestamp::now();
         let days = expires_in_days.unwrap_or(self.default_expiry_days);
-        let expires = now + Duration::days(days as i64);
+        let expires = now + wirken_time::days(days as i64);
 
         // Read the window we are about to overwrite before
         // overwriting it. Same call, same `&self`, so no caller can
@@ -1302,7 +1304,7 @@ impl PermissionStore {
             None => Ok(false),
             Some(expires) => {
                 let expires_at = parse_dt(&expires);
-                Ok(Utc::now() < expires_at)
+                Ok(Timestamp::now() < expires_at)
             }
         }
     }
@@ -1330,9 +1332,9 @@ impl PermissionStore {
         action_key: &str,
         agent_id: &str,
         channel: &str,
-    ) -> Result<Option<DateTime<Utc>>, GatewayError> {
+    ) -> Result<Option<Timestamp>, GatewayError> {
         let agent_id = canonical_agent_id(agent_id);
-        let removed: Option<DateTime<Utc>> = self
+        let removed: Option<Timestamp> = self
             .conn
             .query_row(
                 "SELECT expires_at FROM approvals
@@ -1341,8 +1343,7 @@ impl PermissionStore {
                 |row| row.get::<_, String>(0),
             )
             .ok()
-            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-            .map(|d| d.with_timezone(&Utc));
+            .and_then(|s| wirken_time::parse_rfc3339(&s).ok());
         self.conn.execute(
             "DELETE FROM approvals WHERE action_key = ?1 AND agent_id = ?2 AND channel = ?3",
             params![action_key, agent_id, channel],
@@ -1356,7 +1357,7 @@ impl PermissionStore {
         let added = self.conn.execute(
             "INSERT OR IGNORE INTO stopped_agents (agent_id, stopped_at, stopped_by)
              VALUES (?1, ?2, ?3)",
-            params![agent_id, Utc::now().to_rfc3339(), stopped_by],
+            params![agent_id, Timestamp::now().to_rfc3339(), stopped_by],
         )?;
         Ok(added > 0)
     }
@@ -1486,7 +1487,7 @@ pub enum PermissionCheck {
         /// and the compiler would not have said a word. A new field
         /// breaks every match site instead, which is the direction
         /// this wants to fail in.
-        lapsed_at: Option<DateTime<Utc>>,
+        lapsed_at: Option<Timestamp>,
     },
 }
 
@@ -1581,7 +1582,7 @@ pub struct ActiveSessionScopedGrant {
     pub session_id: String,
     pub action_key: String,
     pub approved_by: String,
-    pub approved_at: DateTime<Utc>,
+    pub approved_at: Timestamp,
 }
 
 /// Replay the session log for `session_id` and return one row per
@@ -1598,7 +1599,7 @@ pub fn list_active_session_scoped_grants_in_session(
 ) -> Result<Vec<ActiveSessionScopedGrant>, wirken_audit::AuditError> {
     let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
     let events = log.get_since(&handle, 0)?;
-    let mut active: std::collections::BTreeMap<String, (String, DateTime<Utc>)> =
+    let mut active: std::collections::BTreeMap<String, (String, Timestamp)> =
         std::collections::BTreeMap::new();
     for stored in events {
         match stored.event {
@@ -1947,7 +1948,7 @@ pub fn emit_permission_revoked(
     agent_id: &str,
     channel: &str,
     revoked_by: &str,
-    removed_expires_at: Option<DateTime<Utc>>,
+    removed_expires_at: Option<Timestamp>,
 ) -> Result<(), GatewayError> {
     log.append(
         handle,
@@ -2060,10 +2061,8 @@ fn drop_unscoped_grants(conn: &mut Connection) -> Result<Vec<StaleGrant>, Gatewa
     Ok(rows)
 }
 
-fn parse_dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+fn parse_dt(s: &str) -> Timestamp {
+    wirken_time::parse_rfc3339(s).unwrap_or_else(|_| Timestamp::now())
 }
 
 #[cfg(test)]
@@ -2568,9 +2567,9 @@ mod tier_tests {
                     action_key: shell("curl").approval_key(),
                     agent_id: "default".into(),
                     channel: "webchat".into(),
-                    approved_at: Utc::now(),
+                    approved_at: Timestamp::now(),
                     approved_by: "planted".into(),
-                    expires_at: DateTime::<Utc>::MAX_UTC,
+                    expires_at: wirken_time::FOREVER,
                     scope: session_scope(sess),
                 },
             );
@@ -3533,14 +3532,14 @@ mod tier_tests {
     fn store_default_window_applies_to_grants_that_name_none() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open_with_expiry(tmp.path(), 7).unwrap();
-        let before = Utc::now();
+        let before = Timestamp::now();
         let approval = store
             .approve_by_key("shell:ls", "agent-a", "test", "operator")
             .unwrap();
-        let window = approval.expires_at - before;
+        let window = approval.expires_at.duration_since(before);
         assert!(
-            window >= Duration::days(7) - Duration::minutes(1)
-                && window <= Duration::days(7) + Duration::minutes(1),
+            window >= wirken_time::days(7) - wirken_time::SignedDuration::from_mins(1)
+                && window <= wirken_time::days(7) + wirken_time::SignedDuration::from_mins(1),
             "expected a 7-day window from the store default, got {window}",
         );
     }
@@ -3551,20 +3550,20 @@ mod tier_tests {
         let store = PermissionStore::open_with_expiry(tmp.path(), 7).unwrap();
 
         // Shorter than the default.
-        let before = Utc::now();
+        let before = Timestamp::now();
         let short = store
             .approve_by_key_with_expiry("shell:ls", "agent-a", "test", "operator", Some(1))
             .unwrap();
-        assert!(short.approval.expires_at - before < Duration::days(2));
+        assert!(short.approval.expires_at.duration_since(before) < wirken_time::days(2));
 
         // Longer than the default. The default is what an operator
         // gets when they say nothing, not a ceiling on what they can
         // ask for.
-        let before = Utc::now();
+        let before = Timestamp::now();
         let long = store
             .approve_by_key_with_expiry("shell:cat", "agent-a", "test", "operator", Some(90))
             .unwrap();
-        assert!(long.approval.expires_at - before > Duration::days(89));
+        assert!(long.approval.expires_at.duration_since(before) > wirken_time::days(89));
     }
 
     #[test]
@@ -3615,7 +3614,7 @@ mod tier_tests {
     fn a_lapsed_grant_is_still_a_renewal_when_regranted() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
-        let lapsed = Utc::now() - Duration::days(2);
+        let lapsed = Timestamp::now() - wirken_time::days(2);
         store
             .conn
             .execute(
@@ -3624,7 +3623,7 @@ mod tier_tests {
                 params![
                     "shell:ls",
                     "agent-a",
-                    (lapsed - Duration::days(30)).to_rfc3339(),
+                    (lapsed - wirken_time::days(30)).to_rfc3339(),
                     "operator",
                     lapsed.to_rfc3339()
                 ],
@@ -3647,7 +3646,7 @@ mod tier_tests {
         let action = Action::ShellExec {
             pattern: "ls".into(),
         };
-        let lapsed = Utc::now() - Duration::hours(1);
+        let lapsed = Timestamp::now() - wirken_time::SignedDuration::from_hours(1);
         store
             .conn
             .execute(
@@ -3656,7 +3655,7 @@ mod tier_tests {
                 params![
                     "shell:ls",
                     "agent-a",
-                    (lapsed - Duration::days(30)).to_rfc3339(),
+                    (lapsed - wirken_time::days(30)).to_rfc3339(),
                     "operator",
                     lapsed.to_rfc3339()
                 ],
@@ -3673,7 +3672,7 @@ mod tier_tests {
             } => {
                 assert_eq!(tier, PermissionTier::Tier2);
                 // Whole-second RFC3339 round-trip through SQLite.
-                assert!((at - lapsed).num_seconds().abs() <= 1);
+                assert!(at.duration_since(lapsed).as_secs().abs() <= 1);
             }
             other => panic!("expected a reported lapse, got {other:?}"),
         }
@@ -4014,7 +4013,7 @@ mod tier_tests {
 
     /// Write a row straight to the table, bypassing the write-path
     /// allowlist. Reproduces what an older build left behind.
-    fn seed_row(path: &std::path::Path, key: &str, agent: &str, expires_at: DateTime<Utc>) {
+    fn seed_row(path: &std::path::Path, key: &str, agent: &str, expires_at: Timestamp) {
         let conn = Connection::open(path).unwrap();
         conn.execute(
             "CREATE TABLE IF NOT EXISTS approvals (
@@ -4036,7 +4035,7 @@ mod tier_tests {
             params![
                 key,
                 agent,
-                (expires_at - Duration::days(30)).to_rfc3339(),
+                (expires_at - wirken_time::days(30)).to_rfc3339(),
                 "operator",
                 expires_at.to_rfc3339()
             ],
@@ -4047,8 +4046,8 @@ mod tier_tests {
     #[test]
     fn open_sweeps_rows_an_upgrade_left_behind_and_leaves_live_tier2_alone() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let future = Utc::now() + Duration::days(10);
-        let past = Utc::now() - Duration::days(1);
+        let future = Timestamp::now() + wirken_time::days(10);
+        let past = Timestamp::now() - wirken_time::days(1);
 
         // Not storable, and not expired, so nothing else would ever
         // have removed them. This is the false floor: an operator
@@ -4078,7 +4077,14 @@ mod tier_tests {
         assert_eq!(report.not_storable.len(), 9, "{report:#?}");
         assert_eq!(report.lapsed.len(), 1, "{report:#?}");
         assert_eq!(report.lapsed[0].action_key, "shell:ls");
-        assert!((report.lapsed[0].expires_at - past).num_seconds().abs() <= 1);
+        assert!(
+            report.lapsed[0]
+                .expires_at
+                .duration_since(past)
+                .as_secs()
+                .abs()
+                <= 1
+        );
 
         let survivors: std::collections::HashSet<String> = store
             .list("agent-a")
@@ -4102,7 +4108,7 @@ mod tier_tests {
             tmp.path(),
             "mcp:mcp_vendor_tool",
             "agent-a",
-            Utc::now() - Duration::days(1),
+            Timestamp::now() - wirken_time::days(1),
         );
         let mut store = PermissionStore::open(tmp.path()).unwrap();
         let report = store.take_sweep_report();
@@ -4120,7 +4126,7 @@ mod tier_tests {
             tmp.path(),
             "mcp:x",
             "agent-a",
-            Utc::now() + Duration::days(5),
+            Timestamp::now() + wirken_time::days(5),
         );
         let mut store = PermissionStore::open(tmp.path()).unwrap();
         assert_eq!(store.take_sweep_report().len(), 1);
@@ -4137,13 +4143,13 @@ mod tier_tests {
             tmp.path(),
             "mcp:x",
             "agent-a",
-            Utc::now() + Duration::days(5),
+            Timestamp::now() + wirken_time::days(5),
         );
         seed_row(
             tmp.path(),
             "shell:ls",
             "agent-a",
-            Utc::now() - Duration::days(1),
+            Timestamp::now() - wirken_time::days(1),
         );
         let mut first = PermissionStore::open(tmp.path()).unwrap();
         assert_eq!(first.take_sweep_report().len(), 2);
@@ -4159,8 +4165,8 @@ mod tier_tests {
             GrantExpiryDetection, SessionEvent, SessionId, SessionLog, SqliteSessionLog,
         };
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let lapsed_at = Utc::now() - Duration::days(2);
-        let live = Utc::now() + Duration::days(5);
+        let lapsed_at = Timestamp::now() - wirken_time::days(2);
+        let live = Timestamp::now() + wirken_time::days(5);
         seed_row(tmp.path(), "mcp:mcp_vendor_tool", "agent-a", live);
         seed_row(tmp.path(), "shell:ls", "agent-a", lapsed_at);
 
@@ -4186,7 +4192,7 @@ mod tier_tests {
                 assert_eq!(action_key, "mcp:mcp_vendor_tool");
                 assert_eq!(agent_id, "agent-a");
                 assert!(
-                    (*expires_at - live).num_seconds().abs() <= 1,
+                    expires_at.duration_since(live).as_secs().abs() <= 1,
                     "the window the operator would have seen listed",
                 );
             }
@@ -4208,7 +4214,7 @@ mod tier_tests {
                     tier.is_none(),
                     "a guessed tier would be a guess in the chain"
                 );
-                assert!((*expired_at - lapsed_at).num_seconds().abs() <= 1);
+                assert!(expired_at.duration_since(lapsed_at).as_secs().abs() <= 1);
             }
             other => panic!("expected PermissionGrantExpired, got {other:?}"),
         }

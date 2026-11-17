@@ -199,7 +199,7 @@ impl AuthProvider for OAuth2Auth {
         // If so we skip the refresh mutex entirely — the lock is only
         // needed on the near-expiry branch.
         let mut cred = self.load_current()?;
-        let now = chrono::Utc::now().timestamp() as u64;
+        let now = wirken_time::now().as_second() as u64;
 
         if cred.expires_at <= now + 60 {
             // Slow path: acquire the per-credential mutex and re-check
@@ -209,7 +209,7 @@ impl AuthProvider for OAuth2Auth {
             let _guard = self.refresh_lock.lock().await;
 
             cred = self.load_current()?;
-            let now = chrono::Utc::now().timestamp() as u64;
+            let now = wirken_time::now().as_second() as u64;
             if cred.expires_at <= now + 60 {
                 tracing::info!(
                     "oauth credential '{}' expires in {}s — asking the gateway to refresh it",
@@ -298,7 +298,7 @@ mod handed_tests {
         let cred = OAuthCredential {
             access_token: "AT-linear".into(),
             refresh_token: String::new(),
-            expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+            expires_at: wirken_time::now().as_second() as u64 + 3600,
             scope: String::new(),
             provider: "linear".into(),
             ..Default::default()

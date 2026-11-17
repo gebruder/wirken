@@ -6,6 +6,7 @@
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use wirken_time::TimestampExt;
 
 use crate::event::{ActorKind, AuditEvent};
 
@@ -336,7 +337,7 @@ fn datadog_entry(e: &AuditEvent, status: &str, config: &SiemConfig) -> serde_jso
         "hostname": hostname(),
         "service": config.service,
         "status": status,
-        "timestamp": e.ts.timestamp_millis(),
+        "timestamp": e.ts.as_millisecond(),
         "wirken": {
             "actor_kind": actor_kind_label(e.actor_kind),
             "actor_id": e.actor_id,
@@ -364,7 +365,7 @@ pub fn build_splunk_body(events: &[AuditEvent]) -> String {
                 "session": event.session,
                 "detail": event.detail,
             },
-            "time": event.ts.timestamp(),
+            "time": event.ts.as_second(),
             "sourcetype": "wirken:audit",
             "source": "wirken",
             "host": hostname(),
@@ -474,7 +475,7 @@ pub fn build_datadog_typed_entry(
         "hostname": hostname(),
         "service": config.service,
         "status": typed_level(&event.event),
-        "timestamp": event.ts.timestamp_millis(),
+        "timestamp": event.ts.as_millisecond(),
         "wirken": {
             "kind": kind,
             "session_id": event.session_id.as_str(),
@@ -513,7 +514,7 @@ pub fn build_splunk_typed_body(events: &[&crate::session_log::StoredSessionEvent
                 "trust": trust_label(stored.trust),
                 "event": stored.event,
             },
-            "time": stored.ts.timestamp(),
+            "time": stored.ts.as_second(),
             "sourcetype": "wirken:session",
             "source": "wirken",
             "host": hostname(),
@@ -1623,7 +1624,7 @@ mod adapter_lifecycle_tests {
             id: 1,
             session_id: SessionId::new(crate::session_log::ADAPTER_LIFECYCLE_SESSION),
             seq: 0,
-            ts: chrono::Utc::now(),
+            ts: wirken_time::now(),
             trust: TrustLevel::System,
             event,
             leaf_hash: HashHex(String::new()),
@@ -1752,7 +1753,7 @@ mod leak_refused_tests {
             id: 1,
             session_id: SessionId::new("work/telegram/c1"),
             seq: 0,
-            ts: chrono::Utc::now(),
+            ts: wirken_time::now(),
             trust: TrustLevel::System,
             event,
             leaf_hash: HashHex(String::new()),
@@ -1872,7 +1873,7 @@ mod severity_tests {
                 id: 1,
                 session_id: SessionId::new("gateway"),
                 seq: 0,
-                ts: chrono::Utc::now(),
+                ts: wirken_time::now(),
                 trust: TrustLevel::System,
                 event: SessionEvent::AuditLegacy {
                     actor_kind: ActorKind::Service,
@@ -1990,7 +1991,7 @@ mod identity_tests {
             id: 1,
             session_id: SessionId::new("default/signal/dm-1"),
             seq: 0,
-            ts: chrono::Utc::now(),
+            ts: wirken_time::now(),
             trust: TrustLevel::System,
             event: approved,
             leaf_hash: HashHex(String::new()),
@@ -2011,10 +2012,7 @@ mod identity_tests {
     fn no_row_puts_an_actor_label_in_an_identity_column() {
         use crate::session_log::{ApprovalScopeKind, DenialSource};
         const LABEL: &str = "an-operator";
-        let stamp = |s: &str| {
-            s.parse::<chrono::DateTime<chrono::Utc>>()
-                .expect("a timestamp")
-        };
+        let stamp = |s: &str| s.parse::<wirken_time::Timestamp>().expect("a timestamp");
         let rows = vec![
             // `actor` on the two import rows.
             SessionEvent::ImportStarted {
@@ -2151,10 +2149,7 @@ mod identity_tests {
         let adapter = || Some("slack".to_string());
         let sender = || Some("U123".to_string());
         let agent = || "worker".to_string();
-        let stamp = |s: &str| {
-            s.parse::<chrono::DateTime<chrono::Utc>>()
-                .expect("a timestamp")
-        };
+        let stamp = |s: &str| s.parse::<wirken_time::Timestamp>().expect("a timestamp");
 
         let cases: Vec<IdentityCase> = vec![
             (

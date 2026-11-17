@@ -28,9 +28,9 @@
 //! [`AuditLog`]: crate::AuditLog
 //! [`SessionEvent`]: crate::SessionEvent
 
-use chrono::Utc;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
+use wirken_time::{Timestamp, TimestampExt};
 
 use crate::error::AuditError;
 use crate::event::{ActorKind, AuditEvent, StoredEvent};
@@ -354,9 +354,7 @@ pub(crate) fn query_legacy(
             Ok(StoredEvent {
                 id: row.get(0)?,
                 event: AuditEvent {
-                    ts: chrono::DateTime::parse_from_rfc3339(&ts_str)
-                        .unwrap_or_default()
-                        .with_timezone(&Utc),
+                    ts: wirken_time::parse_rfc3339(&ts_str).unwrap_or_default(),
                     actor_kind,
                     actor_id,
                     action: row.get(4)?,
@@ -441,9 +439,7 @@ pub(crate) fn latest_legacy_per_target(
             out.push(StoredEvent {
                 id,
                 event: AuditEvent {
-                    ts: chrono::DateTime::parse_from_rfc3339(&ts)
-                        .unwrap_or_default()
-                        .with_timezone(&Utc),
+                    ts: wirken_time::parse_rfc3339(&ts).unwrap_or_default(),
                     actor_kind,
                     actor_id,
                     action,
@@ -599,7 +595,7 @@ pub(crate) fn prune_legacy(
     log: &SqliteSessionLog,
     retention_days: u32,
 ) -> Result<usize, AuditError> {
-    let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+    let cutoff = Timestamp::now() - wirken_time::days(retention_days as i64);
     let cutoff_str = cutoff.to_rfc3339();
 
     log.with_conn(|conn| {

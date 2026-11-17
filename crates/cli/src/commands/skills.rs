@@ -813,7 +813,7 @@ fn migrate_one(skill_file: &std::path::Path, dry_run: bool) -> Result<MigrationO
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("SKILL.md"),
-        chrono::Utc::now().format("%Y-%m-%dT%H%M%SZ")
+        wirken_time::now().strftime("%Y-%m-%dT%H%M%SZ")
     ));
     std::fs::copy(skill_file, &backup)
         .with_context(|| format!("backup to {}", backup.display()))?;

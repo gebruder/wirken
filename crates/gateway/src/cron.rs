@@ -1,8 +1,8 @@
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::str::FromStr;
+use wirken_time::{Timestamp, TimestampExt};
 
 use crate::error::GatewayError;
 
@@ -16,10 +16,13 @@ pub struct CronJob {
     /// Message to send to the agent when the job fires.
     pub message: String,
     pub description: String,
-    pub created_at: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub created_at: Timestamp,
     pub created_by: String,
-    pub last_run_at: Option<DateTime<Utc>>,
-    pub next_run_at: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z::option", default)]
+    pub last_run_at: Option<Timestamp>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub next_run_at: Timestamp,
     pub run_count: i64,
     pub paused: bool,
 }
@@ -67,10 +70,8 @@ impl CronStore {
         let cron_schedule = cron::Schedule::from_str(schedule)
             .map_err(|e| GatewayError::Config(format!("invalid cron expression: {e}")))?;
 
-        let now = Utc::now();
-        let next = cron_schedule
-            .upcoming(Utc)
-            .next()
+        let now = Timestamp::now();
+        let next = next_after(&cron_schedule, Timestamp::now())
             .ok_or_else(|| GatewayError::Config("cron expression has no upcoming times".into()))?;
 
         let id = format!("cron_{}", uuid_short());
@@ -139,7 +140,7 @@ impl CronStore {
 
     /// Get jobs that are due (next_run_at <= now and not paused).
     pub fn due_jobs(&self) -> Result<Vec<CronJob>, GatewayError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Timestamp::now().to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, agent_id, schedule, message, description, created_at, created_by,
                     last_run_at, next_run_at, run_count, paused
@@ -155,7 +156,7 @@ impl CronStore {
 
     /// Mark a job as run and compute the next run time.
     pub fn mark_run(&self, id: &str) -> Result<(), GatewayError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // Get the schedule to compute next run
         let schedule_str: String = self
@@ -170,9 +171,7 @@ impl CronStore {
         let cron_schedule = cron::Schedule::from_str(&schedule_str)
             .map_err(|e| GatewayError::Config(format!("invalid cron: {e}")))?;
 
-        let next = cron_schedule
-            .upcoming(Utc)
-            .next()
+        let next = next_after(&cron_schedule, Timestamp::now())
             .ok_or_else(|| GatewayError::Config("no upcoming times".into()))?;
 
         self.conn.execute(
@@ -221,9 +220,7 @@ impl CronStore {
         let cron_schedule = cron::Schedule::from_str(&schedule_str)
             .map_err(|e| GatewayError::Config(format!("invalid cron: {e}")))?;
 
-        let next = cron_schedule
-            .upcoming(Utc)
-            .next()
+        let next = next_after(&cron_schedule, Timestamp::now())
             .ok_or_else(|| GatewayError::Config("no upcoming times".into()))?;
 
         self.conn.execute(
@@ -233,6 +230,14 @@ impl CronStore {
 
         Ok(())
     }
+}
+
+/// The first time `schedule` fires after `now`. The `cron` crate works
+/// in its own time type; this is the only place it is named.
+fn next_after(schedule: &cron::Schedule, now: Timestamp) -> Option<Timestamp> {
+    let from = chrono::DateTime::from_timestamp(now.as_second(), 0)?;
+    let next = schedule.after(&from).next()?;
+    wirken_time::from_unix_secs(next.timestamp())
 }
 
 fn row_to_job(row: &rusqlite::Row) -> Result<CronJob, rusqlite::Error> {
@@ -246,18 +251,11 @@ fn row_to_job(row: &rusqlite::Row) -> Result<CronJob, rusqlite::Error> {
         schedule: row.get(2)?,
         message: row.get(3)?,
         description: row.get(4)?,
-        created_at: DateTime::parse_from_rfc3339(&created_at_str)
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now()),
+        created_at: wirken_time::parse_rfc3339(&created_at_str)
+            .unwrap_or_else(|_| Timestamp::now()),
         created_by: row.get(6)?,
-        last_run_at: last_run_str.and_then(|s| {
-            DateTime::parse_from_rfc3339(&s)
-                .map(|dt| dt.with_timezone(&Utc))
-                .ok()
-        }),
-        next_run_at: DateTime::parse_from_rfc3339(&next_run_str)
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now()),
+        last_run_at: last_run_str.and_then(|s| wirken_time::parse_rfc3339(&s).ok()),
+        next_run_at: wirken_time::parse_rfc3339(&next_run_str).unwrap_or_else(|_| Timestamp::now()),
         run_count: row.get(9)?,
         paused: row.get::<_, i32>(10)? != 0,
     })

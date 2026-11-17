@@ -1,9 +1,9 @@
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use wirken_time::{Timestamp, TimestampExt};
 
 use crate::binding::{Binding, Destination};
 use crate::crypto::{decrypt_aad, encrypt_aad, generate_key};
@@ -22,10 +22,14 @@ pub const BOUND_FORMAT: u32 = 2;
 pub struct CredentialMetadata {
     pub name: String,
     pub channel: String,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub last_used_at: Option<DateTime<Utc>>,
-    pub rotation_due_at: Option<DateTime<Utc>>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub created_at: Timestamp,
+    #[serde(with = "wirken_time::serde_z::option", default)]
+    pub expires_at: Option<Timestamp>,
+    #[serde(with = "wirken_time::serde_z::option", default)]
+    pub last_used_at: Option<Timestamp>,
+    #[serde(with = "wirken_time::serde_z::option", default)]
+    pub rotation_due_at: Option<Timestamp>,
     /// The binding's hosts, for display.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
@@ -42,7 +46,9 @@ pub struct CredentialMetadata {
 impl CredentialMetadata {
     /// Check if this credential has expired.
     pub fn is_expired(&self) -> bool {
-        self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
+        self.expires_at
+            .map(|exp| Timestamp::now() > exp)
+            .unwrap_or(false)
     }
 
     /// Whether `http_request` may send this credential to `host`.
@@ -53,7 +59,7 @@ impl CredentialMetadata {
     /// Check if this credential is due for rotation.
     pub fn is_rotation_due(&self) -> bool {
         self.rotation_due_at
-            .map(|due| Utc::now() > due)
+            .map(|due| Timestamp::now() > due)
             .unwrap_or(false)
     }
 }
@@ -391,8 +397,8 @@ impl CredentialStore {
         name: &str,
         channel: &str,
         secret: &VaultSecret,
-        expires_at: Option<DateTime<Utc>>,
-        rotation_due_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
+        rotation_due_at: Option<Timestamp>,
     ) -> Result<(), VaultError> {
         self.store_with_hosts(name, channel, secret, expires_at, rotation_due_at, &[])
     }
@@ -404,8 +410,8 @@ impl CredentialStore {
         name: &str,
         channel: &str,
         secret: &VaultSecret,
-        expires_at: Option<DateTime<Utc>>,
-        rotation_due_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
+        rotation_due_at: Option<Timestamp>,
         allowed_hosts: &[String],
     ) -> Result<(), VaultError> {
         self.store_with_kind(
@@ -428,8 +434,8 @@ impl CredentialStore {
         name: &str,
         channel: &str,
         secret: &VaultSecret,
-        expires_at: Option<DateTime<Utc>>,
-        rotation_due_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
+        rotation_due_at: Option<Timestamp>,
         allowed_hosts: &[String],
         kind: CredentialKind,
     ) -> Result<(), VaultError> {
@@ -455,15 +461,15 @@ impl CredentialStore {
         name: &str,
         channel: &str,
         secret: &VaultSecret,
-        expires_at: Option<DateTime<Utc>>,
-        rotation_due_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
+        rotation_due_at: Option<Timestamp>,
         binding: &Binding,
         kind: CredentialKind,
     ) -> Result<(), VaultError> {
         self.require_bound()?;
         let binding_raw = binding.canonical();
         let encrypted = encrypt_aad(&row_aad(name, kind, &binding_raw), secret, &self.device_key)?;
-        let now = Utc::now().to_rfc3339();
+        let now = Timestamp::now().to_rfc3339();
         self.conn.execute(
             "INSERT OR REPLACE INTO credentials
              (name, channel, encrypted_value, created_at, expires_at, last_used_at,
@@ -512,7 +518,7 @@ impl CredentialStore {
         let secret = decrypt_aad(&row.aad(name), &row.encrypted, &self.device_key)?;
         self.conn.execute(
             "UPDATE credentials SET last_used_at = ?1 WHERE name = ?2",
-            params![Utc::now().to_rfc3339(), name],
+            params![Timestamp::now().to_rfc3339(), name],
         )?;
         Ok((secret, meta))
     }
@@ -604,7 +610,7 @@ impl CredentialStore {
             result.push(CredentialMetadata {
                 name,
                 channel: row.channel,
-                created_at: parse_datetime(&row.created_at).unwrap_or_else(|_| Utc::now()),
+                created_at: parse_datetime(&row.created_at).unwrap_or_else(|_| Timestamp::now()),
                 expires_at: row
                     .expires_at
                     .as_deref()
@@ -670,7 +676,7 @@ impl CredentialStore {
         &self,
         name: &str,
         new_secret: &VaultSecret,
-        rotation_due_at: Option<DateTime<Utc>>,
+        rotation_due_at: Option<Timestamp>,
     ) -> Result<(), VaultError> {
         let row = self.read_row(name)?;
         // A plan sign-in is replaced by signing in again, never by a
@@ -693,7 +699,7 @@ impl CredentialStore {
              WHERE name = ?4",
             params![
                 encrypted,
-                Utc::now().to_rfc3339(),
+                Timestamp::now().to_rfc3339(),
                 rotation_due_at.map(|t| t.to_rfc3339()),
                 name,
             ],
@@ -817,7 +823,7 @@ impl CredentialStore {
     fn read_for_update(&self, name: &str) -> Result<(VaultSecret, Row), VaultError> {
         let row = self.read_row(name)?;
         if let Some(exp) = row.expires_at.as_deref().map(parse_datetime).transpose()?
-            && Utc::now() > exp
+            && Timestamp::now() > exp
         {
             return Err(VaultError::Expired(name.to_string()));
         }
@@ -1086,15 +1092,13 @@ fn migrate_binding(conn: &Connection) -> Result<(), VaultError> {
     Ok(())
 }
 
-fn parse_datetime(s: &str) -> Result<DateTime<Utc>, VaultError> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| {
-            VaultError::Serialization(serde_json::Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                e.to_string(),
-            )))
-        })
+fn parse_datetime(s: &str) -> Result<Timestamp, VaultError> {
+    wirken_time::parse_rfc3339(s).map_err(|e| {
+        VaultError::Serialization(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            e.to_string(),
+        )))
+    })
 }
 
 /// Backfill the `allowed_hosts` column onto a `credentials` table

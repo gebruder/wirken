@@ -20,8 +20,8 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use wirken_audit::{AuditError, SessionEvent, SqliteSessionLog, StoredEvent};
+use wirken_time::{Timestamp, TimestampExt};
 
 /// The typed lifecycle events, by kind.
 const LIFECYCLE_KINDS: [&str; 4] = [
@@ -47,7 +47,7 @@ const GATEWAY_ACTIONS: [&str; 2] = ["gateway.start", "gateway.stop"];
 pub enum AdapterState {
     Connected,
     Disconnected {
-        since: DateTime<Utc>,
+        since: Timestamp,
     },
     Restarting {
         attempt: u64,
@@ -63,7 +63,7 @@ pub enum AdapterState {
 pub struct AdapterStatus {
     pub state: AdapterState,
     /// When the row the state comes from was written.
-    pub recorded_at: Option<DateTime<Utc>>,
+    pub recorded_at: Option<Timestamp>,
 }
 
 impl AdapterStatus {
@@ -97,8 +97,8 @@ impl AdapterStatus {
     }
 }
 
-fn ts(at: &DateTime<Utc>) -> String {
-    at.to_rfc3339_opts(SecondsFormat::Secs, true)
+fn ts(at: &Timestamp) -> String {
+    at.to_rfc3339_secs_z()
 }
 
 /// One adapter's newest lifecycle row, of either shape: its row id,
@@ -106,13 +106,13 @@ fn ts(at: &DateTime<Utc>) -> String {
 #[derive(Debug, Clone)]
 struct Recorded {
     id: i64,
-    at: DateTime<Utc>,
+    at: Timestamp,
     state: AdapterState,
 }
 
 impl Recorded {
     /// A typed lifecycle event, with the adapter it names.
-    fn typed(id: i64, at: DateTime<Utc>, event: &SessionEvent) -> Option<(String, Self)> {
+    fn typed(id: i64, at: Timestamp, event: &SessionEvent) -> Option<(String, Self)> {
         let (adapter_id, state) = match event {
             SessionEvent::AdapterConnect { adapter_id, .. } => {
                 (adapter_id, AdapterState::Connected)

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
+use wirken_time::TimestampExt;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -433,7 +434,7 @@ fn print_log_human(
         println!(
             "  {:>6}  {:20}  {:16}  {:20}  {}",
             event.id,
-            event.event.ts.format("%Y-%m-%d %H:%M:%S"),
+            event.event.ts.strftime("%Y-%m-%d %H:%M:%S"),
             truncate(&event.event.actor_id, 16),
             truncate(&event.event.action, 20),
             truncate(&event.event.target, 40),
@@ -720,10 +721,10 @@ fn print_verify_json(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn parse_rfc3339(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
-    let dt = chrono::DateTime::parse_from_rfc3339(s)
+fn parse_rfc3339(s: &str) -> Result<wirken_time::Timestamp> {
+    let dt = wirken_time::parse_rfc3339(s)
         .with_context(|| format!("not an RFC 3339 timestamp: '{s}'"))?;
-    Ok(dt.with_timezone(&chrono::Utc))
+    Ok(dt)
 }
 
 #[allow(

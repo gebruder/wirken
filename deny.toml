@@ -95,6 +95,18 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "Unmaintained advisory, not a known vulnerability: zvariant was merged into zbus 6.0.0 as its wire module. Reached only through zbus 5.14.0 under secret-service 5.2.0, behind wirken-vault's optional keychain-linux feature. Revisit when secret-service releases on zbus 6." },
     { id = "RUSTSEC-2026-0371", reason = "Unmaintained advisory, not a known vulnerability: zbus_names was merged into zbus 6.0.0 as its names module. Reached only through zbus 5.14.0 under secret-service 5.2.0, behind wirken-vault's optional keychain-linux feature. Revisit when secret-service releases on zbus 6." },
     { id = "RUSTSEC-2026-0372", reason = "Unmaintained advisory, not a known vulnerability: zvariant_derive's macros moved into zbus 6.0.0. A proc-macro crate, so it contributes no code to a binary, reached only through zvariant 5.10.0 and zbus 5.14.0 under secret-service 5.2.0, behind wirken-vault's optional keychain-linux feature. Revisit when secret-service releases on zbus 6." },
+
+    # chrono 0.4.45, reached by:
+    #   cron 0.17.0 -> wirken-gateway
+    #   feed-rs 3.0.0 -> wirken-zirkel
+    #   oauth2 5.0.0 -> wirken-mcp-proxy
+    #   serenity 0.12.5 -> wirken-adapter-discord
+    #   teloxide-core 0.13.0 -> wirken-adapter-telegram
+    #   wirken-gateway, in `cron.rs` only, for the type the cron crate takes
+    # Added 2026-11-17. The workspace's own time handling is on jiff
+    # (crates/time). Each of the five crates above has chrono in its public
+    # API and no release without it.
+    { id = "RUSTSEC-2026-0543", reason = "Unmaintained advisory, not a known vulnerability. The workspace's own code uses jiff; chrono remains through cron 0.17, feed-rs 3, oauth2 5, serenity 0.12 and teloxide-core 0.13, which take or return its types, and in wirken-gateway's cron.rs at the cron crate's boundary. Revisit when those crates release without chrono, or if a vulnerability is reported against chrono." },
 ]
 
 [licenses]

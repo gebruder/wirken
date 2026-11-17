@@ -88,7 +88,7 @@ pub fn store_provider_key(
     provider_id: &str,
     base_url: &str,
     secret: &VaultSecret,
-    rotation_due_at: Option<chrono::DateTime<chrono::Utc>>,
+    rotation_due_at: Option<wirken_time::Timestamp>,
 ) -> Result<(), VaultError> {
     let mut binding = Binding::default();
     binding.grant(provider(provider_id, base_url));

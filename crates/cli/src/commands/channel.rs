@@ -1293,10 +1293,7 @@ mod tests {
         assert_eq!(recorded_of(&lines[5]), "-");
         for line in &lines[1..5] {
             let recorded = recorded_of(line);
-            assert!(
-                chrono::DateTime::parse_from_rfc3339(&recorded).is_ok(),
-                "{line}"
-            );
+            assert!(wirken_time::parse_rfc3339(&recorded).is_ok(), "{line}");
         }
     }
 }

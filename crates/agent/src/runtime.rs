@@ -5643,7 +5643,7 @@ impl Agent {
         let overlay = crate::skill_perms::PhaseDenyOverlay {
             skill_id: skill_id.clone(),
             phase_name: phase_name.clone(),
-            entered_at: chrono::Utc::now(),
+            entered_at: wirken_time::now(),
             tools,
             egress_hosts,
             paths_read,

@@ -86,7 +86,7 @@ pub async fn list() -> Result<()> {
             cred.name,
             cred.channel,
             cred.kind.as_str(),
-            cred.created_at.format("%Y-%m-%d %H:%M:%S"),
+            cred.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             status,
             scope_summary,
         );
@@ -129,16 +129,16 @@ pub async fn show(name: &str) -> Result<()> {
     println!("    kind:           {}", meta.kind.as_str());
     println!(
         "    created:        {}",
-        meta.created_at.format("%Y-%m-%d %H:%M:%S")
+        meta.created_at.strftime("%Y-%m-%d %H:%M:%S")
     );
     if let Some(last) = meta.last_used_at {
-        println!("    last used:      {}", last.format("%Y-%m-%d %H:%M:%S"));
+        println!("    last used:      {}", last.strftime("%Y-%m-%d %H:%M:%S"));
     }
     if let Some(exp) = meta.expires_at {
-        println!("    expires:        {}", exp.format("%Y-%m-%d %H:%M:%S"));
+        println!("    expires:        {}", exp.strftime("%Y-%m-%d %H:%M:%S"));
     }
     if let Some(rot) = meta.rotation_due_at {
-        println!("    rotation due:   {}", rot.format("%Y-%m-%d %H:%M:%S"));
+        println!("    rotation due:   {}", rot.strftime("%Y-%m-%d %H:%M:%S"));
     }
     super::credential_binding::print_binding(&meta.binding);
 
@@ -541,7 +541,7 @@ pub async fn rotate(name: &str, source: ValueSource) -> Result<()> {
         .context("Failed to open credential store")?;
 
     let secret = VaultSecret::new(new_value);
-    let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+    let rotation_due = wirken_time::now() + wirken_time::days(90);
 
     store
         .rotate(name, &secret, Some(rotation_due))

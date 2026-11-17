@@ -59,7 +59,7 @@ pub async fn create(
     println!("  Agent: {}", job.agent_id);
     println!(
         "  Next run: {}",
-        job.next_run_at.format("%Y-%m-%d %H:%M UTC")
+        job.next_run_at.strftime("%Y-%m-%d %H:%M UTC")
     );
     println!("  Message: {}", job.message);
     super::note_operator_command(

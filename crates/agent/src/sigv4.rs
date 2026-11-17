@@ -18,9 +18,9 @@ pub fn sign(
     url: &url::Url,
     body: &[u8],
 ) -> Vec<(String, String)> {
-    let now = chrono::Utc::now();
-    let datestamp = now.format("%Y%m%d").to_string();
-    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let now = wirken_time::now();
+    let datestamp = now.strftime("%Y%m%d").to_string();
+    let amz_date = now.strftime("%Y%m%dT%H%M%SZ").to_string();
 
     let payload_hash = hex_sha256(body);
 

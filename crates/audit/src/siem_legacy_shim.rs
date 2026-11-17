@@ -203,6 +203,7 @@ mod tests {
     };
     use crate::siem::SiemTarget;
     use std::sync::Mutex;
+    use wirken_time::TimestampExt;
 
     fn lifecycle() -> Vec<SessionEvent> {
         vec![

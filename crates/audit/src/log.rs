@@ -28,7 +28,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use wirken_time::Timestamp;
 
 use crate::error::AuditError;
 use crate::event::{AuditEvent, StoredEvent};
@@ -43,8 +43,8 @@ pub struct AuditQuery {
     pub channel: Option<String>,
     pub actor: Option<String>,
     pub session: Option<String>,
-    pub since: Option<DateTime<Utc>>,
-    pub until: Option<DateTime<Utc>>,
+    pub since: Option<Timestamp>,
+    pub until: Option<Timestamp>,
     pub limit: Option<usize>,
 }
 

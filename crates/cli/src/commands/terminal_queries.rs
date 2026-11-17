@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use wirken_time::TimestampExt;
 
 use serde_json::{Value, json};
 use wirken_agent::AgentFactory;

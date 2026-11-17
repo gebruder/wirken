@@ -55,7 +55,7 @@ tracing = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
+wirken-time = { path = "../time" }
 # Used by `wirken skills migrate` for round-tripping YAML frontmatter
 # through an untyped value so the migration can splice individual keys
 # without losing unknown fields. indexmap keeps the keys in file order.

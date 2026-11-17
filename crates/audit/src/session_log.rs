@@ -38,10 +38,10 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use wirken_time::{Timestamp, TimestampExt};
 
 use crate::error::AuditError;
 use crate::signing::{AuditSigningKey, CHAIN_HEAD_SCHEMA_VERSION};
@@ -1131,10 +1131,14 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tier: Option<String>,
         /// Window the grant carries. `None` for a session-scoped
-        /// grant, whose expiry is the `DateTime::<Utc>::MAX_UTC`
+        /// grant, whose expiry is the `wirken_time::FOREVER`
         /// sentinel rather than a date anything reads.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expires_at: Option<DateTime<Utc>>,
+        #[serde(
+            with = "wirken_time::serde_z::option",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        expires_at: Option<Timestamp>,
         /// What the approval prompt told the operator about where the
         /// `exec` would run. The chain records what the operator was
         /// told as well as what ran; `sessions verify` compares this
@@ -1272,8 +1276,12 @@ pub enum SessionEvent {
         tier: Option<String>,
         /// Window the removed row carried, or `None` when there was
         /// no row.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expires_at: Option<DateTime<Utc>>,
+        #[serde(
+            with = "wirken_time::serde_z::option",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        expires_at: Option<Timestamp>,
     },
     /// A persisted grant was written over a row that already
     /// existed for the same `(action_key, agent_id)`. Distinct from
@@ -1292,7 +1300,7 @@ pub enum SessionEvent {
     /// yesterday.
     ///
     /// Session-scoped grants never emit this. Their expiry is the
-    /// `DateTime::<Utc>::MAX_UTC` sentinel and re-granting one is
+    /// `wirken_time::FOREVER` sentinel and re-granting one is
     /// idempotent, so there is no window to have discarded.
     PermissionRenewed {
         action_key: String,
@@ -1303,9 +1311,11 @@ pub enum SessionEvent {
         channel: Option<String>,
         approved_by: String,
         /// Expiry the replaced row carried. Serializes RFC3339.
-        previous_expires_at: DateTime<Utc>,
+        #[serde(with = "wirken_time::serde_z")]
+        previous_expires_at: Timestamp,
         /// Expiry the replacement row carries.
-        expires_at: DateTime<Utc>,
+        #[serde(with = "wirken_time::serde_z")]
+        expires_at: Timestamp,
         /// Which surface mediated the renewal. See
         /// [`Self::PermissionApproved::approved_via`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1350,7 +1360,8 @@ pub enum SessionEvent {
         tier: Option<String>,
         /// Expiry the dropped row carried. Always in the past
         /// relative to the row's own `ts`.
-        expired_at: DateTime<Utc>,
+        #[serde(with = "wirken_time::serde_z")]
+        expired_at: Timestamp,
         /// What noticed. A lapse found at a call is a grant that ran
         /// out under an agent doing work; one found by the sweep sat
         /// idle past its window and nothing asked. Same row removed,
@@ -1387,7 +1398,8 @@ pub enum SessionEvent {
         channel: Option<String>,
         /// Expiry the dropped row carried, past or future. Recorded
         /// because it is what the operator would have seen listed.
-        expires_at: DateTime<Utc>,
+        #[serde(with = "wirken_time::serde_z")]
+        expires_at: Timestamp,
     },
     /// A sub-agent session was bound to its runtime constraints,
     /// written on the child's own chain at wake, before its first
@@ -2945,7 +2957,7 @@ pub struct StoredSessionEvent {
     pub id: i64,
     pub session_id: SessionId,
     pub seq: u64,
-    pub ts: DateTime<Utc>,
+    pub ts: Timestamp,
     pub trust: TrustLevel,
     pub event: SessionEvent,
     pub leaf_hash: HashHex,
@@ -3167,8 +3179,8 @@ pub struct PermissionDenialRecord {
 struct SessionCheckpointState {
     /// Wall clock when the most recent ChainHead for this session was
     /// emitted. Set at session-start so the 5-minute window starts on
-    /// the first append, not on `Utc::now()` of `open`.
-    last_head_ts: DateTime<Utc>,
+    /// the first append, not on `Timestamp::now()` of `open`.
+    last_head_ts: Timestamp,
     /// Count of ordinary appends (any variant other than ChainHead)
     /// since the most recent ChainHead. Reset to zero each time a
     /// ChainHead lands.
@@ -3476,7 +3488,7 @@ impl SqliteSessionLog {
         let entry = map
             .entry(session_id.to_string())
             .or_insert(SessionCheckpointState {
-                last_head_ts: Utc::now(),
+                last_head_ts: Timestamp::now(),
                 appends_since_head: 0,
                 last_head_seq: SeqRangeStart::Pending,
             });
@@ -3609,7 +3621,7 @@ impl SqliteSessionLog {
         };
 
         let next_seq = append_inner(conn, handle, TrustLevel::System, event, None)?;
-        self.update_checkpoint_state(handle.id.as_str(), next_seq, Utc::now());
+        self.update_checkpoint_state(handle.id.as_str(), next_seq, Timestamp::now());
         Ok(next_seq)
     }
 
@@ -3621,13 +3633,13 @@ impl SqliteSessionLog {
         map.get(session_id)
             .copied()
             .unwrap_or(SessionCheckpointState {
-                last_head_ts: Utc::now(),
+                last_head_ts: Timestamp::now(),
                 appends_since_head: 0,
                 last_head_seq: SeqRangeStart::Pending,
             })
     }
 
-    fn update_checkpoint_state(&self, session_id: &str, head_seq: u64, ts: DateTime<Utc>) {
+    fn update_checkpoint_state(&self, session_id: &str, head_seq: u64, ts: Timestamp) {
         let mut map = self
             .checkpoint_state
             .lock()
@@ -3650,7 +3662,7 @@ impl SqliteSessionLog {
         let entry = map
             .entry(session_id.to_string())
             .or_insert(SessionCheckpointState {
-                last_head_ts: Utc::now(),
+                last_head_ts: Timestamp::now(),
                 appends_since_head: 0,
                 last_head_seq: SeqRangeStart::Pending,
             });
@@ -3660,9 +3672,9 @@ impl SqliteSessionLog {
     /// Decide whether the post-append cadence has tripped and
     /// returns a reason if it has. Pure read of state plus a clock
     /// check; the caller mutates state via the emission path.
-    fn checkpoint_due(&self, session_id: &str, now: DateTime<Utc>) -> Option<ChainHeadReason> {
+    fn checkpoint_due(&self, session_id: &str, now: Timestamp) -> Option<ChainHeadReason> {
         let state = self.read_checkpoint_state(session_id);
-        let elapsed = (now - state.last_head_ts).num_seconds();
+        let elapsed = now.duration_since(state.last_head_ts).as_secs();
         if state.appends_since_head >= CHECKPOINT_APPENDS || elapsed >= CHECKPOINT_WALL_CLOCK_SECS {
             return Some(ChainHeadReason::Checkpoint);
         }
@@ -3714,7 +3726,8 @@ impl SqliteSessionLog {
             .lock()
             .expect("checkpoint state mutex");
         if let Some(state) = map.get_mut(session_id) {
-            state.last_head_ts = Utc::now() - chrono::Duration::seconds(secs_ago);
+            state.last_head_ts =
+                Timestamp::now() - wirken_time::SignedDuration::from_secs(secs_ago);
         }
     }
 
@@ -4213,7 +4226,7 @@ impl SqliteSessionLog {
         handle: &SessionHandle<OwnSession>,
         trust: TrustLevel,
         event: SessionEvent,
-        ts: DateTime<Utc>,
+        ts: Timestamp,
     ) -> Result<u64, AuditError> {
         self.append_with_cadence(handle, trust, event, Some(ts))
     }
@@ -4227,7 +4240,7 @@ impl SqliteSessionLog {
         handle: &SessionHandle<OwnSession>,
         trust: TrustLevel,
         event: SessionEvent,
-        ts_override: Option<DateTime<Utc>>,
+        ts_override: Option<Timestamp>,
     ) -> Result<u64, AuditError> {
         // Skip cadence on incoming ChainHead events. The caller is
         // already driving emission; layering another head on top
@@ -4269,7 +4282,7 @@ impl SqliteSessionLog {
                     ChainHeadReason::SessionStart,
                     &signer,
                 )?;
-            } else if let Some(reason) = self.checkpoint_due(session_id, Utc::now()) {
+            } else if let Some(reason) = self.checkpoint_due(session_id, Timestamp::now()) {
                 self.append_chain_head_locked(conn, handle, reason, &signer)?;
             }
         }
@@ -4603,9 +4616,8 @@ fn parse_row(row: RawRow) -> Result<StoredSessionEvent, AuditError> {
         seq: seq as u64,
         reason: e.to_string(),
     })?;
-    let ts = DateTime::parse_from_rfc3339(&ts_str)
-        .map_err(|e| AuditError::SiemConfig(format!("invalid timestamp in session_events: {e}")))?
-        .with_timezone(&Utc);
+    let ts = wirken_time::parse_rfc3339(&ts_str)
+        .map_err(|e| AuditError::SiemConfig(format!("invalid timestamp in session_events: {e}")))?;
     Ok(StoredSessionEvent {
         id,
         session_id: SessionId(session_id),
@@ -4624,7 +4636,7 @@ fn parse_row(row: RawRow) -> Result<StoredSessionEvent, AuditError> {
 /// definition in this module." Adding fields to existing variants is
 /// a wire-incompatible change because old hashes will not match.
 /// Internal append shared by [`SessionLog::append`] (which stamps
-/// `Utc::now()`) and [`SqliteSessionLog::append_with_ts`] (which
+/// `Timestamp::now()`) and [`SqliteSessionLog::append_with_ts`] (which
 /// preserves the caller's timestamp for migration use). The
 /// transaction is opened on `conn` directly so the caller controls
 /// the lock.
@@ -4633,7 +4645,7 @@ fn append_inner(
     handle: &SessionHandle<OwnSession>,
     trust: TrustLevel,
     event: SessionEvent,
-    ts_override: Option<DateTime<Utc>>,
+    ts_override: Option<Timestamp>,
 ) -> Result<u64, AuditError> {
     // IMMEDIATE (not DEFERRED) so the write lock is claimed up front.
     // DEFERRED promotes read-to-write on the first INSERT, and in WAL
@@ -4656,7 +4668,7 @@ fn insert_row(
     handle: &SessionHandle<OwnSession>,
     trust: TrustLevel,
     event: SessionEvent,
-    ts_override: Option<DateTime<Utc>>,
+    ts_override: Option<Timestamp>,
     seq: Option<u64>,
 ) -> Result<u64, AuditError> {
     // Compute next seq atomically inside the transaction. SQLite
@@ -4698,7 +4710,7 @@ fn insert_row(
     let payload_str =
         String::from_utf8(payload_bytes).expect("serde_json output is always valid utf-8");
 
-    let ts = ts_override.unwrap_or_else(Utc::now).to_rfc3339();
+    let ts = ts_override.unwrap_or_else(Timestamp::now).to_rfc3339();
     let trust_str = trust_to_str(trust);
 
     tx.execute(

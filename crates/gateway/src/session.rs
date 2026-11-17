@@ -1,7 +1,7 @@
-use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use wirken_time::{Timestamp, TimestampExt};
 
 use crate::error::GatewayError;
 
@@ -11,8 +11,10 @@ pub struct Session {
     pub id: String,
     pub channel: String,
     pub conversation_id: String,
-    pub created_at: DateTime<Utc>,
-    pub last_activity: DateTime<Utc>,
+    #[serde(with = "wirken_time::serde_z")]
+    pub created_at: Timestamp,
+    #[serde(with = "wirken_time::serde_z")]
+    pub last_activity: Timestamp,
     pub message_count: i64,
     pub expired: bool,
 }
@@ -76,11 +78,10 @@ impl SessionStore {
         match existing {
             Ok((id, created_at_str, last_activity_str, message_count, _expired)) => {
                 let last_activity = parse_dt(&last_activity_str);
-                let now = Utc::now();
+                let now = Timestamp::now();
 
                 // Check if session has expired by inactivity
-                if now.signed_duration_since(last_activity).num_seconds() as u64 >= self.expiry_secs
-                {
+                if now.duration_since(last_activity).as_secs() as u64 >= self.expiry_secs {
                     // Mark as expired and create new
                     self.conn
                         .execute("UPDATE sessions SET expired = 1 WHERE id = ?1", params![id])?;
@@ -116,7 +117,7 @@ impl SessionStore {
         conversation_id: &str,
     ) -> Result<Session, GatewayError> {
         let id = generate_session_id();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let now_str = now.to_rfc3339();
 
         self.conn.execute(
@@ -138,7 +139,7 @@ impl SessionStore {
 
     /// Increment the message count for a session.
     pub fn record_message(&self, session_id: &str) -> Result<(), GatewayError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Timestamp::now().to_rfc3339();
         let changes = self.conn.execute(
             "UPDATE sessions SET message_count = message_count + 1, last_activity = ?1
              WHERE id = ?2 AND expired = 0",
@@ -187,7 +188,9 @@ impl SessionStore {
     /// catches a conversation nobody came back to, and the flag is
     /// what catches one an operator closed.
     pub fn is_live(&self, channel: &str, conversation_id: &str) -> bool {
-        let cutoff = (Utc::now() - Duration::seconds(self.expiry_secs as i64)).to_rfc3339();
+        let cutoff = (Timestamp::now()
+            - wirken_time::SignedDuration::from_secs(self.expiry_secs as i64))
+        .to_rfc3339();
         self.conn
             .query_row(
                 "SELECT 1 FROM sessions
@@ -225,7 +228,9 @@ impl SessionStore {
         //
         // Read-only by design: the row is marked expired by
         // `get_or_create` or `expire_inactive`, never by listing it.
-        let cutoff = (Utc::now() - Duration::seconds(self.expiry_secs as i64)).to_rfc3339();
+        let cutoff = (Timestamp::now()
+            - wirken_time::SignedDuration::from_secs(self.expiry_secs as i64))
+        .to_rfc3339();
 
         let (sql, param): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match channel {
             Some(ch) => (
@@ -267,7 +272,8 @@ impl SessionStore {
 
     /// Expire all sessions that have been inactive longer than the expiry window.
     pub fn expire_inactive(&self) -> Result<usize, GatewayError> {
-        let cutoff = Utc::now() - Duration::seconds(self.expiry_secs as i64);
+        let cutoff =
+            Timestamp::now() - wirken_time::SignedDuration::from_secs(self.expiry_secs as i64);
         let changes = self.conn.execute(
             "UPDATE sessions SET expired = 1
              WHERE expired = 0 AND last_activity <= ?1",
@@ -281,8 +287,6 @@ fn generate_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn parse_dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+fn parse_dt(s: &str) -> Timestamp {
+    wirken_time::parse_rfc3339(s).unwrap_or_else(|_| Timestamp::now())
 }

@@ -175,8 +175,8 @@ fn check_org_config_freshness_with(config: &OrgConfig, stale_allowed: bool) -> R
         (Some(ts), Some(age)) => (ts, age),
         _ => return Ok(()),
     };
-    let now = chrono::Utc::now();
-    let age_seconds = (now - signed_at).num_seconds();
+    let now = wirken_time::now();
+    let age_seconds = now.duration_since(signed_at).as_secs();
     if age_seconds < 0 {
         // Clock skew: bundle claims to be from the future. Reject
         // unless the operator opted into stale-mode (which we treat
@@ -288,8 +288,8 @@ pub struct OrgConfig {
     /// signature. Optional for back-compat with older bundles; the
     /// gateway treats `None` as "no freshness claim" and falls back
     /// to whatever the operator set via `WIRKEN_ALLOW_STALE_ORG_CONFIG`.
-    #[serde(default)]
-    pub signed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(with = "wirken_time::serde_z::option", default)]
+    pub signed_at: Option<wirken_time::Timestamp>,
 
     /// Maximum age in seconds the gateway will accept for this
     /// bundle. Together with `signed_at`, lets an org pin a TTL on
@@ -555,10 +555,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn fresh_config_with_age(
-        signed_at: chrono::DateTime<chrono::Utc>,
-        max_age_secs: u64,
-    ) -> OrgConfig {
+    fn fresh_config_with_age(signed_at: wirken_time::Timestamp, max_age_secs: u64) -> OrgConfig {
         OrgConfig {
             signed_at: Some(signed_at),
             max_age_seconds: Some(max_age_secs),
@@ -624,26 +621,38 @@ mod tests {
 
     #[test]
     fn freshness_check_passes_within_window() {
-        let cfg = fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(60), 3600);
+        let cfg = fresh_config_with_age(
+            wirken_time::now() - wirken_time::SignedDuration::from_secs(60),
+            3600,
+        );
         assert!(check_org_config_freshness_with(&cfg, false).is_ok());
     }
 
     #[test]
     fn freshness_check_rejects_stale_without_escape() {
-        let cfg = fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(7200), 3600);
+        let cfg = fresh_config_with_age(
+            wirken_time::now() - wirken_time::SignedDuration::from_secs(7200),
+            3600,
+        );
         let err = check_org_config_freshness_with(&cfg, false).unwrap_err();
         assert!(err.contains("stale"), "got {err}");
     }
 
     #[test]
     fn freshness_check_accepts_stale_with_escape_hatch() {
-        let cfg = fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(7200), 3600);
+        let cfg = fresh_config_with_age(
+            wirken_time::now() - wirken_time::SignedDuration::from_secs(7200),
+            3600,
+        );
         assert!(check_org_config_freshness_with(&cfg, true).is_ok());
     }
 
     #[test]
     fn freshness_check_rejects_future_signed_at() {
-        let cfg = fresh_config_with_age(chrono::Utc::now() + chrono::Duration::seconds(7200), 3600);
+        let cfg = fresh_config_with_age(
+            wirken_time::now() + wirken_time::SignedDuration::from_secs(7200),
+            3600,
+        );
         let err = check_org_config_freshness_with(&cfg, false).unwrap_err();
         assert!(err.contains("future"), "got {err}");
     }
@@ -653,7 +662,10 @@ mod tests {
     /// nothing asserted before.
     #[test]
     fn freshness_check_accepts_future_signed_at_with_escape_hatch() {
-        let cfg = fresh_config_with_age(chrono::Utc::now() + chrono::Duration::seconds(7200), 3600);
+        let cfg = fresh_config_with_age(
+            wirken_time::now() + wirken_time::SignedDuration::from_secs(7200),
+            3600,
+        );
         assert!(check_org_config_freshness_with(&cfg, true).is_ok());
     }
 
@@ -669,7 +681,7 @@ mod tests {
         let pk = sk.verifying_key();
 
         let cfg = OrgConfig {
-            signed_at: Some(chrono::Utc::now()),
+            signed_at: Some(wirken_time::now()),
             max_age_seconds: Some(3600),
             ..Default::default()
         };

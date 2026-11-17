@@ -56,8 +56,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
 use serde_json::Value;
+use wirken_time::Timestamp;
 
 use wirken_audit::otel_exporter::{OtelConfig, StaticFederatedIdentity};
 use wirken_audit::otel_forwarder::{OtelForwarder, ReqwestPoster};
@@ -70,8 +70,8 @@ const DEFAULT_QUERY_ENDPOINT: &str = "http://127.0.0.1:16686/api/traces";
 const READBACK_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const READBACK_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn at(seconds: i64) -> DateTime<Utc> {
-    DateTime::<Utc>::from_timestamp(seconds, 0).unwrap()
+fn at(seconds: i64) -> Timestamp {
+    Timestamp::from_second(seconds).unwrap()
 }
 
 fn zero_hash() -> HashHex {
@@ -115,7 +115,7 @@ async fn round_trip_against_local_otlp_receiver() {
     // has retained. Nanosecond-resolution timestamp is unique
     // enough for a sequential test run; avoiding the uuid crate
     // keeps the test from adding a dev-dep just for one identifier.
-    let conversation_id = format!("smoke-{}", Utc::now().timestamp_nanos_opt().unwrap_or(0),);
+    let conversation_id = format!("smoke-{}", Timestamp::now().as_nanosecond(),);
     let session_id = SessionId::new(conversation_id.clone());
 
     // Build a canonical two-span run: UserMessage opens, then

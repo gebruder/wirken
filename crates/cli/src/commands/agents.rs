@@ -98,7 +98,7 @@ pub async fn add(args: AddArgs) -> Result<()> {
             .context("Failed to open credential store")?;
 
         let secret = VaultSecret::new(key.secret);
-        let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+        let rotation_due = wirken_time::now() + wirken_time::days(90);
         super::destinations::store_provider_key(
             &store,
             &cred_name,
@@ -268,7 +268,7 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
             let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
                 .context("Failed to open credential store")?;
             let secret = VaultSecret::new(api_key);
-            let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+            let rotation_due = wirken_time::now() + wirken_time::days(90);
             super::destinations::store_provider_key(
                 &store,
                 &cred_name,
@@ -963,7 +963,7 @@ pub async fn set(
         let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
         let secret = VaultSecret::new(api_key);
-        let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+        let rotation_due = wirken_time::now() + wirken_time::days(90);
         let current = store.get(id).context("Failed to re-read agent")?;
         super::destinations::store_provider_key(
             &vault,
