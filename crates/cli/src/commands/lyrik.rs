@@ -37,6 +37,12 @@ use super::open_permission_store;
 
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Lyrik's own version, apart from the Wirken version that carries it.
+/// It names the behaviour of `wirken lyrik`: its subcommands, flags, run
+/// output and the fields of `findings.json` outside the tag-pinned
+/// schema. The schema has its own version.
+pub(crate) const LYRIK_VERSION: &str = "1.0.0";
+
 // ---------------------------------------------------------------------------
 // `wirken lyrik run`
 // ---------------------------------------------------------------------------
@@ -245,16 +251,10 @@ pub async fn run(
     // nowhere else. Recorded when they are not the defaults.
     let sandbox_limits =
         super::load_sandbox_config(&super::config().data_dir)?.non_default_limits();
-    let mut started = serde_json::json!({
-        "target": target.display().to_string(),
-        "config_path": config_path.display().to_string(),
-        "bench_mode": bench_mode,
-        "driver_version": DRIVER_VERSION,
-    });
-    if let Some(limits) = sandbox_limits {
-        started["sandbox_limits"] = serde_json::to_value(limits)?;
-    }
-    audit.emit("lyrik.run.started", started)?;
+    audit.emit(
+        "lyrik.run.started",
+        run_started_detail(target, &config_path, bench_mode, sandbox_limits)?,
+    )?;
 
     // Provenance, taken before the run writes anything. The fields go
     // on findings.json; a target whose git state cannot be read gets
@@ -545,6 +545,26 @@ fn one_line(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+/// The detail of the `lyrik.run.started` row.
+fn run_started_detail(
+    target: &Path,
+    config_path: &Path,
+    bench_mode: bool,
+    sandbox_limits: Option<wirken_audit::SandboxLimits>,
+) -> Result<serde_json::Value> {
+    let mut started = serde_json::json!({
+        "target": target.display().to_string(),
+        "config_path": config_path.display().to_string(),
+        "bench_mode": bench_mode,
+        "driver_version": DRIVER_VERSION,
+        "lyrik_version": LYRIK_VERSION,
+    });
+    if let Some(limits) = sandbox_limits {
+        started["sandbox_limits"] = serde_json::to_value(limits)?;
+    }
+    Ok(started)
+}
+
 /// What the operator is asked to sign off: where the run points,
 /// what it scores against, where the code goes, and what it may ask
 /// to run.
@@ -604,7 +624,7 @@ fn signoff_summary(
         "unavailable: the sandbox is off, so a command would run on the host".to_string()
     };
     let mut lines = vec![format!(
-        "Lyrik run {} on {}",
+        "Lyrik {LYRIK_VERSION} run {} on {}",
         one_line(run_id),
         one_line(&target.display().to_string())
     )];
@@ -960,6 +980,7 @@ fn inference_from_chain(
 /// Add `extras` to a findings.json body.
 fn with_extras(mut body: serde_json::Value, extras: &Extras) -> serde_json::Value {
     if let Some(obj) = body.as_object_mut() {
+        obj.insert("lyrik_version".into(), LYRIK_VERSION.into());
         for (k, v) in extras {
             obj.insert(k.clone(), v.clone());
         }
@@ -4801,6 +4822,7 @@ fn aggregate_findings(source: &Path, dest: &Path, run_id: &str) -> Result<()> {
         "schema_version": super::lyrik_validate::schema_version_for(&findings),
         "run_id": run_id,
         "produced_at": wirken_time::now().to_rfc3339(),
+        "lyrik_version": LYRIK_VERSION,
         "findings": findings,
     });
     if let Some(parent) = dest.parent() {
@@ -5961,7 +5983,7 @@ mod tests {
         );
         let lines: Vec<&str> = summary.lines().collect();
         assert_eq!(lines.len(), 8, "{summary}");
-        assert_eq!(lines[0], "Lyrik run r1 on /t");
+        assert_eq!(lines[0], "Lyrik 1.0.0 run r1 on /t");
         assert!(lines[1].starts_with("  target   HEAD abc123, tracked-file state unknown: "));
         assert!(!summary.contains('\x1b'), "{summary}");
         assert!(lines[1].contains("\\nSign off"), "{summary}");
@@ -7500,6 +7522,50 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(body["schema_version"].as_str(), Some("1.1"));
+        assert_eq!(body["lyrik_version"], super::LYRIK_VERSION);
+    }
+
+    /// Every `findings.json` a run can write carries Lyrik's own
+    /// version beside the schema version, and so does the row that
+    /// opens the run. The field is outside the pinned schema.
+    #[test]
+    fn findings_and_the_run_started_row_carry_the_lyrik_version() {
+        assert_eq!(super::LYRIK_VERSION, "1.0.0");
+        let tmp = tempdir().unwrap();
+        let read = |p: &std::path::Path| -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+        };
+
+        let empty = tmp.path().join("empty.json");
+        super::write_empty_findings(&empty, "r1", &super::Extras::new()).unwrap();
+        let body = read(&empty);
+        assert_eq!(body["lyrik_version"], "1.0.0");
+        assert_eq!(body["schema_version"], "1.1");
+
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("a.json"), r#"{"class":"auth"}"#).unwrap();
+        let plain = tmp.path().join("plain.json");
+        super::aggregate_findings(&staged, &plain, "r1").unwrap();
+        assert_eq!(read(&plain)["lyrik_version"], "1.0.0");
+
+        let started = super::run_started_detail(
+            std::path::Path::new("/t"),
+            std::path::Path::new("/t/.lyrik/config.json"),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(started["lyrik_version"], "1.0.0");
+        assert_eq!(started["driver_version"], env!("CARGO_PKG_VERSION"));
+
+        let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/lyrik-json-schema.json"
+        )))
+        .unwrap();
+        assert!(schema["properties"].get("lyrik_version").is_none());
+        assert_ne!(schema["additionalProperties"], false);
     }
 
     #[test]

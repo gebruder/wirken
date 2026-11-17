@@ -1078,6 +1078,16 @@ surface: its subcommands, flags, run output, and the fields `findings.json`
 carries outside the schema can change in any minor release. A schema
 contract changes only with a new schema tag.
 
+Lyrik has its own version, 1.0.0 in Wirken 3.4.0. It is the first line of
+the sign-off summary (`Lyrik 1.0.0 run <id> on <target>`), the
+`lyrik_version` field at the top of `findings.json`, and the
+`lyrik_version` field of the `lyrik.run.started` row, where
+`driver_version` is the Wirken version. What it covers: the tag-pinned
+findings schema is stable and versioned by its tags; subcommands, flags,
+run output and fields outside the pinned schema may change in any Wirken
+minor, and the Lyrik version changes with them. `lyrik_version` is itself
+a field outside the pinned schema.
+
 ```json
 {
   "schema_version": "1.1 or 1.2",
