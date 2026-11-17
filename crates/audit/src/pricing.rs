@@ -106,22 +106,56 @@ pub fn cost_micros_cached(
     cache_creation_input_tokens: u32,
     cache_read_input_tokens: u32,
 ) -> (Option<u64>, Option<u64>, Option<u64>) {
-    let key = (provider.to_string(), model.to_string());
-    let Some(p) = table().get(&key) else {
+    let Some(r) = rates(provider, model) else {
         return (None, None, None);
     };
-    let input = compute_one(input_tokens, p.input_per_million_usd)
-        .saturating_add(compute_one(
-            cache_creation_input_tokens,
-            p.input_per_million_usd * CACHE_WRITE_MULTIPLIER,
-        ))
-        .saturating_add(compute_one(
-            cache_read_input_tokens,
-            p.input_per_million_usd * CACHE_READ_MULTIPLIER,
-        ));
-    let output = compute_one(output_tokens, p.output_per_million_usd);
+    let input = compute_one(input_tokens, r.input)
+        .saturating_add(compute_one(cache_creation_input_tokens, r.cache_write))
+        .saturating_add(compute_one(cache_read_input_tokens, r.cache_read));
+    let output = compute_one(output_tokens, r.output);
     let total = input.saturating_add(output);
     (Some(input), Some(output), Some(total))
+}
+
+/// USD per million tokens for one call's four token classes.
+struct Rates {
+    input: f64,
+    output: f64,
+    cache_write: f64,
+    cache_read: f64,
+}
+
+/// Rates for `(provider, model)`: the vendor's list price from the
+/// `llm-prices` table for the `anthropic`, `openai` and `gemini`
+/// providers (its cache-write and cache-read prices included, which are
+/// not the 1.25x / 0.1x multipliers on every model), otherwise the
+/// baked `pricing.toml` row with the multipliers.
+fn rates(provider: &str, model: &str) -> Option<Rates> {
+    let vendor = match provider {
+        "anthropic" => Some("anthropic"),
+        "openai" => Some("openai"),
+        "gemini" => Some("google"),
+        _ => None,
+    };
+    if let Some(p) = vendor.and_then(|v| llm_prices::lookup_provider(v, model))
+        && let (Some(input), Some(output)) = (p.input, p.output)
+    {
+        return Some(Rates {
+            input,
+            output,
+            cache_write: p
+                .cache_write("5m")
+                .unwrap_or(input * CACHE_WRITE_MULTIPLIER),
+            cache_read: p.cache_read.unwrap_or(input * CACHE_READ_MULTIPLIER),
+        });
+    }
+    let p = table().get(&(provider.to_string(), model.to_string()))?;
+    Some(Rates {
+        input: p.input_per_million_usd,
+        output: p.output_per_million_usd,
+        cache_write: p.input_per_million_usd * CACHE_WRITE_MULTIPLIER,
+        cache_read: p.input_per_million_usd * CACHE_READ_MULTIPLIER,
+    })
 }
 
 /// `tokens * (usd_per_million / 1_000_000)` in micros simplifies to
@@ -157,13 +191,14 @@ mod tests {
 
     #[test]
     fn cache_writes_and_reads_are_priced_into_the_input_cost() {
-        // $15 / 1M input. 1000 uncached, 1000 written, 10000 read:
-        // 15_000 + 18_750 + 15_000 micros.
+        // $5 / 1M input, $6.25 cache write, $0.50 cache read.
+        // 1000 uncached, 1000 written, 10000 read:
+        // 5_000 + 6_250 + 5_000 micros.
         let (inp, out, total) =
             cost_micros_cached("anthropic", "claude-opus-4-7", 1_000, 0, 1_000, 10_000);
-        assert_eq!(inp, Some(48_750));
+        assert_eq!(inp, Some(16_250));
         assert_eq!(out, Some(0));
-        assert_eq!(total, Some(48_750));
+        assert_eq!(total, Some(16_250));
         // With no cache counters it is the plain price.
         assert_eq!(
             cost_micros_cached("anthropic", "claude-opus-4-7", 1_000, 0, 0, 0),
@@ -177,12 +212,12 @@ mod tests {
 
     #[test]
     fn cost_arithmetic_exact_micros() {
-        // $15 / 1M input tokens, 1000 tokens.
-        // 1000 * 15.0 = 15_000 micros = $0.015. Exact.
+        // $5 / 1M input tokens, 1000 tokens.
+        // 1000 * 5.0 = 5_000 micros = $0.005. Exact.
         let (inp, out, total) = cost_micros("anthropic", "claude-opus-4-7", 1_000, 0);
-        assert_eq!(inp, Some(15_000));
+        assert_eq!(inp, Some(5_000));
         assert_eq!(out, Some(0));
-        assert_eq!(total, Some(15_000));
+        assert_eq!(total, Some(5_000));
     }
 
     #[test]
@@ -212,6 +247,42 @@ mod tests {
         assert_eq!(inp, Some(30_000));
         assert_eq!(out, Some(75_000));
         assert_eq!(total, Some(105_000));
+    }
+
+    #[test]
+    fn current_models_are_priced_at_the_vendor_list_price() {
+        // Opus 4.5 and later bill $5 / $25 per 1M, Opus 5.5 $4 / $20; the
+        // 5.x and GPT-5 models had no row and recorded cost=None.
+        assert_eq!(
+            cost_micros("anthropic", "claude-opus-4-5", 1_000, 1_000),
+            (Some(5_000), Some(25_000), Some(30_000))
+        );
+        assert_eq!(
+            cost_micros("anthropic", "claude-opus-5-5", 1_000, 1_000),
+            (Some(4_000), Some(20_000), Some(24_000))
+        );
+        assert_eq!(
+            cost_micros("anthropic", "claude-sonnet-5-5-20990101", 1_000, 0).0,
+            Some(2_000)
+        );
+        assert_eq!(
+            cost_micros("openai", "gpt-5.5", 1_000, 1_000).2,
+            Some(35_000)
+        );
+        assert_eq!(
+            cost_micros("gemini", "gemini-3.1-pro-preview", 1_000, 0).0,
+            Some(2_000)
+        );
+        // Opus 5.5 reads its cache at $0.20 (0.05x), not 0.1x input.
+        assert_eq!(
+            cost_micros_cached("anthropic", "claude-opus-5-5", 0, 0, 0, 10_000).0,
+            Some(2_000)
+        );
+        // A provider the table does not cover keeps the baked row.
+        assert_eq!(
+            cost_micros("bedrock", "anthropic.claude-sonnet-4-5-v1:0", 1_000, 0).0,
+            Some(3_000)
+        );
     }
 
     #[test]
