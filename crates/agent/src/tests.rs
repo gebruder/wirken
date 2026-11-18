@@ -10601,6 +10601,80 @@ mod openai_compat_stub {
     use crate::llm::{LlmClient, LlmConfig, LlmResponse};
     use crate::llm_stream::StreamEvent;
 
+    fn client_for(addr: std::net::SocketAddr) -> LlmClient {
+        LlmClient::new(LlmConfig {
+            provider: "custom".into(),
+            model: "some-model".into(),
+            base_url: format!("http://{addr}/v1"),
+            max_tokens: 256,
+            temperature: 0.7,
+            region: None,
+            tools_enabled: true,
+            context_window: 32_000,
+            auth: Default::default(),
+        })
+        .unwrap()
+    }
+
+    /// A request that gets no response is sent again when the caller
+    /// asked for transport retries: the first connection is dropped
+    /// before any reply, the second is answered, and the call succeeds
+    /// after one retry. With no retries set the same failure is
+    /// returned at once.
+    #[tokio::test]
+    async fn a_request_that_fails_in_transport_is_sent_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub = tokio::spawn(async move {
+            // First connection: read the request, then hang up.
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            drop(socket);
+            // Second connection: answer.
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+        });
+        let client = client_for(addr);
+        client.set_transport_retries(2);
+        let http = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let url = format!("http://{addr}/v1/x");
+        let resp = client
+            .send_with_retry(|| http.post(&url).body("{}"))
+            .await
+            .expect("the second attempt is answered");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(client.transport_retries_made(), 1);
+        stub.await.unwrap();
+
+        // No retries asked for: one attempt, and the error is the caller's.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            drop(socket);
+        });
+        let client = client_for(addr);
+        let url = format!("http://{addr}/v1/x");
+        let err = client
+            .send_with_retry(|| http.post(&url).body("{}"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::AgentError::Http(_)), "{err}");
+        assert_eq!(client.transport_retries_made(), 0);
+        stub.await.unwrap();
+    }
+
     /// The streaming OpenAI path: content deltas and a tool call in
     /// the same stream. The deltas already reached the caller; the
     /// same text has to survive on the response so the row and the

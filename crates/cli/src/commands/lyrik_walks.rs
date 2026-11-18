@@ -61,13 +61,27 @@ pub struct OperatorSettings {
     /// [`WALK_CONTINUATIONS_DEFAULT`]; zero means none. A target's
     /// `.lyrik/config.json` does not set this.
     pub walk_continuations: Option<u32>,
+    /// How many times a provider request that failed in transport is
+    /// sent again during a walk. Absent,
+    /// [`TRANSPORT_RETRIES_DEFAULT`]; zero means none.
+    pub transport_retries: Option<u32>,
 }
+
+/// Times a walk's provider request that failed in transport is sent
+/// again when the operator sets no count.
+pub const TRANSPORT_RETRIES_DEFAULT: u32 = 2;
 
 /// Continuation turns a truncated walk gets when the operator sets no
 /// limit.
 pub const WALK_CONTINUATIONS_DEFAULT: u32 = 2;
 
 impl OperatorSettings {
+    /// Times a walk's request that failed in transport is sent again:
+    /// the operator's, else the default.
+    pub fn transport_retries(&self) -> u32 {
+        self.transport_retries.unwrap_or(TRANSPORT_RETRIES_DEFAULT)
+    }
+
     /// The cap on a truncated walk's continuation turns: the
     /// operator's, else the default.
     pub fn walk_continuations(&self) -> u32 {
@@ -631,11 +645,25 @@ fn staging_section(walk_name: &str) -> String {
          list or read another walk's directory wholesale.\n\
          - If `.lyrik/state/runs/<run-id>/staging/{walk_name}/ledger.json` exists, read \
          it before you start. It holds what earlier runs established about this \
-         project's files. A record under `settled` was observed by an executed run \
-         against the file as it is now: do not check it again and do not stage a \
-         finding for it; a staged finding that repeats one is refused and you are \
-         pointed at the record. A record under `context` was reasoned from the source \
-         only: use it as a lead, and re-examine it if your work depends on it.\n"
+         project. `area` has the full records for the files this run covers; `index` \
+         has one line (`id`, `key`, `evidence`, `stale`) for every other record, and \
+         you read one of those whole at `.lyrik/ledger/<id>.json` when you need it. A \
+         record with `evidence: observed` and no `stale` mark was shown by an executed \
+         run against the file as it is now: it is settled. A record with `evidence: \
+         reasoned` was read from the source only: use it as a lead, and re-examine it \
+         if your work depends on it. A stale record is about an older version of the \
+         file and settles nothing.\n\
+         - Register a claim before you work on it. Before you write a harness, run a \
+         check or stage a finding for a defect, write \
+         `.lyrik/state/runs/<run-id>/staging/{walk_name}/claims/claim-NNN.json` with \
+         `{{\"class\": \"<class>\", \"file\": \"<file>\", \"line\": <line>}}`, the class, \
+         file and line the finding would carry. In your next step read \
+         `claims/claim-NNN.decision.json`; if it is not there yet, read it again. \
+         `registered` means go on; the answer also carries the ledger records for \
+         that file. `refused` means an earlier run already observed this claim: do no \
+         work on it, write no harness and no finding for it, and note the record it \
+         names in your summary. A finding staged for a refused claim is refused again \
+         when the run's results are put together.\n"
     )
 }
 
@@ -890,6 +918,7 @@ pub fn ensure_walk_staging(run_dir: &Path, walks: &[String]) -> Result<()> {
             "steps",
             "reproductions",
             "replays",
+            "claims",
         ] {
             let p = walk_dir.join(sub);
             std::fs::create_dir_all(&p).with_context(|| format!("create {}", p.display()))?;
@@ -1030,11 +1059,20 @@ pub struct TurnEnd {
     pub stop_reason: Option<String>,
 }
 
+/// Why a turn did not end.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnFailure {
+    pub reason: String,
+    /// Set when the turn was stopped at the tool round limit: the
+    /// limit it reached.
+    pub tool_rounds: Option<usize>,
+}
+
 /// What a walk's turns came to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WalkTurns {
     /// The last turn's result, or why a turn failed.
-    pub last: std::result::Result<TurnEnd, String>,
+    pub last: std::result::Result<TurnEnd, TurnFailure>,
     /// Refused calls across every turn.
     pub skipped: Vec<String>,
     /// One entry per reply that was cut off at the output limit: how
@@ -1053,7 +1091,7 @@ pub trait WalkSession {
     fn send(
         &mut self,
         prompt: String,
-    ) -> impl std::future::Future<Output = std::result::Result<TurnEnd, String>> + Send;
+    ) -> impl std::future::Future<Output = std::result::Result<TurnEnd, TurnFailure>> + Send;
 }
 
 /// Run a walk: send the first prompt and, while a reply ends at the
@@ -1081,9 +1119,9 @@ pub async fn drive_walk_turns(
         let kept = staged();
         let end = match end {
             Ok(end) => end,
-            Err(reason) => {
+            Err(failure) => {
                 return WalkTurns {
-                    last: Err(reason),
+                    last: Err(failure),
                     skipped,
                     truncations,
                     continuations,
@@ -1221,7 +1259,7 @@ mod tests {
     }
 
     impl WalkSession for Scripted {
-        async fn send(&mut self, prompt: String) -> std::result::Result<TurnEnd, String> {
+        async fn send(&mut self, prompt: String) -> std::result::Result<TurnEnd, TurnFailure> {
             self.prompts.push(prompt);
             let (stage, end) = self.turns.remove(0);
             for name in stage {
@@ -1243,7 +1281,10 @@ mod tests {
                     skipped: vec!["exec (shell:sh)".to_string()],
                     stop_reason: Some(stop.to_string()),
                 }),
-                Err(why) => Err(why.to_string()),
+                Err(why) => Err(TurnFailure {
+                    reason: why.to_string(),
+                    tool_rounds: (why == "round limit").then_some(20),
+                }),
             }
         }
     }
@@ -1385,9 +1426,19 @@ mod tests {
             ],
         );
         let out = drive(&run_dir, &mut session, 2).await;
-        assert_eq!(out.last, Err("http error".to_string()));
+        assert_eq!(out.last.as_ref().unwrap_err().reason, "http error");
+        assert_eq!(out.last.as_ref().unwrap_err().tool_rounds, None);
         assert_eq!(out.findings_staged, 2);
         assert_eq!(out.truncations, vec![1]);
+
+        // Stopped at the tool round limit: the count is carried, and
+        // what was staged is still counted.
+        let tmp = tempdir().unwrap();
+        let (run_dir, mut session) =
+            scripted(tmp.path(), vec![(vec!["a", "b"], Err("round limit"))]);
+        let out = drive(&run_dir, &mut session, 2).await;
+        assert_eq!(out.last.as_ref().unwrap_err().tool_rounds, Some(20));
+        assert_eq!(out.findings_staged, 2);
 
         let tmp = tempdir().unwrap();
         let (run_dir, mut session) = scripted(tmp.path(), vec![(vec!["a"], Ok("end_turn"))]);
@@ -1422,6 +1473,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read(), 0);
+        // Transport retries: two unless the operator says otherwise.
+        let retries = || {
+            load_operator_settings(data.path())
+                .unwrap()
+                .transport_retries()
+        };
+        assert_eq!(retries(), 2);
+        std::fs::write(
+            operator_settings_path(data.path()),
+            r#"{"transport_retries": 4}"#,
+        )
+        .unwrap();
+        assert_eq!(retries(), 4);
+        std::fs::write(
+            operator_settings_path(data.path()),
+            r#"{"transport_retries": 0}"#,
+        )
+        .unwrap();
+        assert_eq!(retries(), 0);
     }
 
     /// The staged copy of a walk tells it to write each finding as it
@@ -1439,8 +1509,11 @@ mod tests {
             ".lyrik/state/runs/<run-id>/staging/index.json` first",
             "read only the records you need",
             ".lyrik/state/runs/<run-id>/staging/chain-walk/ledger.json",
-            "A record under `settled` was observed by an executed run",
-            "A record under `context` was reasoned from the source only",
+            "you read one of those whole at `.lyrik/ledger/<id>.json`",
+            "Register a claim before you work on it",
+            "staging/chain-walk/claims/claim-NNN.json",
+            "{\"class\": \"<class>\", \"file\": \"<file>\", \"line\": <line>}",
+            "`refused` means an earlier run already observed this claim",
         ] {
             assert!(staged.contains(needle), "{needle}");
         }

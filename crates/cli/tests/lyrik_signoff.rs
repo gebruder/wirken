@@ -151,7 +151,7 @@ fn a_yes_at_the_terminal_signs_the_run_off_on_the_chain() {
     assert!(ok, "{shown}");
     // What was asked, before the run started.
     for part in [
-        "Lyrik 1.0.0 run signed on ",
+        "Lyrik 1.1.0 run signed on ",
         "  target   no git HEAD: not a git work tree",
         "  rubric   inline skills/lyrik/SKILL.md sha256 ",
         "  context  none",

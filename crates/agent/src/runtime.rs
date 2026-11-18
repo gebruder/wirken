@@ -1196,6 +1196,12 @@ impl Agent {
         self.max_tool_rounds
     }
 
+    /// Send a provider request that failed in transport again, up to
+    /// `retries` times. See [`crate::llm::LlmClient::set_transport_retries`].
+    pub fn set_transport_retries(&self, retries: u32) {
+        self.llm.set_transport_retries(retries);
+    }
+
     /// Model calls the last turn made.
     pub fn last_turn_rounds(&self) -> usize {
         self.last_turn_rounds

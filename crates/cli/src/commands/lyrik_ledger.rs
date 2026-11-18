@@ -344,19 +344,240 @@ pub fn records_from_run(
     out
 }
 
-/// What a walk is handed: the records that are not stale, split by
-/// whether they are settled, and how many were left out as stale.
-pub fn for_walk(records: &[Record]) -> Value {
-    let settled: Vec<&Record> = records.iter().filter(|r| r.settled()).collect();
-    let context: Vec<&Record> = records
+/// Whether `path` matches `pattern`, a glob over `/`-separated
+/// segments: `*` and `?` stay inside one segment, `**` spans any
+/// number of them.
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    fn segment(p: &[u8], t: &[u8]) -> bool {
+        match (p.first(), t.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => segment(&p[1..], t) || (!t.is_empty() && segment(p, &t[1..])),
+            (Some(b'?'), Some(_)) => segment(&p[1..], &t[1..]),
+            (Some(a), Some(b)) if a == b => segment(&p[1..], &t[1..]),
+            _ => false,
+        }
+    }
+    fn parts(p: &[&str], t: &[&str]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some(&"**") => parts(&p[1..], t) || (!t.is_empty() && parts(p, &t[1..])),
+            Some(first) => {
+                !t.is_empty()
+                    && segment(first.as_bytes(), t[0].as_bytes())
+                    && parts(&p[1..], &t[1..])
+            }
+        }
+    }
+    let p: Vec<&str> = pattern.split('/').collect();
+    let t: Vec<&str> = path.split('/').collect();
+    parts(&p, &t)
+}
+
+/// The files a run's walks work on, from `scope` in the target's
+/// `.lyrik/config.json`: a path is in the area when an `include`
+/// pattern matches it and no `exclude` pattern does. With no `include`
+/// every file is in the area. A pattern with no `/` matches a file of
+/// that name in any directory.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Area {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+impl Area {
+    pub fn from_config(config: &Value) -> Self {
+        let list = |key: &str| -> Vec<String> {
+            config
+                .pointer(&format!("/scope/{key}"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Area {
+            include: list("include"),
+            exclude: list("exclude"),
+        }
+    }
+
+    pub fn contains(&self, path: &str) -> bool {
+        let hit = |pattern: &String| {
+            glob_matches(pattern, path)
+                || (!pattern.contains('/') && glob_matches(&format!("**/{pattern}"), path))
+        };
+        (self.include.is_empty() || self.include.iter().any(hit)) && !self.exclude.iter().any(hit)
+    }
+}
+
+/// What a walk is handed before it starts: in `area`, the full records
+/// that are not stale for the files of its area; in `index`, one line
+/// for every other record (stale ones, and those for files outside the
+/// area) with its id, key, evidence and stale mark. A record in the
+/// index is read whole from `.lyrik/ledger/<id>.json`.
+pub fn for_walk(records: &[Record], area: &Area) -> Value {
+    let full: Vec<&Record> = records
         .iter()
-        .filter(|r| !r.stale && !r.settled())
+        .filter(|r| !r.stale && area.contains(&r.file))
+        .collect();
+    let index: Vec<Value> = records
+        .iter()
+        .filter(|r| r.stale || !area.contains(&r.file))
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id, "key": r.key, "evidence": r.evidence, "stale": r.stale,
+            })
+        })
         .collect();
     serde_json::json!({
-        "settled": settled,
-        "context": context,
-        "stale_left_out": records.iter().filter(|r| r.stale).count(),
+        "area": full,
+        "index": index,
+        "read_a_record_at": ".lyrik/ledger/<id>.json",
     })
+}
+
+/// The runner's answer to a claim a walk registered.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClaimDecision {
+    pub walk: String,
+    /// The claim file's name, `claim-NNN.json`.
+    pub file: String,
+    pub key: String,
+    /// `registered`, or `refused` when the ledger already settles it.
+    pub decision: &'static str,
+    /// The settling record, when refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
+    /// The run that record came from, when refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub established_by_run: Option<String>,
+}
+
+/// Answer each claim under `<walk_dir>/claims/` that has no answer
+/// yet. A claim is `claim-NNN.json` with `class` (or the first of
+/// `framing`), `file` and `line` (or a `location`). The answer is
+/// written beside it as `claim-NNN.decision.json`: `refused` with the
+/// settling record and its run when the ledger holds the same claim as
+/// observed against the file as it is now, else `registered`. Either
+/// way the answer carries the full records for the claim's file that
+/// are not stale, so registering a claim is also how a walk gets the
+/// ledger for the file it is about to work on. A claim that cannot be
+/// read is answered `refused` with the reason, so a walk is never left
+/// waiting.
+pub fn answer_claims(
+    walk_dir: &Path,
+    walk: &str,
+    records: &[Record],
+) -> Result<Vec<ClaimDecision>> {
+    let dir = walk_dir.join("claims");
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .with_context(|| format!("read {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| n.ends_with(".json") && !n.ends_with(".decision.json") && !n.ends_with(".tmp"))
+        .collect();
+    names.sort();
+    let mut out = Vec::new();
+    for name in names {
+        let stem = name.trim_end_matches(".json");
+        let answer_path = dir.join(format!("{stem}.decision.json"));
+        if answer_path.exists() {
+            continue;
+        }
+        let parsed: Option<Value> = std::fs::read_to_string(dir.join(&name))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
+        let claim = parsed.as_ref().and_then(|c| {
+            let class = c
+                .get("class")
+                .and_then(Value::as_str)
+                .or_else(|| c.pointer("/framing/0").and_then(Value::as_str))?;
+            let file = c
+                .get("file")
+                .and_then(Value::as_str)
+                .or_else(|| c.pointer("/location/file").and_then(Value::as_str))?;
+            let line = c
+                .get("line")
+                .and_then(Value::as_u64)
+                .or_else(|| c.pointer("/location/line_start").and_then(Value::as_u64))?;
+            Some((format!("{class}::{file}:{line}"), file.to_string()))
+        });
+        let (decision, body) = match claim {
+            None => (
+                ClaimDecision {
+                    walk: walk.to_string(),
+                    file: name.clone(),
+                    key: String::new(),
+                    decision: "refused",
+                    record: None,
+                    established_by_run: None,
+                },
+                serde_json::json!({
+                    "decision": "refused",
+                    "reason": "the claim needs `class`, `file` and `line`",
+                }),
+            ),
+            Some((key, file)) => {
+                let for_file: Vec<&Record> = records
+                    .iter()
+                    .filter(|r| !r.stale && r.file == file)
+                    .collect();
+                let held = records
+                    .iter()
+                    .find(|r| r.settled() && r.kind != Kind::ArmResult && r.key == key);
+                match held {
+                    Some(held) => (
+                        ClaimDecision {
+                            walk: walk.to_string(),
+                            file: name.clone(),
+                            key: key.clone(),
+                            decision: "refused",
+                            record: Some(held.id.clone()),
+                            established_by_run: Some(held.run.clone()),
+                        },
+                        serde_json::json!({
+                            "decision": "refused",
+                            "key": key,
+                            "reason": "an earlier run observed this claim against the file as it is now; \
+                                       do not check it again and do not stage a finding for it",
+                            "record": held.id,
+                            "record_path": format!(".lyrik/ledger/{}.json", held.id),
+                            "established_by_run": held.run,
+                            "records_for_file": for_file,
+                        }),
+                    ),
+                    None => (
+                        ClaimDecision {
+                            walk: walk.to_string(),
+                            file: name.clone(),
+                            key: key.clone(),
+                            decision: "registered",
+                            record: None,
+                            established_by_run: None,
+                        },
+                        serde_json::json!({
+                            "decision": "registered",
+                            "key": key,
+                            "records_for_file": for_file,
+                        }),
+                    ),
+                }
+            }
+        };
+        let tmp = dir.join(format!("{stem}.decision.json.tmp"));
+        std::fs::write(&tmp, serde_json::to_string_pretty(&body)?)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &answer_path)
+            .with_context(|| format!("write {}", answer_path.display()))?;
+        out.push(decision);
+    }
+    Ok(out)
 }
 
 /// A staged finding the runner refused because the ledger already
@@ -616,24 +837,162 @@ mod tests {
         assert!(left.contains(&"finding-002.json".to_string()));
         assert!(left.contains(&"finding-004.json".to_string()));
         assert!(walk_dir.join("ledger-refused/finding-001.json").is_file());
+    }
 
-        // What a walk is handed says which is which.
-        let handed = for_walk(&ledger);
-        let settled: Vec<&str> = handed["settled"]
+    fn claim(walk_dir: &Path, name: &str, body: &Value) {
+        let dir = walk_dir.join("claims");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), body.to_string()).unwrap();
+    }
+
+    fn decision(walk_dir: &Path, stem: &str) -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(walk_dir.join(format!("claims/{stem}.decision.json")))
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// A walk registers a claim before it works on it. One the ledger
+    /// already holds as observed is refused there and then, with the
+    /// record and its run; a new one, and one the ledger only reasoned,
+    /// are registered. Each answer carries the ledger for the claim's
+    /// file. A claim is answered once.
+    #[test]
+    fn registering_a_settled_claim_is_refused_before_any_work() {
+        let tmp = target_with("src/a.rs", "fn a() {}\n");
+        std::fs::write(tmp.path().join("src/b.rs"), "fn b() {}\n").unwrap();
+        let records = records_from_run(tmp.path(), &run_body(), &rejections(), "r1");
+        upsert(tmp.path(), &records).unwrap();
+        let ledger = load(tmp.path()).unwrap();
+        let walk_dir = tmp.path().join("staging/fuzz-walk");
+
+        claim(
+            &walk_dir,
+            "claim-001.json",
+            &json!({"class": "auth", "file": "src/a.rs", "line": 10}),
+        );
+        claim(
+            &walk_dir,
+            "claim-002.json",
+            &json!({"class": "injection", "file": "src/a.rs", "line": 20}),
+        );
+        claim(
+            &walk_dir,
+            "claim-003.json",
+            &json!({"framing": ["auth"], "location": {"file": "src/b.rs", "line_start": 3}}),
+        );
+        claim(&walk_dir, "claim-004.json", &json!({"file": "src/a.rs"}));
+
+        let answers = answer_claims(&walk_dir, "fuzz-walk", &ledger).unwrap();
+        assert_eq!(answers.len(), 4);
+        assert_eq!(answers[0].decision, "refused");
+        assert_eq!(answers[0].key, "auth::src/a.rs:10");
+        assert_eq!(
+            answers[0].record.as_deref(),
+            Some(record_id(Kind::Finding, "auth::src/a.rs:10").as_str())
+        );
+        assert_eq!(answers[0].established_by_run.as_deref(), Some("r1"));
+        assert_eq!(
+            answers[1].decision, "registered",
+            "a reasoned record blocks nothing"
+        );
+        assert_eq!(answers[2].decision, "registered");
+        assert_eq!(
+            answers[3].decision, "refused",
+            "a claim that names no line is not registered"
+        );
+
+        let refused = decision(&walk_dir, "claim-001");
+        assert_eq!(refused["decision"], "refused");
+        assert_eq!(refused["established_by_run"], "r1");
+        assert_eq!(
+            refused["record_path"],
+            format!(
+                ".lyrik/ledger/{}.json",
+                record_id(Kind::Finding, "auth::src/a.rs:10")
+            )
+        );
+        // The answer is the hand-off for the claim's file: every record
+        // for src/a.rs, none for another file.
+        assert_eq!(refused["records_for_file"].as_array().unwrap().len(), 5);
+        let registered = decision(&walk_dir, "claim-003");
+        assert_eq!(registered["decision"], "registered");
+        assert!(
+            registered["records_for_file"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        // Answered once: a second pass has nothing to do.
+        assert!(
+            answer_claims(&walk_dir, "fuzz-walk", &ledger)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A walk gets full records only for the files of its area, and an
+    /// index line for everything else, which it can read by id.
+    #[test]
+    fn a_walk_is_handed_full_records_for_its_area_and_an_index_of_the_rest() {
+        let tmp = target_with("src/a.rs", "fn a() {}\n");
+        std::fs::create_dir_all(tmp.path().join("lib")).unwrap();
+        std::fs::write(tmp.path().join("lib/z.rs"), "fn z() {}\n").unwrap();
+        let mut body = run_body();
+        body["findings"].as_array_mut().unwrap().push(json!({
+            "stable_id": "auth::lib/z.rs:1", "title": "outside the area", "framing": ["auth"],
+            "location": {"file": "lib/z.rs", "line_start": 1}
+        }));
+        let records = records_from_run(tmp.path(), &body, &[], "r1");
+        upsert(tmp.path(), &records).unwrap();
+        let ledger = load(tmp.path()).unwrap();
+
+        let area = Area::from_config(&json!({"scope": {"include": ["src/**"], "exclude": []}}));
+        assert!(area.contains("src/a.rs"));
+        assert!(area.contains("src/deep/er/b.rs"));
+        assert!(!area.contains("lib/z.rs"));
+        let handed = for_walk(&ledger, &area);
+        let full: Vec<&str> = handed["area"]
             .as_array()
             .unwrap()
             .iter()
             .map(|r| r["key"].as_str().unwrap())
             .collect();
-        assert!(settled.contains(&"auth::src/a.rs:10"));
-        assert!(!settled.contains(&"injection::src/a.rs:20"));
-        let context: Vec<&str> = handed["context"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| r["key"].as_str().unwrap())
-            .collect();
-        assert!(context.contains(&"injection::src/a.rs:20"));
+        assert!(full.contains(&"auth::src/a.rs:10"));
+        assert!(!full.contains(&"auth::lib/z.rs:1"));
+        assert!(
+            handed["area"][0].get("claim").is_some(),
+            "area records are whole"
+        );
+        let index = handed["index"].as_array().unwrap();
+        assert_eq!(index.len(), 1);
+        let line = index[0].as_object().unwrap();
+        assert_eq!(line["key"], "auth::lib/z.rs:1");
+        assert_eq!(line["evidence"], "reasoned");
+        assert_eq!(line["stale"], false);
+        let mut keys: Vec<&str> = line.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["evidence", "id", "key", "stale"],
+            "an index line is compact"
+        );
+        // The id is the file to read the whole record from.
+        let id = line["id"].as_str().unwrap();
+        assert!(ledger_dir(tmp.path()).join(format!("{id}.json")).is_file());
+        assert_eq!(handed["read_a_record_at"], ".lyrik/ledger/<id>.json");
+
+        // Patterns: a bare name matches in any directory; exclude wins;
+        // no include means everything.
+        let sh =
+            Area::from_config(&json!({"scope": {"include": ["*.sh"], "exclude": ["vendor/**"]}}));
+        assert!(sh.contains("a.sh"));
+        assert!(sh.contains("tools/b.sh"));
+        assert!(!sh.contains("vendor/c.sh"));
+        assert!(!sh.contains("a.rs"));
+        assert!(Area::default().contains("anything/at/all"));
     }
 
     /// When the file changes, every record established against the old
@@ -669,9 +1028,25 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let handed = for_walk(&ledger);
-        assert_eq!(handed["stale_left_out"], 5);
-        assert!(handed["settled"].as_array().unwrap().is_empty());
+        let handed = for_walk(&ledger, &Area::default());
+        assert!(handed["area"].as_array().unwrap().is_empty());
+        let index = handed["index"].as_array().unwrap();
+        assert_eq!(index.len(), 5);
+        assert!(index.iter().all(|line| line["stale"] == true));
+        // Registering the same claim is no longer refused either.
+        claim(
+            &walk_dir,
+            "claim-001.json",
+            &json!({"class": "auth", "file": "src/a.rs", "line": 10}),
+        );
+        let answers = answer_claims(&walk_dir, "sink-walk", &ledger).unwrap();
+        assert_eq!(answers[0].decision, "registered");
+        assert!(
+            decision(&walk_dir, "claim-001")["records_for_file"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
 
         // The file put back: the records stand again.
         std::fs::write(tmp.path().join("src/a.rs"), "fn a() {}\n").unwrap();

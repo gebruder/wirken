@@ -437,6 +437,11 @@ pub struct LlmClient {
     /// The stop reason of the reply the last call returned. Set by
     /// each call, read by the runtime straight after it.
     last_stop: Mutex<Option<(StopReason, String)>>,
+    /// How many times a request that failed in transport is sent
+    /// again. Zero, the default, sends it once.
+    transport_retries: std::sync::atomic::AtomicU32,
+    /// Transport retries made by this client, for a caller's records.
+    transport_retries_made: std::sync::atomic::AtomicU32,
     /// Lazy-initialized tinfoil SDK client. Construction performs
     /// AMD SEV-SNP attestation + Sigstore verification + TLS pinning
     /// against the discovered enclave; the result is cached for the
@@ -491,6 +496,8 @@ impl LlmClient {
             http,
             observer: Mutex::new(None),
             last_stop: Mutex::new(None),
+            transport_retries: std::sync::atomic::AtomicU32::new(0),
+            transport_retries_made: std::sync::atomic::AtomicU32::new(0),
             tinfoil: tokio::sync::Mutex::new(None),
             leak_matcher: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
             plan_source: None,
@@ -569,6 +576,21 @@ impl LlmClient {
         *self.observer.lock().unwrap() = Some(observer);
     }
 
+    /// Send a request that failed in transport again, up to `retries`
+    /// times. A transport failure is one where no response arrived: the
+    /// connection could not be made, timed out or was dropped while the
+    /// request was being sent. Zero, the default, sends once.
+    pub fn set_transport_retries(&self, retries: u32) {
+        self.transport_retries
+            .store(retries, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Transport retries this client has made.
+    pub fn transport_retries_made(&self) -> u32 {
+        self.transport_retries_made
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Send a request through `build` with HTTP-429 retry/backoff.
     /// `build` is called fresh per attempt — `reqwest::RequestBuilder`
     /// is not cheaply cloneable across awaits, and Bedrock requires a
@@ -578,19 +600,39 @@ impl LlmClient {
     ///
     /// 429 responses retry with backoff up to
     /// [`MAX_RATE_LIMIT_RETRIES`] attempts. Any other status (success
-    /// or non-429 error) is returned to the caller unchanged. Network
-    /// errors propagate immediately (no retry) so a wedged client
-    /// doesn't sit in a backoff loop.
-    async fn send_with_retry<F>(&self, mut build: F) -> Result<reqwest::Response, AgentError>
+    /// or non-429 error) is returned to the caller unchanged. A network
+    /// error propagates at once unless the caller set
+    /// [`Self::set_transport_retries`]; then a request that got no
+    /// response is sent again that many times, one, two, four and at
+    /// most eight seconds apart, before the error is returned.
+    pub(crate) async fn send_with_retry<F>(
+        &self,
+        mut build: F,
+    ) -> Result<reqwest::Response, AgentError>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
         let mut attempt: u32 = 1;
+        let transport_retries = self
+            .transport_retries
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut transport_attempt: u32 = 0;
         loop {
-            let resp = build()
-                .send()
-                .await
-                .map_err(|e| AgentError::Http(e.to_string()))?;
+            let resp = match build().send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let no_response = e.is_connect() || e.is_timeout() || e.is_request();
+                    if !no_response || transport_attempt >= transport_retries {
+                        return Err(AgentError::Http(e.to_string()));
+                    }
+                    transport_attempt += 1;
+                    self.transport_retries_made
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let delay_secs = 1u64 << (transport_attempt - 1).min(3);
+                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                    continue;
+                }
+            };
             if resp.status().as_u16() != 429 {
                 return Ok(resp);
             }
