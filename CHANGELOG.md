@@ -10,6 +10,19 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- A Lyrik walk can run on its own model. An entry in `.lyrik/config.json`
+  keyed by a walk's name under `phases` (for example `phases.sink-walk`)
+  overrides the `model` and `max_tokens` for that walk; the provider, base
+  URL and credential stay the run's, so an entry naming a different provider
+  is refused and a walk with no entry uses the run pin. Each distinct model
+  is tool-call-probed before the run, fail-closed, and a walk's model is
+  recorded on its `lyrik.walk.started` row. Before this, every walk of a run
+  used the one run-level pin (`walks_in_one_run_take_their_own_models`,
+  `crates/cli/src/commands/lyrik.rs`;
+  [docs/lyrik.md](docs/lyrik.md#lyrikconfigjson)).
+
 ### Fixed
 
 - The WebChat session list writes `last_activity` in the text form every

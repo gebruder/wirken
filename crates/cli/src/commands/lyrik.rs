@@ -1246,6 +1246,12 @@ async fn dispatch_via_agent_runtime(
     if let Some(max) = pin.max_tokens {
         llm_config.max_tokens = max;
     }
+    // Per-walk model overrides, resolved before the probe so each
+    // distinct model is probed. Empty for the one-call slice.
+    let walk_configs = match walks_cfg.as_ref() {
+        Some(wc) => walk_llm_configs(config, &wc.walks, &llm_config)?,
+        None => std::collections::HashMap::new(),
+    };
 
     let cfg = super::config();
 
@@ -1375,6 +1381,58 @@ async fn dispatch_via_agent_runtime(
                 }),
             )?;
             return Err(e.context("preflight tool-call probe"));
+        }
+    }
+    // Each distinct per-walk override model is probed too, fail-closed:
+    // a walk pinned to a model that cannot emit tool calls would stage
+    // nothing, so abort before any audit work rather than mid-run.
+    let mut probed_models = std::collections::HashSet::from([llm_config.model.clone()]);
+    for walk_cfg in walk_configs.values() {
+        if !probed_models.insert(walk_cfg.model.clone()) {
+            continue;
+        }
+        match super::lyrik_preflight::probe_tool_calling(
+            walk_cfg,
+            api_key.as_deref(),
+            Some(&probe_record),
+        )
+        .await
+        {
+            Ok(super::lyrik_preflight::ProbeOutcome::Pass) => {
+                audit.emit(
+                    "lyrik.model.tool_calls_supported",
+                    serde_json::json!({ "provider": walk_cfg.provider, "model": walk_cfg.model }),
+                )?;
+            }
+            Ok(super::lyrik_preflight::ProbeOutcome::Fail { case, detail }) => {
+                audit.emit(
+                    "lyrik.model.tool_calls_unsupported",
+                    serde_json::json!({
+                        "provider": walk_cfg.provider,
+                        "model": walk_cfg.model,
+                        "case": case.as_str(),
+                        "detail": detail,
+                    }),
+                )?;
+                anyhow::bail!(
+                    "preflight: per-walk model {} (provider {}) cannot emit tool calls (case: {}); aborting before any audit work",
+                    walk_cfg.model,
+                    walk_cfg.provider,
+                    case.as_str(),
+                );
+            }
+            Err(e) => {
+                audit.emit(
+                    "lyrik.model.tool_calls_unsupported",
+                    serde_json::json!({
+                        "provider": walk_cfg.provider,
+                        "model": walk_cfg.model,
+                        "case": "preflight_error",
+                        "detail": e.to_string(),
+                    }),
+                )?;
+                return Err(e.context("preflight tool-call probe for a per-walk model"));
+            }
         }
     }
 
@@ -1712,7 +1770,7 @@ async fn dispatch_via_agent_runtime(
                 agent_id.clone(),
                 target.to_path_buf(),
                 run_id.to_string(),
-                llm_config.clone(),
+                walk_configs.clone(),
                 api_key.clone(),
                 api_key_credential.clone(),
                 session_log.clone(),
@@ -4011,7 +4069,9 @@ async fn dispatch_walks_concurrent(
     agent_id: String,
     target: PathBuf,
     run_id: String,
-    llm_config: LlmConfig,
+    // Each selected walk's model config, built by `walk_llm_configs`:
+    // the run pin, with a per-walk model override where one is set.
+    walk_configs: std::collections::HashMap<String, LlmConfig>,
     api_key: Option<String>,
     api_key_credential: Option<String>,
     session_log: Arc<dyn wirken_audit::SessionLog>,
@@ -4097,16 +4157,19 @@ async fn dispatch_walks_concurrent(
     let mut handles: Vec<(String, tokio::task::JoinHandle<WalkOutcome>)> =
         Vec::with_capacity(walks.len());
     for name in walks {
+        let llm_config_t = walk_configs
+            .get(&name)
+            .cloned()
+            .expect("every selected walk has a model config");
         audit.emit(
             "lyrik.walk.started",
-            serde_json::json!({"walk": name, "run_id": run_id}),
+            serde_json::json!({"walk": name, "run_id": run_id, "model": llm_config_t.model}),
         )?;
 
         let sem_handle = sem.clone();
         let agent_id_t = agent_id.clone();
         let target_t = target.clone();
         let run_id_t = run_id.clone();
-        let llm_config_t = llm_config.clone();
         let api_key_t = api_key.clone();
         let api_key_credential_t = api_key_credential.clone();
         let session_log_t = session_log.clone();
@@ -5472,6 +5535,50 @@ struct PhasePin {
     max_tokens: Option<u32>,
 }
 
+/// Per-walk model override. A walk may pin its own model under
+/// `phases.<walk-name>` in `.lyrik/config.json`; the provider, base
+/// URL, credential and the rest of the run pin stay the run's, so only
+/// the `model` string (and an optional `max_tokens`) is taken from the
+/// per-walk entry. A per-walk entry that names a different `provider`
+/// is rejected, because changing the provider would need its own
+/// credential. Every selected walk gets an entry: the override where
+/// one is set, otherwise the run's `base` config.
+fn walk_llm_configs(
+    config: &serde_json::Value,
+    walks: &[String],
+    base: &LlmConfig,
+) -> Result<std::collections::HashMap<String, LlmConfig>> {
+    let phases = config.get("phases");
+    let mut out = std::collections::HashMap::with_capacity(walks.len());
+    for w in walks {
+        let mut cfg = base.clone();
+        if let Some(entry) = phases.and_then(|p| p.get(w)) {
+            if let Some(prov) = entry.get("provider").and_then(|v| v.as_str())
+                && prov != base.provider
+            {
+                anyhow::bail!(
+                    "phases.{w} sets provider `{prov}`, but a per-walk override may change \
+                     only the model, not the provider (the run's provider is `{}`)",
+                    base.provider
+                );
+            }
+            if let Some(model) = entry.get("model").and_then(|v| v.as_str()) {
+                cfg.model = model.to_string();
+            }
+            if let Some(mt) = entry
+                .get("max_tokens")
+                .and_then(|v| v.as_u64())
+                .filter(|n| *n > 0)
+                .and_then(|n| u32::try_from(n).ok())
+            {
+                cfg.max_tokens = mt;
+            }
+        }
+        out.insert(w.clone(), cfg);
+    }
+    Ok(out)
+}
+
 fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
     let phases = config
         .get("phases")
@@ -5769,6 +5876,61 @@ mod tests {
     }
 
     use super::resolve_phase_pin;
+
+    /// Two walks in one run get two different models: a walk with a
+    /// `phases.<walk>` model override takes it, the others take the run
+    /// pin, and the provider, base URL and context window stay the
+    /// run's. A per-walk override that changes the provider is refused.
+    #[test]
+    fn walks_in_one_run_take_their_own_models() {
+        let cfg = serde_json::json!({
+            "phases": {
+                "framing": { "provider": "anthropic", "model": "model-a", "max_tokens": 16000 },
+                "sink-walk": { "model": "model-b", "max_tokens": 4000 }
+            }
+        });
+        let pin = super::resolve_phase_pin(&cfg).unwrap();
+        let mut base = super::LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
+        if let Some(m) = pin.max_tokens {
+            base.max_tokens = m;
+        }
+        assert_eq!(base.model, "model-a");
+        let walks = vec!["sink-walk".to_string(), "chain-walk".to_string()];
+        let got = super::walk_llm_configs(&cfg, &walks, &base).unwrap();
+
+        // The overridden walk takes model-b and its max_tokens; the
+        // other takes the run pin, model-a.
+        assert_eq!(got["sink-walk"].model, "model-b");
+        assert_eq!(got["sink-walk"].max_tokens, 4000);
+        assert_eq!(got["chain-walk"].model, "model-a");
+        assert_eq!(got["chain-walk"].max_tokens, base.max_tokens);
+        // Provider and base URL are the run's for both.
+        for w in &walks {
+            assert_eq!(got[w].provider, "anthropic");
+            assert_eq!(got[w].base_url, base.base_url);
+        }
+
+        // A per-walk entry changing the provider is rejected.
+        let bad = serde_json::json!({
+            "phases": {
+                "framing": { "provider": "anthropic", "model": "model-a" },
+                "sink-walk": { "provider": "openai", "model": "gpt-x" }
+            }
+        });
+        let err = super::walk_llm_configs(&bad, &walks, &base).unwrap_err();
+        assert!(
+            err.to_string().contains("only the model, not the provider"),
+            "{err}"
+        );
+
+        // No phases override for a walk: it is the run pin.
+        let plain = serde_json::json!({
+            "phases": { "framing": { "provider": "anthropic", "model": "model-a" } }
+        });
+        let got = super::walk_llm_configs(&plain, &walks, &base).unwrap();
+        assert!(got.values().all(|c| c.model == "model-a"));
+        assert_eq!(got.len(), 2);
+    }
 
     #[test]
     fn resolve_phase_pin_returns_context_window_when_set() {
