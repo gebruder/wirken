@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-11-18
+
 ### Operator notes
 
 - Nothing in this release needs a configuration change or a migration.

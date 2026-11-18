@@ -4078,11 +4078,11 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-core"
-version = "3.4.0"
+version = "3.4.1"
 
 [[package]]
 name = "wirken-agent"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -4121,7 +4121,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-audit"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "async-trait",
  "ed25519-dalek 3.0.0",
@@ -4155,7 +4155,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-gateway"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -4186,7 +4186,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-ipc"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "async-trait",
  "capnp",
@@ -4202,7 +4202,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-mcp-proxy"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4231,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-sandbox"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4247,7 +4247,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-time"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "jiff",
  "serde",
@@ -4255,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-vault"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
