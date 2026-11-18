@@ -25,6 +25,15 @@ tagged.
   `crates/cli/src/commands/lyrik.rs`;
   [docs/lyrik.md](docs/lyrik.md#lyrikconfigjson)).
 
+- `llm_request` and `llm_response` rows carry `step`, the step of a run the
+  call was made for, when the caller names one. A Lyrik run writes the walk's
+  name on a walk's calls, `replay` on a replay's and `probe` on the preflight
+  probe's, so a run's model calls can be told apart by walk on the chain. The
+  field is absent on every other row, and rows written before it read as
+  before (`model_call_rows_name_the_walk_they_were_made_for`,
+  `crates/cli/tests/lyrik_walks_run_under_their_own_skills.rs`;
+  [docs/audit-cli.md](docs/audit-cli.md)).
+
 ### Fixed
 
 - A Lyrik walk or replay whose turn ended in an error, for example at the

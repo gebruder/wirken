@@ -335,6 +335,10 @@ pub struct Agent {
     last_turn_rounds: usize,
     /// Whether the last turn was stopped at `max_tool_rounds`.
     last_turn_exhausted: bool,
+    /// The step of a run this agent's model calls are made for, written
+    /// on their `LlmRequest` and `LlmResponse` rows. `None` unless the
+    /// harness names one.
+    call_step: Option<String>,
     /// Calls refused since the last turn began. A turn that ends in an
     /// error returns no [`ProcessResult`], so this is where its refused
     /// calls are read from.
@@ -834,6 +838,7 @@ impl Agent {
             last_turn_rounds: 0,
             last_turn_exhausted: false,
             last_turn_denials: Vec::new(),
+            call_step: None,
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -950,6 +955,7 @@ impl Agent {
             last_turn_rounds: 0,
             last_turn_exhausted: false,
             last_turn_denials: Vec::new(),
+            call_step: None,
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -1190,6 +1196,13 @@ impl Agent {
     /// own.
     pub fn set_agent_id(&mut self, agent_id: impl Into<String>) {
         self.agent_id = Some(agent_id.into());
+    }
+
+    /// Name the step of a run this agent's model calls are made for.
+    /// Every `LlmRequest` and `LlmResponse` row it writes from then on
+    /// carries the name as `step`.
+    pub fn set_call_step(&mut self, step: impl Into<String>) {
+        self.call_step = Some(step.into());
     }
 
     /// How many model calls one turn may make. The default is
@@ -2765,6 +2778,7 @@ impl Agent {
                 self.audited_agent_id(),
                 self.api_key_credential.clone(),
                 self.current_inbound.sender_id.clone(),
+                self.call_step.clone(),
             ),
         )?;
         let meter = self.meter_model_time();
@@ -2785,6 +2799,7 @@ impl Agent {
                     self.audited_agent_id(),
                     self.api_key_credential.clone(),
                     self.current_inbound.sender_id.clone(),
+                    self.call_step.clone(),
                 );
                 self.log_event(TrustLevel::System, row)?;
                 self.charge_budget(total_cost_usd_micros);
@@ -3504,6 +3519,7 @@ impl Agent {
                     sender_id: self.current_inbound.sender_id.clone(),
                     request_bytes: Some(request_bytes(self.conversation.messages(), &tool_defs)),
                     purpose: wirken_audit::LlmCallPurpose::Turn,
+                    step: self.call_step.clone(),
                 },
             )?;
 
@@ -3554,6 +3570,7 @@ impl Agent {
                     output_cost_usd_micros,
                     total_cost_usd_micros,
                     sender_id: self.current_inbound.sender_id.clone(),
+                    step: self.call_step.clone(),
                 },
             )?;
             self.charge_budget(total_cost_usd_micros);
@@ -3900,6 +3917,7 @@ impl Agent {
                     sender_id: self.current_inbound.sender_id.clone(),
                     request_bytes: Some(request_bytes(self.conversation.messages(), &tool_defs)),
                     purpose: wirken_audit::LlmCallPurpose::Turn,
+                    step: self.call_step.clone(),
                 },
             )?;
 
@@ -3974,6 +3992,7 @@ impl Agent {
                     output_cost_usd_micros,
                     total_cost_usd_micros,
                     sender_id: self.current_inbound.sender_id.clone(),
+                    step: self.call_step.clone(),
                 },
             )?;
             self.charge_budget(total_cost_usd_micros);
@@ -6951,6 +6970,7 @@ pub fn side_call_request(
     agent_id: String,
     credential_id: Option<String>,
     sender_id: Option<String>,
+    step: Option<String>,
 ) -> SessionEvent {
     SessionEvent::LlmRequest {
         provider: config.provider.clone(),
@@ -6964,6 +6984,7 @@ pub fn side_call_request(
         sender_id,
         request_bytes: Some(request_bytes(messages, tools)),
         purpose,
+        step,
     }
 }
 
@@ -6980,6 +7001,7 @@ pub fn side_call_response(
     agent_id: String,
     credential_id: Option<String>,
     sender_id: Option<String>,
+    step: Option<String>,
 ) -> (SessionEvent, Option<u64>) {
     let LlmResponseAttribution {
         input_tokens,
@@ -7007,6 +7029,7 @@ pub fn side_call_response(
             output_cost_usd_micros,
             total_cost_usd_micros,
             sender_id,
+            step,
         },
         total_cost_usd_micros,
     )

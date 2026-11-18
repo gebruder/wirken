@@ -860,6 +860,13 @@ pub enum SessionEvent {
         /// What the call was for. Omitted for a turn.
         #[serde(default, skip_serializing_if = "LlmCallPurpose::is_turn")]
         purpose: LlmCallPurpose,
+        /// The step of a run the call was made for, when the caller
+        /// names one. A Lyrik run names the walk on a walk's calls
+        /// (`sink-walk`), `replay` on a replay's and `probe` on the
+        /// preflight probe's. Absent on rows written before the field
+        /// existed and for a caller that names no step.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<String>,
     },
     /// LLM response metadata.
     ///
@@ -941,6 +948,10 @@ pub enum SessionEvent {
         /// `LlmResponse` always agree on the human principal.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
+        /// See [`Self::LlmRequest::step`]: the same value as on the
+        /// request this row answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<String>,
     },
     /// The model call an [`Self::LlmRequest`] started failed: the
     /// request was refused before it was sent, the provider answered

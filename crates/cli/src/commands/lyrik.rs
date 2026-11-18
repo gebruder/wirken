@@ -3823,6 +3823,7 @@ async fn dispatch_replays(
                 }
             };
             agent.set_agent_id(agent_id_t);
+            agent.set_call_step(REPLAY_STEP);
             agent.set_leak_matcher(leak_t);
             attach_terminal_gate(&mut agent, "replay", terminal_t);
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
@@ -4012,6 +4013,8 @@ struct AgentWalkSession<'a> {
 
 /// Why a walk ended when the run reached its cost ceiling.
 const STOPPED_AT_CEILING: &str = "the run reached its cost ceiling";
+/// `step` on the `LlmRequest` and `LlmResponse` rows of a replay.
+const REPLAY_STEP: &str = "replay";
 
 impl super::lyrik_walks::WalkSession for AgentWalkSession<'_> {
     async fn send(
@@ -4246,6 +4249,8 @@ async fn dispatch_walks_concurrent(
             // above: an agent that has not named itself gets no
             // persisted grants.
             local_agent.set_agent_id(agent_id_t.clone());
+            // The walk's name, on every model call it makes.
+            local_agent.set_call_step(walk_name.clone());
             local_agent.set_leak_matcher(leak_t);
             local_agent.set_transport_retries(transport_retries);
             attach_terminal_gate(&mut local_agent, &walk_name, terminal_t);

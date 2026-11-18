@@ -1010,6 +1010,7 @@ mod tests {
             sender_id: Some("U123".into()),
             request_bytes: None,
             purpose: Default::default(),
+            step: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"sender_id\":\"U123\""));
@@ -1048,6 +1049,7 @@ mod tests {
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
             sender_id: None,
+            step: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(
@@ -1087,6 +1089,7 @@ mod tests {
             sender_id: None,
             request_bytes: None,
             purpose: Default::default(),
+            step: None,
         };
         assert!(!should_forward(&req, &cfg));
     }

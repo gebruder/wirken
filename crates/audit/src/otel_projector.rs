@@ -1370,6 +1370,7 @@ mod tests {
             sender_id: None,
             request_bytes: None,
             purpose: Default::default(),
+            step: None,
         }
     }
 
@@ -1390,6 +1391,7 @@ mod tests {
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
             sender_id: None,
+            step: None,
         }
     }
 
@@ -2735,6 +2737,7 @@ mod tests {
                 sender_id: None,
                 request_bytes: None,
                 purpose: Default::default(),
+                step: None,
             },
             &parent,
             at(1),
@@ -2773,6 +2776,7 @@ mod tests {
                 sender_id: None,
                 request_bytes: None,
                 purpose: Default::default(),
+                step: None,
             },
             &parent,
             at(1),
@@ -2819,6 +2823,7 @@ mod tests {
                 sender_id: None,
                 request_bytes: None,
                 purpose: Default::default(),
+                step: None,
             },
             &parent,
             at(1),
@@ -2881,6 +2886,7 @@ mod tests {
                 sender_id: None,
                 request_bytes: None,
                 purpose: Default::default(),
+                step: None,
             },
             &parent,
             at(1),
@@ -2991,6 +2997,7 @@ mod tests {
                 sender_id: None,
                 request_bytes: None,
                 purpose: Default::default(),
+                step: None,
             },
             &parent,
             at(1),

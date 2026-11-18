@@ -6599,6 +6599,7 @@ mod tests {
                     output_cost_usd_micros: Some(5),
                     total_cost_usd_micros: Some(15),
                     sender_id: None,
+                    step: None,
                 },
             ),
             (
@@ -6622,6 +6623,7 @@ mod tests {
                     sender_id: Some("webchat-user".into()),
                     request_bytes: None,
                     purpose: Default::default(),
+                    step: None,
                 },
             ),
             (

@@ -1109,6 +1109,7 @@ mod session {
                     sender_id: None,
                     request_bytes: None,
                     purpose: Default::default(),
+                    step: None,
                 },
             ),
             (
@@ -1129,6 +1130,7 @@ mod session {
                     output_cost_usd_micros: None,
                     total_cost_usd_micros: None,
                     sender_id: None,
+                    step: None,
                 },
             ),
             (
@@ -1519,6 +1521,7 @@ mod session {
                 output_cost_usd_micros: None,
                 total_cost_usd_micros: None,
                 sender_id: None,
+                step: None,
             },
         )
         .unwrap();
@@ -1589,6 +1592,7 @@ mod session {
                 output_cost_usd_micros: Some(37_500),
                 total_cost_usd_micros: Some(52_500),
                 sender_id: None,
+                step: None,
             },
         )
         .unwrap();
@@ -1654,6 +1658,7 @@ mod session {
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
             sender_id: None,
+            step: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -1708,6 +1713,7 @@ mod session {
                 output_cost_usd_micros: Some(1),
                 total_cost_usd_micros: Some(2),
                 sender_id: None,
+                step: None,
             },
         )
         .unwrap();
@@ -1740,6 +1746,7 @@ mod session {
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
             sender_id: None,
+            step: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -3347,6 +3354,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             sender_id: None,
             request_bytes: None,
             purpose: Default::default(),
+            step: None,
         },
         SessionEvent::LlmResponse {
             request_id: String::new(),
@@ -3364,6 +3372,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
             sender_id: None,
+            step: None,
         },
         SessionEvent::BudgetExceeded {
             agent_id: String::new(),

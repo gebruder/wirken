@@ -7938,6 +7938,7 @@ mod verify {
                 sender_id: None,
                 request_bytes: None,
                 purpose: Default::default(),
+                step: None,
             },
         )
         .unwrap();
@@ -7964,6 +7965,7 @@ mod verify {
                 output_cost_usd_micros: None,
                 total_cost_usd_micros: None,
                 sender_id: None,
+                step: None,
             },
         )
         .unwrap();
@@ -8912,6 +8914,7 @@ mod per_channel_llm_override {
                     sender_id: None,
                     request_bytes: None,
                     purpose: Default::default(),
+                    step: None,
                 },
             )
             .unwrap();
@@ -8971,6 +8974,7 @@ mod per_channel_llm_override {
                     sender_id: None,
                     request_bytes: None,
                     purpose: Default::default(),
+                    step: None,
                 },
             )
             .unwrap();
@@ -9073,6 +9077,7 @@ mod per_channel_llm_override {
                     sender_id: None,
                     request_bytes: None,
                     purpose: Default::default(),
+                    step: None,
                 },
             )
             .unwrap();

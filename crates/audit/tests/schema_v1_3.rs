@@ -343,6 +343,7 @@ fn snapshot_llm_request_size_and_purpose() {
         sender_id: None,
         request_bytes: Some(1234),
         purpose,
+        step: None,
     };
     let turn: Value = serde_json::to_value(row(wirken_audit::LlmCallPurpose::Turn)).unwrap();
     assert_eq!(turn["request_bytes"], 1234);
@@ -364,6 +365,49 @@ fn snapshot_llm_request_size_and_purpose() {
     }
 }
 
+/// `step` is written only when the caller names one, on the request
+/// and on its response, and a row written before the field existed
+/// reads as naming none.
+#[test]
+fn llm_rows_carry_a_step_only_when_one_is_named() {
+    let request = |step: Option<&str>| SessionEvent::LlmRequest {
+        provider: "ollama".into(),
+        model: "m".into(),
+        request_id: "req-1".into(),
+        tools_hash_version: wirken_audit::ToolsHashVersion::V2,
+        tools_hash: HashHex("aa".repeat(32)),
+        messages_hash: HashHex("bb".repeat(32)),
+        agent_id: "lyrik-r1".into(),
+        credential_id: None,
+        sender_id: None,
+        request_bytes: Some(1234),
+        purpose: wirken_audit::LlmCallPurpose::Turn,
+        step: step.map(str::to_string),
+    };
+    let unnamed: Value = serde_json::to_value(request(None)).unwrap();
+    assert!(unnamed.get("step").is_none(), "{unnamed}");
+    let back: SessionEvent = serde_json::from_value(unnamed).unwrap();
+    assert!(matches!(back, SessionEvent::LlmRequest { step: None, .. }));
+
+    let named: Value = serde_json::to_value(request(Some("sink-walk"))).unwrap();
+    assert_eq!(named["step"], "sink-walk");
+    let back: SessionEvent = serde_json::from_value(named).unwrap();
+    assert!(matches!(back, SessionEvent::LlmRequest { step: Some(s), .. } if s == "sink-walk"));
+
+    let response: SessionEvent = serde_json::from_value(serde_json::json!({
+        "kind": "llm_response", "request_id": "req-1", "finish_reason": "text",
+        "latency_ms": 1, "step": "replay",
+    }))
+    .unwrap();
+    assert!(matches!(&response, SessionEvent::LlmResponse { step: Some(s), .. } if s == "replay"));
+    assert_eq!(serde_json::to_value(&response).unwrap()["step"], "replay");
+    let old: SessionEvent = serde_json::from_value(serde_json::json!({
+        "kind": "llm_response", "request_id": "req-1", "finish_reason": "text", "latency_ms": 1,
+    }))
+    .unwrap();
+    assert!(matches!(old, SessionEvent::LlmResponse { step: None, .. }));
+}
+
 #[test]
 fn llm_request_with_credential_id_round_trips() {
     // The 1.3.x wire shape carries credential_id when the gateway
@@ -381,6 +425,7 @@ fn llm_request_with_credential_id_round_trips() {
         sender_id: None,
         request_bytes: None,
         purpose: Default::default(),
+        step: None,
     };
     let json = serde_json::to_string(&original).unwrap();
     assert!(
@@ -413,6 +458,7 @@ fn llm_request_with_credential_id_none_omits_field_on_wire() {
         sender_id: None,
         request_bytes: None,
         purpose: Default::default(),
+        step: None,
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(
@@ -447,6 +493,7 @@ fn llm_response_with_credential_id_round_trips() {
         output_cost_usd_micros: None,
         total_cost_usd_micros: None,
         sender_id: None,
+        step: None,
     };
     let json = serde_json::to_string(&original).unwrap();
     assert!(json.contains("\"credential_id\":\"anthropic-api-key\""));
@@ -719,6 +766,7 @@ fn snapshot_llm_response_renames_tokens_and_carries_agent_id() {
         output_cost_usd_micros: None,
         total_cost_usd_micros: None,
         sender_id: None,
+        step: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["input_tokens", "output_tokens", "agent_id"]);

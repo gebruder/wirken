@@ -279,3 +279,68 @@ fn a_walk_stopped_at_the_round_limit_reports_its_refused_calls() {
     let dispatch = audit_row(&target, "lyrik.dispatch.completed");
     assert_eq!(dispatch["denials"], denied, "{dispatch}");
 }
+
+/// Every model call of a per-walk run says on its chain rows what it
+/// was for: the walk's name on the walk's calls, `probe` on the
+/// preflight probe, on the request and on its response.
+#[test]
+fn model_call_rows_name_the_walk_they_were_made_for() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, data, target) = (
+        tmp.path().join("home"),
+        tmp.path().join("data"),
+        tmp.path().join("target"),
+    );
+    let walk = data.join("lyrik/walks/sink-walk");
+    std::fs::create_dir_all(&walk).unwrap();
+    std::fs::write(
+        walk.join("SKILL.md"),
+        "---\nname: sink-walk\ndescription: test walk\n---\n\n# sink-walk\n\nWalk sinks.\n",
+    )
+    .unwrap();
+    let model = ScriptedModel::start(vec![
+        call("probe_ping", serde_json::json!({"marker": "ok"})),
+        call("list_files", serde_json::json!({})),
+        serde_json::json!({"role": "assistant", "content": "Done."}),
+    ]);
+    write_target(&target, &model);
+
+    let out = wirken(&data)
+        .env("HOME", &home)
+        .args(["lyrik", "run", "--bench", "--target"])
+        .arg(&target)
+        .args(["--run", RUN])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
+    let steps: Vec<(String, Option<String>)> = db
+        .prepare(
+            "SELECT json_extract(payload, '$.kind'), json_extract(payload, '$.step')
+               FROM session_events
+              WHERE json_extract(payload, '$.kind') IN ('llm_request', 'llm_response')
+              ORDER BY seq",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let row = |kind: &str, step: &str| (kind.to_string(), Some(step.to_string()));
+    assert_eq!(
+        steps,
+        [
+            row("llm_request", "probe"),
+            row("llm_response", "probe"),
+            row("llm_request", "sink-walk"),
+            row("llm_response", "sink-walk"),
+            row("llm_request", "sink-walk"),
+            row("llm_response", "sink-walk"),
+        ]
+    );
+}

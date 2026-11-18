@@ -62,6 +62,8 @@ impl FailCase {
 }
 
 const PROBE_TOOL_NAME: &str = "probe_ping";
+/// `step` on the probe's `LlmRequest` and `LlmResponse` rows.
+const PROBE_STEP: &str = "probe";
 
 /// Where the probe's request and its outcome go: the run's signed
 /// chain, so the probe is on it like every other model call the run
@@ -119,6 +121,7 @@ pub async fn probe_tool_calling(
                 r.agent_id.clone(),
                 r.credential_id.clone(),
                 None,
+                Some(PROBE_STEP.to_string()),
             ),
         )?;
     }
@@ -137,6 +140,7 @@ pub async fn probe_tool_calling(
                     r.agent_id.clone(),
                     r.credential_id.clone(),
                     None,
+                    Some(PROBE_STEP.to_string()),
                 )
                 .0
             }
