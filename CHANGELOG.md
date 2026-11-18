@@ -10,6 +10,14 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- The WebChat session list writes `last_activity` in the text form every
+  other timestamp has (zero, three, six or nine fractional digits and a
+  `Z`). Since 3.4.0 it was written by the time library's own serializer,
+  which drops trailing zeros, and compiled only because another dependency
+  switched that serializer on.
+
 ## [3.4.1] - 2026-11-18
 
 ### Operator notes

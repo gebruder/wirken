@@ -4119,7 +4119,7 @@ fn conversation_rows(
                     "log_id": row.log_id,
                     "channel": row.channel,
                     "message_count": row.message_count,
-                    "last_activity": row.last_activity,
+                    "last_activity": row.last_activity.to_rfc3339_z(),
                     "first_message": first_message,
                     "turn_open": turn_open,
                     "turn_open_age_seconds": turn_age,
