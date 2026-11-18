@@ -196,7 +196,8 @@ JSON
     # provider. The scripted server never reads it.
     if ! "$WIRKEN" credentials list 2>/dev/null | grep -q 'custom-api-key'; then
         printf 'not-a-real-key\n' \
-            | "$WIRKEN" credentials add custom-api-key --stdin >/dev/null 2>&1
+            | "$WIRKEN" credentials add custom-api-key --stdin \
+                --provider custom --base-url "http://127.0.0.1:$PORT/v1" >/dev/null 2>&1
     fi
 
     for bundle in demo-tampered demo-selfsigned; do
