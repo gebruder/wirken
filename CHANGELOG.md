@@ -39,9 +39,10 @@ Lyrik's run output changed, so its version is 1.1.0: the first line of the
 sign-off summary, `lyrik_version` in `findings.json` and on the
 `lyrik.run.started` row. The pinned findings schema is unchanged. What
 changed is under Added below: results built from staged records with
-continuation after a cut-off reply, the ledger with claim registration, the
-per-walk run summary and its `walk_summary`, `claims_refused` and
-`ledger_refused` fields in `findings.json`, transport retries, and the
+continuation after a cut-off reply, the ledger with claim registration and
+carried findings, the per-walk run summary and its `walk_summary`,
+`claims_refused`, `ledger_refused`, `carried` and `cost` fields in
+`findings.json`, the cost ceiling and cache check, transport retries, and the
 `incomplete` walk status.
 
 ### Added
@@ -82,6 +83,34 @@ per-walk run summary and its `walk_summary`, `claims_refused` and
   `a_record_whose_file_changed_is_stale_and_blocks_nothing`,
   `crates/cli/src/commands/lyrik_ledger.rs`;
   [docs/lyrik.md](docs/lyrik.md#the-ledger)).
+
+- A ledger claim matches a settled record by place: the same file within two
+  lines, whatever class the walk named. Such a claim is refused with the
+  record quoted; a walk whose claim is a different defect registers again
+  naming the record and saying how, which is accepted, recorded and counted
+  in the run summary. A run's `findings.json` and SARIF carry the settled
+  findings for the run's scope, each marked `carried` with the run that
+  established it, so a repeat run on unchanged code does not read as empty;
+  stale records are not carried
+  (`a_claim_at_a_settled_place_is_refused_whatever_class_it_names`,
+  `settled_findings_in_scope_are_carried_and_stale_ones_are_not`,
+  `crates/cli/src/commands/lyrik_ledger.rs`).
+
+- A cost guard for Lyrik runs. `run_ceiling_usd` in the data directory's
+  `lyrik.json` is a ceiling on a run's recorded cost: when it is reached the
+  run ends its walks, starts no replay or fix step, keeps staged findings and
+  exits zero. There is none by default. The sign-off banner shows the
+  ceiling or that none is set, and says before the run starts when the model
+  has no price entry. From the third model call on, a run that is sending
+  its conversation uncached (more than half of at least 10,000 prompt
+  tokens) prints a warning with the tokens and the estimated extra cost,
+  writes a `lyrik.cost.cache_warning` row and repeats it in the summary.
+  Every run ends with its cost, also in `findings.json` under `cost`
+  (`a_session_with_caching_disabled_triggers_the_warning`,
+  `the_run_ceiling_is_reached_on_recorded_cost`,
+  `the_banner_shows_the_ceiling_and_a_missing_price_entry`,
+  `crates/cli/src/commands/lyrik_cost.rs`;
+  [docs/lyrik.md](docs/lyrik.md#cost-guard)).
 
 - A Lyrik walk's provider request that fails in transport is sent again,
   `transport_retries` times in the data directory's `lyrik.json`, default 2.

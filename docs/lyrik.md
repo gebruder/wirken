@@ -178,7 +178,7 @@ committed; run state lives under `.lyrik/state/`.
 |---|---|
 | Wirken vault | provider API keys |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `fix_tool_rounds`, `walk_continuations` and `transport_retries` |
+| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `fix_tool_rounds`, `walk_continuations`, `transport_retries` and `run_ceiling_usd` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
@@ -500,6 +500,7 @@ test target kept outside this repository):
 | `file_sha256` | SHA-256 of the file's content when it was established |
 | `evidence` | `observed` or `reasoned` |
 | `run` | the run that produced it; its `findings.json` and audit log hold the detail |
+| `tier` | on a finding, the severity tier the run gave it |
 | `stale` | present and true when the file's content has changed since |
 
 A record names no model, provider, walk or harness. It is a statement about
@@ -579,8 +580,66 @@ a staged finding that repeats a settled record is refused: it is moved to
 and its run, and `findings.json` lists it under `ledger_refused`. A walk that
 did not register a claim, or went on after a refusal, is caught there.
 
-A claim matches a record when the class, file and line are the same. A walk
-that names the same defect with another class is not matched.
+A claim matches a settled record by place, not by name: the same file, within
+two lines of the record's line, whatever class the walk gave it. Two walks
+that call one defect `unbounded_length` and `missing_bounds_check` are making
+the same claim. During run `ledger-e2` a claim of class `heap_overflow` at
+`len.sh:3` and one of class `missing_bounds_check` at `len.sh:4` were both
+refused against the record `unbounded_length::len.sh:3` that `ledger-e1` had
+written; the refusal quotes the record:
+
+```json
+{
+  "decision": "refused",
+  "established_by_run": "ledger-e1",
+  "key": "heap_overflow::len.sh:3",
+  "record": "6ccb28f1e9899bf6",
+  "record_key": "unbounded_length::len.sh:3",
+  "record_claim": "decode_len passes the header-declared length through unbounded; a.sh/b.sh copy more than the 8-byte slot",
+  "if_yours_is_a_different_defect": "register again with `differs_from` set to the record id and `how`, one sentence on how your claim differs from it"
+}
+```
+
+Those two claims were written by the operator into the run's staging directory
+while it ran, to see the runner's answer; the walks' own claims in that run
+were at other places.
+
+Refusal is the default. A walk whose claim really is another defect at the
+same place registers again with two more fields:
+
+```json
+{ "class": "race", "file": "len.sh", "line": 3,
+  "differs_from": "6ccb28f1e9899bf6",
+  "how": "The record is the missing bound; this is two writers to the same slot." }
+```
+
+That is answered `registered_distinct`, written as a
+`lyrik.claim.registered_distinct` row with the sentence, and counted in the run
+summary. Its finding is then left alone when results are put together.
+
+### Settled findings are carried into a run's output
+
+A repeat run on unchanged code does not read as empty. After a run's own
+findings are final, the runner adds to `findings.json` each settled finding
+record for a file in the run's scope that the run did not keep a finding at
+itself. A carried finding has the record's class, place, claim and tier, and a
+`carried` object naming the run that established it:
+
+```json
+"carried": { "commit": "022ca0eb6e280b504f8507cd4eb4df59938492e6", "evidence": "observed",
+             "from_run": "ledger-e1", "record": "6ccb28f1e9899bf6" }
+```
+
+The run prints what it carried, here from `ledger-e2`:
+
+```
+carried from the ledger: 1 finding(s) an earlier run observed, files unchanged: unbounded_length::len.sh:3
+```
+
+In SARIF the result's `properties.lyrik.carried` has the same object. A stale
+record is not carried, and neither is a reasoned one. A carried finding gets
+no replay and no fix step in the run that carries it, and writes no new ledger
+record.
 
 ### What it looks like across runs
 
@@ -632,6 +691,65 @@ claim replaces the stale record.
 The ledger is read and written only in per-walk runs. A `--bench` run and a
 fixture replay neither read nor write it. `.lyrik/ledger/` can be committed
 with the repository or ignored; delete it to start over.
+
+## Cost guard
+
+**A ceiling on a run's cost.** `run_ceiling_usd` in the data directory's
+`lyrik.json` is the most a run may spend, in USD of recorded cost. There is no
+ceiling unless the operator sets one. A target's `.lyrik/config.json` does not
+set it.
+
+```json
+{ "run_ceiling_usd": 25 }
+```
+
+The runner adds up the cost on the run's `llm_response` rows every two seconds.
+When the sum reaches the ceiling it says so, ends the walks' turns, starts no
+replay and no fix step, and builds `findings.json` from what is staged. The
+run exits zero. Because the check runs every two seconds a run goes over by
+what it spends in that time. From run `ledger-f`, with the ceiling at $0.15:
+
+```
+wirken lyrik: the run reached its cost ceiling of $0.15 ($0.18 recorded over 10 model calls); stopping, staged findings are kept
+walk sink-walk: 0 finding(s) staged, stopped at the run's cost ceiling, staged findings kept
+walk fuzz-walk: 0 finding(s) staged, stopped at the run's cost ceiling, staged findings kept
+cost: $0.18 recorded over 10 model call(s)
+stopped at the cost ceiling of $0.15: walks were ended, staged findings were kept, and no replay or fix step ran after it
+```
+
+The sign-off banner shows the ceiling, or that none is set. The first line is
+from run `ledger-e1`; the second is the text for a data directory with no
+ceiling:
+
+```
+  ceiling  the run stops at $5.00 of recorded cost (`run_ceiling_usd` in lyrik.json)
+  ceiling  none set: this run has no cost limit (`run_ceiling_usd` in lyrik.json sets one)
+```
+
+**A model with no price entry.** Cost comes from the price table
+(`crates/audit/src/pricing.toml`). When the run's model is not in it, no cost
+is recorded and a ceiling cannot hold. The banner says so before the run
+starts, in these words (from the test
+`the_banner_shows_the_ceiling_and_a_missing_price_entry`, not a run):
+
+```
+  ceiling  $25.00 is set but cannot be enforced: anthropic no-such-model has no price entry
+  pricing  anthropic no-such-model has no price entry: this run's cost is not recorded
+```
+
+**A check that the prompt cache is in use.** For a provider that reports cache
+tokens (Anthropic), from the third model call on the runner compares what was
+sent uncached with what was read from and written to the cache. A cached
+conversation sends almost nothing uncached. When more than half of all the
+prompt tokens so far were sent uncached, and at least 10,000 prompt tokens
+have been sent, the run prints a warning once with the tokens and an estimate
+of the extra cost, writes a `lyrik.cost.cache_warning` row, and repeats the
+line in the run summary. The estimate is the uncached tokens priced at the
+difference between the model's input and cache-read rates.
+
+Every run ends with its cost, and `findings.json` carries it under `cost`:
+the recorded spend, the number of calls and how many had no price, the ceiling
+and whether it stopped the run, and the cache warning if there was one.
 
 ## Defender fix step
 
@@ -1390,15 +1508,21 @@ without a marker and exits zero.
 
 ### Carried outside the schema
 
-Ten additions sit outside the schema contract. The validator tolerates unknown
+Thirteen additions sit outside the schema contract. The validator tolerates unknown
 keys, so they do not change `schema_version`, and a later minor release may
 change them:
 
 - `walk_summary`, a top-level array with one entry per walk: `walk`,
   `findings_staged`, `truncations`, `kept_at_truncation`, `continuations`,
-  `claims_registered`, `refused_at_registration`, `refused_at_aggregation`,
-  `completed`, and `incomplete_at_tool_rounds` for a walk stopped at the tool
-  round limit.
+  `claims_registered`, `registered_as_distinct`, `refused_at_registration`,
+  `refused_at_aggregation`, `completed`, `incomplete_at_tool_rounds` for a
+  walk stopped at the tool round limit, and `stopped_at_cost_ceiling`.
+- `carried` on a finding the run carried from the ledger (`from_run`, `record`,
+  `evidence`, `commit`), and a top-level `carried` with the `count` and the
+  keys. See [The ledger](#settled-findings-are-carried-into-a-runs-output).
+- `cost`, a top-level object: `spend` (`usd_micros`, `calls`,
+  `unpriced_calls`), `ceiling_usd`, `stopped_at_ceiling`, `priced` and
+  `cache_warning`. See [Cost guard](#cost-guard).
 - `claims_refused`, a top-level array present when a claim was refused at
   registration: `walk`, `file`, `key`, `decision`, `record` and
   `established_by_run`.
