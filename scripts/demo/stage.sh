@@ -5,7 +5,7 @@
 #
 #   up      everything before the first prompt, silently
 #   ask     the one visible run; the presenter answers the prompts
-#   skills  the refusal at load
+#   skills  the two signatures, then the refusals at load
 #   verify  the chain, one edit, the chain again
 #   down    stop the server, remove the scratch dir
 #
@@ -341,39 +341,66 @@ sys.exit(child.wait())
 PY
 }
 
-# One line per bundle from `skills list`: the table row for a bundle
-# that loaded, and for one that did not, the loader's reason with the
-# timestamp and the paths cut. The loader logs that reason through
-# tracing, which writes to stdout beside the table. NO_COLOR keeps
-# escape sequences out of what gets parsed.
-skill_lines() {
-    NO_COLOR=1 RUST_LOG=wirken_agent::skill=debug "$WIRKEN" skills list 2>/dev/null \
+# One line per bundle from `skills verify`: what the bundle's own
+# signature says, before any root is asked. An edited bundle's
+# signature does not cover its SKILL.md; an intact one is consistent
+# with itself and nothing more. RUST_LOG keeps the self-signed warning,
+# which carries the bundle's path, off the stage.
+signature_lines() {
+    # `skills verify` exits 1 on a signature that does not verify,
+    # which is an answer and not an error.
+    local bundle report
+    for bundle in demo-tampered demo-selfsigned; do
+        report="$(NO_COLOR=1 RUST_LOG=error "$WIRKEN" skills verify \
+            "$WIRKEN_DATA_DIR/skills/$bundle" 2>/dev/null)" || true
+        printf '%s\n' "$report" | python3 -c '
+import sys
+name = sys.argv[1]
+lines = [line.strip() for line in sys.stdin]
+for at, line in enumerate(lines):
+    if not line.startswith("Signature: "):
+        continue
+    status = line.split(": ", 1)[1]
+    if status == "INVALID":
+        why = lines[at + 1].rstrip(".") if at + 1 < len(lines) else ""
+        print(f"  {name:<17} signature invalid: {why[:1].lower()}{why[1:]}")
+    else:
+        print(f"  {name:<17} signature {status.split(" (")[0].lower()}, consistent with its own key")
+    break
+' "$bundle"
+    done
+}
+
+# One line per bundle from `skills list`: the last column of its table
+# row, which is the loader's reason for a bundle it refused and the
+# trust it loaded under for one it did not. NO_COLOR keeps escape
+# sequences out of what gets parsed.
+load_lines() {
+    NO_COLOR=1 RUST_LOG=error "$WIRKEN" skills list 2>/dev/null \
         | python3 -c '
 import re, sys
 for line in sys.stdin:
-    refused = re.search(r"skills/([^/]+)/SKILL\.md: skill load error: .* failed: (.*?)\. ", line)
-    if refused:
-        print(f"  {refused[1]:<17} refused: {refused[2]}")
+    cells = re.split(r"\s{2,}", line.strip())
+    if len(cells) < 2 or not cells[0].startswith("demo-"):
         continue
-    row = re.match(r"\s+(demo-\S+)\s.*\s(\S+)\s*$", line)
-    if row:
-        print(f"  {row[1]:<17} loads, {row[2]}")
-'
+    verdict = cells[-1]
+    if not verdict.startswith("refused"):
+        verdict = f"loads, {verdict}"
+    print(f"  {cells[0]:<17} {verdict}")
+' | sort -r
 }
 
-# Twice: once with the registry root moved aside, so only the
-# self-signed floor applies, and once with it back. A root left aside
-# by an interrupted run is put back first.
+# Two blocks over the same two bundles: what each signature says on
+# its own, then what the loader does with the registry root `up`
+# installed. Loading always answers to a root, the operator's or the
+# compiled one, so there is no pass without one to show.
 skills() {
-    local root="$WIRKEN_DATA_DIR/registry-root.pub"
-    [ ! -f "$root.aside" ] || mv "$root.aside" "$root"
-    [ -f "$root" ] || die "no registry root in the scratch dir; run 'up' first"
+    [ -f "$WIRKEN_DATA_DIR/registry-root.pub" ] \
+        || die "no registry root in the scratch dir; run 'up' first"
     asi ASI04
-    mv "$root" "$root.aside"
-    skill_lines
-    mv "$root.aside" "$root"
+    signature_lines
     printf '\n'
-    skill_lines
+    load_lines
 }
 
 verify() {
