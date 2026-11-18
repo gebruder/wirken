@@ -433,6 +433,16 @@ mod tests {
             cost_micros("openai", "gpt-5.5", 300_000, 1_000),
             (Some(3_000_000), Some(45_000), Some(3_045_000))
         );
+        // Bedrock: the global profile at the list price, the regional
+        // id ten percent over it.
+        assert_eq!(
+            cost_micros("bedrock", "global.anthropic.claude-opus-4-7", 1_000, 0).0,
+            Some(5_000)
+        );
+        assert_eq!(
+            cost_micros("bedrock", "anthropic.claude-opus-4-7", 1_000, 0).0,
+            Some(5_500)
+        );
         // gemini-2.5-pro: $1.25 / $10, and $2.50 / $15 over 200,000.
         assert_eq!(
             cost_micros("gemini", "gemini-2.5-pro", 200_001, 0).0,

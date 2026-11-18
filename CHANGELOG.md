@@ -23,11 +23,20 @@ tagged.
   per million tokens, where the table had $15 and $75. Found by Matthew
   Busel (@Mattbusel).
 
+- The Bedrock rows are keyed by the ids Bedrock uses, where the two rows the
+  table had matched no call. Opus 4.7 on Bedrock is priced at $5 and $25
+  under the `global.` id and at $5.50 and $27.50 under the regional ids,
+  where the table had $15 and $75; Sonnet 4.5 is $3 and $15 global and
+  $3.30 and $16.50 regional.
+
 ### Added
 
 - The pricing table lists the current Anthropic, OpenAI and Gemini models
   (`crates/audit/src/pricing.toml`). A model absent from it recorded no
-  cost.
+  cost. Anthropic's 4.5 models are listed under their dated ids as well as
+  their aliases.
+- A pricing row can carry a price that starts on a date. The Gemini models
+  with an announced increase are priced at the new rate from that date.
 - A pricing row can set its cache read rate, and a second tier for a model
   priced by prompt length. Cache reads on Anthropic's Opus 5.5 and Sonnet
   5.5 are priced at 0.05 times input and on Fable 5.1 and 5.2 at 0.025
