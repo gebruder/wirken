@@ -12,9 +12,21 @@ tagged.
 
 ### Operator notes
 
+- Nothing in this release needs a configuration change or a migration.
 - A Lyrik run in per-walk mode now writes `.lyrik/ledger/` in the target and
   reads it on the next run. Commit it or ignore it as the team prefers;
   delete it to start over.
+- A repeat Lyrik run on unchanged code lists the findings an earlier run
+  observed, marked `carried`, and does not check them again.
+- Three new settings in the data directory's `lyrik.json`, none required:
+  `walk_continuations` (turns a walk gets after a reply cut off at the
+  output limit, default 2), `transport_retries` (times a walk's provider
+  request that got no response is sent again, default 2) and
+  `run_ceiling_usd` (the most a run may spend; none by default).
+- A Lyrik run has no cost limit unless `run_ceiling_usd` is set. The sign-off
+  banner says which, and says when the run's model has no price entry.
+- Calls to Anthropic's Mythos 5.2 now record a cost and count against a USD
+  budget ceiling.
 
 - Recorded cost for Anthropic's Opus 4.5 and Opus 4.7 falls to a third. A
   USD budget ceiling on such an agent is reached later for the same traffic.
@@ -33,9 +45,9 @@ tagged.
   where the table had $15 and $75; Sonnet 4.5 is $3 and $15 global and
   $3.30 and $16.50 regional.
 
-### Lyrik 1.1.0
+### Lyrik 1.0.1
 
-Lyrik's run output changed, so its version is 1.1.0: the first line of the
+Lyrik's version is 1.0.1: the first line of the
 sign-off summary, `lyrik_version` in `findings.json` and on the
 `lyrik.run.started` row. The pinned findings schema is unchanged. What
 changed is under Added below: results built from staged records with
@@ -105,8 +117,12 @@ carried findings, the per-walk run summary and its `walk_summary`,
   its conversation uncached (more than half of at least 10,000 prompt
   tokens) prints a warning with the tokens and the estimated extra cost,
   writes a `lyrik.cost.cache_warning` row and repeats it in the summary.
-  Every run ends with its cost, also in `findings.json` under `cost`
-  (`a_session_with_caching_disabled_triggers_the_warning`,
+  Every run ends with its cost, also in `findings.json` under `cost`.
+  Findings carried from the ledger are their own count in the funnel,
+  `merged.carried`, beside `kept`
+  (`carried_findings_are_counted_in_the_funnel_beside_kept`,
+  `crates/cli/src/commands/lyrik.rs`;
+  `a_session_with_caching_disabled_triggers_the_warning`,
   `the_run_ceiling_is_reached_on_recorded_cost`,
   `the_banner_shows_the_ceiling_and_a_missing_price_entry`,
   `crates/cli/src/commands/lyrik_cost.rs`;
@@ -145,6 +161,13 @@ carried findings, the per-walk run summary and its `walk_summary`,
   whose whole input is over the threshold
   (`a_long_prompt_pays_the_second_tier`, `crates/audit/src/pricing.rs`;
   [docs/cost-monitoring.md](docs/cost-monitoring.md)).
+
+### Deferred
+
+- Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
+  serenity 0.12.5 in the Discord adapter, stay open as in 3.4.0. The fix for
+  all three is serenity on rustls 0.23, held until the migrated adapter
+  passes a live Discord round-trip.
 
 ## [3.4.0] - 2026-11-17
 

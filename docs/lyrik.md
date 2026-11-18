@@ -348,8 +348,9 @@ expected, not a grant and not a limit: nothing is approved ahead of time, and
 a command outside the list is put to the operator the same way. The section
 also tells the walk it has 20 tool rounds in its turn. A walk that uses them
 up ends there: the per-run log records `lyrik.walk.completed` with status
-`transient_failure` and the reason, what it had staged is still aggregated,
-and nothing in `findings.json` marks the walk as cut short.
+`incomplete` and the limit it reached, what it had staged is still aggregated,
+and the walk's `walk_summary` entry in `findings.json` carries
+`incomplete_at_tool_rounds`.
 With stdin on a terminal, the operator is asked at the moment each command is
 about to run, one prompt at a time across concurrent walks, in a prompt that
 is the walk's name and the exact command and nothing else; an answer covers
@@ -377,8 +378,9 @@ order. The first finding's `summary`, `id` and `stable_id` survive as
 canonical. Findings without a file and line pass through unchanged, so a
 malformed input does not collapse against everything else under a default key.
 
-Exit `0` when at least one walk completed; non-zero when every selected walk
-failed transiently. A refused call does not fail a walk or the run: the
+Exit `0` when at least one walk completed, was stopped at the tool round
+limit or was ended at the run's cost ceiling; non-zero when every selected
+walk failed transiently. A refused call does not fail a walk or the run: the
 refusal is on the chain, the model is told the step was not executed, and the
 walk carries on. Each walk's `lyrik.walk.completed` row lists what it skipped
 under `skipped`, as `tool (approval key)`, for example `exec (shell:git)`.
@@ -1418,9 +1420,9 @@ surface: its subcommands, flags, run output, and the fields `findings.json`
 carries outside the schema can change in any minor release. A schema
 contract changes only with a new schema tag.
 
-Lyrik has its own version, 1.1.0; it was 1.0.0 in Wirken 3.4.0. It is the
+Lyrik has its own version, 1.0.1; it was 1.0.0 in Wirken 3.4.0. It is the
 first line of
-the sign-off summary (`Lyrik 1.1.0 run <id> on <target>`), the
+the sign-off summary (`Lyrik 1.0.1 run <id> on <target>`), the
 `lyrik_version` field at the top of `findings.json`, and the
 `lyrik_version` field of the `lyrik.run.started` row, where
 `driver_version` is the Wirken version. What it covers: the tag-pinned
@@ -1519,7 +1521,8 @@ change them:
   walk stopped at the tool round limit, and `stopped_at_cost_ceiling`.
 - `carried` on a finding the run carried from the ledger (`from_run`, `record`,
   `evidence`, `commit`), and a top-level `carried` with the `count` and the
-  keys. See [The ledger](#settled-findings-are-carried-into-a-runs-output).
+  keys; the funnel's `merged.carried` is the same count. See
+  [The ledger](#settled-findings-are-carried-into-a-runs-output).
 - `cost`, a top-level object: `spend` (`usd_micros`, `calls`,
   `unpriced_calls`), `ceiling_usd`, `stopped_at_ceiling`, `priced` and
   `cache_warning`. See [Cost guard](#cost-guard).
@@ -1592,8 +1595,10 @@ and the SARIF report carries it under the run's `properties.lyrik.funnel`:
   (candidates a defender-mode rejection removed), and the `skipped` steps
   from its `lyrik.walk.completed` row.
 - `merged`: `emitted`, `refused`, `brocard_removed`, `collapsed` (findings
-  folded into another at the same location by dedup) and `kept` (findings in
-  `findings.json`).
+  folded into another at the same location by dedup) and `kept` (this run's
+  own findings in `findings.json`). When the run carried findings from the
+  ledger, `carried` is their count, and `kept` plus `carried` is the length
+  of the findings list.
 - `scanner`, when Semgrep ran: `candidates`, each counted once as `accepted`
   (a kept finding sits at its location), `brocard_rejected` (otherwise, when
   a candidate there was removed in defender mode), `declined` (otherwise, when

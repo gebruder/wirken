@@ -41,7 +41,7 @@ const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// It names the behaviour of `wirken lyrik`: its subcommands, flags, run
 /// output and the fields of `findings.json` outside the tag-pinned
 /// schema. The schema has its own version.
-pub(crate) const LYRIK_VERSION: &str = "1.1.0";
+pub(crate) const LYRIK_VERSION: &str = "1.0.1";
 
 // ---------------------------------------------------------------------------
 // `wirken lyrik run`
@@ -637,6 +637,15 @@ fn carry_settled_findings(
             .unwrap_or(&[])
     ));
     body["carried"] = serde_json::json!({ "count": keys.len(), "findings": keys });
+    // The funnel counts what this run's own turns emitted. Carried
+    // findings are beside that, as their own count, so the block
+    // reconciles with the list: kept + carried is its length.
+    if let Some(merged) = body
+        .pointer_mut("/funnel/merged")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        merged.insert("carried".into(), serde_json::json!(keys.len()));
+    }
     std::fs::write(findings, serde_json::to_string_pretty(&body)?)
         .with_context(|| format!("write {}", findings.display()))?;
     Ok(keys)
@@ -4718,7 +4727,10 @@ struct MergedFunnel {
     brocard_removed: usize,
     /// Findings folded into another at the same location by dedup.
     collapsed: usize,
-    /// Findings in findings.json.
+    /// This run's own findings in findings.json. Findings carried
+    /// from the ledger are counted beside it as `carried`, added when
+    /// they are; `kept` and `carried` together are the length of the
+    /// findings list.
     kept: usize,
 }
 
@@ -6590,7 +6602,7 @@ mod tests {
         );
         let lines: Vec<&str> = summary.lines().collect();
         assert_eq!(lines.len(), 8, "{summary}");
-        assert_eq!(lines[0], "Lyrik 1.1.0 run r1 on /t");
+        assert_eq!(lines[0], "Lyrik 1.0.1 run r1 on /t");
         assert!(lines[1].starts_with("  target   HEAD abc123, tracked-file state unknown: "));
         assert!(!summary.contains('\x1b'), "{summary}");
         assert!(lines[1].contains("\\nSign off"), "{summary}");
@@ -8132,12 +8144,76 @@ mod tests {
         assert_eq!(body["lyrik_version"], super::LYRIK_VERSION);
     }
 
+    /// Carried findings are their own count in the funnel, so the
+    /// block reconciles with the findings list: `kept` is this run's
+    /// own, `carried` the ledger's, and together they are its length.
+    #[test]
+    fn carried_findings_are_counted_in_the_funnel_beside_kept() {
+        let tmp = tempdir().unwrap();
+        let target = tmp.path();
+        std::fs::create_dir_all(target.join("src")).unwrap();
+        std::fs::write(target.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(target.join("src/b.rs"), "fn b() {}\n").unwrap();
+        // An earlier run observed a finding in src/a.rs.
+        let earlier = serde_json::json!({
+            "target_sha": "abc",
+            "findings": [{"stable_id": "auth::src/a.rs:1", "title": "t", "tier": "HIGH",
+                "framing": ["auth"], "location": {"file": "src/a.rs", "line_start": 1}}],
+            "reproductions": [{"stable_id": "auth::src/a.rs:1", "outcome": "reproduced", "agreement": true}]
+        });
+        let records = super::super::lyrik_ledger::records_from_run(target, &earlier, &[], "r1");
+        super::super::lyrik_ledger::upsert(target, &records).unwrap();
+        // This run kept one finding of its own, in src/b.rs.
+        let findings = target.join("findings.json");
+        std::fs::write(
+            &findings,
+            serde_json::json!({
+                "schema_version": "1.1", "run_id": "r2", "produced_at": "2026-01-01T00:00:00Z",
+                "findings": [{"stable_id": "auth::src/b.rs:1", "id": "x", "title": "u", "summary": "s",
+                    "tier": "LOW", "framing": ["auth"], "location": {"file": "src/b.rs", "line_start": 1}}],
+                "funnel": {"merged": {"emitted": 1, "refused": 0, "brocard_removed": 0, "collapsed": 0, "kept": 1},
+                           "walks": {}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let carried =
+            super::carry_settled_findings(target, &serde_json::json!({}), &findings).unwrap();
+        assert_eq!(carried, vec!["auth::src/a.rs:1".to_string()]);
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&findings).unwrap()).unwrap();
+        let merged = &body["funnel"]["merged"];
+        assert_eq!(merged["kept"], 1);
+        assert_eq!(merged["carried"], 1);
+        assert_eq!(
+            merged["kept"].as_u64().unwrap() + merged["carried"].as_u64().unwrap(),
+            body["findings"].as_array().unwrap().len() as u64
+        );
+        assert_eq!(body["findings"][1]["carried"]["from_run"], "r1");
+        assert_eq!(body["carried"]["count"], 1);
+        // Nothing to carry: the funnel is left as the run wrote it.
+        std::fs::write(target.join("src/a.rs"), "fn a() { changed(); }\n").unwrap();
+        std::fs::write(
+            &findings,
+            serde_json::json!({"findings": [], "funnel": {"merged": {"kept": 0}}}).to_string(),
+        )
+        .unwrap();
+        assert!(
+            super::carry_settled_findings(target, &serde_json::json!({}), &findings)
+                .unwrap()
+                .is_empty()
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&findings).unwrap()).unwrap();
+        assert!(body["funnel"]["merged"].get("carried").is_none());
+    }
+
     /// The sign-off banner carries the cost lines above its closing
     /// sentence: the ceiling or that none is set, and a model with no
     /// price entry, before the run starts.
     #[test]
     fn the_signoff_banner_shows_the_cost_ceiling_and_a_missing_price() {
-        let summary = "Lyrik 1.1.0 run r1 on /t\n  walks    sink-walk\n  Nothing leaves this host but calls to the model.";
+        let summary = "Lyrik 1.0.1 run r1 on /t\n  walks    sink-walk\n  Nothing leaves this host but calls to the model.";
         let with = super::with_cost_lines(
             summary,
             &super::super::lyrik_cost::banner_lines("openai", "gpt-6.2-astra", Some(20.0)),
@@ -8207,7 +8283,7 @@ mod tests {
     /// opens the run. The field is outside the pinned schema.
     #[test]
     fn findings_and_the_run_started_row_carry_the_lyrik_version() {
-        assert_eq!(super::LYRIK_VERSION, "1.1.0");
+        assert_eq!(super::LYRIK_VERSION, "1.0.1");
         let tmp = tempdir().unwrap();
         let read = |p: &std::path::Path| -> serde_json::Value {
             serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
@@ -8216,7 +8292,7 @@ mod tests {
         let empty = tmp.path().join("empty.json");
         super::write_empty_findings(&empty, "r1", &super::Extras::new()).unwrap();
         let body = read(&empty);
-        assert_eq!(body["lyrik_version"], "1.1.0");
+        assert_eq!(body["lyrik_version"], "1.0.1");
         assert_eq!(body["schema_version"], "1.1");
 
         let staged = tmp.path().join("staged");
@@ -8224,7 +8300,7 @@ mod tests {
         std::fs::write(staged.join("a.json"), r#"{"class":"auth"}"#).unwrap();
         let plain = tmp.path().join("plain.json");
         super::aggregate_findings(&staged, &plain, "r1").unwrap();
-        assert_eq!(read(&plain)["lyrik_version"], "1.1.0");
+        assert_eq!(read(&plain)["lyrik_version"], "1.0.1");
 
         let started = super::run_started_detail(
             std::path::Path::new("/t"),
@@ -8233,7 +8309,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(started["lyrik_version"], "1.1.0");
+        assert_eq!(started["lyrik_version"], "1.0.1");
         assert_eq!(started["driver_version"], env!("CARGO_PKG_VERSION"));
 
         let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
