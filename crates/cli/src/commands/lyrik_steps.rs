@@ -52,6 +52,110 @@ pub struct AcceptedStep {
     pub file: String,
     #[serde(flatten)]
     pub record: StepRecord,
+    /// Whether the command the record's `check` names is one the run
+    /// ran: `executed` or `not_executed`. Absent when the check is a
+    /// read, and when the run's chain was not there to hold it to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_status: Option<&'static str>,
+}
+
+/// The commands the run's agents ran through `exec`, read off the
+/// run's chain: an `exec` call whose result says where it ran. A call
+/// that was refused has no such result and is not one of them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExecutedCommands(std::collections::BTreeSet<String>);
+
+impl ExecutedCommands {
+    /// From the run's rows, in order. A result is paired with the
+    /// earliest unanswered `exec` call of its id.
+    pub fn from_rows(rows: impl IntoIterator<Item = wirken_audit::SessionEvent>) -> Self {
+        use wirken_audit::SessionEvent;
+        let mut asked: std::collections::HashMap<String, std::collections::VecDeque<String>> =
+            std::collections::HashMap::new();
+        let mut ran = std::collections::BTreeSet::new();
+        for event in rows {
+            match event {
+                SessionEvent::AssistantToolCalls { calls, .. } => {
+                    for call in calls.into_iter().filter(|c| c.name == "exec") {
+                        let command = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                            .ok()
+                            .and_then(|a| wirken_agent::tool::extract_exec_command(&a).ok());
+                        if let Some(command) = command {
+                            asked.entry(call.id).or_default().push_back(command);
+                        }
+                    }
+                }
+                SessionEvent::ToolResult {
+                    call_id,
+                    tool_name,
+                    sandbox,
+                    ..
+                } if tool_name == "exec" => {
+                    let command = asked.get_mut(&call_id).and_then(|q| q.pop_front());
+                    if let (Some(command), Some(_)) = (command, sandbox) {
+                        ran.insert(one_spaced(&command));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Self(ran)
+    }
+
+    /// Whether `command` is one of them, exactly as run but for runs
+    /// of whitespace.
+    pub fn ran(&self, command: &str) -> bool {
+        self.0.contains(&one_spaced(command))
+    }
+}
+
+fn one_spaced(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether a record's `check` names a read and not a command: it opens
+/// with `read`, with a file tool's name (`read_file`, `list_files`),
+/// or with a file of the target, with or without a `:line` or
+/// `:from-to` after it. Anything else names a command.
+pub fn check_is_a_read(check: &str, workspace: &Path) -> bool {
+    let Some(first) = check.split_whitespace().next() else {
+        return false;
+    };
+    let first = first.trim_end_matches([';', ',', '.']);
+    let word = first.trim_end_matches(':');
+    if ["read", "read_file", "list_files"]
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
+    {
+        return true;
+    }
+    let file = first.split(':').next().unwrap_or(first);
+    let plain = Path::new(file)
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)));
+    plain && !file.is_empty() && workspace.join(file).is_file()
+}
+
+/// Hold each record's cited command to the commands the run ran, and
+/// mark it. Returns the records marked `not_executed`.
+pub fn mark_checks<'a>(
+    steps: &'a mut [AcceptedStep],
+    executed: &ExecutedCommands,
+    workspace: &Path,
+) -> Vec<&'a AcceptedStep> {
+    for s in steps.iter_mut() {
+        s.check_status = if check_is_a_read(&s.record.check, workspace) {
+            None
+        } else if executed.ran(&s.record.check) {
+            Some("executed")
+        } else {
+            Some("not_executed")
+        };
+    }
+    steps
+        .iter()
+        .filter(|s| s.check_status == Some("not_executed"))
+        .collect()
 }
 
 /// A refused file and why.
@@ -94,6 +198,7 @@ pub fn read_walk_steps(
                 walk: walk.map(str::to_string),
                 file: file.clone(),
                 record,
+                check_status: None,
             }),
             Err(reason) => refused.push(RefusedStep {
                 file: file.clone(),
@@ -151,6 +256,93 @@ fn parse_record(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn accepted(check: &str) -> AcceptedStep {
+        AcceptedStep {
+            walk: Some("sink-walk".into()),
+            file: "step-01.json".into(),
+            record: StepRecord {
+                step: "s".into(),
+                claim: "c".into(),
+                code_revision: "unknown".into(),
+                check: check.into(),
+                evidence: vec!["agent.py:18: eval(expr)".into()],
+                open_questions: Vec::new(),
+                prior: None,
+            },
+            check_status: None,
+        }
+    }
+
+    fn exec_rows(command: &str, ran: bool) -> Vec<wirken_audit::SessionEvent> {
+        let call: wirken_audit::SessionEvent = serde_json::from_value(serde_json::json!({
+            "kind": "assistant_tool_calls",
+            "calls": [{
+                "id": "call_0", "name": "exec",
+                "arguments": serde_json::json!({"command": command}).to_string(),
+            }],
+        }))
+        .unwrap();
+        let mut result = serde_json::json!({
+            "kind": "tool_result", "call_id": "call_0", "tool_name": "exec",
+            "output": "", "success": ran,
+        });
+        if ran {
+            result["sandbox"] = serde_json::json!({
+                "mode": "exec_only", "runtime": "docker", "container_id": "c0",
+            });
+        }
+        vec![call, serde_json::from_value(result).unwrap()]
+    }
+
+    /// The checks a walk cited in a real run. It ran `sha256sum`, `pwd`
+    /// and `which`; the searches it named have no `exec` row.
+    #[test]
+    fn a_cited_command_is_held_to_the_commands_that_ran() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("agent.py"), "x\n").unwrap();
+        std::fs::write(tmp.path().join("mcp.json"), "{}\n").unwrap();
+        let mut rows = exec_rows("sha256sum agent.py mcp.json", true);
+        // Asked and refused: on the chain, and it did not run.
+        rows.extend(exec_rows("rg -n --type py 'requests\\.get'", false));
+        let executed = ExecutedCommands::from_rows(rows);
+
+        let mut steps = vec![
+            accepted("rg -n --type py 'subprocess.*shell\\s*=\\s*True'"),
+            accepted("rg -n --type py 'eval\\('"),
+            accepted("rg -n --type py 'requests\\.get'"),
+            accepted("cat mcp.json | grep -i allow-write"),
+            // Run, and cited as run but for the spacing.
+            accepted("sha256sum  agent.py mcp.json"),
+            // Reads, in the forms walks write them.
+            accepted("read agent.py:1-20; trace analyze_data() to @tool decorator"),
+            accepted("read_file src/parse.rs:10-40"),
+            accepted("agent.py:18-20"),
+            accepted("mcp.json"),
+        ];
+        let unbacked = mark_checks(&mut steps, &executed, tmp.path()).len();
+        assert_eq!(unbacked, 4);
+        let marks: Vec<Option<&str>> = steps.iter().map(|s| s.check_status).collect();
+        assert_eq!(
+            marks,
+            [
+                Some("not_executed"),
+                Some("not_executed"),
+                Some("not_executed"),
+                Some("not_executed"),
+                Some("executed"),
+                None,
+                None,
+                None,
+                None,
+            ]
+        );
+        // The mark is on the record as findings.json carries it, and
+        // absent from a read's.
+        let carried = serde_json::to_value(&steps).unwrap();
+        assert_eq!(carried[0]["check_status"], "not_executed");
+        assert!(carried[5].get("check_status").is_none());
+    }
 
     fn record(step: &str, prior: Option<&str>) -> String {
         let prior = match prior {

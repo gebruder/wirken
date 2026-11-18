@@ -61,6 +61,13 @@ tagged.
 
 ### Fixed
 
+- A step record that names a command as its `check` is held to the run's
+  chain. A command with no `exec` row that ran is marked `check_status`
+  `not_executed` on the record in `findings.json`, logged as
+  `lyrik.step.check_not_executed` and counted as `checks_not_executed` in the
+  walk's funnel; one that ran is marked `executed`. A walk could cite a
+  search it never ran and the record was carried as written
+  (`crates/cli/tests/lyrik_cited_commands.rs`).
 - `lyrik.replay.completed` reports what the replay found. `status` is the
   outcome the replay recorded, `reproduced`, `not_reproduced` or `blocked`,
   with what it saw as `observed`; `no_record` when the replay ended without

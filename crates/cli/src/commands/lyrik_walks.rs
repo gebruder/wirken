@@ -869,7 +869,11 @@ fn step_section(walk_name: &str) -> String {
          - `step`: the step's name in the walk text.\n\
          - `claim`: one falsifiable sentence the step established.\n\
          - `code_revision`: the revision the dispatch prompt names, copied exactly.\n\
-         - `check`: the check the step ran: the command, or the file and line range read.\n\
+         - `check`: the check the step ran. A command is written exactly as it was run \
+         through `exec`, and nothing else in the field; a read is written as \
+         `read <file>:<from>-<to>`. The runner looks for a command among the commands \
+         this run ran. One it does not find is marked `not_executed` on the record and \
+         counted against the walk, so do not name a command you did not run.\n\
          - `evidence`: a non-empty list of strings, each a quoted line with its `file:line` \
          or the output of the command. Raw, not paraphrased.\n\
          - `open_questions`: what the step could not settle; an empty list when nothing is \

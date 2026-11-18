@@ -1276,6 +1276,21 @@ fn with_inference(
     Ok(out)
 }
 
+/// The commands the run ran through `exec`, from its chain rows after
+/// `mark`.
+fn executed_commands(
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    mark: Option<u64>,
+) -> Result<lyrik_steps::ExecutedCommands> {
+    let rows = log
+        .get_since(handle, mark.map_or(0, |m| m + 1))
+        .context("read the run's chain rows")?;
+    Ok(lyrik_steps::ExecutedCommands::from_rows(
+        rows.into_iter().map(|row| row.event),
+    ))
+}
+
 /// Where the run's code went, from its chain rows: the provider and
 /// model each call named (a list if they ever differ), how many
 /// calls, and the bytes they sent (`null` if any row predates the
@@ -2312,6 +2327,7 @@ async fn dispatch_via_agent_runtime(
         &skipped,
         scanner_ran.then_some(scanner_counts),
         brocard_mode,
+        Some(&executed_commands(&*session_log, &run_handle, chain_mark)?),
         audit,
     )
     .context("aggregate findings");
@@ -4599,6 +4615,9 @@ fn aggregate_findings_multi(
     skipped: &std::collections::BTreeMap<String, Vec<String>>,
     scanner: Option<ScannerFunnel>,
     brocard_mode: lyrik_brocards::Mode,
+    // The commands the run ran, off its chain. `None` where there is
+    // no chain to read them from; step records are then left unmarked.
+    executed: Option<&lyrik_steps::ExecutedCommands>,
     audit: &mut AuditLogger,
 ) -> Result<Funnel> {
     use super::lyrik_citation;
@@ -4686,6 +4705,23 @@ fn aggregate_findings_multi(
                     "lyrik.step.refused",
                     serde_json::json!({ "walk": walk_name, "file": r.file, "reason": r.reason }),
                 )?;
+            }
+            let mut accepted = accepted;
+            // A record that names a command is held to the chain: the
+            // command ran, or the record says it did not.
+            if let Some(executed) = executed {
+                let unbacked = lyrik_steps::mark_checks(&mut accepted, executed, workspace);
+                counts.checks_not_executed += unbacked.len();
+                for s in unbacked {
+                    audit.emit(
+                        "lyrik.step.check_not_executed",
+                        serde_json::json!({
+                            "walk": walk_name,
+                            "file": s.file,
+                            "check": s.record.check,
+                        }),
+                    )?;
+                }
             }
             step_records.extend(accepted);
             if steps_dir.is_dir() {
@@ -5005,6 +5041,9 @@ struct WalkFunnel {
     skipped: Vec<String>,
     /// Candidates a defender-mode brocard rejection removed.
     brocard_removed: usize,
+    /// Step records whose `check` names a command the run has no
+    /// `exec` row for.
+    checks_not_executed: usize,
 }
 
 /// Every turn's findings taken together.
@@ -7356,6 +7395,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -7424,6 +7464,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -7653,6 +7694,7 @@ mod tests {
             &Default::default(),
             None,
             mode,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -7904,6 +7946,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -7948,6 +7991,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -8097,6 +8141,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Defender,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -8135,6 +8180,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -8174,6 +8220,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -8279,6 +8326,7 @@ mod tests {
             &skipped,
             Some(scanner),
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -8287,15 +8335,18 @@ mod tests {
             "walks": {
                 "chain-walk": {
                     "emitted": 0, "refused": 0, "framing_stripped": 0,
-                    "grade_corrected": 0, "brocard_removed": 0, "skipped": [],
+                    "grade_corrected": 0, "brocard_removed": 0, "checks_not_executed": 0,
+                    "skipped": [],
                 },
                 "graph-walk": {
                     "emitted": 3, "refused": 0, "framing_stripped": 0,
-                    "grade_corrected": 0, "brocard_removed": 0, "skipped": ["exec (shell:git)"],
+                    "grade_corrected": 0, "brocard_removed": 0, "checks_not_executed": 0,
+                    "skipped": ["exec (shell:git)"],
                 },
                 "sink-walk": {
                     "emitted": 3, "refused": 1, "framing_stripped": 1,
-                    "grade_corrected": 1, "brocard_removed": 0, "skipped": [],
+                    "grade_corrected": 1, "brocard_removed": 0, "checks_not_executed": 0,
+                    "skipped": [],
                 },
             },
             "merged": {"emitted": 6, "refused": 1, "brocard_removed": 0, "collapsed": 2, "kept": 3},
@@ -8565,6 +8616,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();
@@ -8778,6 +8830,7 @@ mod tests {
             &Default::default(),
             None,
             lyrik_brocards::Mode::Pentest,
+            None,
             &mut audit,
         )
         .unwrap();

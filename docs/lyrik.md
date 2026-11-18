@@ -316,7 +316,12 @@ file: it must parse, no field may be blank, `evidence` may not be empty,
 `prior` must name the file before it. A file that fails is recorded as
 `lyrik.step.refused` in the audit log with the reason, and the walk's other
 records stand. Accepted records are carried in `findings.json` under
-`step_records`. The staged wrapper tells the walk all of this; the walk text
+`step_records`. A `check` that names a command is held to the run's chain: it
+is a read when it opens with `read`, `read_file`, `list_files` or a file of
+the target, and a command otherwise, and a command must be one an `exec` call
+of the run ran, exactly as run but for spacing. The record carries
+`check_status` `executed` or `not_executed`; a `not_executed` one is also a
+`lyrik.step.check_not_executed` row and is counted in the walk's funnel. The staged wrapper tells the walk all of this; the walk text
 itself is not edited.
 
 **Target threat model.** When the scanned repository has `THREAT_MODEL.md`
@@ -1585,7 +1590,8 @@ change them:
 - `step_records`, a top-level array, one entry per accepted step record a
   walk wrote (see "Step records" under `walks` above). Each entry carries
   `walk`, `file`, `step`, `claim`, `code_revision`, `check`, `evidence`,
-  `open_questions` and, from the second record of a walk on, `prior`.
+  `open_questions` and, from the second record of a walk on, `prior`; a
+  record whose `check` names a command also carries `check_status`.
 - `reproductions`, a top-level array, one entry per reproduction record a
   walk wrote, with the fresh-context replay beside it when one ran: `walk`,
   `file`, the record's fields, `replay` and `agreement`. See
@@ -1634,8 +1640,9 @@ and the SARIF report carries it under the run's `properties.lyrik.funnel`:
 
 - `walks`, one entry per walk (`lyrik` for single-call mode): `emitted`,
   `refused`, `framing_stripped`, `grade_corrected`, `brocard_removed`
-  (candidates a defender-mode rejection removed), and the `skipped` steps
-  from its `lyrik.walk.completed` row.
+  (candidates a defender-mode rejection removed), `checks_not_executed` (step
+  records naming a command the run has no `exec` row for), and the `skipped`
+  steps from its `lyrik.walk.completed` row.
 - `merged`: `emitted`, `refused`, `brocard_removed`, `collapsed` (findings
   folded into another at the same location by dedup) and `kept` (this run's
   own findings in `findings.json`). When the run carried findings from the
