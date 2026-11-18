@@ -21,6 +21,10 @@
 # change; bumping these is a version-bump change because the audit
 # chain captures the cost the binary was built against.
 #
+# The openai and gemini rows set no cache_read_multiplier: those
+# providers' cache counters are not recorded, so their cached input is
+# priced as input.
+#
 # Local-only providers (ollama, tinfoil enclave dispatch where the
 # operator runs the hardware) have no per-token vendor cost and are
 # intentionally absent. The Privatemode OpenAI-compat endpoint is
@@ -29,21 +33,73 @@
 
 [[entries]]
 provider = "anthropic"
-model = "claude-opus-4-5"
-input_per_million_usd = 15.0
-output_per_million_usd = 75.0
+model = "claude-fable-5-2"
+input_per_million_usd = 8.0
+output_per_million_usd = 40.0
+cache_read_multiplier = 0.025
+
+[[entries]]
+provider = "anthropic"
+model = "claude-fable-5-1"
+input_per_million_usd = 10.0
+output_per_million_usd = 50.0
+cache_read_multiplier = 0.025
+
+[[entries]]
+provider = "anthropic"
+model = "claude-fable-5"
+input_per_million_usd = 10.0
+output_per_million_usd = 50.0
+
+[[entries]]
+provider = "anthropic"
+model = "claude-opus-5-5"
+input_per_million_usd = 4.0
+output_per_million_usd = 20.0
+cache_read_multiplier = 0.05
+
+[[entries]]
+provider = "anthropic"
+model = "claude-opus-5"
+input_per_million_usd = 5.0
+output_per_million_usd = 25.0
+
+[[entries]]
+provider = "anthropic"
+model = "claude-opus-4-8"
+input_per_million_usd = 5.0
+output_per_million_usd = 25.0
 
 [[entries]]
 provider = "anthropic"
 model = "claude-opus-4-7"
-input_per_million_usd = 15.0
-output_per_million_usd = 75.0
+input_per_million_usd = 5.0
+output_per_million_usd = 25.0
 
 [[entries]]
 provider = "anthropic"
-model = "claude-sonnet-4-5"
-input_per_million_usd = 3.0
-output_per_million_usd = 15.0
+model = "claude-opus-4-6"
+input_per_million_usd = 5.0
+output_per_million_usd = 25.0
+
+[[entries]]
+provider = "anthropic"
+model = "claude-opus-4-5"
+input_per_million_usd = 5.0
+output_per_million_usd = 25.0
+
+[[entries]]
+provider = "anthropic"
+model = "claude-sonnet-5-5"
+input_per_million_usd = 2.0
+output_per_million_usd = 10.0
+cache_read_multiplier = 0.05
+
+[[entries]]
+provider = "anthropic"
+model = "claude-sonnet-5"
+input_per_million_usd = 2.0
+output_per_million_usd = 10.0
 
 [[entries]]
 provider = "anthropic"
@@ -53,9 +109,221 @@ output_per_million_usd = 15.0
 
 [[entries]]
 provider = "anthropic"
+model = "claude-sonnet-4-5"
+input_per_million_usd = 3.0
+output_per_million_usd = 15.0
+
+[[entries]]
+provider = "anthropic"
+model = "claude-haiku-5-5"
+input_per_million_usd = 0.1
+output_per_million_usd = 0.5
+[entries.long_prompt]
+over_prompt_tokens = 100000
+input_per_million_usd = 0.5
+output_per_million_usd = 2.5
+
+[[entries]]
+provider = "anthropic"
 model = "claude-haiku-4-5"
 input_per_million_usd = 1.0
 output_per_million_usd = 5.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-6.2-astra"
+input_per_million_usd = 8.0
+output_per_million_usd = 40.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 16.0
+output_per_million_usd = 60.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-6.2-sol"
+input_per_million_usd = 2.0
+output_per_million_usd = 10.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 4.0
+output_per_million_usd = 15.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-6.1-sol"
+input_per_million_usd = 2.0
+output_per_million_usd = 10.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 4.0
+output_per_million_usd = 15.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-6.1-terra"
+input_per_million_usd = 1.0
+output_per_million_usd = 5.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 2.0
+output_per_million_usd = 7.5
+
+[[entries]]
+provider = "openai"
+model = "gpt-6-astra"
+input_per_million_usd = 10.0
+output_per_million_usd = 50.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 20.0
+output_per_million_usd = 75.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-6-sol"
+input_per_million_usd = 2.0
+output_per_million_usd = 10.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 4.0
+output_per_million_usd = 15.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-6-luna"
+input_per_million_usd = 0.1
+output_per_million_usd = 0.5
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 0.2
+output_per_million_usd = 0.75
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.6-terra"
+input_per_million_usd = 2.0
+output_per_million_usd = 12.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 4.0
+output_per_million_usd = 18.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.6-luna"
+input_per_million_usd = 0.2
+output_per_million_usd = 1.2
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 0.4
+output_per_million_usd = 1.8
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.5"
+input_per_million_usd = 5.0
+output_per_million_usd = 30.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 10.0
+output_per_million_usd = 45.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.5-pro"
+input_per_million_usd = 30.0
+output_per_million_usd = 180.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 60.0
+output_per_million_usd = 270.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.4"
+input_per_million_usd = 2.5
+output_per_million_usd = 15.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 5.0
+output_per_million_usd = 22.5
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.4-pro"
+input_per_million_usd = 30.0
+output_per_million_usd = 180.0
+[entries.long_prompt]
+over_prompt_tokens = 272000
+input_per_million_usd = 60.0
+output_per_million_usd = 270.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.4-mini"
+input_per_million_usd = 0.75
+output_per_million_usd = 4.5
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.4-nano"
+input_per_million_usd = 0.2
+output_per_million_usd = 1.25
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.2"
+input_per_million_usd = 1.75
+output_per_million_usd = 14.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.2-pro"
+input_per_million_usd = 21.0
+output_per_million_usd = 168.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5.1"
+input_per_million_usd = 1.25
+output_per_million_usd = 10.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5"
+input_per_million_usd = 1.25
+output_per_million_usd = 10.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5-mini"
+input_per_million_usd = 0.25
+output_per_million_usd = 2.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-5-nano"
+input_per_million_usd = 0.05
+output_per_million_usd = 0.4
+
+[[entries]]
+provider = "openai"
+model = "gpt-5-pro"
+input_per_million_usd = 15.0
+output_per_million_usd = 120.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-4.1"
+input_per_million_usd = 2.0
+output_per_million_usd = 8.0
+
+[[entries]]
+provider = "openai"
+model = "gpt-4.1-mini"
+input_per_million_usd = 0.4
+output_per_million_usd = 1.6
 
 [[entries]]
 provider = "openai"
@@ -67,19 +335,109 @@ output_per_million_usd = 10.0
 provider = "openai"
 model = "gpt-4o-mini"
 input_per_million_usd = 0.15
-output_per_million_usd = 0.60
+output_per_million_usd = 0.6
+
+[[entries]]
+provider = "openai"
+model = "o3"
+input_per_million_usd = 2.0
+output_per_million_usd = 8.0
+
+[[entries]]
+provider = "openai"
+model = "o3-pro"
+input_per_million_usd = 20.0
+output_per_million_usd = 80.0
+
+# $4 / $20 from 2026-12-01.
+[[entries]]
+provider = "gemini"
+model = "gemini-4-carbon"
+input_per_million_usd = 2.0
+output_per_million_usd = 10.0
+
+# $4 / $20 from 2026-12-01.
+[[entries]]
+provider = "gemini"
+model = "gemini-4-argon"
+input_per_million_usd = 2.0
+output_per_million_usd = 10.0
 
 [[entries]]
 provider = "gemini"
-model = "gemini-2.0-flash"
-input_per_million_usd = 0.10
-output_per_million_usd = 0.40
+model = "gemini-4-hydrogen"
+input_per_million_usd = 1.5
+output_per_million_usd = 7.5
+
+# $1.50 / $7.50 from 2027-01-01.
+[[entries]]
+provider = "gemini"
+model = "gemini-3.8-flash"
+input_per_million_usd = 0.75
+output_per_million_usd = 3.75
+
+# $1.50 / $7.50 from 2027-01-01.
+[[entries]]
+provider = "gemini"
+model = "gemini-3.6-flash"
+input_per_million_usd = 0.75
+output_per_million_usd = 3.75
+
+[[entries]]
+provider = "gemini"
+model = "gemini-3.5-flash-lite"
+input_per_million_usd = 0.3
+output_per_million_usd = 2.5
+
+[[entries]]
+provider = "gemini"
+model = "gemini-3.1-pro-preview"
+input_per_million_usd = 2.0
+output_per_million_usd = 12.0
+[entries.long_prompt]
+over_prompt_tokens = 200000
+input_per_million_usd = 4.0
+output_per_million_usd = 18.0
+
+[[entries]]
+provider = "gemini"
+model = "gemini-3.1-flash-lite"
+input_per_million_usd = 0.25
+output_per_million_usd = 1.5
+
+[[entries]]
+provider = "gemini"
+model = "gemini-3-flash-preview"
+input_per_million_usd = 0.5
+output_per_million_usd = 3.0
 
 [[entries]]
 provider = "gemini"
 model = "gemini-2.5-pro"
 input_per_million_usd = 1.25
 output_per_million_usd = 10.0
+[entries.long_prompt]
+over_prompt_tokens = 200000
+input_per_million_usd = 2.5
+output_per_million_usd = 15.0
+
+[[entries]]
+provider = "gemini"
+model = "gemini-2.5-flash"
+input_per_million_usd = 0.3
+output_per_million_usd = 2.5
+
+[[entries]]
+provider = "gemini"
+model = "gemini-2.5-flash-lite"
+input_per_million_usd = 0.1
+output_per_million_usd = 0.4
+
+[[entries]]
+provider = "gemini"
+model = "gemini-2.0-flash"
+input_per_million_usd = 0.1
+output_per_million_usd = 0.4
 
 [[entries]]
 provider = "bedrock"

@@ -10,6 +10,33 @@ tagged.
 
 ## [Unreleased]
 
+### Operator notes
+
+- Recorded cost for Anthropic's Opus 4.5 and Opus 4.7 falls to a third. A
+  USD budget ceiling on such an agent is reached later for the same traffic.
+- Calls to the models added to the pricing table now record a cost and
+  count against a USD budget ceiling.
+
+### Fixed
+
+- Anthropic's Opus 4.5 and Opus 4.7 are priced at $5 input and $25 output
+  per million tokens, where the table had $15 and $75. Found by Matthew
+  Busel (@Mattbusel).
+
+### Added
+
+- The pricing table lists the current Anthropic, OpenAI and Gemini models
+  (`crates/audit/src/pricing.toml`). A model absent from it recorded no
+  cost.
+- A pricing row can set its cache read rate, and a second tier for a model
+  priced by prompt length. Cache reads on Anthropic's Opus 5.5 and Sonnet
+  5.5 are priced at 0.05 times input and on Fable 5.1 and 5.2 at 0.025
+  times. Haiku 5.5, the OpenAI models with a long-context price and Gemini
+  2.5 Pro and 3.1 Pro pay the higher input and output prices on a call
+  whose whole input is over the threshold
+  (`a_long_prompt_pays_the_second_tier`, `crates/audit/src/pricing.rs`;
+  [docs/cost-monitoring.md](docs/cost-monitoring.md)).
+
 ## [3.4.0] - 2026-11-17
 
 ### Operator notes

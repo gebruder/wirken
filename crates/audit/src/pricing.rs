@@ -223,13 +223,13 @@ mod tests {
 
     #[test]
     fn cache_writes_and_reads_are_priced_into_the_input_cost() {
-        // $15 / 1M input. 1000 uncached, 1000 written, 10000 read:
-        // 15_000 + 18_750 + 15_000 micros.
+        // $5 / 1M input. 1000 uncached, 1000 written, 10000 read:
+        // 5_000 + 6_250 + 5_000 micros.
         let (inp, out, total) =
             cost_micros_cached("anthropic", "claude-opus-4-7", 1_000, 0, 1_000, 10_000);
-        assert_eq!(inp, Some(48_750));
+        assert_eq!(inp, Some(16_250));
         assert_eq!(out, Some(0));
-        assert_eq!(total, Some(48_750));
+        assert_eq!(total, Some(16_250));
         // With no cache counters it is the plain price.
         assert_eq!(
             cost_micros_cached("anthropic", "claude-opus-4-7", 1_000, 0, 0, 0),
@@ -284,12 +284,12 @@ mod tests {
 
     #[test]
     fn cost_arithmetic_exact_micros() {
-        // $15 / 1M input tokens, 1000 tokens.
-        // 1000 * 15.0 = 15_000 micros = $0.015. Exact.
+        // $5 / 1M input tokens, 1000 tokens.
+        // 1000 * 5.0 = 5_000 micros = $0.005. Exact.
         let (inp, out, total) = cost_micros("anthropic", "claude-opus-4-7", 1_000, 0);
-        assert_eq!(inp, Some(15_000));
+        assert_eq!(inp, Some(5_000));
         assert_eq!(out, Some(0));
-        assert_eq!(total, Some(15_000));
+        assert_eq!(total, Some(5_000));
     }
 
     #[test]
@@ -319,6 +319,56 @@ mod tests {
         assert_eq!(inp, Some(30_000));
         assert_eq!(out, Some(75_000));
         assert_eq!(total, Some(105_000));
+    }
+
+    #[test]
+    fn every_row_is_a_usable_price() {
+        for ((provider, model), p) in table() {
+            let id = format!("{provider}/{model}");
+            for price in [p.input_per_million_usd, p.output_per_million_usd] {
+                assert!(price.is_finite() && price > 0.0, "{id}");
+            }
+            assert!(
+                p.cache_read_multiplier > 0.0 && p.cache_read_multiplier <= 1.0,
+                "{id}"
+            );
+            if let Some(long) = p.long_prompt {
+                assert!(long.over_prompt_tokens > 0, "{id}");
+                assert!(long.input_per_million_usd > p.input_per_million_usd, "{id}");
+                assert!(
+                    long.output_per_million_usd > p.output_per_million_usd,
+                    "{id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_table_carries_each_model_s_own_rates() {
+        // Opus 5.5: $4 in, $20 out, cache read at 0.05 times input.
+        assert_eq!(
+            cost_micros_cached("anthropic", "claude-opus-5-5", 1_000, 1_000, 0, 10_000),
+            (Some(6_000), Some(20_000), Some(26_000))
+        );
+        // Haiku 5.5 moves to $0.50 / $2.50 over a 100,000 token prompt.
+        assert_eq!(
+            cost_micros("anthropic", "claude-haiku-5-5", 100_000, 1_000),
+            (Some(10_000), Some(500), Some(10_500))
+        );
+        assert_eq!(
+            cost_micros("anthropic", "claude-haiku-5-5", 200_000, 1_000),
+            (Some(100_000), Some(2_500), Some(102_500))
+        );
+        // gpt-5.5: $5 / $30, and $10 / $45 over 272,000.
+        assert_eq!(
+            cost_micros("openai", "gpt-5.5", 300_000, 1_000),
+            (Some(3_000_000), Some(45_000), Some(3_045_000))
+        );
+        // gemini-2.5-pro: $1.25 / $10, and $2.50 / $15 over 200,000.
+        assert_eq!(
+            cost_micros("gemini", "gemini-2.5-pro", 200_001, 0).0,
+            Some(500_002)
+        );
     }
 
     #[test]

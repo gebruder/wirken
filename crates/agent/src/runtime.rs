@@ -7229,11 +7229,11 @@ mod attribution_tests {
         assert_eq!(a.output_cost_usd_micros, b.output_cost_usd_micros);
         assert_eq!(a.total_cost_usd_micros, b.total_cost_usd_micros);
         // Sanity check the arithmetic.
-        // claude-opus-4-7 input price: $15/M, 1000 tokens -> 15_000 micros.
-        assert_eq!(a.input_cost_usd_micros, Some(15_000));
-        // Output price: $75/M, 500 tokens -> 37_500 micros.
-        assert_eq!(a.output_cost_usd_micros, Some(37_500));
-        assert_eq!(a.total_cost_usd_micros, Some(52_500));
+        // claude-opus-4-7 input price: $5/M, 1000 tokens -> 5_000 micros.
+        assert_eq!(a.input_cost_usd_micros, Some(5_000));
+        // Output price: $25/M, 500 tokens -> 12_500 micros.
+        assert_eq!(a.output_cost_usd_micros, Some(12_500));
+        assert_eq!(a.total_cost_usd_micros, Some(17_500));
     }
 
     /// Unpriced model with reported usage: tokens populated, costs
