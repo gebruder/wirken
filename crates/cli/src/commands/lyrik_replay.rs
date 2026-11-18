@@ -172,6 +172,64 @@ pub fn read_replays(dir: &Path) -> Result<ReadResult<ReplayRecord>> {
     read_records::<ReplayRecord>(dir)
 }
 
+impl ReplayOutcome {
+    /// The outcome as the record and the run's log spell it.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReplayOutcome::Reproduced => "reproduced",
+            ReplayOutcome::NotReproduced => "not_reproduced",
+            ReplayOutcome::Blocked => "blocked",
+        }
+    }
+}
+
+/// What a replay came to, for its `lyrik.replay.completed` row: the
+/// outcome the replay recorded, and never that its turn finished.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayStatus {
+    /// `reproduced`, `not_reproduced` or `blocked` from the replay's
+    /// record. With no record: `no_record` when the turn finished
+    /// without writing one, `transient_failure` when the turn failed.
+    pub status: &'static str,
+    /// What the replay recorded it saw, when it recorded anything.
+    pub observed: Option<String>,
+    /// Why there is no outcome, or the note on a blocked replay.
+    pub reason: Option<String>,
+}
+
+/// Read the one record a replay of `repro_file` was to write under
+/// `replays_dir` and say what the replay came to. `turn` is how the
+/// replay's turn ended.
+pub fn replay_status(
+    replays_dir: &Path,
+    repro_file: &str,
+    turn: &std::result::Result<(), String>,
+) -> ReplayStatus {
+    let file = replay_file_for(repro_file);
+    let record = std::fs::read_to_string(replays_dir.join(&file))
+        .map_err(|e| e.to_string())
+        .and_then(|body| serde_json::from_str::<ReplayRecord>(&body).map_err(|e| e.to_string()));
+    match (record, turn) {
+        (Ok(record), _) => ReplayStatus {
+            status: record.outcome.label(),
+            observed: Some(record.observed),
+            reason: record.note,
+        },
+        (Err(_), Err(failure)) => ReplayStatus {
+            status: "transient_failure",
+            observed: None,
+            reason: Some(failure.clone()),
+        },
+        (Err(why), Ok(())) => ReplayStatus {
+            status: "no_record",
+            observed: None,
+            reason: Some(format!(
+                "the replay ended without a record at {file}: {why}"
+            )),
+        },
+    }
+}
+
 /// The replay file name for a reproduction file: the same ordinal.
 pub fn replay_file_for(repro_file: &str) -> String {
     repro_file.replacen("repro-", "replay-", 1)

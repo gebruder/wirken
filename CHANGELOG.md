@@ -61,6 +61,12 @@ tagged.
 
 ### Fixed
 
+- `lyrik.replay.completed` reports what the replay found. `status` is the
+  outcome the replay recorded, `reproduced`, `not_reproduced` or `blocked`,
+  with what it saw as `observed`; `no_record` when the replay ended without
+  writing its file, and `transient_failure` when its turn failed. It said
+  `success` whenever the turn finished, including for a replay whose command
+  could not run (`crates/cli/tests/lyrik_replay_status.rs`).
 - A Lyrik walk or replay whose turn ended in an error, for example at the
   tool round limit, reports the calls refused in that turn: `denials` and
   `skipped` on `lyrik.walk.completed`, `skipped` on `lyrik.replay.completed`.

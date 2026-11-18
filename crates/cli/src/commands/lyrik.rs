@@ -4025,18 +4025,22 @@ async fn dispatch_replays(
                 continue;
             }
         };
-        let (status, reason) = match result {
-            Ok(()) => ("success", None),
-            Err(reason) => ("transient_failure", Some(reason)),
-        };
+        // What the replay recorded, not that its turn finished: a
+        // replay that could not run its command did not succeed.
+        let came_to = lyrik_replay::replay_status(
+            &run_dir.join("staging").join(&walk).join("replays"),
+            &file,
+            &result,
+        );
         denials += skipped.len();
         audit.emit(
             "lyrik.replay.completed",
             serde_json::json!({
                 "walk": walk,
                 "file": file,
-                "status": status,
-                "reason": reason,
+                "status": came_to.status,
+                "observed": came_to.observed,
+                "reason": came_to.reason,
                 "skipped": skipped,
             }),
         )?;
