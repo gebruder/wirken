@@ -178,13 +178,14 @@ committed; run state lives under `.lyrik/state/`.
 |---|---|
 | Wirken vault | provider API keys |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<data_dir>/lyrik.json` | the operator's `walks_dir` and `fix_tool_rounds` |
+| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `fix_tool_rounds` and `walk_continuations` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
 | `<repo>/.lyrik/fix-patches/<slug>.patch` | optional: a patch for the defender fix step to check in place of writing one |
 | `<repo>/.lyrik/context.md` | the team's project context |
 | `<repo>/THREAT_MODEL.md`, else `<repo>/docs/threat-model.md` | the target's own threat model, loaded when committed and unmodified. The first of the two that exists is the one checked; when it is uncommitted or modified it is skipped with its reason and the other path is not tried (`load_target_threat_model`, `crates/cli/src/commands/lyrik.rs`); see [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) |
+| `<repo>/.lyrik/ledger/` | what earlier runs established about the target, one JSON record per claim; written by the runner, never by a run's agents |
 | `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may `write_file` |
 
 `.lyrik/config.json` names the provider, not its key:
@@ -410,6 +411,80 @@ Without the flag, the run asks at the terminal (see [Setup](#setup)); without
 a terminal it writes a `lyrik.phase_0.signoff` row with `decision:
 "pending_adapter_route"` and exits non-zero before dispatch. `scoring_disagreement` has no bench handling and no routing; a
 disagreement is recorded on the finding as `scoring_disagreement: true`.
+
+## Staged results, truncation and the ledger
+
+**A walk's results are its staged records, not its last reply.** Each walk
+writes every finding to its own `staging/<walk>/findings/finding-NNN.json` when
+the finding is established, and ends with a summary of a few lines. The runner
+builds `findings.json` from the staged files. The staged copy of each walk
+carries these instructions; the installed walk text is not changed.
+
+**A reply cut off at the output limit does not end a walk.** When a walk's
+reply ends with stop reason `max_tokens`, the runner keeps what is staged,
+records the walk as truncated with the number of findings kept, and sends a
+continuation turn in the same conversation that names the kept records. The
+operator caps continuations with `walk_continuations` in the data directory's
+`lyrik.json`; the default is 2 and 0 sends none. A target's
+`.lyrik/config.json` does not set it.
+
+```json
+{ "walk_continuations": 3 }
+```
+
+A walk that fails for another reason (a provider error, the tool round limit)
+is not continued; what it staged before failing is still aggregated.
+
+**A walk reads another walk's output through an index.** The runner writes
+`staging/index.json` before the walks start and again after every turn: one
+entry per staged finding or rejection with its `walk`, `kind`, `id`, `title`,
+`file`, `line`, `tier` and `path`. A walk is told to read the index first and
+then only the records it needs.
+
+**The ledger** is what earlier runs established about the target, kept under
+`.lyrik/ledger/` as one JSON file per claim:
+
+| Field | Meaning |
+|---|---|
+| `id` | stable for a `(kind, key)` pair; also the file name |
+| `kind` | `finding`, `rejection` or `arm_result` |
+| `key` | `<class>::<file>:<line>`; for an arm result, the finding's key and `#<arm>` |
+| `claim` | the claim in words |
+| `file`, `line` | where, relative to the target's root |
+| `commit` | the revision it was established at, when the target is a git checkout |
+| `file_sha256` | SHA-256 of the file's content when it was established |
+| `evidence` | `observed` (an executed run showed it) or `reasoned` (read from the source only) |
+| `run` | the run that produced it |
+| `stale` | present and true when the file's content has changed since |
+
+A record names no model, provider, walk or harness. After a run the runner
+writes one record per kept finding (`observed` when a reproduction ran and its
+replay agreed, else `reasoned`), one per rejection (`observed` for a replay
+rejection, rule 8, else `reasoned`), and one per fix arm that passed or failed
+on an executed run. A reasoned record never replaces an observed one whose file
+is unchanged.
+
+Before a run's walks start, the runner reads the ledger and hands each walk
+`staging/<walk>/ledger.json`: the records that are not stale, split into
+`settled` (observed, against the file as it is now) and `context` (reasoned),
+with a count of the stale ones left out. A staged finding that repeats a
+settled record is refused before aggregation: it is moved to
+`staging/<walk>/ledger-refused/`, a `lyrik.ledger.refused` row names the record
+and the run it came from, and `findings.json` lists it under `ledger_refused`.
+A reasoned record blocks nothing and may be re-examined.
+
+A record whose file no longer has the content it was established against is
+marked `stale` in its file the next time the ledger is read. A stale record
+blocks nothing and is not handed to walks. If the file returns to that content
+the mark is removed.
+
+The ledger is read and written only in per-walk runs. A `--bench` run and a
+fixture replay neither read nor write it. Delete `.lyrik/ledger/` to start
+over.
+
+The run prints one line per walk, and `findings.json` carries the same under
+`walk_summary`: findings staged, truncations with the count kept at each,
+continuations sent, findings the ledger refused, and whether the walk completed.
 
 ## Defender fix step
 
@@ -1167,10 +1242,16 @@ without a marker and exits zero.
 
 ### Carried outside the schema
 
-Seven additions sit outside the schema contract. The validator tolerates unknown
+Nine additions sit outside the schema contract. The validator tolerates unknown
 keys, so they do not change `schema_version`, and a later minor release may
 change them:
 
+- `walk_summary`, a top-level array with one entry per walk: `walk`,
+  `findings_staged`, `truncations`, `kept_at_truncation`, `continuations`,
+  `ledger_refused` and `completed`.
+- `ledger_refused`, a top-level array present when the ledger refused a staged
+  finding: `walk`, `file`, `key`, `record` and `established_by_run`. See
+  [Staged results, truncation and the ledger](#staged-results-truncation-and-the-ledger).
 - `rejected_candidates`, a top-level array. Each entry carries `rule` (1 to 8),
   `walk` (absent in single-call mode), `stable_id`, `title`, `location`,
   `reason`, and `applied_by`. In SARIF each entry is a result under rule

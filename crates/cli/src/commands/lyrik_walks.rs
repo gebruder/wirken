@@ -56,9 +56,25 @@ pub struct OperatorSettings {
     /// calls one of them may make before it is stopped. Absent, 60. A
     /// target's `.lyrik/config.json` does not set this.
     pub fix_tool_rounds: Option<u32>,
+    /// How many continuation turns a walk gets after a reply that was
+    /// cut off at the output token limit. Absent,
+    /// [`WALK_CONTINUATIONS_DEFAULT`]; zero means none. A target's
+    /// `.lyrik/config.json` does not set this.
+    pub walk_continuations: Option<u32>,
 }
 
+/// Continuation turns a truncated walk gets when the operator sets no
+/// limit.
+pub const WALK_CONTINUATIONS_DEFAULT: u32 = 2;
+
 impl OperatorSettings {
+    /// The cap on a truncated walk's continuation turns: the
+    /// operator's, else the default.
+    pub fn walk_continuations(&self) -> u32 {
+        self.walk_continuations
+            .unwrap_or(WALK_CONTINUATIONS_DEFAULT)
+    }
+
     /// The fix step's round limit: the operator's, else the default.
     /// Zero is read as the default.
     pub fn fix_tool_rounds(&self) -> usize {
@@ -344,8 +360,9 @@ pub fn wrap_for_target(
     let description =
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
     let mut section = format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         run_section(walk_name, exec_available, profile),
+        staging_section(walk_name),
         finding_section(),
         brocard_section(walk_name),
         step_section(walk_name),
@@ -586,6 +603,39 @@ fn run_section(walk_name: &str, exec_available: bool, profile: &TargetProfile) -
          under `.lyrik/state/runs/<run-id>/staging/{walk_name}/harness/` instead. \
          Promoting it into the test tree is an operator step after the run.\n\
          {exec_lines}\n"
+    )
+}
+
+/// How a walk's results reach the runner: one record per finding,
+/// written when the finding is established, and a short final reply.
+/// The runner builds `findings.json` from the staged records and from
+/// nothing in the reply, so a reply that is cut off loses only what
+/// was not yet written.
+fn staging_section(walk_name: &str) -> String {
+    format!(
+        "## Results are staged as you go\n\n\
+         - Write each finding to its own `finding-NNN.json` under \
+         `.lyrik/state/runs/<run-id>/staging/{walk_name}/findings/` as soon as it is \
+         established, before you move on to the next area. Do not collect findings to \
+         write at the end: the runner reads the staged files and nothing else, and a \
+         reply that reaches the output limit keeps only what is already written.\n\
+         - The final reply is a summary of a few lines: how many findings you staged, \
+         what you skipped and why. Do not repeat a finding's text in it.\n\
+         - If a reply of yours is cut off, the runner tells you which records it \
+         kept and asks you to continue. Carry on from there; do not rewrite a record \
+         that is already staged.\n\
+         - To use another walk's output, read \
+         `.lyrik/state/runs/<run-id>/staging/index.json` first. It lists every staged \
+         record of every walk with its walk, id, title, file, line, tier and path. \
+         Then read only the records you need, by the path the index gives. Do not \
+         list or read another walk's directory wholesale.\n\
+         - If `.lyrik/state/runs/<run-id>/staging/{walk_name}/ledger.json` exists, read \
+         it before you start. It holds what earlier runs established about this \
+         project's files. A record under `settled` was observed by an executed run \
+         against the file as it is now: do not check it again and do not stage a \
+         finding for it; a staged finding that repeats one is refused and you are \
+         pointed at the record. A record under `context` was reasoned from the source \
+         only: use it as a lead, and re-examine it if your work depends on it.\n"
     )
 }
 
@@ -848,6 +898,218 @@ pub fn ensure_walk_staging(run_dir: &Path, walks: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// One staged record as the index lists it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct IndexEntry {
+    pub walk: String,
+    /// `finding` or `rejection`.
+    pub kind: &'static str,
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// The record's path, relative to the target's root.
+    pub path: String,
+}
+
+/// The staged records of every walk of a run: each walk's
+/// `findings/*.json` and `rejections/*.json`, in walk and file order.
+/// A file that does not parse is listed with an empty title, so a
+/// reader can still see it is there.
+pub fn staged_index(run_dir: &Path, run_rel: &str) -> Vec<IndexEntry> {
+    let staging = run_dir.join("staging");
+    let mut walks: Vec<String> = std::fs::read_dir(&staging)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect();
+    walks.sort();
+    let mut out = Vec::new();
+    for walk in walks {
+        for (kind, sub) in [("finding", "findings"), ("rejection", "rejections")] {
+            let dir = staging.join(&walk).join(sub);
+            let mut files: Vec<String> = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .filter(|n| n.ends_with(".json"))
+                .collect();
+            files.sort();
+            for name in files {
+                let parsed: serde_json::Value = std::fs::read_to_string(dir.join(&name))
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                let text = |k: &str| parsed.get(k).and_then(|v| v.as_str()).map(str::to_string);
+                out.push(IndexEntry {
+                    walk: walk.clone(),
+                    kind,
+                    id: text("stable_id")
+                        .or_else(|| text("id"))
+                        .unwrap_or_else(|| name.clone()),
+                    title: text("title").unwrap_or_default(),
+                    file: parsed
+                        .pointer("/location/file")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    line: parsed
+                        .pointer("/location/line_start")
+                        .and_then(|v| v.as_u64()),
+                    tier: text("tier"),
+                    path: format!("{run_rel}/staging/{walk}/{sub}/{name}"),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Write `staging/index.json` for a run. Written whole to a temporary
+/// file and renamed, so a walk reading it never sees half of it.
+pub fn write_staged_index(run_dir: &Path, run_rel: &str) -> Result<usize> {
+    let entries = staged_index(run_dir, run_rel);
+    let staging = run_dir.join("staging");
+    std::fs::create_dir_all(&staging).with_context(|| format!("create {}", staging.display()))?;
+    let tmp = staging.join(format!("index.json.{}.tmp", uuid::Uuid::new_v4()));
+    let dest = staging.join("index.json");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&entries)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &dest).with_context(|| format!("write {}", dest.display()))?;
+    Ok(entries.len())
+}
+
+/// The ids of the findings a walk has staged, in file order.
+pub fn staged_finding_ids(run_dir: &Path, run_rel: &str, walk_name: &str) -> Vec<String> {
+    staged_index(run_dir, run_rel)
+        .into_iter()
+        .filter(|e| e.walk == walk_name && e.kind == "finding")
+        .map(|e| e.id)
+        .collect()
+}
+
+/// What a walk is sent after a reply that was cut off at the output
+/// limit: what the runner kept, and to carry on.
+pub fn continuation_prompt(walk_name: &str, run_id: &str, kept: &[String]) -> String {
+    let held = if kept.is_empty() {
+        "No finding is staged yet.".to_string()
+    } else {
+        format!(
+            "{} finding(s) are staged and kept: {}. Do not rewrite them.",
+            kept.len(),
+            kept.iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "Your last reply for {walk_name} was cut off at the output token limit, so \
+         nothing in it reached the runner. {held} Continue the walk from where you \
+         stopped. Write each further finding to \
+         `.lyrik/state/runs/{run_id}/staging/{walk_name}/findings/` as its own record \
+         the moment it is established, and keep what you say between tool calls \
+         short. End with a summary of a few lines."
+    )
+}
+
+/// How one turn of a walk ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnEnd {
+    pub response_len: usize,
+    /// Each refused call, as `tool (approval key)`.
+    pub skipped: Vec<String>,
+    /// The final reply's stop reason, as the audit row names it.
+    pub stop_reason: Option<String>,
+}
+
+/// What a walk's turns came to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WalkTurns {
+    /// The last turn's result, or why a turn failed.
+    pub last: std::result::Result<TurnEnd, String>,
+    /// Refused calls across every turn.
+    pub skipped: Vec<String>,
+    /// One entry per reply that was cut off at the output limit: how
+    /// many findings were staged, and so kept, at that point.
+    pub truncations: Vec<usize>,
+    /// Continuation turns sent.
+    pub continuations: u32,
+    /// Findings staged when the walk stopped.
+    pub findings_staged: usize,
+}
+
+/// One walk's conversation, as the turn driver uses it.
+pub trait WalkSession {
+    /// Run one turn with `prompt` and say how it ended, or why it
+    /// failed.
+    fn send(
+        &mut self,
+        prompt: String,
+    ) -> impl std::future::Future<Output = std::result::Result<TurnEnd, String>> + Send;
+}
+
+/// Run a walk: send the first prompt and, while a reply ends at the
+/// output token limit and the cap allows, send a continuation that
+/// names what is staged. `session` runs one turn in the walk's own
+/// conversation; `staged` returns the ids of the findings the walk has
+/// staged so far, and is called after every turn, so the index a
+/// continuation reads is current. A turn that fails ends the walk; what
+/// it staged before failing is still counted, because the runner
+/// aggregates staged records whatever the last reply was.
+pub async fn drive_walk_turns(
+    walk_name: &str,
+    run_id: &str,
+    first_prompt: String,
+    cap: u32,
+    session: &mut (impl WalkSession + Send),
+    mut staged: impl FnMut() -> Vec<String> + Send,
+) -> WalkTurns {
+    let mut prompt = first_prompt;
+    let mut skipped = Vec::new();
+    let mut truncations = Vec::new();
+    let mut continuations = 0;
+    loop {
+        let end = session.send(prompt).await;
+        let kept = staged();
+        let end = match end {
+            Ok(end) => end,
+            Err(reason) => {
+                return WalkTurns {
+                    last: Err(reason),
+                    skipped,
+                    truncations,
+                    continuations,
+                    findings_staged: kept.len(),
+                };
+            }
+        };
+        skipped.extend(end.skipped.iter().cloned());
+        let cut_off = end.stop_reason.as_deref() == Some("max_tokens");
+        if cut_off {
+            truncations.push(kept.len());
+        }
+        if !cut_off || continuations >= cap {
+            return WalkTurns {
+                last: Ok(end),
+                skipped,
+                truncations,
+                continuations,
+                findings_staged: kept.len(),
+            };
+        }
+        continuations += 1;
+        prompt = continuation_prompt(walk_name, run_id, &kept);
+    }
+}
+
 /// Synthesize the per-walk dispatch prompt. The slash interceptor
 /// rewrites `/<walk-name> ...` to prepend the staged walk body, so
 /// the runner only needs to supply the run-id, the staging path,
@@ -869,7 +1131,9 @@ pub fn build_walk_prompt(
         "/{walk_name} Run {walk_name} on this workspace. Run-id: `{run_id}`. {revision} \
          Emission is staged. Findings: write each finding to \
          `.lyrik/state/runs/{run_id}/staging/{walk_name}/findings/finding-NNN.json` \
-         (zero-padded ordinal; one finding per file). Context (if produced): \
+         (zero-padded ordinal; one finding per file) as soon as it is established, \
+         not at the end. Your final reply is a short summary; the runner reads the \
+         staged files, not the reply. Context (if produced): \
          `.lyrik/state/runs/{run_id}/staging/{walk_name}/context/<NN>-<section>.md`. \
          Rubric (if produced): `.lyrik/state/runs/{run_id}/staging/{walk_name}/rubric/<NN>-<tier>.md`. \
          Do not write `findings.json` directly; the Lyrik runner aggregates \
@@ -943,6 +1207,251 @@ mod tests {
                 .fix_tool_rounds(),
             super::super::lyrik_fix::FIX_TOOL_ROUNDS_DEFAULT
         );
+    }
+
+    /// A scripted walk: each turn stages the findings it is given and
+    /// ends with the stop reason it is given. Records every prompt.
+    struct Scripted {
+        findings_dir: PathBuf,
+        turns: Vec<(
+            Vec<&'static str>,
+            std::result::Result<&'static str, &'static str>,
+        )>,
+        prompts: Vec<String>,
+    }
+
+    impl WalkSession for Scripted {
+        async fn send(&mut self, prompt: String) -> std::result::Result<TurnEnd, String> {
+            self.prompts.push(prompt);
+            let (stage, end) = self.turns.remove(0);
+            for name in stage {
+                let id = format!("auth::src/{name}.rs:1");
+                std::fs::write(
+                    self.findings_dir.join(format!("finding-{name}.json")),
+                    serde_json::json!({
+                        "stable_id": id, "title": format!("finding {name}"), "tier": "LOW",
+                        "framing": ["auth"],
+                        "location": {"file": format!("src/{name}.rs"), "line_start": 1}
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            }
+            match end {
+                Ok(stop) => Ok(TurnEnd {
+                    response_len: 10,
+                    skipped: vec!["exec (shell:sh)".to_string()],
+                    stop_reason: Some(stop.to_string()),
+                }),
+                Err(why) => Err(why.to_string()),
+            }
+        }
+    }
+
+    const RUN_REL: &str = ".lyrik/state/runs/r1";
+
+    fn scripted(
+        tmp: &Path,
+        turns: Vec<(
+            Vec<&'static str>,
+            std::result::Result<&'static str, &'static str>,
+        )>,
+    ) -> (PathBuf, Scripted) {
+        let run_dir = tmp.join(RUN_REL);
+        ensure_walk_staging(&run_dir, &["sink-walk".to_string()]).unwrap();
+        let findings_dir = run_dir.join("staging/sink-walk/findings");
+        (
+            run_dir,
+            Scripted {
+                findings_dir,
+                turns,
+                prompts: Vec::new(),
+            },
+        )
+    }
+
+    async fn drive(run_dir: &Path, session: &mut Scripted, cap: u32) -> WalkTurns {
+        drive_walk_turns(
+            "sink-walk",
+            "r1",
+            "first prompt".to_string(),
+            cap,
+            session,
+            || {
+                write_staged_index(run_dir, RUN_REL).unwrap();
+                staged_finding_ids(run_dir, RUN_REL, "sink-walk")
+            },
+        )
+        .await
+    }
+
+    /// A reply cut off at the output limit does not end the walk: what
+    /// is staged is kept and counted, the walk is marked truncated, and
+    /// a continuation turn names the kept records. The second turn's
+    /// finding is added to the first's.
+    #[tokio::test]
+    async fn a_truncated_walk_keeps_what_is_staged_and_resumes() {
+        let tmp = tempdir().unwrap();
+        let (run_dir, mut session) = scripted(
+            tmp.path(),
+            vec![(vec!["a"], Ok("max_tokens")), (vec!["b"], Ok("end_turn"))],
+        );
+        let out = drive(&run_dir, &mut session, 2).await;
+        assert_eq!(out.truncations, vec![1], "one finding was kept at the cut");
+        assert_eq!(out.continuations, 1);
+        assert_eq!(out.findings_staged, 2);
+        assert_eq!(
+            out.last.as_ref().unwrap().stop_reason.as_deref(),
+            Some("end_turn")
+        );
+        assert_eq!(out.skipped.len(), 2, "refused calls of both turns");
+        assert_eq!(session.prompts.len(), 2);
+        assert_eq!(session.prompts[0], "first prompt");
+        let resume = &session.prompts[1];
+        assert!(
+            resume.contains("cut off at the output token limit"),
+            "{resume}"
+        );
+        assert!(
+            resume.contains("1 finding(s) are staged and kept"),
+            "{resume}"
+        );
+        assert!(resume.contains("`auth::src/a.rs:1`"), "{resume}");
+        assert!(resume.contains("Do not rewrite them"), "{resume}");
+        // The runner builds results from the staged records: both are
+        // in the index, with the path to read each by.
+        let index: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_dir.join("staging/index.json")).unwrap(),
+        )
+        .unwrap();
+        let entries = index.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["walk"], "sink-walk");
+        assert_eq!(entries[0]["kind"], "finding");
+        assert_eq!(entries[0]["id"], "auth::src/a.rs:1");
+        assert_eq!(entries[0]["file"], "src/a.rs");
+        assert_eq!(entries[0]["line"], 1);
+        assert_eq!(
+            entries[1]["path"],
+            ".lyrik/state/runs/r1/staging/sink-walk/findings/finding-b.json"
+        );
+    }
+
+    /// The operator's cap bounds the continuations. At the cap the walk
+    /// stops truncated, with what it staged still counted; with a cap
+    /// of zero no continuation is sent at all.
+    #[tokio::test]
+    async fn continuations_stop_at_the_operator_cap() {
+        let tmp = tempdir().unwrap();
+        let (run_dir, mut session) = scripted(
+            tmp.path(),
+            vec![
+                (vec![], Ok("max_tokens")),
+                (vec!["a"], Ok("max_tokens")),
+                (vec!["b"], Ok("max_tokens")),
+                (vec!["never"], Ok("end_turn")),
+            ],
+        );
+        let out = drive(&run_dir, &mut session, 2).await;
+        assert_eq!(out.continuations, 2);
+        assert_eq!(out.truncations, vec![0, 1, 2]);
+        assert_eq!(out.findings_staged, 2);
+        assert_eq!(session.prompts.len(), 3, "the fourth turn was never sent");
+        assert!(session.prompts[1].contains("No finding is staged yet"));
+
+        let tmp = tempdir().unwrap();
+        let (run_dir, mut session) = scripted(
+            tmp.path(),
+            vec![(vec!["a"], Ok("max_tokens")), (vec!["b"], Ok("end_turn"))],
+        );
+        let out = drive(&run_dir, &mut session, 0).await;
+        assert_eq!(out.continuations, 0);
+        assert_eq!(out.truncations, vec![1]);
+        assert_eq!(out.findings_staged, 1);
+        assert_eq!(session.prompts.len(), 1);
+    }
+
+    /// A turn that fails ends the walk, and what it staged before
+    /// failing is still counted. A reply that ends normally gets no
+    /// continuation.
+    #[tokio::test]
+    async fn a_failed_turn_keeps_its_staged_findings() {
+        let tmp = tempdir().unwrap();
+        let (run_dir, mut session) = scripted(
+            tmp.path(),
+            vec![
+                (vec!["a"], Ok("max_tokens")),
+                (vec!["b"], Err("http error")),
+            ],
+        );
+        let out = drive(&run_dir, &mut session, 2).await;
+        assert_eq!(out.last, Err("http error".to_string()));
+        assert_eq!(out.findings_staged, 2);
+        assert_eq!(out.truncations, vec![1]);
+
+        let tmp = tempdir().unwrap();
+        let (run_dir, mut session) = scripted(tmp.path(), vec![(vec!["a"], Ok("end_turn"))]);
+        let out = drive(&run_dir, &mut session, 2).await;
+        assert!(out.truncations.is_empty());
+        assert_eq!(out.continuations, 0);
+        assert_eq!(session.prompts.len(), 1);
+    }
+
+    /// The cap on continuations is the operator's: `lyrik.json` in the
+    /// data directory sets it, zero is a real setting, and it defaults
+    /// to two.
+    #[test]
+    fn walk_continuations_come_from_the_data_directory() {
+        let data = tempfile::tempdir().unwrap();
+        let read = || {
+            load_operator_settings(data.path())
+                .unwrap()
+                .walk_continuations()
+        };
+        assert_eq!(read(), WALK_CONTINUATIONS_DEFAULT);
+        assert_eq!(WALK_CONTINUATIONS_DEFAULT, 2);
+        std::fs::write(
+            operator_settings_path(data.path()),
+            r#"{"walk_continuations": 5}"#,
+        )
+        .unwrap();
+        assert_eq!(read(), 5);
+        std::fs::write(
+            operator_settings_path(data.path()),
+            r#"{"walk_continuations": 0}"#,
+        )
+        .unwrap();
+        assert_eq!(read(), 0);
+    }
+
+    /// The staged copy of a walk tells it to write each finding as it
+    /// goes, to keep the final reply short, to read another walk's
+    /// output through the index, and what the ledger file means. The
+    /// installed walk text is not changed: these lines are in the
+    /// section the runner adds.
+    #[test]
+    fn the_staged_walk_is_told_to_stage_as_it_goes_and_read_the_index_first() {
+        let source = minimal_walk_body("chain-walk");
+        let staged = wrap_with_wirken_frontmatter("chain-walk", "r1", None, true, &source);
+        for needle in [
+            "as soon as it is established",
+            "The final reply is a summary of a few lines",
+            ".lyrik/state/runs/<run-id>/staging/index.json` first",
+            "read only the records you need",
+            ".lyrik/state/runs/<run-id>/staging/chain-walk/ledger.json",
+            "A record under `settled` was observed by an executed run",
+            "A record under `context` was reasoned from the source only",
+        ] {
+            assert!(staged.contains(needle), "{needle}");
+        }
+        assert!(
+            staged.ends_with("# chain-walk\n\nbody.\n"),
+            "the walk's own text follows"
+        );
+        assert!(!source.contains("index.json"));
+        let prompt = build_walk_prompt("chain-walk", "r1", None, "");
+        assert!(prompt.contains("as soon as it is established"));
+        assert!(prompt.contains("the runner reads the staged files, not the reply"));
     }
 
     #[test]

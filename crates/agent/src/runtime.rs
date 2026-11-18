@@ -3251,6 +3251,14 @@ impl Agent {
     /// `webchat`, `cron`, and `wirken ask`. The harness uses it to
     /// detect re-deliveries after a crash and return the prior
     /// assistant response without re-running the LLM.
+    /// Why the provider says the last reply ended, as the audit row
+    /// names it: `end_turn`, `tool_use`, `max_tokens` and so on. After
+    /// [`Self::process_message`] returns, this is the stop reason of
+    /// the turn's final reply. `None` when the provider reported none.
+    pub fn last_stop_reason(&self) -> Option<String> {
+        self.llm.last_stop_reason().map(|r| r.as_str().to_string())
+    }
+
     pub async fn process_message(
         &mut self,
         user_message: &str,

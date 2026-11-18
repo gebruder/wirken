@@ -12,6 +12,10 @@ tagged.
 
 ### Operator notes
 
+- A Lyrik run in per-walk mode now writes `.lyrik/ledger/` in the target and
+  reads it on the next run. Commit it or ignore it as the team prefers;
+  delete it to start over.
+
 - Recorded cost for Anthropic's Opus 4.5 and Opus 4.7 falls to a third. A
   USD budget ceiling on such an agent is reached later for the same traffic.
 - Calls to the models added to the pricing table now record a cost and
@@ -30,6 +34,35 @@ tagged.
   $3.30 and $16.50 regional.
 
 ### Added
+
+- A Lyrik walk no longer depends on its last reply. Each walk writes every
+  finding to its staging directory when the finding is established and ends
+  with a short summary; the runner builds `findings.json` from the staged
+  records. When a reply is cut off at the output token limit the runner keeps
+  what is staged, records the walk as truncated with the count kept, and
+  sends a continuation turn that names the kept records. The operator caps
+  continuations with `walk_continuations` in the data directory's
+  `lyrik.json`, default 2. A walk reads another walk's output through
+  `staging/index.json`, which the runner rewrites after every turn
+  (`a_truncated_walk_keeps_what_is_staged_and_resumes`,
+  `continuations_stop_at_the_operator_cap`,
+  `crates/cli/src/commands/lyrik_walks.rs`;
+  [docs/lyrik.md](docs/lyrik.md#staged-results-truncation-and-the-ledger)).
+
+- Lyrik keeps a ledger of what earlier runs established about a target,
+  under the target's `.lyrik/ledger/`: one record per claim with the claim,
+  file and line, commit, a hash of the file content, whether it was observed
+  by an executed run or only reasoned, and the run that produced it. Records
+  come from a run's findings, rejections and fix arm results. Each walk is
+  handed the records before it starts. A staged finding that repeats an
+  observed record is refused with a pointer to the record; a reasoned record
+  is context and may be re-examined; a record whose file has changed is
+  marked stale and blocks nothing. A `--bench` run does not use the ledger.
+  The run prints, per walk, findings staged, truncations and what the ledger
+  refused, and `findings.json` carries it as `walk_summary`
+  (`a_check_that_duplicates_an_observed_record_is_refused_with_a_pointer`,
+  `a_record_whose_file_changed_is_stale_and_blocks_nothing`,
+  `crates/cli/src/commands/lyrik_ledger.rs`).
 
 - Anthropic's Mythos 5.2 is in the pricing table at $8 input and $40 output
   per million tokens, and it and Fable 5.2 carry Anthropic's listed cache

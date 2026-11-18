@@ -448,6 +448,17 @@ pub async fn run(
         )?;
     }
 
+    // Record what this run established, for the next one. Not in
+    // bench mode, and not for a fixture replay, which ran nothing.
+    if !bench_mode && use_fixture.is_none() {
+        let written =
+            update_ledger(target, &findings_dest, &run_dir, run_id).context("update the ledger")?;
+        audit.emit(
+            "lyrik.ledger.updated",
+            serde_json::json!({ "written": written }),
+        )?;
+    }
+
     audit.emit(
         "lyrik.run.completed",
         serde_json::json!({
@@ -543,6 +554,24 @@ fn one_line(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// Write the ledger records a finished run establishes, from its
+/// `findings.json` and the rejection records beside it.
+fn update_ledger(target: &Path, findings: &Path, run_dir: &Path, run_id: &str) -> Result<usize> {
+    let Ok(text) = std::fs::read_to_string(findings) else {
+        return Ok(0);
+    };
+    let body: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", findings.display()))?;
+    let rejections: Vec<serde_json::Value> =
+        std::fs::read_to_string(run_dir.join("rejections.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+    let records = super::lyrik_ledger::records_from_run(target, &body, &rejections, run_id);
+    super::lyrik_ledger::upsert(target, &records)
 }
 
 /// The detail of the `lyrik.run.started` row.
@@ -1330,9 +1359,42 @@ async fn dispatch_via_agent_runtime(
         target,
         fix_inputs.functionality.test_command.as_deref(),
     );
+    // What earlier runs established about this target. A bench run
+    // neither reads nor writes it: bench runs are independent.
+    let ledger = if audit.bench_mode {
+        Vec::new()
+    } else {
+        super::lyrik_ledger::load(target).context("read the ledger")?
+    };
+    if !ledger.is_empty() {
+        audit.emit(
+            "lyrik.ledger.loaded",
+            serde_json::json!({
+                "records": ledger.len(),
+                "settled": ledger.iter().filter(|r| r.settled()).count(),
+                "stale": ledger.iter().filter(|r| r.stale).count(),
+            }),
+        )?;
+    }
     let walks_staged_dir = match walks_cfg.as_ref() {
         Some(wc) => {
             ensure_walk_staging(&run_dir, &wc.walks).context("ensure per-walk staging dirs")?;
+            // Each walk is handed the ledger before it starts, and an
+            // index of staged records it can read another walk's
+            // output through.
+            if ledger.iter().any(|r| !r.stale) {
+                let handed = serde_json::to_string_pretty(&super::lyrik_ledger::for_walk(&ledger))?;
+                for w in &wc.walks {
+                    let path = run_dir.join("staging").join(w).join("ledger.json");
+                    std::fs::write(&path, &handed)
+                        .with_context(|| format!("write {}", path.display()))?;
+                }
+            }
+            super::lyrik_walks::write_staged_index(
+                &run_dir,
+                &format!(".lyrik/state/runs/{run_id}"),
+            )
+            .context("write the staged index")?;
             let staged = super::lyrik_walks::stage_walk_skills_for(
                 &wc.walks,
                 &walks_source_dir,
@@ -1448,6 +1510,7 @@ async fn dispatch_via_agent_runtime(
                     .get("target_sha")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
+                super::lyrik_walks::load_operator_settings(&cfg.data_dir)?.walk_continuations(),
                 terminal.clone(),
                 audit,
             )
@@ -1592,6 +1655,58 @@ async fn dispatch_via_agent_runtime(
     // directory, never the team's committed `.lyrik/rubric.md` or
     // `.lyrik/context.md`.
     let staging = run_dir.join("staging");
+    // A staged finding that repeats a claim the ledger holds as
+    // observed, against the file as it is now, is refused before
+    // aggregation and pointed at the record.
+    let mut ledger_refused: Vec<super::lyrik_ledger::Refused> = Vec::new();
+    if let Some(wc) = walks_cfg.as_ref() {
+        for w in &wc.walks {
+            let refused = super::lyrik_ledger::refuse_duplicates(&staging.join(w), w, &ledger)
+                .with_context(|| format!("check {w} against the ledger"))?;
+            for r in &refused {
+                audit.emit("lyrik.ledger.refused", serde_json::to_value(r)?)?;
+            }
+            ledger_refused.extend(refused);
+        }
+    }
+    // Per walk: what it staged, how often it was cut off, and what the
+    // ledger refused.
+    let walk_summary: Vec<serde_json::Value> = walk_outcomes
+        .iter()
+        .flatten()
+        .map(|o| {
+            let refused = ledger_refused
+                .iter()
+                .filter(|r| r.walk == o.walk_name)
+                .count();
+            serde_json::json!({
+                "walk": o.walk_name,
+                "findings_staged": o.findings_staged,
+                "truncations": o.truncations.len(),
+                "kept_at_truncation": o.truncations,
+                "continuations": o.continuations,
+                "ledger_refused": refused,
+                "completed": matches!(o.status, WalkStatus::Success),
+            })
+        })
+        .collect();
+    for line in walk_summary_lines(&walk_summary) {
+        println!("{line}");
+    }
+    let mut extras = extras.clone();
+    if !walk_summary.is_empty() {
+        extras.insert(
+            "walk_summary".into(),
+            serde_json::Value::Array(walk_summary),
+        );
+    }
+    if !ledger_refused.is_empty() {
+        extras.insert(
+            "ledger_refused".into(),
+            serde_json::to_value(&ledger_refused)?,
+        );
+    }
+    let extras = &extras;
     aggregate_phase0_section(
         &staging.join("context"),
         &run_dir.join("proposed").join("context.md"),
@@ -3383,6 +3498,29 @@ pub(super) struct WalkOutcome {
     /// Each refused call in the walk's turn, as `tool (approval key)`.
     /// The step was not taken; the walk carried on without it.
     pub skipped: Vec<String>,
+    /// Findings the walk had staged when it stopped.
+    pub findings_staged: usize,
+    /// One entry per reply cut off at the output token limit: the
+    /// findings staged, and so kept, at that point.
+    pub truncations: Vec<usize>,
+    /// Continuation turns the runner sent after a cut-off reply.
+    pub continuations: u32,
+}
+
+impl WalkOutcome {
+    /// A walk that did not get as far as a turn.
+    fn failed_before_a_turn(walk_name: &str, reason: String) -> Self {
+        WalkOutcome {
+            walk_name: walk_name.to_string(),
+            status: WalkStatus::TransientFailure { reason },
+            response_len: 0,
+            denials: 0,
+            skipped: Vec::new(),
+            findings_staged: 0,
+            truncations: Vec::new(),
+            continuations: 0,
+        }
+    }
 }
 
 /// Outcome class. A walk whose turn completed is a success, whatever
@@ -3393,6 +3531,80 @@ pub(super) struct WalkOutcome {
 pub(super) enum WalkStatus {
     Success,
     TransientFailure { reason: String },
+}
+
+/// The run summary's per-walk lines, from the `walk_summary` records.
+fn walk_summary_lines(summary: &[serde_json::Value]) -> Vec<String> {
+    summary
+        .iter()
+        .map(|w| {
+            let n = |k: &str| w.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let mut line = format!(
+                "walk {}: {} finding(s) staged",
+                w.get("walk")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                n("findings_staged")
+            );
+            if n("truncations") > 0 {
+                let kept: Vec<String> = w
+                    .get("kept_at_truncation")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| a.iter().map(|k| k.to_string()).collect())
+                    .unwrap_or_default();
+                line.push_str(&format!(
+                    ", truncated {} time(s) at the output limit (kept {}), {} continuation(s)",
+                    n("truncations"),
+                    kept.join(", "),
+                    n("continuations")
+                ));
+            }
+            if n("ledger_refused") > 0 {
+                line.push_str(&format!(
+                    ", {} refused as already observed",
+                    n("ledger_refused")
+                ));
+            }
+            if w.get("completed").and_then(serde_json::Value::as_bool) == Some(false) {
+                line.push_str(", did not complete");
+            }
+            line
+        })
+        .collect()
+}
+
+/// A walk's own agent, as the turn driver's session.
+struct AgentWalkSession<'a> {
+    agent: &'a mut Agent,
+    walk_name: &'a str,
+}
+
+impl super::lyrik_walks::WalkSession for AgentWalkSession<'_> {
+    async fn send(
+        &mut self,
+        prompt: String,
+    ) -> std::result::Result<super::lyrik_walks::TurnEnd, String> {
+        let inbound_id = format!("lyrik-walk-{}-{}", self.walk_name, uuid::Uuid::new_v4());
+        match self.agent.process_message(&prompt, inbound_id).await {
+            // A refused call is a step the walk did not take, not the
+            // end of the run: the refusal is on the chain, the model
+            // was told, and the turn went on. The walk reports the
+            // steps it skipped.
+            Ok(r) => Ok(super::lyrik_walks::TurnEnd {
+                response_len: r.response.len(),
+                skipped: r
+                    .denials
+                    .iter()
+                    .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
+                    .collect(),
+                stop_reason: self.agent.last_stop_reason(),
+            }),
+            Err(AgentError::RateLimitExhausted { attempts }) => {
+                Err(format!("rate_limit_exhausted after {attempts} attempts"))
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
 }
 
 /// Run every selected walk concurrently, gated by a Semaphore
@@ -3432,6 +3644,9 @@ async fn dispatch_walks_concurrent(
     // prompt so step records can carry it. `None` when git state was
     // unavailable.
     code_revision: Option<String>,
+    // Continuation turns a walk gets after a reply cut off at the
+    // output token limit: the operator's `walk_continuations`.
+    continuations_cap: u32,
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
@@ -3536,15 +3751,10 @@ async fn dispatch_walks_concurrent(
             ) {
                 Ok(a) => a,
                 Err(e) => {
-                    return WalkOutcome {
-                        walk_name: walk_name.clone(),
-                        status: WalkStatus::TransientFailure {
-                            reason: format!("agent_construct: {e}"),
-                        },
-                        response_len: 0,
-                        denials: 0,
-                        skipped: Vec::new(),
-                    };
+                    return WalkOutcome::failed_before_a_turn(
+                        &walk_name,
+                        format!("agent_construct: {e}"),
+                    );
                 }
             };
             // Named before any call is gated, like the run agent
@@ -3558,15 +3768,10 @@ async fn dispatch_walks_concurrent(
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|skills| local_agent.attach_skills(skills).map_err(|e| e.to_string()));
             if let Err(e) = attached {
-                return WalkOutcome {
-                    walk_name: walk_name.clone(),
-                    status: WalkStatus::TransientFailure {
-                        reason: format!("attach_skills: {e}"),
-                    },
-                    response_len: 0,
-                    denials: 0,
-                    skipped: Vec::new(),
-                };
+                return WalkOutcome::failed_before_a_turn(
+                    &walk_name,
+                    format!("attach_skills: {e}"),
+                );
             }
 
             let prompt = build_walk_prompt(
@@ -3575,44 +3780,40 @@ async fn dispatch_walks_concurrent(
                 code_revision_t.as_deref(),
                 &walk_seed_suffix_t,
             );
-            let inbound_id = format!("lyrik-walk-{}-{}", walk_name, uuid::Uuid::new_v4());
-            match local_agent.process_message(&prompt, inbound_id).await {
-                Ok(r) => {
-                    // A refused call is a step the walk did not take,
-                    // not the end of the run: the refusal is on the
-                    // chain, the model was told, and the turn went on.
-                    // The walk reports the steps it skipped.
-                    let skipped: Vec<String> = r
-                        .denials
-                        .iter()
-                        .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
-                        .collect();
-                    WalkOutcome {
-                        walk_name: walk_name.clone(),
-                        status: WalkStatus::Success,
-                        response_len: r.response.len(),
-                        denials: skipped.len(),
-                        skipped,
-                    }
-                }
-                Err(AgentError::RateLimitExhausted { attempts }) => WalkOutcome {
-                    walk_name: walk_name.clone(),
-                    status: WalkStatus::TransientFailure {
-                        reason: format!("rate_limit_exhausted after {attempts} attempts"),
-                    },
-                    response_len: 0,
-                    denials: 0,
-                    skipped: Vec::new(),
+            // The walk's turns: the first prompt and, after a reply cut
+            // off at the output token limit, continuations that name
+            // what is staged. The index is rewritten after every turn,
+            // so another walk reading it sees this walk's records.
+            let run_rel = format!(".lyrik/state/runs/{run_id_t}");
+            let run_dir_t = target_t.join(&run_rel);
+            let turns = super::lyrik_walks::drive_walk_turns(
+                &walk_name,
+                &run_id_t,
+                prompt,
+                continuations_cap,
+                &mut AgentWalkSession {
+                    agent: &mut local_agent,
+                    walk_name: &walk_name,
                 },
-                Err(e) => WalkOutcome {
-                    walk_name: walk_name.clone(),
-                    status: WalkStatus::TransientFailure {
-                        reason: e.to_string(),
-                    },
-                    response_len: 0,
-                    denials: 0,
-                    skipped: Vec::new(),
+                || {
+                    let _ = super::lyrik_walks::write_staged_index(&run_dir_t, &run_rel);
+                    super::lyrik_walks::staged_finding_ids(&run_dir_t, &run_rel, &walk_name)
                 },
+            )
+            .await;
+            let (status, response_len) = match turns.last {
+                Ok(end) => (WalkStatus::Success, end.response_len),
+                Err(reason) => (WalkStatus::TransientFailure { reason }, 0),
+            };
+            WalkOutcome {
+                walk_name: walk_name.clone(),
+                status,
+                response_len,
+                denials: turns.skipped.len(),
+                skipped: turns.skipped,
+                findings_staged: turns.findings_staged,
+                truncations: turns.truncations,
+                continuations: turns.continuations,
             }
         });
         handles.push((name, h));
@@ -3622,15 +3823,7 @@ async fn dispatch_walks_concurrent(
     for (name, h) in handles {
         let outcome = match h.await {
             Ok(o) => o,
-            Err(join_err) => WalkOutcome {
-                walk_name: name.clone(),
-                status: WalkStatus::TransientFailure {
-                    reason: format!("join: {join_err}"),
-                },
-                response_len: 0,
-                denials: 0,
-                skipped: Vec::new(),
-            },
+            Err(join_err) => WalkOutcome::failed_before_a_turn(&name, format!("join: {join_err}")),
         };
         let status_label = match &outcome.status {
             WalkStatus::Success => "success",
@@ -3649,6 +3842,10 @@ async fn dispatch_walks_concurrent(
                 "response_len": outcome.response_len,
                 "denials": outcome.denials,
                 "skipped": outcome.skipped,
+                "findings_staged": outcome.findings_staged,
+                "truncated": !outcome.truncations.is_empty(),
+                "truncations": outcome.truncations,
+                "continuations": outcome.continuations,
             }),
         )?;
         outcomes.push(outcome);
@@ -7523,6 +7720,29 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(body["schema_version"].as_str(), Some("1.1"));
         assert_eq!(body["lyrik_version"], super::LYRIK_VERSION);
+    }
+
+    /// The run summary says, per walk, what was staged, how often the
+    /// walk was cut off and what was kept each time, and what the
+    /// ledger refused.
+    #[test]
+    fn the_run_summary_reports_each_walk_s_staging_and_truncations() {
+        let lines = super::walk_summary_lines(&[
+            serde_json::json!({"walk": "sink-walk", "findings_staged": 3, "truncations": 2,
+                "kept_at_truncation": [1, 2], "continuations": 2, "ledger_refused": 1,
+                "completed": true}),
+            serde_json::json!({"walk": "doc-walk", "findings_staged": 0, "truncations": 0,
+                "kept_at_truncation": [], "continuations": 0, "ledger_refused": 0,
+                "completed": false}),
+        ]);
+        assert_eq!(
+            lines,
+            vec![
+                "walk sink-walk: 3 finding(s) staged, truncated 2 time(s) at the output limit \
+                 (kept 1, 2), 2 continuation(s), 1 refused as already observed",
+                "walk doc-walk: 0 finding(s) staged, did not complete",
+            ]
+        );
     }
 
     /// Every `findings.json` a run can write carries Lyrik's own

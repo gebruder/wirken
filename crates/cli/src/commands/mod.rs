@@ -25,6 +25,7 @@ pub mod lyrik_citation;
 pub mod lyrik_fix;
 pub mod lyrik_fix_arms;
 pub mod lyrik_git;
+pub mod lyrik_ledger;
 pub mod lyrik_preflight;
 pub mod lyrik_replay;
 pub mod lyrik_sarif;
