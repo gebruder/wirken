@@ -70,7 +70,7 @@ enum ExecSandbox {
     /// On the host: the operator set `"mode": "off"`.
     Host,
     /// In a container under the runtime the mode names.
-    Container(DockerSandbox),
+    Container(Box<DockerSandbox>),
     /// Nowhere: the runtime the mode names cannot run a container.
     Unavailable(RuntimeStatus),
 }
@@ -623,7 +623,7 @@ impl ToolRegistry {
                             "sandbox provisioned: {status}, image={}",
                             self.sandbox_config.image,
                         );
-                        ExecSandbox::Container(s)
+                        ExecSandbox::Container(Box::new(s))
                     }
                     Err(e) => {
                         let status = RuntimeStatus {

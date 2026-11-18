@@ -5413,6 +5413,142 @@ fn an_exec_on_the_default_bridge_keeps_the_host_resolver() {
     assert_eq!(hc.dns_search, None);
 }
 
+/// Under a workspace scope the workspace is mounted read-only, each
+/// writable directory read-write over it, and each masked directory
+/// behind an empty read-only tmpfs. Without one, read-write as before.
+#[test]
+fn a_workspace_scope_mounts_the_workspace_read_only_with_its_exceptions() {
+    use crate::sandbox::{EgressDecision, SandboxConfig, WorkspaceScope, build_host_config};
+
+    let plain = build_host_config(
+        &SandboxConfig::default(),
+        "/host/workspace",
+        EgressDecision::Denied,
+    );
+    assert_eq!(
+        plain.binds.as_deref(),
+        Some(&["/host/workspace:/workspace:rw".to_string()][..])
+    );
+    assert!(plain.mounts.unwrap_or_default().is_empty());
+
+    let cfg = SandboxConfig {
+        workspace_scope: Some(WorkspaceScope {
+            writable: vec!["state/own".into()],
+            masked: vec!["state/other".into()],
+        }),
+        ..SandboxConfig::default()
+    };
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Denied);
+    assert_eq!(
+        hc.binds.as_deref(),
+        Some(
+            &[
+                "/host/workspace:/workspace:ro".to_string(),
+                "/host/workspace/state/own:/workspace/state/own:rw".to_string(),
+            ][..]
+        )
+    );
+    let mounts = hc.mounts.unwrap();
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].target.as_deref(), Some("/workspace/state/other"));
+    assert_eq!(mounts[0].typ, Some(bollard::models::MountType::TMPFS));
+    assert_eq!(mounts[0].read_only, Some(true));
+    assert_eq!(hc.network_mode.as_deref(), Some("none"));
+}
+
+/// A scope the mounts cannot express is refused before a container
+/// exists: a path that leaves the workspace, and a directory that is
+/// not there or is a link to somewhere else.
+#[test]
+fn a_workspace_scope_that_cannot_be_mounted_is_refused() {
+    use crate::sandbox::WorkspaceScope;
+
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(ws.join("own")).unwrap();
+    std::fs::create_dir_all(ws.join("other")).unwrap();
+    let scope = |writable: &str| WorkspaceScope {
+        writable: vec![writable.into()],
+        masked: vec!["other".into()],
+    };
+    assert!(scope("own").check(&ws).is_ok());
+    for bad in ["../outside", "/abs", "own/../other", "missing", "a:b"] {
+        assert!(scope(bad).check(&ws).is_err(), "{bad}");
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(ws.join("other"), ws.join("link")).unwrap();
+        assert!(scope("link").check(&ws).is_err());
+    }
+}
+
+/// The mounts hold in a real container: a command cannot write the
+/// workspace or see a masked directory, and can write a writable one.
+#[tokio::test]
+async fn a_scoped_exec_cannot_write_the_workspace_or_see_a_masked_directory() {
+    use crate::sandbox::{
+        DockerSandbox, SandboxConfig, SandboxMode, WorkspaceScope, detect_image, detect_runtime,
+    };
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("staging/own")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("staging/other")).unwrap();
+    std::fs::write(tmp.path().join("staging/other/secret.json"), "{}").unwrap();
+    std::fs::write(tmp.path().join("a.c"), "int x;\n").unwrap();
+    // The container runs as another user, as a walk's does.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in ["", "staging", "staging/own", "staging/other"] {
+            std::fs::set_permissions(tmp.path().join(dir), std::fs::Permissions::from_mode(0o777))
+                .unwrap();
+        }
+    }
+    let sandbox = DockerSandbox::new(SandboxConfig {
+        mode: SandboxMode::ExecOnly,
+        workspace_scope: Some(WorkspaceScope {
+            writable: vec!["staging/own".into()],
+            masked: vec!["staging/other".into()],
+        }),
+        ..Default::default()
+    })
+    .expect("sandbox");
+    let result = sandbox
+        .exec(
+            "cat a.c >/dev/null && echo read=0; \
+             (echo t > a.c) 2>/dev/null; echo target_write=$?; \
+             (echo t > new.txt) 2>/dev/null; echo target_create=$?; \
+             (echo t > staging/own/out) 2>/dev/null; echo own_write=$?; \
+             (echo t > staging/other/out) 2>/dev/null; echo other_write=$?; \
+             echo other_entries=$(ls staging/other | wc -l)",
+            tmp.path(),
+            None,
+        )
+        .await
+        .expect("exec runs");
+    let out = &result.output;
+    for line in ["read=0", "own_write=0", "other_entries=0"] {
+        assert!(out.contains(line), "missing {line} in:\n{out}");
+    }
+    for line in ["target_write=0", "target_create=0", "other_write=0"] {
+        assert!(!out.contains(line), "{line} in:\n{out}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("a.c")).unwrap(),
+        "int x;\n"
+    );
+    assert!(tmp.path().join("staging/own/out").is_file());
+    assert!(!tmp.path().join("staging/other/out").exists());
+}
+
 /// The exec sidecar runs as the operator, and its broker socket and
 /// directory admit the operator alone.
 #[cfg(unix)]

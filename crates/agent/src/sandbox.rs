@@ -8,7 +8,7 @@
 //! ended without either left behind.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 use bollard::Docker;
@@ -223,6 +223,49 @@ fn find_executable(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// What an `exec` may touch of the workspace, for a caller that
+/// confines it. With a scope the workspace is mounted read-only; each
+/// `writable` directory is mounted read-write over it, and each
+/// `masked` directory is covered by an empty read-only tmpfs, so
+/// nothing in it can be read or written. Both lists are directories
+/// relative to the workspace. Without a scope the whole workspace is
+/// mounted read-write.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceScope {
+    pub writable: Vec<PathBuf>,
+    pub masked: Vec<PathBuf>,
+}
+
+impl WorkspaceScope {
+    /// Refuse a scope the mounts cannot express as written: a path
+    /// that is absolute, leaves the workspace, or carries a `:` (the
+    /// separator of a bind), and a directory that is not there to
+    /// mount. Checked before a container is created, so an `exec`
+    /// under a scope that cannot be enforced does not run.
+    pub fn check(&self, workspace: &Path) -> Result<(), String> {
+        for rel in self.writable.iter().chain(&self.masked) {
+            let plain = rel.components().all(|c| matches!(c, Component::Normal(_)));
+            if !plain || rel.as_os_str().is_empty() || rel.to_string_lossy().contains(':') {
+                return Err(format!(
+                    "{} is not a plain path inside the workspace",
+                    rel.display()
+                ));
+            }
+            let dir = workspace.join(rel);
+            let real = dir
+                .canonicalize()
+                .map_err(|e| format!("{} cannot be mounted: {e}", dir.display()))?;
+            if !real.is_dir() || real != dir {
+                return Err(format!(
+                    "{} is not a directory of the workspace itself",
+                    dir.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Configuration for the sandbox.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -251,6 +294,9 @@ pub struct SandboxConfig {
     /// containers carry it. Empty labels nothing with an instance, and
     /// [`sweep_leftovers`] then removes nothing.
     pub instance: String,
+    /// What an `exec` may touch of the workspace. `None` mounts the
+    /// whole workspace read-write.
+    pub workspace_scope: Option<WorkspaceScope>,
 }
 
 /// Default wall-clock limit on one command.
@@ -283,6 +329,7 @@ impl Default for SandboxConfig {
             shell: ShellMode::Auto,
             sidecar_binary: None,
             instance: String::new(),
+            workspace_scope: None,
         }
     }
 }
@@ -564,6 +611,12 @@ impl DockerSandbox {
             .unwrap_or_else(|_| workspace.to_path_buf())
             .to_string_lossy()
             .to_string();
+
+        if let Some(scope) = &self.config.workspace_scope {
+            scope
+                .check(Path::new(&workspace_str))
+                .map_err(|e| AgentError::Sandbox(format!("exec refused: {e}")))?;
+        }
 
         let mut resources = ExecResources::new(self.client.clone());
 
@@ -933,7 +986,9 @@ pub enum EgressDecision<'a> {
 /// * the seccomp profile in [`wirken_sandbox::seccomp`], which refuses
 ///   `unshare`, `mount` and a namespace-making `clone` on its own terms
 ///   rather than on the runtime default's;
-/// * the agent workspace, bind-mounted read-write at `/workspace`;
+/// * the agent workspace, bind-mounted read-write at `/workspace`, or
+///   under a [`WorkspaceScope`] read-only with only the scope's
+///   directories writable;
 /// * the memory and PID caps, and no CPU cap;
 /// * `egress`: what the egress layer decided. `Proxied` joins the
 ///   named Docker network, created `Internal` with inter-container
@@ -980,9 +1035,10 @@ pub fn build_host_config(
             Some(vec![".".to_string()]),
         )
     };
+    let (binds, mounts) = workspace_mounts(workspace_str, config.workspace_scope.as_ref());
     wirken_sandbox::hardened_host_config(wirken_sandbox::HostSettings {
-        binds: vec![format!("{workspace_str}:/workspace:rw")],
-        mounts: Vec::new(),
+        binds,
+        mounts,
         network_mode,
         dns,
         dns_search,
@@ -992,6 +1048,39 @@ pub fn build_host_config(
         runtime: config.mode.runtime_name(),
         seccomp: wirken_sandbox::seccomp::Seccomp::Profile,
     })
+}
+
+/// The workspace's mounts: all of it read-write, or under a
+/// [`WorkspaceScope`] read-only with the scope's writable directories
+/// bound over it and its masked ones behind an empty read-only tmpfs.
+fn workspace_mounts(
+    workspace_str: &str,
+    scope: Option<&WorkspaceScope>,
+) -> (Vec<String>, Vec<bollard::models::Mount>) {
+    let Some(scope) = scope else {
+        return (vec![format!("{workspace_str}:/workspace:rw")], Vec::new());
+    };
+    let mut binds = vec![format!("{workspace_str}:/workspace:ro")];
+    for rel in &scope.writable {
+        let rel = rel.to_string_lossy();
+        binds.push(format!("{workspace_str}/{rel}:/workspace/{rel}:rw"));
+    }
+    let mounts = scope
+        .masked
+        .iter()
+        .map(|rel| bollard::models::Mount {
+            target: Some(format!("/workspace/{}", rel.to_string_lossy())),
+            typ: Some(bollard::models::MountType::TMPFS),
+            read_only: Some(true),
+            tmpfs_options: Some(bollard::models::MountTmpfsOptions {
+                size_bytes: Some(4096),
+                mode: Some(0o555),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .collect();
+    (binds, mounts)
 }
 
 /// The sidecar for one exec. It runs as the operator, so the broker's

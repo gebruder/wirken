@@ -180,6 +180,85 @@ fn attach_terminal_gate(
     }
 }
 
+/// [`attach_terminal_gate`] for an agent that runs inside an
+/// [`Envelope`]. In a run the operator signed off, its `exec` calls
+/// are approved by that sign-off. A `--bench` run has no sign-off to
+/// approve them: at a terminal each command is asked as before, and
+/// with no terminal `exec` is refused as before.
+fn attach_envelope_gate(
+    agent: &mut wirken_agent::Agent,
+    asker: &str,
+    terminal: Option<
+        Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
+    >,
+    signed_off: bool,
+) {
+    match terminal {
+        Some(terminal) => {
+            let gate = super::stdin_approval::LyrikPromptGate::new(asker, terminal);
+            agent.set_approval_gate(Arc::new(if signed_off {
+                gate.with_signoff_envelope()
+            } else {
+                gate
+            }))
+        }
+        None => agent.set_unmediated_denial_reason(NO_TERMINAL_FOR_APPROVAL),
+    }
+}
+
+/// What one walk's or one replay's agent may touch, enforced twice:
+/// by the mounts of the container its `exec` runs in, and by the scope
+/// on its file tools. The target is read-only, `own` is the one
+/// writable directory, and another walk's staging directory is hidden
+/// from `exec` and readable through the file tools only at the record
+/// files the staged index lists.
+struct Envelope {
+    mounts: wirken_agent::sandbox::WorkspaceScope,
+    files: wirken_agent::file_scope::FileScope,
+}
+
+/// The envelope for `walk` among the run's `walks`. `own` is the
+/// writable directory, relative to the walk's staging directory: empty
+/// for the walk itself, `replays` for a replay of one of its records.
+fn envelope_for(target: &Path, run_id: &str, walks: &[String], walk: &str, own: &str) -> Envelope {
+    let staging = PathBuf::from(format!(".lyrik/state/runs/{run_id}/staging"));
+    let writable = staging.join(walk).join(own);
+    let masked: Vec<PathBuf> = walks
+        .iter()
+        .filter(|w| w.as_str() != walk)
+        .map(|w| staging.join(w))
+        .collect();
+    let target = wirken_agent::file_scope::resolve(target);
+    // What `staging/index.json` lists of a walk: the files directly
+    // in its `findings/` and `rejections/`.
+    let listed: Vec<PathBuf> = masked
+        .iter()
+        .flat_map(|m| {
+            [
+                target.join(m).join("findings"),
+                target.join(m).join("rejections"),
+            ]
+        })
+        .collect();
+    let files = wirken_agent::file_scope::FileScope::new(
+        &target.join(&writable),
+        &masked.iter().map(|m| target.join(m)).collect::<Vec<_>>(),
+        Arc::new(move |path: &Path| {
+            path.extension().is_some_and(|e| e == "json")
+                && path
+                    .parent()
+                    .is_some_and(|dir| listed.iter().any(|l| l == dir))
+        }),
+    );
+    Envelope {
+        mounts: wirken_agent::sandbox::WorkspaceScope {
+            writable: vec![writable],
+            masked,
+        },
+        files,
+    }
+}
+
 pub async fn run(
     target: &Path,
     run_id: &str,
@@ -751,6 +830,9 @@ fn signoff_summary(
             "lyrik: none listed".to_string(),
         ),
     };
+    // A per-walk run's walks and replays run `exec` inside the
+    // envelope; the single call has no walk to scope it to.
+    let enveloped = exec_available && walks.is_some();
     let exec_line = if exec_available {
         exec_line
     } else {
@@ -785,9 +867,18 @@ fn signoff_summary(
                 .join("; "),
         ),
         ("exec", exec_line),
+        (
+            "envelope",
+            if enveloped {
+                ENVELOPE_LINE.to_string()
+            } else {
+                String::new()
+            },
+        ),
     ] {
-        // `models` is said only when a walk runs on its own model.
-        if label == "models" && value.is_empty() {
+        // `models` is said only when a walk runs on its own model,
+        // `envelope` only when the run's walks run inside one.
+        if matches!(label, "models" | "envelope") && value.is_empty() {
             continue;
         }
         lines.push(format!("  {label:<8} {}", one_line(&value)));
@@ -801,7 +892,11 @@ fn signoff_summary(
             l.memory_mb, l.pids, l.timeout_secs
         ));
     }
-    lines.push(if exec_available {
+    lines.push(if enveloped {
+        "  Anything outside the envelope is still asked; nothing leaves this host \
+         but calls to the model."
+            .to_string()
+    } else if exec_available {
         "  Each exec command is asked again before it runs; nothing else leaves \
          this host but calls to the model."
             .to_string()
@@ -1805,6 +1900,7 @@ async fn dispatch_via_agent_runtime(
                 operator.transport_retries(),
                 ceiling_hit.clone(),
                 terminal.clone(),
+                !audit.bench_mode,
                 audit,
             )
             .await;
@@ -1853,6 +1949,7 @@ async fn dispatch_via_agent_runtime(
                     &run_dir,
                     exec_available,
                     terminal.clone(),
+                    !audit.bench_mode,
                     audit,
                 )
                 .await?;
@@ -3742,6 +3839,8 @@ async fn dispatch_replays(
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
+    // Whether the operator signed this run off: a `--bench` run was not.
+    signed_off: bool,
     audit: &mut AuditLogger,
 ) -> Result<usize> {
     // Every record first, so the skill is staged only when one exists
@@ -3799,7 +3898,16 @@ async fn dispatch_replays(
         let api_key_t = api_key.clone();
         let api_key_credential_t = api_key_credential.clone();
         let session_log_t = session_log.clone();
-        let sandbox_t = sandbox.clone();
+        // A replay runs in the envelope of the walk whose record it
+        // replays, with that walk's `replays/` the one directory it
+        // writes.
+        let replays_dir = run_dir.join("staging").join(&walk).join("replays");
+        std::fs::create_dir_all(&replays_dir)
+            .with_context(|| format!("create {}", replays_dir.display()))?;
+        let envelope = envelope_for(&target, &run_id, walks, &walk, "replays");
+        let mut sandbox_t = sandbox.clone();
+        sandbox_t.workspace_scope = Some(envelope.mounts);
+        let file_scope_t = envelope.files;
         let permissions_t = permissions.clone();
         let leak_t = leak_matcher.clone();
         let terminal_t = terminal.clone();
@@ -3825,7 +3933,8 @@ async fn dispatch_replays(
             agent.set_agent_id(agent_id_t);
             agent.set_call_step(REPLAY_STEP);
             agent.set_leak_matcher(leak_t);
-            attach_terminal_gate(&mut agent, "replay", terminal_t);
+            agent.set_file_scope(file_scope_t);
+            attach_envelope_gate(&mut agent, "replay", terminal_t, signed_off);
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()));
@@ -4013,6 +4122,11 @@ struct AgentWalkSession<'a> {
 
 /// Why a walk ended when the run reached its cost ceiling.
 const STOPPED_AT_CEILING: &str = "the run reached its cost ceiling";
+/// The envelope as the sign-off summary states it. The sign-off is
+/// what approves an `exec` inside it, so this is the text signed.
+const ENVELOPE_LINE: &str = "each exec runs in the sandbox with the target read-only, the \
+     walk's own staging directory writable, other walks' staging hidden and no network; \
+     this sign-off approves every exec inside it";
 /// `step` on the `LlmRequest` and `LlmResponse` rows of a replay.
 const REPLAY_STEP: &str = "replay";
 
@@ -4134,6 +4248,8 @@ async fn dispatch_walks_concurrent(
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
+    // Whether the operator signed this run off: a `--bench` run was not.
+    signed_off: bool,
     audit: &mut AuditLogger,
 ) -> Result<Vec<WalkOutcome>> {
     // What the run may ask, before the first prompt.
@@ -4171,10 +4287,18 @@ async fn dispatch_walks_concurrent(
             {
                 eprintln!("{line}");
             }
-            eprintln!(
-                "  This run asks before each of these commands runs: {}",
-                asks.join("; ")
-            );
+            if signed_off {
+                eprintln!(
+                    "  These run inside the envelope the sign-off approved, without asking: {}",
+                    asks.join("; ")
+                );
+            } else {
+                eprintln!(
+                    "  This run was not signed off, so it asks before each of these commands \
+                     runs: {}",
+                    asks.join("; ")
+                );
+            }
         } else {
             eprintln!(
                 "  stdin is not a terminal, so these commands are refused and \
@@ -4190,6 +4314,7 @@ async fn dispatch_walks_concurrent(
 
     let mut handles: Vec<(String, tokio::task::JoinHandle<WalkOutcome>)> =
         Vec::with_capacity(walks.len());
+    let all_walks = walks.clone();
     for name in walks {
         let llm_config_t = walk_configs
             .get(&name)
@@ -4207,7 +4332,13 @@ async fn dispatch_walks_concurrent(
         let api_key_t = api_key.clone();
         let api_key_credential_t = api_key_credential.clone();
         let session_log_t = session_log.clone();
-        let sandbox_t = sandbox.clone();
+        // The walk's envelope: its `exec` sees the target read-only,
+        // its own staging directory read-write and no other walk's,
+        // and its file tools are held to the same.
+        let envelope = envelope_for(&target, &run_id, &all_walks, &name, "");
+        let mut sandbox_t = sandbox.clone();
+        sandbox_t.workspace_scope = Some(envelope.mounts);
+        let file_scope_t = envelope.files;
         let permissions_t = permissions.clone();
         let leak_t = leak_matcher.clone();
         let terminal_t = terminal.clone();
@@ -4253,7 +4384,8 @@ async fn dispatch_walks_concurrent(
             local_agent.set_call_step(walk_name.clone());
             local_agent.set_leak_matcher(leak_t);
             local_agent.set_transport_retries(transport_retries);
-            attach_terminal_gate(&mut local_agent, &walk_name, terminal_t);
+            local_agent.set_file_scope(file_scope_t);
+            attach_envelope_gate(&mut local_agent, &walk_name, terminal_t, signed_off);
 
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))
@@ -6832,7 +6964,7 @@ mod tests {
             None,
         );
         let lines: Vec<&str> = summary.lines().collect();
-        assert_eq!(lines.len(), 8, "{summary}");
+        assert_eq!(lines.len(), 9, "{summary}");
         assert_eq!(lines[0], "Lyrik 1.0.1 run r1 on /t");
         assert!(lines[1].starts_with("  target   HEAD abc123, tracked-file state unknown: "));
         assert!(!summary.contains('\x1b'), "{summary}");
@@ -6852,6 +6984,14 @@ mod tests {
             "  exec     sink-walk: git log, git blame, \
              sh .lyrik/state/runs/<run-id>/staging/sink-walk/harness/<script>; \
              chain-walk: sh .lyrik/state/runs/<run-id>/staging/chain-walk/harness/<script>"
+        );
+        // A per-walk run with exec states the envelope the sign-off
+        // approves, and no longer says each command is asked again.
+        assert_eq!(lines[7], format!("  envelope {}", super::ENVELOPE_LINE));
+        assert_eq!(
+            lines[8],
+            "  Anything outside the envelope is still asked; nothing leaves this host but \
+             calls to the model."
         );
     }
 

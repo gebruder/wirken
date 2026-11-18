@@ -14,6 +14,7 @@ pub mod egress;
 pub mod error;
 pub mod exec_location;
 pub mod factory;
+pub mod file_scope;
 pub mod http_tool;
 pub mod identity;
 pub mod imported_tool;

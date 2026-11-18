@@ -209,6 +209,7 @@ pub struct LyrikPromptGate {
     asker: String,
     terminal: std::sync::Arc<OneAtATime<StdinApprovalGate>>,
     plan: Option<std::sync::Arc<PlanGrant>>,
+    signoff_covers_exec: bool,
 }
 
 impl LyrikPromptGate {
@@ -217,7 +218,18 @@ impl LyrikPromptGate {
             asker: asker.to_string(),
             terminal,
             plan: None,
+            signoff_covers_exec: false,
         }
+    }
+
+    /// The same gate for an agent whose every `exec` runs inside the
+    /// envelope the run's sign-off stated: an `exec` is approved by
+    /// that sign-off without another prompt. Only for an agent whose
+    /// sandbox enforces the envelope. Any other call that needs
+    /// approval is still asked at the terminal.
+    pub fn with_signoff_envelope(mut self) -> Self {
+        self.signoff_covers_exec = true;
+        self
     }
 
     /// The same gate with a plan the operator approved: a command the
@@ -239,6 +251,14 @@ impl ApprovalGate for LyrikPromptGate {
                 actor: Some(plan.actor()),
             };
         }
+        if self.signoff_covers_exec && ctx.tool_name == "exec" {
+            return ApprovalOutcome::Approved {
+                actor: Some(
+                    wirken_gateway::pending_approvals::DecisionActor::new(SIGNOFF_GRANT_ACTOR)
+                        .with_display("the run's sign-off".to_string()),
+                ),
+            };
+        }
         self.terminal
             .ask(&render_lyrik_prompt(&self.asker, ctx))
             .await
@@ -248,6 +268,11 @@ impl ApprovalGate for LyrikPromptGate {
         ApprovalSource::Stdin
     }
 }
+
+/// The actor an `exec` inside the run's sandbox envelope is approved
+/// by, on its `PermissionApproved` row: the sign-off that stated the
+/// envelope.
+pub const SIGNOFF_GRANT_ACTOR: &str = "lyrik-signoff";
 
 /// The actor a command that ran under a plan grant is approved by, on
 /// its `PermissionApproved` row.

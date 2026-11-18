@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
 use wirken_audit::{
@@ -335,6 +335,9 @@ pub struct Agent {
     last_turn_rounds: usize,
     /// Whether the last turn was stopped at `max_tool_rounds`.
     last_turn_exhausted: bool,
+    /// The harness's limit on the file tools, inside what the skills
+    /// allow. `None` unless the harness sets one.
+    file_scope: Option<crate::file_scope::FileScope>,
     /// The step of a run this agent's model calls are made for, written
     /// on their `LlmRequest` and `LlmResponse` rows. `None` unless the
     /// harness names one.
@@ -839,6 +842,7 @@ impl Agent {
             last_turn_exhausted: false,
             last_turn_denials: Vec::new(),
             call_step: None,
+            file_scope: None,
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -956,6 +960,7 @@ impl Agent {
             last_turn_exhausted: false,
             last_turn_denials: Vec::new(),
             call_step: None,
+            file_scope: None,
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -1196,6 +1201,37 @@ impl Agent {
     /// own.
     pub fn set_agent_id(&mut self, agent_id: impl Into<String>) {
         self.agent_id = Some(agent_id.into());
+    }
+
+    /// Limit the file tools to `scope`, inside what the skills allow.
+    pub fn set_file_scope(&mut self, scope: crate::file_scope::FileScope) {
+        self.file_scope = Some(scope);
+    }
+
+    /// `decision` with the harness's [`crate::file_scope::FileScope`]
+    /// applied: a path the profile allows and the scope does not is
+    /// refused as the profile would refuse it.
+    fn within_file_scope(
+        &self,
+        axis: &FsAxis,
+        path: &Path,
+        decision: crate::skill_perms::GateDecision,
+    ) -> crate::skill_perms::GateDecision {
+        let Some(scope) = &self.file_scope else {
+            return decision;
+        };
+        if !matches!(decision, crate::skill_perms::GateDecision::Allow) {
+            return decision;
+        }
+        let allowed = match axis {
+            FsAxis::Read => scope.allows_read(path),
+            FsAxis::Write => scope.allows_write(path),
+        };
+        if allowed {
+            decision
+        } else {
+            crate::skill_perms::GateDecision::DeniedByProfile
+        }
     }
 
     /// Name the step of a run this agent's model calls are made for.
@@ -1834,6 +1870,7 @@ impl Agent {
                 FsAxis::Read => self.effective_permissions.gate_read_path(&path),
                 FsAxis::Write => self.effective_permissions.gate_write_path(&path),
             };
+            let decision = self.within_file_scope(&axis, &path, decision);
             if !matches!(decision, GateDecision::Allow) {
                 return true;
             }
@@ -4358,6 +4395,7 @@ impl Agent {
                 FsAxis::Read => self.effective_permissions.gate_read_path(&requested),
                 FsAxis::Write => self.effective_permissions.gate_write_path(&requested),
             };
+            let decision = self.within_file_scope(&axis, &requested, decision);
             match decision {
                 crate::skill_perms::GateDecision::Allow => {}
                 crate::skill_perms::GateDecision::DeniedByPhase {

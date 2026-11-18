@@ -34,6 +34,21 @@ tagged.
   `crates/cli/tests/lyrik_walks_run_under_their_own_skills.rs`;
   [docs/audit-cli.md](docs/audit-cli.md)).
 
+### Changed
+
+- A per-walk Lyrik run no longer asks before each `exec`. A walk's and a
+  replay's commands run inside one sandbox envelope: the target mounted
+  read-only, the walk's own staging directory the only one writable, another
+  walk's staging directory hidden, no network. The sign-off summary states it
+  on an `envelope` line and the one sign-off approves every `exec` inside it;
+  each command still gets its `permission_approved` row, with `approved_by`
+  `lyrik-signoff`. A walk's file tools are held to the same: writes outside
+  its own staging directory are refused, as are reads of another walk's
+  staging beyond the record files `staging/index.json` lists. The single call
+  and the fix step ask for each command as before
+  (`crates/cli/tests/lyrik_exec_envelope.rs`;
+  [docs/lyrik.md](docs/lyrik.md#the-exec-envelope)).
+
 ### Fixed
 
 - A Lyrik walk or replay whose turn ended in an error, for example at the

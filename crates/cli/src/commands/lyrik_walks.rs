@@ -505,8 +505,8 @@ impl TargetProfile {
 /// walk and printed before a run starts, so what will be asked is
 /// known before the first prompt. Every walk may also ask to run the
 /// scripts it wrote under its own harness directory; that entry is
-/// [`harness_command`]. The list is not a grant: each command is still
-/// put to the operator when it is about to run.
+/// [`harness_command`]. The list is not a limit: a walk's commands run
+/// inside the envelope the sign-off approves, whatever they are.
 pub fn walk_commands(walk_name: &str, profile: &TargetProfile) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     match walk_name {
@@ -585,11 +585,15 @@ fn run_section(walk_name: &str, exec_available: bool, profile: &TargetProfile) -
         let commands = walk_commands(walk_name, profile);
         let interpreters = profile.harness_interpreters();
         format!(
-            "- Commands this walk is expected to ask for through `exec`: {}. The operator \
-             is asked before each one runs and may refuse any; a refused one is a step \
-             skipped: record that it was skipped and carry on. The list is what is \
-             expected, not a limit: a command outside it is put to the operator the same \
-             way.\n\
+            "- Commands this walk is expected to run through `exec`: {}. The list is what \
+             is expected, not a limit.\n\
+             - Every `exec` command runs in a sandbox with no network. The project is \
+             read-only there. The one directory a command can write is \
+             `.lyrik/state/runs/<run-id>/staging/{walk_name}/`; another walk's staging \
+             directory is not there at all. In a run the operator signed off, that \
+             sign-off covers every command and none is asked again; in any other run \
+             each is put to the operator. A command that is refused is a step skipped: \
+             record that it was skipped and carry on.\n\
              - You may ask to run a script you wrote under \
              `.lyrik/state/runs/<run-id>/staging/{walk_name}/harness/`, from the project \
              root, with {}: for example \
@@ -1829,9 +1833,17 @@ mod tests {
             );
             assert!(text.contains("at most 20 tool rounds"), "{walk}");
             assert!(text.contains("not a limit"), "{walk}");
-            // Asking is still asking: nothing is granted ahead of time,
-            // and the write scope is the run directory as before.
-            assert!(text.contains("The operator"), "{walk}");
+            // The walk is told the envelope its commands run in. The
+            // staged grant is the run directory as before; the walk's
+            // agent is held to its own staging directory on top of it.
+            assert!(
+                text.contains(&format!(
+                    "The one directory a command can write is \
+                     `.lyrik/state/runs/<run-id>/staging/{walk}/`"
+                )),
+                "{walk}: {text}"
+            );
+            assert!(text.contains("with no network"), "{walk}");
             assert!(
                 text.contains("write_paths: [\"<workspace>/.lyrik/state/runs/sample/r1\"]"),
                 "{walk}"

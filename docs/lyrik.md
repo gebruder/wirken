@@ -55,9 +55,12 @@ scorers into a consensus, and does not send findings to any delivery channel.
   the inline rubric in `SKILL.md` as the fallback. See
   [Writing the scoring guide](#writing-the-scoring-guide).
 - **Team-owned files locked.** A run's agents' `write_file` is confined to the
-  run's own directory by the staged skill's `write_paths`; an approved `exec`
-  runs with the target mounted read-write (`crates/agent/src/sandbox.rs:901`),
-  so the hash check below is the control on that path. The runner never writes `.lyrik/rubric.md`,
+  run's own directory by the staged skill's `write_paths`. In a per-walk run a
+  walk's and a replay's `exec` runs with the target mounted read-only and its
+  file tools write only the walk's own staging directory
+  ([the exec envelope](#the-exec-envelope)); the single call's `exec` and the
+  fix step's run with the target mounted read-write, so the hash check below
+  is the control on that path. The runner never writes `.lyrik/rubric.md`,
   `.lyrik/context.md` or `.lyrik/config.json`. It hashes all three at run
   start and end; if one changed, it records `lyrik.locked_file.changed` with
   the file and both sha256 values and the run fails.
@@ -151,7 +154,8 @@ scorers into a consensus, and does not send findings to any delivery channel.
    or a name with spaces, is kept as given. Before any model call the run shows what it is about to
    do: the target's HEAD and whether tracked files changed, the rubric and
    context with their source and sha256, the provider and model, the walks and
-   the commands each may ask to run through `exec`. It then asks
+   the commands each may run through `exec`, and for a per-walk run
+   [the envelope](#the-exec-envelope) they run in. It then asks
    `Sign off this run? [y/N]`. A yes is recorded on the signed chain as a
    one-shot `permission_approved` row whose action key carries the sha256 of
    the summary shown; anything else, or end of input, is recorded as a
@@ -352,25 +356,51 @@ one for the language at the target's root (`cargo test`, `npm test`,
 under its own `staging/<walk>/harness/` directory, with `sh` or the target's
 interpreter, under the marker contract, that this is how a finding gets a
 reproduction, and that the replay runs the same command. The list is what is
-expected, not a grant and not a limit: nothing is approved ahead of time, and
-a command outside the list is put to the operator the same way. The section
+expected, not a limit. The section
 also tells the walk it has 20 tool rounds in its turn. A walk that uses them
 up ends there: the per-run log records `lyrik.walk.completed` with status
 `incomplete` and the limit it reached, what it had staged is still aggregated,
 and the walk's `walk_summary` entry in `findings.json` carries
 `incomplete_at_tool_rounds`.
-With stdin on a terminal, the operator is asked at the moment each command is
-about to run, one prompt at a time across concurrent walks, in a prompt that
-is the walk's name and the exact command and nothing else; an answer covers
-that one call and nothing is stored for later runs. Without a terminal every
-such command is refused: the run says so once, before it dispatches, and each
+
+### The exec envelope
+
+In a per-walk run every `exec` of a walk or a replay runs inside one envelope,
+and the run's sign-off approves all of them: no command is asked again.
+
+- The target is mounted read-only.
+- The walk's own `staging/<walk>/` is the one directory mounted read-write. A
+  replay writes `staging/<walk>/replays/` of the walk whose record it replays.
+- Another walk's staging directory is behind an empty read-only mount: a
+  command cannot read or write it.
+- There is no network.
+
+The walk's file tools are held to the same: `write_file` is refused outside
+the walk's own staging directory, and `read_file` and `list_files` are refused
+in another walk's staging directory except for the record files
+`staging/index.json` lists (its `findings/*.json` and `rejections/*.json`).
+Each refusal is a `skill_permission_denied` row.
+
+The sign-off summary states the envelope on its `envelope` line, and the
+summary's sha256 is on the sign-off's `permission_approved` row. Each command
+still gets its own `permission_approved` row, with `approved_by`
+`lyrik-signoff`, then its `assistant_tool_calls` and `tool_result` rows. A
+scope that cannot be mounted (a staging directory that is missing or is a
+link) refuses the `exec`. A call that needs approval and is not an `exec` is
+asked at the terminal. The single call (no `walks`) and the fix step have no
+envelope and ask for each command as before. A `--bench` run has the same
+mounts and file scope and no sign-off: at a terminal it asks before each
+command.
+
+Without a terminal there was no sign-off, and every `exec` is refused: the run
+says so once, before it dispatches, and each
 refusal's `permission_denied` row carries `denial_reason` `no terminal for
 approval`. A refused command is a skipped step, not a failed
-walk. An approved command runs in the `exec` sandbox, so the sandbox image
+walk. A command runs in the `exec` sandbox, so the sandbox image
 needs the binaries those commands name; the default image has neither `git`
 nor `cargo`. Before
-the first prompt the run asks the sandbox which of the binaries its walks need
-are missing, and names them, so no one approves a command that can only fail.
+the walks start the run asks the sandbox which of the binaries its walks need
+are missing, and names them.
 
 With sandbox `mode: off`, `exec` is not available in a run: an approved
 command such as `cargo test` would run the target's build scripts on the host
