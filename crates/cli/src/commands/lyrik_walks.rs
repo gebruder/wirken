@@ -65,6 +65,10 @@ pub struct OperatorSettings {
     /// sent again during a walk. Absent,
     /// [`TRANSPORT_RETRIES_DEFAULT`]; zero means none.
     pub transport_retries: Option<u32>,
+    /// The most a Lyrik run may spend, in USD of recorded cost. When a
+    /// run's recorded cost reaches it the run stops. Absent, or zero or
+    /// less, there is no ceiling.
+    pub run_ceiling_usd: Option<f64>,
 }
 
 /// Times a walk's provider request that failed in transport is sent
@@ -76,6 +80,11 @@ pub const TRANSPORT_RETRIES_DEFAULT: u32 = 2;
 pub const WALK_CONTINUATIONS_DEFAULT: u32 = 2;
 
 impl OperatorSettings {
+    /// The ceiling on a run's recorded cost, when the operator set one.
+    pub fn run_ceiling_usd(&self) -> Option<f64> {
+        self.run_ceiling_usd.filter(|c| *c > 0.0)
+    }
+
     /// Times a walk's request that failed in transport is sent again:
     /// the operator's, else the default.
     pub fn transport_retries(&self) -> u32 {
@@ -660,10 +669,14 @@ fn staging_section(walk_name: &str) -> String {
          file and line the finding would carry. In your next step read \
          `claims/claim-NNN.decision.json`; if it is not there yet, read it again. \
          `registered` means go on; the answer also carries the ledger records for \
-         that file. `refused` means an earlier run already observed this claim: do no \
-         work on it, write no harness and no finding for it, and note the record it \
-         names in your summary. A finding staged for a refused claim is refused again \
-         when the run's results are put together.\n"
+         that file. `refused` means an earlier run already observed a defect at that \
+         place, whatever class you gave it: do no work on it, write no harness and no \
+         finding for it, and note the record it names in your summary. The answer \
+         quotes that record's claim. Only if yours is a different defect at the same \
+         place, register again as a new claim file with two more fields, \
+         `\"differs_from\": \"<record id>\"` and `\"how\": \"<one sentence on how it \
+         differs>\"`; that is accepted and recorded. A finding staged at a refused \
+         place without that is refused again when the run's results are put together.\n"
     )
 }
 
@@ -1473,6 +1486,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read(), 0);
+        // No ceiling unless the operator sets one; zero is none.
+        let ceiling = || {
+            load_operator_settings(data.path())
+                .unwrap()
+                .run_ceiling_usd()
+        };
+        std::fs::write(operator_settings_path(data.path()), "{}").unwrap();
+        assert_eq!(ceiling(), None);
+        std::fs::write(
+            operator_settings_path(data.path()),
+            r#"{"run_ceiling_usd": 12.5}"#,
+        )
+        .unwrap();
+        assert_eq!(ceiling(), Some(12.5));
+        std::fs::write(
+            operator_settings_path(data.path()),
+            r#"{"run_ceiling_usd": 0}"#,
+        )
+        .unwrap();
+        assert_eq!(ceiling(), None);
         // Transport retries: two unless the operator says otherwise.
         let retries = || {
             load_operator_settings(data.path())
@@ -1513,7 +1546,8 @@ mod tests {
             "Register a claim before you work on it",
             "staging/chain-walk/claims/claim-NNN.json",
             "{\"class\": \"<class>\", \"file\": \"<file>\", \"line\": <line>}",
-            "`refused` means an earlier run already observed this claim",
+            "`refused` means an earlier run already observed a defect at that place, whatever class",
+            "\"differs_from\": \"<record id>\"",
         ] {
             assert!(staged.contains(needle), "{needle}");
         }

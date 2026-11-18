@@ -22,6 +22,7 @@ pub mod lyrik;
 pub mod lyrik_agent_config;
 pub mod lyrik_brocards;
 pub mod lyrik_citation;
+pub mod lyrik_cost;
 pub mod lyrik_fix;
 pub mod lyrik_fix_arms;
 pub mod lyrik_git;

@@ -234,6 +234,23 @@ pub fn cost_micros_cached(
     )
 }
 
+/// Whether the table has a row for `(provider, model)`: whether a call
+/// to it records a cost.
+pub fn is_priced(provider: &str, model: &str) -> bool {
+    table().contains_key(&(provider.to_string(), model.to_string()))
+}
+
+/// What a million input tokens cost more when sent uncached than when
+/// read from the prompt cache, at the row's base prices. `None` when
+/// the model has no row.
+pub fn uncached_premium_per_million_usd(provider: &str, model: &str) -> Option<f64> {
+    let p = table().get(&(provider.to_string(), model.to_string()))?;
+    let read = p
+        .cache_read_per_million_usd
+        .unwrap_or(p.input_per_million_usd * p.cache_read_multiplier);
+    Some((p.input_per_million_usd - read).max(0.0))
+}
+
 /// Input and output cost in micros of one call made at `now` at the
 /// prices of `p`.
 fn cost_at(
@@ -477,6 +494,22 @@ mod tests {
             9_557_626
         );
         assert_eq!(compute_one(11_947_033, 0.2), 2_389_406);
+    }
+
+    #[test]
+    fn the_premium_for_sending_input_uncached_is_input_less_cache_read() {
+        assert!(is_priced("anthropic", "claude-mythos-5-2"));
+        assert!(!is_priced("anthropic", "no-such-model"));
+        // $8 input, $0.20 cache read.
+        let premium = uncached_premium_per_million_usd("anthropic", "claude-mythos-5-2").unwrap();
+        assert!((premium - 7.8).abs() < 1e-9, "{premium}");
+        // $5 input, read at the 0.1 estimate.
+        let premium = uncached_premium_per_million_usd("anthropic", "claude-opus-4-7").unwrap();
+        assert!((premium - 4.5).abs() < 1e-9, "{premium}");
+        assert_eq!(
+            uncached_premium_per_million_usd("nonexistent", "model"),
+            None
+        );
     }
 
     /// Wirken asks for the five-minute lifetime, so a write is priced

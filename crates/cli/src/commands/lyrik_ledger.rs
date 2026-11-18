@@ -71,6 +71,10 @@ pub struct Record {
     pub evidence: Evidence,
     /// The run that produced the record.
     pub run: String,
+    /// The severity tier the run gave a finding, so a later run can
+    /// carry the finding with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
     /// Set when the file's content is no longer the content the claim
     /// was established against.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -255,6 +259,7 @@ pub fn records_from_run(
             commit: commit.clone(),
             evidence: ev,
             run: run_id.to_string(),
+            tier: None,
             stale: false,
         };
     let mut out: Vec<Record> = Vec::new();
@@ -263,6 +268,11 @@ pub fn records_from_run(
         .and_then(Value::as_array)
         .unwrap_or(&empty);
     for f in findings {
+        // A finding this run carried from the ledger is not something
+        // this run established.
+        if f.get("carried").is_some() {
+            continue;
+        }
         let Some((key, file, line)) = claim_key(f) else {
             continue;
         };
@@ -276,7 +286,9 @@ pub fn records_from_run(
         } else {
             Evidence::Reasoned
         };
-        out.push(record(Kind::Finding, key, claim, file, line, ev));
+        let mut made = record(Kind::Finding, key, claim, file, line, ev);
+        made.tier = f.get("tier").and_then(Value::as_str).map(str::to_string);
+        out.push(made);
     }
     for r in rejections {
         let Some((key, file, line)) = claim_key(r) else {
@@ -439,6 +451,24 @@ pub fn for_walk(records: &[Record], area: &Area) -> Value {
     })
 }
 
+/// How far apart two lines may be and still be the same place. A
+/// walk and an earlier run often name a defect one or two lines apart
+/// (the function's first line, or the statement inside it).
+pub const LINE_WINDOW: u64 = 2;
+
+/// The settled record at a place, if there is one: observed, against
+/// the file as it is now, in the same file within [`LINE_WINDOW`]
+/// lines. The class a walk gave the claim is not compared: two names
+/// for one defect are one defect. An arm result is about a patch and
+/// settles nothing about the code.
+pub fn settled_at<'a>(records: &'a [Record], file: &str, line: u64) -> Option<&'a Record> {
+    records
+        .iter()
+        .filter(|r| r.settled() && r.kind != Kind::ArmResult && r.file == file)
+        .filter(|r| r.line.abs_diff(line) <= LINE_WINDOW)
+        .min_by_key(|r| r.line.abs_diff(line))
+}
+
 /// The runner's answer to a claim a walk registered.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ClaimDecision {
@@ -446,27 +476,39 @@ pub struct ClaimDecision {
     /// The claim file's name, `claim-NNN.json`.
     pub file: String,
     pub key: String,
-    /// `registered`, or `refused` when the ledger already settles it.
+    /// Where the claim is: the target file and line it named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<(String, u64)>,
+    /// `registered`; `refused` when the ledger already settles the
+    /// place; `registered_distinct` when the walk named the settled
+    /// record and said how its claim differs.
     pub decision: &'static str,
-    /// The settling record, when refused.
+    /// The settled record at the place, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record: Option<String>,
-    /// The run that record came from, when refused.
+    /// The run that record came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub established_by_run: Option<String>,
+    /// The walk's sentence on how its claim differs from the record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub how: Option<String>,
 }
 
 /// Answer each claim under `<walk_dir>/claims/` that has no answer
 /// yet. A claim is `claim-NNN.json` with `class` (or the first of
 /// `framing`), `file` and `line` (or a `location`). The answer is
-/// written beside it as `claim-NNN.decision.json`: `refused` with the
-/// settling record and its run when the ledger holds the same claim as
-/// observed against the file as it is now, else `registered`. Either
-/// way the answer carries the full records for the claim's file that
-/// are not stale, so registering a claim is also how a walk gets the
-/// ledger for the file it is about to work on. A claim that cannot be
-/// read is answered `refused` with the reason, so a walk is never left
-/// waiting.
+/// written beside it as `claim-NNN.decision.json`.
+///
+/// A claim at a place the ledger already settles ([`settled_at`]) is
+/// `refused`, with the record and its run, whatever class it names.
+/// The walk may register again with `differs_from` naming that record
+/// and `how`, one sentence on how its claim differs: that is accepted
+/// as `registered_distinct` and recorded. Any other claim is
+/// `registered`. Every answer carries the full records for the claim's
+/// file that are not stale, so registering a claim is also how a walk
+/// gets the ledger for the file it is about to work on. A claim that
+/// cannot be read is answered `refused` with the reason, so a walk is
+/// never left waiting.
 pub fn answer_claims(
     walk_dir: &Path,
     walk: &str,
@@ -506,67 +548,82 @@ pub fn answer_claims(
                 .get("line")
                 .and_then(Value::as_u64)
                 .or_else(|| c.pointer("/location/line_start").and_then(Value::as_u64))?;
-            Some((format!("{class}::{file}:{line}"), file.to_string()))
+            Some((format!("{class}::{file}:{line}"), file.to_string(), line))
         });
-        let (decision, body) = match claim {
-            None => (
-                ClaimDecision {
-                    walk: walk.to_string(),
-                    file: name.clone(),
-                    key: String::new(),
-                    decision: "refused",
-                    record: None,
-                    established_by_run: None,
-                },
-                serde_json::json!({
-                    "decision": "refused",
-                    "reason": "the claim needs `class`, `file` and `line`",
-                }),
-            ),
-            Some((key, file)) => {
+        let text = |k: &str| {
+            parsed
+                .as_ref()
+                .and_then(|c| c.get(k))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let mut decision = ClaimDecision {
+            walk: walk.to_string(),
+            file: name.clone(),
+            key: String::new(),
+            at: None,
+            decision: "refused",
+            record: None,
+            established_by_run: None,
+            how: None,
+        };
+        let body = match claim {
+            None => serde_json::json!({
+                "decision": "refused",
+                "reason": "the claim needs `class`, `file` and `line`",
+            }),
+            Some((key, file, line)) => {
                 let for_file: Vec<&Record> = records
                     .iter()
                     .filter(|r| !r.stale && r.file == file)
                     .collect();
-                let held = records
-                    .iter()
-                    .find(|r| r.settled() && r.kind != Kind::ArmResult && r.key == key);
-                match held {
-                    Some(held) => (
-                        ClaimDecision {
-                            walk: walk.to_string(),
-                            file: name.clone(),
-                            key: key.clone(),
-                            decision: "refused",
-                            record: Some(held.id.clone()),
-                            established_by_run: Some(held.run.clone()),
-                        },
-                        serde_json::json!({
-                            "decision": "refused",
-                            "key": key,
-                            "reason": "an earlier run observed this claim against the file as it is now; \
-                                       do not check it again and do not stage a finding for it",
-                            "record": held.id,
-                            "record_path": format!(".lyrik/ledger/{}.json", held.id),
-                            "established_by_run": held.run,
-                            "records_for_file": for_file,
-                        }),
-                    ),
-                    None => (
-                        ClaimDecision {
-                            walk: walk.to_string(),
-                            file: name.clone(),
-                            key: key.clone(),
-                            decision: "registered",
-                            record: None,
-                            established_by_run: None,
-                        },
+                decision.key = key.clone();
+                decision.at = Some((file.clone(), line));
+                match settled_at(records, &file, line) {
+                    None => {
+                        decision.decision = "registered";
                         serde_json::json!({
                             "decision": "registered",
                             "key": key,
                             "records_for_file": for_file,
-                        }),
-                    ),
+                        })
+                    }
+                    Some(held) => {
+                        decision.record = Some(held.id.clone());
+                        decision.established_by_run = Some(held.run.clone());
+                        let names_it = text("differs_from").as_deref() == Some(held.id.as_str());
+                        match (names_it, text("how")) {
+                            (true, Some(how)) => {
+                                decision.decision = "registered_distinct";
+                                decision.how = Some(how.clone());
+                                serde_json::json!({
+                                    "decision": "registered_distinct",
+                                    "key": key,
+                                    "differs_from": held.id,
+                                    "how": how,
+                                    "records_for_file": for_file,
+                                })
+                            }
+                            _ => serde_json::json!({
+                                "decision": "refused",
+                                "key": key,
+                                "reason": "an earlier run observed a defect at this place against the \
+                                           file as it is now; do not check it again and do not stage a \
+                                           finding for it",
+                                "record": held.id,
+                                "record_key": held.key,
+                                "record_claim": held.claim,
+                                "record_path": format!(".lyrik/ledger/{}.json", held.id),
+                                "established_by_run": held.run,
+                                "if_yours_is_a_different_defect":
+                                    "register again with `differs_from` set to the record id and \
+                                     `how`, one sentence on how your claim differs from it",
+                                "records_for_file": for_file,
+                            }),
+                        }
+                    }
                 }
             }
         };
@@ -581,7 +638,8 @@ pub fn answer_claims(
 }
 
 /// A staged finding the runner refused because the ledger already
-/// holds the same claim, observed, against the file as it is now.
+/// holds an observed claim at its place, against the file as it is
+/// now.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Refused {
     pub walk: String,
@@ -594,12 +652,17 @@ pub struct Refused {
     pub established_by_run: String,
 }
 
-/// Move each staged finding of `walk` that repeats a settled record
+/// Move each staged finding of `walk` at a place the ledger settles
 /// out of `findings/` into `ledger-refused/` beside it, so it is not
-/// aggregated, and return what was refused. A finding record or an
-/// observed rejection settles a claim; an arm result is about a patch
-/// and settles no claim about the code.
-pub fn refuse_duplicates(walk_dir: &Path, walk: &str, records: &[Record]) -> Result<Vec<Refused>> {
+/// aggregated, and return what was refused. A finding the walk
+/// registered as distinct from the settled record (`distinct`, this
+/// walk's `registered_distinct` answers) is left in place.
+pub fn refuse_duplicates(
+    walk_dir: &Path,
+    walk: &str,
+    records: &[Record],
+    distinct: &[ClaimDecision],
+) -> Result<Vec<Refused>> {
     let findings = walk_dir.join("findings");
     if !findings.is_dir() {
         return Ok(Vec::new());
@@ -618,15 +681,23 @@ pub fn refuse_duplicates(walk_dir: &Path, walk: &str, records: &[Record]) -> Res
         let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
             continue;
         };
-        let Some((key, _, _)) = claim_key(&parsed) else {
+        let Some((key, file, line)) = claim_key(&parsed) else {
             continue;
         };
-        let Some(held) = records
-            .iter()
-            .find(|r| r.settled() && r.kind != Kind::ArmResult && r.key == key)
-        else {
+        let Some(held) = settled_at(records, &file, line) else {
             continue;
         };
+        let accepted = distinct.iter().any(|d| {
+            d.walk == walk
+                && d.decision == "registered_distinct"
+                && d.record.as_deref() == Some(held.id.as_str())
+                && d.at
+                    .as_ref()
+                    .is_some_and(|(f, l)| *f == file && l.abs_diff(line) <= LINE_WINDOW)
+        });
+        if accepted {
+            continue;
+        }
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -646,6 +717,47 @@ pub fn refuse_duplicates(walk_dir: &Path, walk: &str, records: &[Record]) -> Res
         });
     }
     Ok(out)
+}
+
+/// The settled finding records for the files of a run's area, as
+/// findings a run's `findings.json` carries: each is marked `carried`
+/// with the record, the run that established it and the revision. A
+/// record at a place where this run kept a finding of its own
+/// (`kept`, each a file and line) is left out, and so is every stale
+/// record: a carried finding says "an earlier run showed this and the
+/// file has not changed since".
+pub fn carried_findings(records: &[Record], area: &Area, kept: &[(String, u64)]) -> Vec<Value> {
+    records
+        .iter()
+        .filter(|r| r.kind == Kind::Finding && r.settled() && area.contains(&r.file))
+        .filter(|r| {
+            !kept
+                .iter()
+                .any(|(f, l)| *f == r.file && l.abs_diff(r.line) <= LINE_WINDOW)
+        })
+        .map(|r| {
+            let class = r.key.split("::").next().unwrap_or("unclassified");
+            serde_json::json!({
+                "id": r.key,
+                "stable_id": r.key,
+                "framing": [class],
+                "location": { "file": r.file, "line_start": r.line },
+                "title": r.claim,
+                "summary": format!(
+                    "{} Carried from run {}, which observed it by an executed run; the file \
+                     has not changed since, so this run did not examine it again.",
+                    r.claim, r.run
+                ),
+                "tier": r.tier.clone().unwrap_or_else(|| "INFO".to_string()),
+                "carried": {
+                    "from_run": r.run,
+                    "record": r.id,
+                    "evidence": r.evidence,
+                    "commit": r.commit,
+                },
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -754,7 +866,8 @@ mod tests {
                         "file_sha256",
                         "evidence",
                         "run",
-                        "stale"
+                        "stale",
+                        "tier"
                     ]
                     .contains(k),
                     "{k}"
@@ -813,7 +926,7 @@ mod tests {
                     "location": {"file": "src/a.rs", "line_start": 99}}),
         );
 
-        let refused = refuse_duplicates(&walk_dir, "sink-walk", &ledger).unwrap();
+        let refused = refuse_duplicates(&walk_dir, "sink-walk", &ledger, &[]).unwrap();
         assert_eq!(refused.len(), 2, "{refused:?}");
         assert_eq!(refused[0].file, "finding-001.json");
         assert_eq!(refused[0].key, "auth::src/a.rs:10");
@@ -933,6 +1046,172 @@ mod tests {
         );
     }
 
+    /// The class a walk gives a claim does not matter: the same place,
+    /// within the line window, is the same claim. The refusal quotes
+    /// the record. A walk that names the record and says how its claim
+    /// differs is registered as distinct, and its finding is then left
+    /// alone at aggregation; one that does not is refused there too.
+    #[test]
+    fn a_claim_at_a_settled_place_is_refused_whatever_class_it_names() {
+        let tmp = target_with("src/a.rs", "fn a() {}\n");
+        let records = records_from_run(tmp.path(), &run_body(), &rejections(), "r1");
+        upsert(tmp.path(), &records).unwrap();
+        let ledger = load(tmp.path()).unwrap();
+        let settled = record_id(Kind::Finding, "auth::src/a.rs:10");
+        let walk_dir = tmp.path().join("staging/sink-walk");
+
+        // Another class, same line; another class, two lines off; three
+        // lines off is another place.
+        claim(
+            &walk_dir,
+            "claim-001.json",
+            &json!({"class": "missing_bounds_check", "file": "src/a.rs", "line": 10}),
+        );
+        claim(
+            &walk_dir,
+            "claim-002.json",
+            &json!({"class": "unbounded_alloc", "file": "src/a.rs", "line": 12}),
+        );
+        claim(
+            &walk_dir,
+            "claim-003.json",
+            &json!({"class": "unbounded_alloc", "file": "src/a.rs", "line": 13}),
+        );
+        // Naming the record without saying how, and naming another
+        // record, are not enough.
+        claim(
+            &walk_dir,
+            "claim-004.json",
+            &json!({"class": "race", "file": "src/a.rs", "line": 10, "differs_from": settled}),
+        );
+        claim(
+            &walk_dir,
+            "claim-005.json",
+            &json!({"class": "race", "file": "src/a.rs", "line": 10, "differs_from": "0000000000000000", "how": "x"}),
+        );
+        // Naming it and saying how: accepted.
+        claim(
+            &walk_dir,
+            "claim-006.json",
+            &json!({"class": "race", "file": "src/a.rs", "line": 11,
+            "differs_from": settled, "how": "The settled record is the missing check; this is two writers to the same slot."}),
+        );
+        let answers = answer_claims(&walk_dir, "sink-walk", &ledger).unwrap();
+        let got: Vec<&str> = answers.iter().map(|a| a.decision).collect();
+        assert_eq!(
+            got,
+            [
+                "refused",
+                "refused",
+                "registered",
+                "refused",
+                "refused",
+                "registered_distinct"
+            ]
+        );
+        assert_eq!(LINE_WINDOW, 2);
+        for a in &answers[..2] {
+            assert_eq!(a.record.as_deref(), Some(settled.as_str()));
+            assert_eq!(a.established_by_run.as_deref(), Some("r1"));
+        }
+        let refused = decision(&walk_dir, "claim-001");
+        assert_eq!(refused["record_key"], "auth::src/a.rs:10");
+        assert_eq!(refused["record_claim"], "no check before the write");
+        assert!(
+            refused["if_yours_is_a_different_defect"]
+                .as_str()
+                .unwrap()
+                .contains("differs_from")
+        );
+        let distinct = decision(&walk_dir, "claim-006");
+        assert_eq!(distinct["decision"], "registered_distinct");
+        assert_eq!(distinct["differs_from"], settled);
+        assert!(answers[5].how.as_deref().unwrap().contains("two writers"));
+
+        // At aggregation: the finding registered as distinct stays; one
+        // under another class with no such claim is refused.
+        stage(
+            &walk_dir,
+            "finding-001.json",
+            &json!({"stable_id": "race::src/a.rs:11", "framing": ["race"],
+            "title": "two writers", "location": {"file": "src/a.rs", "line_start": 11}}),
+        );
+        let kept = refuse_duplicates(&walk_dir, "sink-walk", &ledger, &answers).unwrap();
+        assert!(kept.is_empty(), "{kept:?}");
+        let other = tmp.path().join("staging/fuzz-walk");
+        stage(
+            &other,
+            "finding-001.json",
+            &json!({"stable_id": "unbounded_alloc::src/a.rs:9", "framing": ["unbounded_alloc"],
+            "title": "same defect, other name", "location": {"file": "src/a.rs", "line_start": 9}}),
+        );
+        let refused = refuse_duplicates(&other, "fuzz-walk", &ledger, &answers).unwrap();
+        assert_eq!(
+            refused.len(),
+            1,
+            "another walk's distinct claim does not cover this one"
+        );
+        assert_eq!(refused[0].record, settled);
+    }
+
+    /// A run's output carries what earlier runs observed in its scope
+    /// while the file is unchanged, marked with the run that
+    /// established it. Reasoned records, records outside the scope,
+    /// stale records and places this run kept a finding at are not
+    /// carried, and a carried finding does not become a new record.
+    #[test]
+    fn settled_findings_in_scope_are_carried_and_stale_ones_are_not() {
+        let tmp = target_with("src/a.rs", "fn a() {}\n");
+        std::fs::create_dir_all(tmp.path().join("lib")).unwrap();
+        std::fs::write(tmp.path().join("lib/z.rs"), "fn z() {}\n").unwrap();
+        let mut body = run_body();
+        body["findings"][0]["tier"] = json!("HIGH");
+        body["findings"].as_array_mut().unwrap().push(json!({
+            "stable_id": "auth::lib/z.rs:1", "title": "outside", "framing": ["auth"],
+            "location": {"file": "lib/z.rs", "line_start": 1}
+        }));
+        body["reproductions"].as_array_mut().unwrap().push(json!(
+            {"stable_id": "auth::lib/z.rs:1", "outcome": "reproduced", "agreement": true}
+        ));
+        upsert(tmp.path(), &records_from_run(tmp.path(), &body, &[], "r1")).unwrap();
+        let ledger = load(tmp.path()).unwrap();
+        let area = Area::from_config(&json!({"scope": {"include": ["src/**"]}}));
+
+        let carried = carried_findings(&ledger, &area, &[]);
+        assert_eq!(carried.len(), 1, "{carried:?}");
+        let c = &carried[0];
+        assert_eq!(c["stable_id"], "auth::src/a.rs:10");
+        assert_eq!(c["framing"], json!(["auth"]));
+        assert_eq!(c["location"], json!({"file": "src/a.rs", "line_start": 10}));
+        assert_eq!(c["tier"], "HIGH");
+        assert_eq!(c["carried"]["from_run"], "r1");
+        assert_eq!(c["carried"]["evidence"], "observed");
+        assert_eq!(c["carried"]["commit"], "abc123");
+        assert_eq!(
+            c["carried"]["record"],
+            record_id(Kind::Finding, "auth::src/a.rs:10")
+        );
+        assert!(
+            c["summary"]
+                .as_str()
+                .unwrap()
+                .contains("Carried from run r1")
+        );
+
+        // This run kept a finding of its own there: not carried as well.
+        assert!(carried_findings(&ledger, &area, &[("src/a.rs".into(), 11)]).is_empty());
+        // No scope: the one outside comes too.
+        assert_eq!(carried_findings(&ledger, &Area::default(), &[]).len(), 2);
+        // A carried finding in a later run's output writes no record.
+        let later = json!({"target_sha": "abc123", "findings": [c.clone()]});
+        assert!(records_from_run(tmp.path(), &later, &[], "r2").is_empty());
+
+        // The file changes: nothing is carried.
+        std::fs::write(tmp.path().join("src/a.rs"), "fn a() { check(); }\n").unwrap();
+        let ledger = load(tmp.path()).unwrap();
+        assert!(carried_findings(&ledger, &area, &[]).is_empty());
+    }
+
     /// A walk gets full records only for the files of its area, and an
     /// index line for everything else, which it can read by id.
     #[test]
@@ -1024,7 +1303,7 @@ mod tests {
                     "location": {"file": "src/a.rs", "line_start": 10}}),
         );
         assert!(
-            refuse_duplicates(&walk_dir, "sink-walk", &ledger)
+            refuse_duplicates(&walk_dir, "sink-walk", &ledger, &[])
                 .unwrap()
                 .is_empty()
         );

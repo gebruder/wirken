@@ -139,6 +139,10 @@ struct Finding {
     dedup_match: Option<DedupMatch>,
     #[serde(default)]
     patch_localized: Option<PatchLocalized>,
+    /// Set on a finding carried from the ledger: the run that
+    /// established it and the record.
+    #[serde(default)]
+    carried: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -527,6 +531,7 @@ fn build_result(f: &Finding, run_id: &str) -> SarifResult {
             "detection_source": f.detection_source,
             "tier": f.tier,
             "grade": f.grade,
+            "carried": f.carried,
             "title": title,
             "scoring_passes": f.scoring_passes.len(),
             "rung": { "name": rung_name, "number": rung_number },

@@ -316,6 +316,17 @@ pub async fn run(
             ),
             sandbox_for_summary.non_default_limits(),
         );
+        // The cost lines: the operator's ceiling for a run, or that
+        // there is none, and a model the price table does not have.
+        let summary = with_cost_lines(
+            &summary,
+            &super::lyrik_cost::banner_lines(
+                &pin.provider,
+                &pin.model,
+                super::lyrik_walks::load_operator_settings(&super::config().data_dir)?
+                    .run_ceiling_usd(),
+            ),
+        );
         let shown = summary.clone();
         let answer = tokio::task::spawn_blocking(move || {
             ask_signoff(&shown, std::io::stdin().lock(), std::io::stderr())
@@ -448,6 +459,26 @@ pub async fn run(
         )?;
     }
 
+    // What earlier runs observed in this run's scope, and the file has
+    // not changed since, is part of this run's result: a repeat run on
+    // unchanged code does not read as empty. Read before this run's
+    // own records are written.
+    if !bench_mode && use_fixture.is_none() {
+        let carried = carry_settled_findings(target, &config, &findings_dest)
+            .context("carry settled findings")?;
+        if !carried.is_empty() {
+            println!(
+                "carried from the ledger: {} finding(s) an earlier run observed, files unchanged: {}",
+                carried.len(),
+                carried.join(", ")
+            );
+            audit.emit(
+                "lyrik.ledger.carried",
+                serde_json::json!({ "findings": carried }),
+            )?;
+        }
+    }
+
     // Record what this run established, for the next one. Not in
     // bench mode, and not for a fixture replay, which ran nothing.
     if !bench_mode && use_fixture.is_none() {
@@ -554,6 +585,61 @@ fn one_line(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// Add to a finished run's `findings.json` the settled ledger findings
+/// for the files of the run's scope, each marked `carried` with the
+/// run that established it. Returns the keys carried. A place where
+/// this run kept a finding of its own is not carried as well.
+fn carry_settled_findings(
+    target: &Path,
+    config: &serde_json::Value,
+    findings: &Path,
+) -> Result<Vec<String>> {
+    let Ok(text) = std::fs::read_to_string(findings) else {
+        return Ok(Vec::new());
+    };
+    let mut body: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", findings.display()))?;
+    let ledger = super::lyrik_ledger::load(target)?;
+    let area = super::lyrik_ledger::Area::from_config(config);
+    let kept: Vec<(String, u64)> = body
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(super::lyrik_ledger::claim_key)
+                .map(|(_, file, line)| (file, line))
+                .collect()
+        })
+        .unwrap_or_default();
+    let carried = super::lyrik_ledger::carried_findings(&ledger, &area, &kept);
+    if carried.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys: Vec<String> = carried
+        .iter()
+        .filter_map(|c| c.get("stable_id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let Some(list) = body
+        .get_mut("findings")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(Vec::new());
+    };
+    list.extend(carried);
+    // A carried finding of another class needs the wider schema.
+    body["schema_version"] = serde_json::json!(super::lyrik_validate::schema_version_for(
+        body["findings"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    ));
+    body["carried"] = serde_json::json!({ "count": keys.len(), "findings": keys });
+    std::fs::write(findings, serde_json::to_string_pretty(&body)?)
+        .with_context(|| format!("write {}", findings.display()))?;
+    Ok(keys)
 }
 
 /// Write the ledger records a finished run establishes, from its
@@ -693,6 +779,74 @@ fn signoff_summary(
         "  Nothing leaves this host but calls to the model.".to_string()
     });
     lines.join("\n")
+}
+
+/// The sign-off summary with the cost lines put in above its closing
+/// sentence.
+fn with_cost_lines(summary: &str, lines: &[(String, String)]) -> String {
+    let cost: Vec<String> = lines
+        .iter()
+        .map(|(label, value)| format!("  {label:<8} {}", one_line(value)))
+        .collect();
+    match summary.rsplit_once('\n') {
+        Some((head, last)) => format!("{head}\n{}\n{last}", cost.join("\n")),
+        None => format!("{summary}\n{}", cost.join("\n")),
+    }
+}
+
+/// Watch a run's cost while it runs. Every two seconds: after the third
+/// model call, check once whether the conversation is being sent
+/// uncached and say so; and when the recorded cost reaches the
+/// operator's ceiling, say so, set `hit` and end the run agent's
+/// turns. While `hit` is set it keeps ending turns, so work started
+/// after the ceiling does not run on. Ends when `done` is set.
+#[allow(clippy::too_many_arguments)]
+fn start_cost_watch(
+    log: Arc<dyn wirken_audit::SessionLog>,
+    agent_id: String,
+    mark: Option<u64>,
+    provider: String,
+    model: String,
+    ceiling_usd: Option<f64>,
+    hit: Arc<std::sync::atomic::AtomicBool>,
+    warning: Arc<Mutex<Option<super::lyrik_cost::CacheWarning>>>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    use std::sync::atomic::Ordering;
+    tokio::spawn(async move {
+        let handle = log.handle_for(wirken_audit::SessionId::new(agent_id.clone()));
+        let mut ticks = 0u32;
+        while !done.load(Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            ticks += 1;
+            if !ticks.is_multiple_of(8) {
+                continue;
+            }
+            let calls = super::lyrik_cost::calls_since(&*log, &handle, mark);
+            {
+                let mut held = warning.lock().unwrap_or_else(|e| e.into_inner());
+                if held.is_none()
+                    && let Some(w) = super::lyrik_cost::cache_check(&provider, &model, &calls)
+                {
+                    eprintln!("wirken lyrik: {}", w.line());
+                    *held = Some(w);
+                }
+            }
+            let spend = super::lyrik_cost::spend(&calls);
+            if super::lyrik_cost::ceiling_reached(&spend, ceiling_usd) {
+                if !hit.swap(true, Ordering::AcqRel) {
+                    eprintln!(
+                        "wirken lyrik: the run reached its cost ceiling of ${:.2} (${:.2} recorded \
+                         over {} model calls); stopping, staged findings are kept",
+                        ceiling_usd.unwrap_or_default(),
+                        spend.usd_micros as f64 / 1e6,
+                        spend.calls
+                    );
+                }
+                wirken_agent::stop::cancel_turns(&agent_id);
+            }
+        }
+    })
 }
 
 /// Print the summary and read one line. `y` or `yes` approves;
@@ -1129,6 +1283,24 @@ async fn dispatch_via_agent_runtime(
     let chain_mark = session_log
         .last_index(&run_handle)
         .context("read the run chain's last row")?;
+    // The cost guard, for the whole of the run's model work.
+    let run_ceiling_usd =
+        super::lyrik_walks::load_operator_settings(&cfg.data_dir)?.run_ceiling_usd();
+    let ceiling_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cache_warning: Arc<Mutex<Option<super::lyrik_cost::CacheWarning>>> =
+        Arc::new(Mutex::new(None));
+    let cost_watch_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cost_watch = start_cost_watch(
+        session_log.clone(),
+        agent_id.clone(),
+        chain_mark,
+        pin.provider.clone(),
+        pin.model.clone(),
+        run_ceiling_usd,
+        ceiling_hit.clone(),
+        cache_warning.clone(),
+        cost_watch_done.clone(),
+    );
     // Every stored secret, for the probe's failure row and the run's
     // agents.
     let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
@@ -1549,6 +1721,7 @@ async fn dispatch_via_agent_runtime(
                     .map(str::to_string),
                 operator.walk_continuations(),
                 operator.transport_retries(),
+                ceiling_hit.clone(),
                 terminal.clone(),
                 audit,
             )
@@ -1560,10 +1733,10 @@ async fn dispatch_via_agent_runtime(
                 std::mem::take(&mut *claim_log.lock().unwrap_or_else(|e| e.into_inner()));
             for d in &claim_decisions {
                 audit.emit(
-                    if d.decision == "refused" {
-                        "lyrik.claim.refused"
-                    } else {
-                        "lyrik.claim.registered"
+                    match d.decision {
+                        "refused" => "lyrik.claim.refused",
+                        "registered_distinct" => "lyrik.claim.registered_distinct",
+                        _ => "lyrik.claim.registered",
                     },
                     serde_json::to_value(d)?,
                 )?;
@@ -1574,30 +1747,33 @@ async fn dispatch_via_agent_runtime(
             // Fresh-context replay of every reproduction the walks
             // recorded: one agent per record, which sees the record and
             // nothing of the walk that wrote it. The aggregator below
-            // pairs the replays with the records.
-            dispatch_replays(
-                &wc.walks,
-                wc.max_concurrent_walks,
-                agent_id.clone(),
-                target.to_path_buf(),
-                run_id.to_string(),
-                llm_config.clone(),
-                api_key.clone(),
-                api_key_credential.clone(),
-                session_log.clone(),
-                super::load_sandbox_config(&cfg.data_dir)?,
-                perms_arc.clone(),
-                leak_matcher.clone(),
-                lyrik_staged_dir.clone(),
-                walks_staged_dir
-                    .clone()
-                    .expect("walks_staged_dir is Some when walks_cfg is Some"),
-                &run_dir,
-                exec_available,
-                terminal.clone(),
-                audit,
-            )
-            .await?;
+            // pairs the replays with the records. Not after the cost
+            // ceiling: the run does no more model work.
+            if !ceiling_hit.load(std::sync::atomic::Ordering::Acquire) {
+                dispatch_replays(
+                    &wc.walks,
+                    wc.max_concurrent_walks,
+                    agent_id.clone(),
+                    target.to_path_buf(),
+                    run_id.to_string(),
+                    llm_config.clone(),
+                    api_key.clone(),
+                    api_key_credential.clone(),
+                    session_log.clone(),
+                    super::load_sandbox_config(&cfg.data_dir)?,
+                    perms_arc.clone(),
+                    leak_matcher.clone(),
+                    lyrik_staged_dir.clone(),
+                    walks_staged_dir
+                        .clone()
+                        .expect("walks_staged_dir is Some when walks_cfg is Some"),
+                    &run_dir,
+                    exec_available,
+                    terminal.clone(),
+                    audit,
+                )
+                .await?;
+            }
         }
         None => {
             let seed_protocol = if seeds_present {
@@ -1714,8 +1890,13 @@ async fn dispatch_via_agent_runtime(
     let mut ledger_refused: Vec<super::lyrik_ledger::Refused> = Vec::new();
     if let Some(wc) = walks_cfg.as_ref() {
         for w in &wc.walks {
-            let refused = super::lyrik_ledger::refuse_duplicates(&staging.join(w), w, &ledger)
-                .with_context(|| format!("check {w} against the ledger"))?;
+            let refused = super::lyrik_ledger::refuse_duplicates(
+                &staging.join(w),
+                w,
+                &ledger,
+                &claim_decisions,
+            )
+            .with_context(|| format!("check {w} against the ledger"))?;
             for r in &refused {
                 audit.emit("lyrik.ledger.refused", serde_json::to_value(r)?)?;
             }
@@ -1745,12 +1926,16 @@ async fn dispatch_via_agent_runtime(
                 "kept_at_truncation": o.truncations,
                 "continuations": o.continuations,
                 "claims_registered": claims("registered"),
+                "registered_as_distinct": claims("registered_distinct"),
                 "refused_at_registration": claims("refused"),
                 "refused_at_aggregation": at_aggregation,
                 "completed": matches!(o.status, WalkStatus::Success),
             });
             if let WalkStatus::Incomplete { tool_rounds, .. } = &o.status {
                 entry["incomplete_at_tool_rounds"] = serde_json::json!(tool_rounds);
+            }
+            if matches!(o.status, WalkStatus::StoppedAtCeiling) {
+                entry["stopped_at_cost_ceiling"] = serde_json::json!(true);
             }
             entry
         })
@@ -1894,6 +2079,7 @@ async fn dispatch_via_agent_runtime(
     // staging/fix/, which is why the parent staging/ stays behind.
     if aggregated.is_ok()
         && brocard_mode == lyrik_brocards::Mode::Defender
+        && !ceiling_hit.load(std::sync::atomic::Ordering::Acquire)
         && let Some(wc) = walks_cfg.as_ref()
     {
         dispatch_fixes(
@@ -1931,6 +2117,50 @@ async fn dispatch_via_agent_runtime(
             audit,
         )
         .await?;
+    }
+    // The run's model work is over: stop the cost watch, take the
+    // final figures, and record them.
+    cost_watch_done.store(true, std::sync::atomic::Ordering::Release);
+    let _ = cost_watch.await;
+    let calls = super::lyrik_cost::calls_since(&*session_log, &run_handle, chain_mark);
+    let spend = super::lyrik_cost::spend(&calls);
+    let warning = cache_warning
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .or_else(|| super::lyrik_cost::cache_check(&pin.provider, &pin.model, &calls));
+    let stopped_at_ceiling = ceiling_hit.load(std::sync::atomic::Ordering::Acquire);
+    if let Some(w) = &warning {
+        audit.emit("lyrik.cost.cache_warning", serde_json::to_value(w)?)?;
+    }
+    if stopped_at_ceiling {
+        audit.emit(
+            "lyrik.cost.ceiling_reached",
+            serde_json::json!({ "ceiling_usd": run_ceiling_usd, "spend": spend }),
+        )?;
+    }
+    let cost = serde_json::json!({
+        "spend": spend,
+        "ceiling_usd": run_ceiling_usd,
+        "stopped_at_ceiling": stopped_at_ceiling,
+        "priced": wirken_audit::pricing::is_priced(&pin.provider, &pin.model),
+        "cache_warning": warning,
+    });
+    audit.emit("lyrik.cost.summary", cost.clone())?;
+    for line in super::lyrik_cost::summary_lines(
+        &spend,
+        run_ceiling_usd,
+        stopped_at_ceiling,
+        warning.as_ref(),
+    ) {
+        println!("{line}");
+    }
+    if let Ok(text) = std::fs::read_to_string(expected_findings)
+        && let Ok(mut body) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        body["cost"] = cost;
+        std::fs::write(expected_findings, serde_json::to_string_pretty(&body)?)
+            .with_context(|| format!("write {}", expected_findings.display()))?;
     }
     // remove_dir succeeds only if empty — exactly the semantics we
     // want for cleaning up the parent staging/ once each subdir
@@ -3611,6 +3841,9 @@ pub(super) enum WalkStatus {
         tool_rounds: usize,
         reason: String,
     },
+    /// The run reached its cost ceiling and the walk was ended. What
+    /// it staged is kept.
+    StoppedAtCeiling,
     TransientFailure {
         reason: String,
     },
@@ -3642,11 +3875,19 @@ fn walk_summary_lines(summary: &[serde_json::Value]) -> Vec<String> {
                     n("continuations")
                 ));
             }
-            if n("claims_registered") + n("refused_at_registration") > 0 {
+            if n("claims_registered") + n("refused_at_registration") + n("registered_as_distinct")
+                > 0
+            {
                 line.push_str(&format!(
                     ", {} claim(s) registered, {} refused at registration as already observed",
                     n("claims_registered"),
                     n("refused_at_registration")
+                ));
+            }
+            if n("registered_as_distinct") > 0 {
+                line.push_str(&format!(
+                    ", {} registered as distinct from a settled record",
+                    n("registered_as_distinct")
                 ));
             }
             if n("refused_at_aggregation") > 0 {
@@ -3659,6 +3900,12 @@ fn walk_summary_lines(summary: &[serde_json::Value]) -> Vec<String> {
                 line.push_str(&format!(
                     ", incomplete: stopped at the limit of {rounds} tool rounds, staged findings kept"
                 ));
+            } else if w
+                .get("stopped_at_cost_ceiling")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                line.push_str(", stopped at the run's cost ceiling, staged findings kept");
             } else if w.get("completed").and_then(serde_json::Value::as_bool) == Some(false) {
                 line.push_str(", did not complete");
             }
@@ -3671,15 +3918,38 @@ fn walk_summary_lines(summary: &[serde_json::Value]) -> Vec<String> {
 struct AgentWalkSession<'a> {
     agent: &'a mut Agent,
     walk_name: &'a str,
+    /// Set when the run reached its cost ceiling.
+    ceiling_hit: &'a std::sync::atomic::AtomicBool,
 }
+
+/// Why a walk ended when the run reached its cost ceiling.
+const STOPPED_AT_CEILING: &str = "the run reached its cost ceiling";
 
 impl super::lyrik_walks::WalkSession for AgentWalkSession<'_> {
     async fn send(
         &mut self,
         prompt: String,
     ) -> std::result::Result<super::lyrik_walks::TurnEnd, super::lyrik_walks::TurnFailure> {
+        let hit = self.ceiling_hit;
+        let at_ceiling = || {
+            hit.load(std::sync::atomic::Ordering::Acquire).then(|| {
+                super::lyrik_walks::TurnFailure {
+                    reason: STOPPED_AT_CEILING.to_string(),
+                    tool_rounds: None,
+                }
+            })
+        };
+        if let Some(stopped) = at_ceiling() {
+            return Err(stopped);
+        }
         let inbound_id = format!("lyrik-walk-{}-{}", self.walk_name, uuid::Uuid::new_v4());
-        match self.agent.process_message(&prompt, inbound_id).await {
+        let result = self.agent.process_message(&prompt, inbound_id).await;
+        if result.is_err()
+            && let Some(stopped) = at_ceiling()
+        {
+            return Err(stopped);
+        }
+        match result {
             // A refused call is a step the walk did not take, not the
             // end of the run: the refusal is on the chain, the model
             // was told, and the turn went on. The walk reports the
@@ -3755,6 +4025,9 @@ async fn dispatch_walks_concurrent(
     // Times a provider request that failed in transport is sent again:
     // the operator's `transport_retries`.
     transport_retries: u32,
+    // Set by the cost watch when the run reached its ceiling: no walk
+    // starts another turn.
+    ceiling_hit: Arc<std::sync::atomic::AtomicBool>,
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
@@ -3840,6 +4113,7 @@ async fn dispatch_walks_concurrent(
         // staging path. The template carries a `<walk>` sentinel the
         // dispatch site built once for the whole run.
         let walk_seed_suffix_t = walk_seed_suffix.replace("<walk>", &walk_name);
+        let ceiling_hit_t = ceiling_hit.clone();
         let code_revision_t = code_revision.clone();
 
         let h = tokio::spawn(async move {
@@ -3903,6 +4177,7 @@ async fn dispatch_walks_concurrent(
                 &mut AgentWalkSession {
                     agent: &mut local_agent,
                     walk_name: &walk_name,
+                    ceiling_hit: &ceiling_hit_t,
                 },
                 || {
                     let _ = super::lyrik_walks::write_staged_index(&run_dir_t, &run_rel);
@@ -3922,6 +4197,9 @@ async fn dispatch_walks_concurrent(
                     },
                     0,
                 ),
+                Err(failure) if failure.reason == STOPPED_AT_CEILING => {
+                    (WalkStatus::StoppedAtCeiling, 0)
+                }
                 Err(failure) => (
                     WalkStatus::TransientFailure {
                         reason: failure.reason,
@@ -3952,11 +4230,13 @@ async fn dispatch_walks_concurrent(
         let status_label = match &outcome.status {
             WalkStatus::Success => "success",
             WalkStatus::Incomplete { .. } => "incomplete",
+            WalkStatus::StoppedAtCeiling => "stopped_at_cost_ceiling",
             WalkStatus::TransientFailure { .. } => "transient_failure",
         };
         let reason = match &outcome.status {
             WalkStatus::Success => None,
             WalkStatus::Incomplete { reason, .. } => Some(reason.clone()),
+            WalkStatus::StoppedAtCeiling => Some(STOPPED_AT_CEILING.to_string()),
             WalkStatus::TransientFailure { reason } => Some(reason.clone()),
         };
         audit.emit(
@@ -7852,6 +8132,43 @@ mod tests {
         assert_eq!(body["lyrik_version"], super::LYRIK_VERSION);
     }
 
+    /// The sign-off banner carries the cost lines above its closing
+    /// sentence: the ceiling or that none is set, and a model with no
+    /// price entry, before the run starts.
+    #[test]
+    fn the_signoff_banner_shows_the_cost_ceiling_and_a_missing_price() {
+        let summary = "Lyrik 1.1.0 run r1 on /t\n  walks    sink-walk\n  Nothing leaves this host but calls to the model.";
+        let with = super::with_cost_lines(
+            summary,
+            &super::super::lyrik_cost::banner_lines("openai", "gpt-6.2-astra", Some(20.0)),
+        );
+        let lines: Vec<&str> = with.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            lines[2],
+            "  ceiling  the run stops at $20.00 of recorded cost (`run_ceiling_usd` in lyrik.json)"
+        );
+        assert_eq!(
+            lines[3],
+            "  Nothing leaves this host but calls to the model."
+        );
+
+        let none = super::with_cost_lines(
+            summary,
+            &super::super::lyrik_cost::banner_lines("anthropic", "no-such-model", None),
+        );
+        let lines: Vec<&str> = none.lines().collect();
+        assert!(
+            lines[2].starts_with("  ceiling  none set: this run has no cost limit"),
+            "{}",
+            lines[2]
+        );
+        assert_eq!(
+            lines[3],
+            "  pricing  anthropic no-such-model has no price entry: this run's cost is not recorded"
+        );
+    }
+
     /// The run summary says, per walk, what was staged, how often the
     /// walk was cut off and what was kept each time, and what the
     /// ledger refused.
@@ -7860,6 +8177,7 @@ mod tests {
         let lines = super::walk_summary_lines(&[
             serde_json::json!({"walk": "sink-walk", "findings_staged": 3, "truncations": 2,
                 "kept_at_truncation": [1, 2], "continuations": 2, "claims_registered": 4,
+                "registered_as_distinct": 1,
                 "refused_at_registration": 2, "refused_at_aggregation": 1, "completed": true}),
             serde_json::json!({"walk": "doc-walk", "findings_staged": 0, "truncations": 0,
                 "kept_at_truncation": [], "continuations": 0, "claims_registered": 0,
@@ -7874,8 +8192,8 @@ mod tests {
             vec![
                 "walk sink-walk: 3 finding(s) staged, truncated 2 time(s) at the output limit \
                  (kept 1, 2), 2 continuation(s), 4 claim(s) registered, 2 refused at \
-                 registration as already observed, 1 finding(s) refused at aggregation as \
-                 already observed",
+                 registration as already observed, 1 registered as distinct from a settled \
+                 record, 1 finding(s) refused at aggregation as already observed",
                 "walk doc-walk: 0 finding(s) staged, did not complete",
                 "walk fuzz-walk: 1 finding(s) staged, 1 claim(s) registered, 0 refused at \
                  registration as already observed, incomplete: stopped at the limit of 20 \

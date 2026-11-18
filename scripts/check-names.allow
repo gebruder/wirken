@@ -7,3 +7,4 @@ crates/audit/src/pricing.rs      Tests that price those identifiers against the 
 crates/agent/src/runtime.rs      Usage-attribution tests that need a model the pricing table prices.
 crates/agent/src/tests.rs        Provider-config and response-parsing tests for the vendor's API and Bedrock, which take the vendor's model identifiers.
 crates/cli/src/commands/lyrik_agent_config.rs	the settings path the scan looks for in a scanned repository, and its test fixtures
+crates/cli/src/commands/lyrik_cost.rs	model ids from the price table in the cost tests, where a priced model with cache counters is needed
