@@ -437,6 +437,21 @@ pub struct TargetProfile {
     /// else the usual one for the first language that has one.
     pub test_command: Option<String>,
     pub git: bool,
+    /// What the `exec` sandbox was found to have. Empty until the run
+    /// asks it, which it does before the walks are staged.
+    pub sandbox: SandboxFacts,
+}
+
+/// What the place `exec` runs was found to have, asked once before the
+/// walks are staged so their text offers nothing that cannot run.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct SandboxFacts {
+    /// The binaries the walks' commands name that are not there.
+    /// `None` when it was not asked or could not be.
+    pub missing: Option<Vec<String>>,
+    /// Whether the shell there expands `{a,b}`. `None` when it was not
+    /// asked or could not be.
+    pub brace_expansion: Option<bool>,
 }
 
 impl TargetProfile {
@@ -483,11 +498,13 @@ impl TargetProfile {
                 .map(str::to_string),
             git: has(".git"),
             languages,
+            sandbox: SandboxFacts::default(),
         }
     }
 
     /// The interpreters a harness script may be run with: `sh` always,
-    /// and the target's own where it is a scripting language.
+    /// and the target's own where it is a scripting language and the
+    /// sandbox was not found to lack it.
     pub fn harness_interpreters(&self) -> Vec<&'static str> {
         let mut out = vec!["sh"];
         if self.languages.contains(&"python") {
@@ -496,6 +513,8 @@ impl TargetProfile {
         if self.languages.contains(&"node") {
             out.push("node");
         }
+        let missing = self.sandbox.missing.as_deref().unwrap_or_default();
+        out.retain(|i| *i == "sh" || !missing.iter().any(|m| m == i));
         out
     }
 }
@@ -572,6 +591,32 @@ pub fn sandbox_banner(where_exec_runs: &str, missing: Option<&[String]>) -> Opti
     }
 }
 
+/// What a walk is told the sandbox lacks, one list item for each: the
+/// binaries its commands would need that are not there, and brace
+/// expansion when the shell there has none. Nothing when the sandbox
+/// was not asked or lacks neither.
+fn sandbox_lines(facts: &SandboxFacts) -> String {
+    let mut out = String::new();
+    if let Some(missing) = facts.missing.as_deref().filter(|m| !m.is_empty()) {
+        out.push_str(&format!(
+            "- The sandbox has no {}: a command that needs it fails. Do not write a \
+             harness or a check that needs it.\n",
+            missing
+                .iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        ));
+    }
+    if facts.brace_expansion == Some(false) {
+        out.push_str(
+            "- The sandbox shell does not expand braces: `mkdir -p a/{b,c}` makes one \
+             directory named `{b,c}`. Name each path in full.\n",
+        );
+    }
+    out
+}
+
 /// The rules a walk runs under inside `wirken lyrik run`, placed ahead
 /// of the operator's walk text. They take precedence over a location
 /// the walk text names, such as a harness in the project's test tree.
@@ -594,6 +639,7 @@ fn run_section(walk_name: &str, exec_available: bool, profile: &TargetProfile) -
              sign-off covers every command and none is asked again; in any other run \
              each is put to the operator. A command that is refused is a step skipped: \
              record that it was skipped and carry on.\n\
+             {}\
              - You may ask to run a script you wrote under \
              `.lyrik/state/runs/<run-id>/staging/{walk_name}/harness/`, from the project \
              root, with {}: for example \
@@ -611,6 +657,7 @@ fn run_section(walk_name: &str, exec_available: bool, profile: &TargetProfile) -
                 .map(|c| format!("`{c}`"))
                 .collect::<Vec<_>>()
                 .join(", "),
+            sandbox_lines(&profile.sandbox),
             interpreters
                 .iter()
                 .map(|i| format!("`{i}`"))
@@ -1853,6 +1900,44 @@ mod tests {
         }
         // With exec unavailable no command is offered at all.
         let off = wrap_for_target("fuzz-walk", "r1", None, false, &profile, "body\n");
+        // What the sandbox was found to lack is said, and an
+        // interpreter it lacks is not offered. Nothing is said of a
+        // sandbox that was not asked.
+        let py = TargetProfile {
+            languages: vec!["python"],
+            ..Default::default()
+        };
+        let unasked = wrap_for_target("sink-walk", "r1", None, true, &py, "body\n");
+        assert!(unasked.contains("with `sh` or `python3`"), "{unasked}");
+        assert!(!unasked.contains("The sandbox has no"), "{unasked}");
+        assert!(!unasked.contains("expand braces"), "{unasked}");
+        let bare = TargetProfile {
+            sandbox: SandboxFacts {
+                missing: Some(vec!["python3".into()]),
+                brace_expansion: Some(false),
+            },
+            ..py.clone()
+        };
+        assert_eq!(bare.harness_interpreters(), ["sh"]);
+        let told = wrap_for_target("sink-walk", "r1", None, true, &bare, "body\n");
+        assert!(told.contains("root, with `sh`: for example"), "{told}");
+        assert!(!told.contains("python3 .lyrik"), "{told}");
+        assert!(told.contains("The sandbox has no `python3`"), "{told}");
+        assert!(
+            told.contains("does not expand braces: `mkdir -p a/{b,c}`"),
+            "{told}"
+        );
+        let whole = TargetProfile {
+            sandbox: SandboxFacts {
+                missing: Some(Vec::new()),
+                brace_expansion: Some(true),
+            },
+            ..py
+        };
+        let fine = wrap_for_target("sink-walk", "r1", None, true, &whole, "body\n");
+        assert!(fine.contains("with `sh` or `python3`"), "{fine}");
+        assert!(!fine.contains("The sandbox has no"), "{fine}");
+        assert!(!fine.contains("expand braces"), "{fine}");
         assert!(off.contains("`exec` is not available in this run"), "{off}");
         assert!(!off.contains("You may ask to run a script"), "{off}");
     }

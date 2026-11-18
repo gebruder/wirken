@@ -59,42 +59,76 @@ pub(crate) const LYRIK_VERSION: &str = "1.0.1";
 /// `PATH` under sandbox mode off, otherwise the configured sandbox
 /// image, asked through the same sandbox an approved command runs in.
 /// `None` when it cannot be asked, such as no container runtime.
+#[cfg(test)]
 async fn binaries_missing_for_exec(
     sandbox: &wirken_agent::sandbox::SandboxConfig,
     workspace: &Path,
     binaries: &[String],
 ) -> Option<Vec<String>> {
-    if binaries.is_empty() {
-        return Some(Vec::new());
-    }
+    probe_exec_sandbox(sandbox, workspace, binaries)
+        .await
+        .missing
+}
+
+/// What the place `exec` runs has, asked once: which of `binaries` are
+/// missing, and whether its shell expands braces. Under sandbox mode
+/// off the host `PATH` answers the first and the second is not asked.
+/// Otherwise one command in the configured sandbox image answers both,
+/// with the workspace mounted read-only. A sandbox that cannot be
+/// asked, such as no container runtime, answers neither.
+async fn probe_exec_sandbox(
+    sandbox: &wirken_agent::sandbox::SandboxConfig,
+    workspace: &Path,
+    binaries: &[String],
+) -> super::lyrik_walks::SandboxFacts {
+    use super::lyrik_walks::SandboxFacts;
     if sandbox.mode == wirken_agent::sandbox::SandboxMode::Off {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        return Some(
-            binaries
-                .iter()
-                .filter(|b| !std::env::split_paths(&path).any(|d| d.join(b.as_str()).is_file()))
-                .cloned()
-                .collect(),
-        );
+        return SandboxFacts {
+            missing: Some(
+                binaries
+                    .iter()
+                    .filter(|b| !std::env::split_paths(&path).any(|d| d.join(b.as_str()).is_file()))
+                    .cloned()
+                    .collect(),
+            ),
+            brace_expansion: None,
+        };
     }
     let probe = format!(
-        "for b in {}; do command -v \"$b\" >/dev/null 2>&1 || echo \"$b\"; done; echo probed",
+        "for b in {}; do command -v \"$b\" >/dev/null 2>&1 || echo \"$b\"; done; \
+         echo braces={{a,b}}; echo probed",
         binaries.join(" ")
     );
-    let docker = wirken_agent::sandbox::DockerSandbox::new(sandbox.clone()).ok()?;
-    let result = docker.exec(&probe, workspace, None).await.ok()?;
-    if !result.output.lines().any(|l| l.trim() == "probed") {
-        return None;
+    // The probe writes nothing, so it gets nothing writable.
+    let config = wirken_agent::sandbox::SandboxConfig {
+        workspace_scope: Some(wirken_agent::sandbox::WorkspaceScope::default()),
+        ..sandbox.clone()
+    };
+    let Ok(docker) = wirken_agent::sandbox::DockerSandbox::new(config) else {
+        return SandboxFacts::default();
+    };
+    let Ok(result) = docker.exec(&probe, workspace, None).await else {
+        return SandboxFacts::default();
+    };
+    let lines: Vec<&str> = result.output.lines().map(str::trim).collect();
+    if !lines.contains(&"probed") {
+        return SandboxFacts::default();
     }
-    Some(
-        result
-            .output
-            .lines()
-            .map(str::trim)
-            .filter(|l| binaries.iter().any(|b| b == l))
-            .map(str::to_string)
-            .collect(),
-    )
+    SandboxFacts {
+        missing: Some(
+            lines
+                .iter()
+                .filter(|l| binaries.iter().any(|b| b == *l))
+                .map(|l| l.to_string())
+                .collect(),
+        ),
+        // A shell that expands braces prints `braces=a braces=b`.
+        brace_expansion: lines
+            .iter()
+            .find(|l| l.starts_with("braces="))
+            .map(|l| *l != "braces={a,b}"),
+    }
 }
 
 /// The skills a Lyrik agent attaches: the run's staged Lyrik copy and,
@@ -1704,10 +1738,34 @@ async fn dispatch_via_agent_runtime(
     // operator's installed body intact.
     // The commands each walk is offered come from the target as it
     // stands, with the test command the run read at start.
-    let target_profile = super::lyrik_walks::TargetProfile::detect(
+    let mut target_profile = super::lyrik_walks::TargetProfile::detect(
         target,
         fix_inputs.functionality.test_command.as_deref(),
     );
+    // Ask the sandbox what it has before the walks are staged, so a
+    // walk's text offers no interpreter the image lacks. Only where a
+    // command can run at all: with the sandbox on and a terminal.
+    if let Some(wc) = walks_cfg.as_ref()
+        && exec_available
+        && terminal.is_some()
+    {
+        let needed: Vec<String> = wc
+            .walks
+            .iter()
+            .flat_map(|w| super::lyrik_walks::walk_commands(w, &target_profile))
+            .collect();
+        let sandbox = super::load_sandbox_config(&cfg.data_dir)?;
+        target_profile.sandbox =
+            probe_exec_sandbox(&sandbox, target, &super::lyrik_walks::binaries_for(&needed)).await;
+        audit.emit(
+            "lyrik.sandbox.probed",
+            serde_json::json!({
+                "image": sandbox.image,
+                "missing": target_profile.sandbox.missing,
+                "brace_expansion": target_profile.sandbox.brace_expansion,
+            }),
+        )?;
+    }
     // What earlier runs established about this target. A bench run
     // neither reads nor writes it: bench runs are independent.
     let ledger = if audit.bench_mode {
@@ -4268,14 +4326,9 @@ async fn dispatch_walks_concurrent(
         );
     } else if !asks.is_empty() {
         if terminal.is_some() {
-            // Said before anything is asked: an approved command that
-            // needs a binary the sandbox lacks can only fail.
-            let needed: Vec<String> = walks
-                .iter()
-                .flat_map(|w| super::lyrik_walks::walk_commands(w, profile))
-                .collect();
-            let binaries = super::lyrik_walks::binaries_for(&needed);
-            let missing = binaries_missing_for_exec(&sandbox, &target, &binaries).await;
+            // What the sandbox lacks, as it was asked before the walks
+            // were staged: a command that needs it can only fail.
+            let missing = profile.sandbox.missing.as_ref();
             let where_exec_runs = match sandbox.mode {
                 wirken_agent::sandbox::SandboxMode::Off => {
                     "The host (sandbox mode off)".to_string()
@@ -4283,7 +4336,7 @@ async fn dispatch_walks_concurrent(
                 _ => format!("The exec sandbox image `{}`", sandbox.image),
             };
             if let Some(line) =
-                super::lyrik_walks::sandbox_banner(&where_exec_runs, missing.as_deref())
+                super::lyrik_walks::sandbox_banner(&where_exec_runs, missing.map(Vec::as_slice))
             {
                 eprintln!("{line}");
             }

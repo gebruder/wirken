@@ -4,6 +4,10 @@
 //! directory read-write, another walk's staging directory is not
 //! there, and there is no network.
 //!
+//! The walks are told what that sandbox has before they start: an
+//! interpreter the image lacks is not offered, and a shell that does
+//! not expand braces is named.
+//!
 //! Driven through the binary on a pseudo-terminal with a scripted
 //! model. The case that runs a command needs Docker and the default
 //! sandbox image, and says so when it skips.
@@ -235,6 +239,53 @@ fn a_signed_off_walk_runs_exec_inside_the_envelope_without_asking() {
         .filter(|w| s.target.join(&staging).join(w).join("out").is_file())
         .count();
     assert_eq!(written, 1, "one walk's staging, its own");
+}
+
+/// A Python target on an image with no `python3`: the staged walk is
+/// offered `sh` only, is told `python3` is not there, and is told the
+/// sandbox shell does not expand braces. The probe is on the run's log.
+#[test]
+fn a_walk_is_told_what_the_sandbox_lacks_before_it_starts() {
+    const RUN: &str = "sandbox-facts";
+    if !docker_has("debian:bookworm-slim") {
+        eprintln!("skipping: Docker or debian:bookworm-slim is not available on this host");
+        return;
+    }
+    let model = ScriptedModel::start(vec![
+        call("probe_ping", serde_json::json!({"marker": "ok"})),
+        serde_json::json!({"role": "assistant", "content": "Done."}),
+        serde_json::json!({"role": "assistant", "content": "Done."}),
+    ]);
+    let s = scene(&model);
+    std::fs::write(s.target.join("agent.py"), "print('hi')\n").unwrap();
+    let shown = run_on_terminal(&s, RUN, "y\n");
+
+    let run_dir = s.target.join(format!(".lyrik/state/runs/{RUN}"));
+    for walk in ["sink-walk", "chain-walk"] {
+        let text =
+            std::fs::read_to_string(run_dir.join("walks-skills").join(walk).join("SKILL.md"))
+                .unwrap_or_else(|e| panic!("{walk}: {e}\n{shown}"));
+        let harness = format!(".lyrik/state/runs/<run-id>/staging/{walk}/harness/<script>");
+        assert!(
+            text.contains(&format!("`sh {harness}`")),
+            "{walk} is offered sh:\n{text}"
+        );
+        assert!(!text.contains("python3 .lyrik"), "{walk}:\n{text}");
+        assert!(
+            text.contains("The sandbox has no `python3`"),
+            "{walk}:\n{text}"
+        );
+        assert!(text.contains("does not expand braces"), "{walk}:\n{text}");
+    }
+    let audit = std::fs::read_to_string(run_dir.join("audit.log")).unwrap();
+    let probed: serde_json::Value = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| e["event"] == "lyrik.sandbox.probed")
+        .unwrap_or_else(|| panic!("no lyrik.sandbox.probed row:\n{audit}"));
+    assert_eq!(probed["detail"]["missing"], serde_json::json!(["python3"]));
+    assert_eq!(probed["detail"]["brace_expansion"], false);
+    assert_eq!(probed["detail"]["image"], "debian:bookworm-slim");
 }
 
 /// A `--bench` run has no sign-off, so nothing approves its commands:

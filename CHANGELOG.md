@@ -49,6 +49,16 @@ tagged.
   (`crates/cli/tests/lyrik_exec_envelope.rs`;
   [docs/lyrik.md](docs/lyrik.md#the-exec-envelope)).
 
+- A per-walk Lyrik run asks the `exec` sandbox what it has before the walks
+  are staged, and tells the walks. A walk is no longer offered an interpreter
+  the image lacks, is told which binaries its commands would need are not
+  there, and is told when the sandbox shell does not expand braces. The
+  answer is on the run's log as `lyrik.sandbox.probed`. The walks were
+  staged before the sandbox was asked, so a Python target on the default
+  image was offered `python3`
+  (`a_walk_is_told_what_the_sandbox_lacks_before_it_starts`,
+  `crates/cli/tests/lyrik_exec_envelope.rs`).
+
 ### Fixed
 
 - A Lyrik walk or replay whose turn ended in an error, for example at the

@@ -399,8 +399,12 @@ approval`. A refused command is a skipped step, not a failed
 walk. A command runs in the `exec` sandbox, so the sandbox image
 needs the binaries those commands name; the default image has neither `git`
 nor `cargo`. Before
-the walks start the run asks the sandbox which of the binaries its walks need
-are missing, and names them.
+the walks are staged the run asks the sandbox which of the binaries its walks
+need are missing and whether its shell expands braces, with the target mounted
+read-only, and records the answer as `lyrik.sandbox.probed`. It names what is
+missing, and the staged walk text carries the answer: a walk is not offered an
+interpreter the image lacks, is told which binaries are not there, and is told
+when `{a,b}` is not expanded.
 
 With sandbox `mode: off`, `exec` is not available in a run: an approved
 command such as `cargo test` would run the target's build scripts on the host
