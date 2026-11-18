@@ -152,9 +152,10 @@ PY
 # The row the edit lands on: the model's exec call as the chain
 # recorded it. Every `ask` writes one, whatever the presenter answers,
 # and it is still an exec call after the edit, so a second `verify`
-# finds the same row.
-target_seq() {
-    sqlite3 "$DB" "SELECT MIN(seq) FROM session_events
+# finds the same row. By row id: `seq` restarts in every session, and
+# the operator session `up` writes has rows at the same numbers.
+target_id() {
+    sqlite3 "$DB" "SELECT MIN(id) FROM session_events
                     WHERE json_extract(payload, '\$.kind') = 'assistant_tool_calls'
                       AND payload LIKE '%\"name\":\"exec\"%';"
 }
@@ -270,7 +271,7 @@ def rows(after):
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         try:
             return conn.execute(
-                "SELECT seq, payload FROM session_events WHERE seq > ? ORDER BY seq",
+                "SELECT id, payload FROM session_events WHERE id > ? ORDER BY id",
                 (after,),
             ).fetchall()
         finally:
@@ -278,14 +279,17 @@ def rows(after):
     except sqlite3.Error:
         return []
 
-# Rows from an earlier `ask` are not this run's calls.
-seen = max((seq for seq, _ in rows(-1)), default=-1)
+# Rows from an earlier `ask` are not this run's calls. The cursor is
+# the table's row id: `seq` restarts in every session, and `up` has
+# already written an operator session whose rows would hide the first
+# rows of this one.
+seen = max((row_id for row_id, _ in rows(-1)), default=-1)
 refused = set()
 
 def trace():
     global seen
-    for seq, payload in rows(seen):
-        seen = seq
+    for row_id, payload in rows(seen):
+        seen = row_id
         event = json.loads(payload)
         kind = event.get("kind")
         if kind == "assistant_tool_calls":
@@ -374,11 +378,12 @@ skills() {
 
 verify() {
     [ -f "$DB" ] || die "no audit log yet; run 'ask' first"
-    local seq
-    seq="$(target_seq)"
+    local id seq
+    id="$(target_id)"
     # The edit rewrites what the model asked for: the pipe into bash
     # goes, and the call reads as a look at a file.
-    [ -n "$seq" ] || die "no exec call on the chain; run 'ask' first"
+    [ -n "$id" ] || die "no exec call on the chain; run 'ask' first"
+    seq="$(sqlite3 "$DB" "SELECT seq FROM session_events WHERE id = $id;")"
 
     asi ASI10
     printf -- '── the chain as written ──\n'
@@ -397,10 +402,10 @@ verify() {
     sqlite3 "$DB" \
         "UPDATE session_events
             SET payload = replace(payload, '| bash', ' ')
-          WHERE seq = $seq;"
+          WHERE id = $id;"
     sqlite3 "$DB" \
         "SELECT seq || '|' || json_extract(payload, '\$.calls[0].arguments')
-           FROM session_events WHERE seq = $seq;"
+           FROM session_events WHERE id = $id;"
 
     printf -- '\n── the chain after the edit ──\n'
     run_verify quiet
