@@ -211,7 +211,9 @@ name (for example `phases.sink-walk`) overrides the `model` (and `max_tokens`)
 for that walk only. The provider, base URL and credential stay the run's, so a
 per-walk entry that names a different `provider` is refused; a walk with no
 entry of its own uses the run pin. Each distinct model is tool-call-probed
-before the run, and a walk's model is on its `lyrik.walk.started` row. Other
+before the run, and a walk's model is on its `lyrik.walk.started` row. When a
+walk has its own model, the sign-off summary carries a `models` line with the
+model of each selected walk. Other
 keys, including `articulate`, `rubric` and `exploit`, are accepted and not
 read; no exploit phase runs. A pin may
 carry `max_tokens`, the output tokens allowed per model reply; absent,

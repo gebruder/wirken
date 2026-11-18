@@ -275,3 +275,52 @@ fn bench_mode_auto_approves_without_asking() {
     assert_eq!(rows[0]["decision"], "auto_bench");
     assert!(chain_rows(&s.data, "permission_approved").is_empty());
 }
+
+/// With a walk on its own model, the summary says which model each
+/// selected walk will use, before the question.
+#[test]
+fn the_summary_names_each_walks_model_when_one_is_overridden() {
+    const RUN: &str = "per-walk-models";
+    let s = scene(RUN, false);
+    for walk in ["sink-walk", "chain-walk"] {
+        let dir = s.data.join("lyrik/walks").join(walk);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {walk}\ndescription: test walk\n---\n\n# {walk}\n"),
+        )
+        .unwrap();
+    }
+    let pin = serde_json::json!({
+        "provider": "ollama", "model": "scripted", "base_url": s.model.base_url,
+    });
+    std::fs::write(
+        s.target.join(".lyrik/config.json"),
+        serde_json::json!({
+            "phases": {"framing": pin, "sink-walk": {"model": "scripted-small"}},
+            "walks": ["sink-walk", "chain-walk"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let (ok, shown) = run_on_terminal(&s, RUN, "n\n");
+    assert!(!ok, "{shown}");
+    let models = "  models   sink-walk: scripted-small; chain-walk: scripted";
+    let (at, question) = (shown.find(models), shown.find("Sign off this run? [y/N]: "));
+    assert!(
+        at.is_some() && at < question,
+        "missing {models:?} before the question in:\n{shown}"
+    );
+    // The run pin reads as it did.
+    assert!(shown.contains("  model    ollama scripted\r\n"), "{shown}");
+    // And the summary on the audit row is the one shown.
+    let rows = audit_rows(&s.target, RUN, "lyrik.phase_0.signoff");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0]["summary"]
+            .as_str()
+            .is_some_and(|t| t.contains(models)),
+        "{rows:?}"
+    );
+}

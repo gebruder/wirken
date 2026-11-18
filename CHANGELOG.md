@@ -18,7 +18,9 @@ tagged.
   URL and credential stay the run's, so an entry naming a different provider
   is refused and a walk with no entry uses the run pin. Each distinct model
   is tool-call-probed before the run, fail-closed, and a walk's model is
-  recorded on its `lyrik.walk.started` row. Before this, every walk of a run
+  recorded on its `lyrik.walk.started` row. When a walk has its own model
+  the sign-off summary adds a `models` line naming the model of each
+  selected walk. Before this, every walk of a run
   used the one run-level pin (`walks_in_one_run_take_their_own_models`,
   `crates/cli/src/commands/lyrik.rs`;
   [docs/lyrik.md](docs/lyrik.md#lyrikconfigjson)).

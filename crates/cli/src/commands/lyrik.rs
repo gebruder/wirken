@@ -302,6 +302,13 @@ pub async fn run(
             .map(|c| c.walks);
         let sandbox_for_summary = super::load_sandbox_config(&super::config().data_dir)?;
         let exec_available = sandbox_for_summary.mode != wirken_agent::sandbox::SandboxMode::Off;
+        let walk_models = match walks.as_deref() {
+            Some(walks) => {
+                let base = pin_llm_config(&pin);
+                overridden_walk_models(walks, &walk_llm_configs(&config, walks, &base)?, &base)
+            }
+            None => Vec::new(),
+        };
         let summary = signoff_summary(
             run_id,
             target,
@@ -309,6 +316,7 @@ pub async fn run(
             &scoring,
             &pin,
             walks.as_deref(),
+            &walk_models,
             exec_available,
             &super::lyrik_walks::TargetProfile::detect(
                 target,
@@ -700,6 +708,7 @@ fn signoff_summary(
     scoring: &Scoring,
     pin: &PhasePin,
     walks: Option<&[String]>,
+    walk_models: &[(String, String)],
     exec_available: bool,
     profile: &super::lyrik_walks::TargetProfile,
     limits: Option<wirken_audit::SandboxLimits>,
@@ -767,8 +776,20 @@ fn signoff_summary(
             },
         ),
         ("walks", walk_line),
+        (
+            "models",
+            walk_models
+                .iter()
+                .map(|(walk, model)| format!("{walk}: {model}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
         ("exec", exec_line),
     ] {
+        // `models` is said only when a walk runs on its own model.
+        if label == "models" && value.is_empty() {
+            continue;
+        }
         lines.push(format!("  {label:<8} {}", one_line(&value)));
     }
     // Said only when the operator's sandbox.json moved a limit: a run
@@ -1239,13 +1260,7 @@ async fn dispatch_via_agent_runtime(
     // tool calls produces a worthless audit, so fail-closed here
     // beats wasting a run.
     let pin = resolve_phase_pin(config)?;
-    let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
-    if let Some(cw) = pin.context_window {
-        llm_config.context_window = cw as usize;
-    }
-    if let Some(max) = pin.max_tokens {
-        llm_config.max_tokens = max;
-    }
+    let llm_config = pin_llm_config(&pin);
     // Per-walk model overrides, resolved before the probe so each
     // distinct model is probed. Empty for the one-call slice.
     let walk_configs = match walks_cfg.as_ref() {
@@ -5579,6 +5594,37 @@ fn walk_llm_configs(
     Ok(out)
 }
 
+/// The run pin as the model config every call uses unless a walk has
+/// its own.
+fn pin_llm_config(pin: &PhasePin) -> LlmConfig {
+    let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
+    if let Some(cw) = pin.context_window {
+        llm_config.context_window = cw as usize;
+    }
+    if let Some(max) = pin.max_tokens {
+        llm_config.max_tokens = max;
+    }
+    llm_config
+}
+
+/// Each selected walk with the model it will use, in the order
+/// selected, when any walk's model differs from the run pin's; empty
+/// when every walk uses the pin.
+fn overridden_walk_models(
+    walks: &[String],
+    walk_configs: &std::collections::HashMap<String, LlmConfig>,
+    base: &LlmConfig,
+) -> Vec<(String, String)> {
+    let models: Vec<(String, String)> = walks
+        .iter()
+        .filter_map(|w| Some((w.clone(), walk_configs.get(w)?.model.clone())))
+        .collect();
+    if models.iter().all(|(_, model)| *model == base.model) {
+        return Vec::new();
+    }
+    models
+}
+
 fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
     let phases = config
         .get("phases")
@@ -6755,6 +6801,7 @@ mod tests {
             &scoring,
             &pin,
             Some(&walks),
+            &[],
             true,
             &super::super::lyrik_walks::TargetProfile {
                 git: true,
@@ -6811,6 +6858,7 @@ mod tests {
                 &super::Scoring::inline(),
                 &pin,
                 Some(&walks),
+                &[],
                 true,
                 &Default::default(),
                 limits,
@@ -6899,6 +6947,7 @@ mod tests {
             &super::Scoring::inline(),
             &pin,
             Some(&walks),
+            &[],
             false,
             &Default::default(),
             None,
