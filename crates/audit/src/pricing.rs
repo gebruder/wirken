@@ -23,6 +23,31 @@ use serde::Deserialize;
 pub struct Pricing {
     pub input_per_million_usd: f64,
     pub output_per_million_usd: f64,
+    /// What a cache read costs against the input price.
+    /// [`CACHE_READ_MULTIPLIER`] when the row does not set it.
+    #[serde(default = "default_cache_read_multiplier")]
+    pub cache_read_multiplier: f64,
+    /// The prices a call pays when its prompt is longer than
+    /// `over_prompt_tokens`. `None` for a model with one price at
+    /// every prompt length.
+    #[serde(default)]
+    pub long_prompt: Option<LongPrompt>,
+}
+
+/// The second price tier of a model priced by prompt length.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LongPrompt {
+    /// A prompt of more tokens than this pays the prices below. The
+    /// prompt is the call's whole input: uncached input, cache writes
+    /// and cache reads.
+    pub over_prompt_tokens: u32,
+    pub input_per_million_usd: f64,
+    pub output_per_million_usd: f64,
+}
+
+fn default_cache_read_multiplier() -> f64 {
+    CACHE_READ_MULTIPLIER
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,11 +57,16 @@ struct PricingFile {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PricingEntry {
     provider: String,
     model: String,
     input_per_million_usd: f64,
     output_per_million_usd: f64,
+    #[serde(default = "default_cache_read_multiplier")]
+    cache_read_multiplier: f64,
+    #[serde(default)]
+    long_prompt: Option<LongPrompt>,
 }
 
 const BAKED_PRICING_TOML: &str = include_str!("pricing.toml");
@@ -59,6 +89,8 @@ fn parse_table(raw: &str) -> HashMap<(String, String), Pricing> {
             Pricing {
                 input_per_million_usd: e.input_per_million_usd,
                 output_per_million_usd: e.output_per_million_usd,
+                cache_read_multiplier: e.cache_read_multiplier,
+                long_prompt: e.long_prompt,
             },
         );
     }
@@ -87,7 +119,8 @@ pub fn cost_micros(
 }
 
 /// What a prompt-cache write costs against the input price, at the
-/// default five-minute lifetime, and what a cache read costs.
+/// default five-minute lifetime, and what a cache read costs on a
+/// model whose row sets no `cache_read_multiplier`.
 pub const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
 pub const CACHE_READ_MULTIPLIER: f64 = 0.1;
 
@@ -95,9 +128,13 @@ pub const CACHE_READ_MULTIPLIER: f64 = 0.1;
 /// cache. A provider that reports cache counters reports `input_tokens`
 /// without them, so the input cost is the three together: uncached
 /// input at the input price, cache writes at
-/// [`CACHE_WRITE_MULTIPLIER`] times it and cache reads at
-/// [`CACHE_READ_MULTIPLIER`] times it. Left out, a cached conversation
+/// [`CACHE_WRITE_MULTIPLIER`] times it and cache reads at the row's
+/// `cache_read_multiplier` times it. Left out, a cached conversation
 /// would be recorded at a fraction of what it cost.
+///
+/// A model priced by prompt length pays its `long_prompt` prices, for
+/// input and output both, on a call whose three input counts add up to
+/// more than the row's `over_prompt_tokens`.
 pub fn cost_micros_cached(
     provider: &str,
     model: &str,
@@ -110,18 +147,47 @@ pub fn cost_micros_cached(
     let Some(p) = table().get(&key) else {
         return (None, None, None);
     };
-    let input = compute_one(input_tokens, p.input_per_million_usd)
+    let (input, output) = cost_at(
+        p,
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+    );
+    (
+        Some(input),
+        Some(output),
+        Some(input.saturating_add(output)),
+    )
+}
+
+/// Input and output cost in micros of one call at the prices of `p`.
+fn cost_at(
+    p: &Pricing,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+) -> (u64, u64) {
+    let prompt_tokens = u64::from(input_tokens)
+        + u64::from(cache_creation_input_tokens)
+        + u64::from(cache_read_input_tokens);
+    let (input_price, output_price) = match p.long_prompt {
+        Some(long) if prompt_tokens > u64::from(long.over_prompt_tokens) => {
+            (long.input_per_million_usd, long.output_per_million_usd)
+        }
+        _ => (p.input_per_million_usd, p.output_per_million_usd),
+    };
+    let input = compute_one(input_tokens, input_price)
         .saturating_add(compute_one(
             cache_creation_input_tokens,
-            p.input_per_million_usd * CACHE_WRITE_MULTIPLIER,
+            input_price * CACHE_WRITE_MULTIPLIER,
         ))
         .saturating_add(compute_one(
             cache_read_input_tokens,
-            p.input_per_million_usd * CACHE_READ_MULTIPLIER,
+            input_price * p.cache_read_multiplier,
         ));
-    let output = compute_one(output_tokens, p.output_per_million_usd);
-    let total = input.saturating_add(output);
-    (Some(input), Some(output), Some(total))
+    (input, compute_one(output_tokens, output_price))
 }
 
 /// `tokens * (usd_per_million / 1_000_000)` in micros simplifies to
@@ -173,6 +239,47 @@ mod tests {
             cost_micros_cached("nonexistent", "model", 1, 1, 1, 1),
             (None, None, None)
         );
+    }
+
+    fn row(fields: &str) -> Pricing {
+        let raw = format!("[[entries]]\nprovider = \"p\"\nmodel = \"m\"\n{fields}");
+        parse_table(&raw)[&("p".to_string(), "m".to_string())]
+    }
+
+    #[test]
+    fn a_row_sets_its_own_cache_read_multiplier() {
+        // $4 / 1M input, read at 0.05 times it: 10_000 read is 2_000.
+        let p = row(
+            "input_per_million_usd = 4.0\noutput_per_million_usd = 20.0\n\
+             cache_read_multiplier = 0.05",
+        );
+        assert_eq!(cost_at(&p, 0, 0, 0, 10_000), (2_000, 0));
+        // A row that sets none reads at 0.1 times input.
+        let p = row("input_per_million_usd = 4.0\noutput_per_million_usd = 20.0");
+        assert_eq!(cost_at(&p, 0, 0, 0, 10_000), (4_000, 0));
+    }
+
+    #[test]
+    fn a_long_prompt_pays_the_second_tier() {
+        let p = row(
+            "input_per_million_usd = 0.1\noutput_per_million_usd = 0.5\n\
+             [entries.long_prompt]\nover_prompt_tokens = 100000\n\
+             input_per_million_usd = 0.5\noutput_per_million_usd = 2.5",
+        );
+        // At the threshold the first tier still applies.
+        assert_eq!(cost_at(&p, 100_000, 1_000, 0, 0), (10_000, 500));
+        // One token over, input and output both move.
+        assert_eq!(cost_at(&p, 100_001, 1_000, 0, 0), (50_000, 2_500));
+        // Cache writes and reads count toward the prompt length, and
+        // are priced off the second tier's input price:
+        // 10_000 * 0.5 + 40_000 * 0.625 + 60_000 * 0.05.
+        assert_eq!(cost_at(&p, 10_000, 0, 40_000, 60_000), (33_000, 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "baked pricing.toml must parse")]
+    fn an_unknown_row_key_fails_the_parse() {
+        row("input_per_million_usd = 1.0\noutput_per_million_usd = 1.0\ncache_read = 0.1");
     }
 
     #[test]
