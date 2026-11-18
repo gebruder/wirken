@@ -33,6 +33,17 @@ tagged.
   where the table had $15 and $75; Sonnet 4.5 is $3 and $15 global and
   $3.30 and $16.50 regional.
 
+### Lyrik 1.1.0
+
+Lyrik's run output changed, so its version is 1.1.0: the first line of the
+sign-off summary, `lyrik_version` in `findings.json` and on the
+`lyrik.run.started` row. The pinned findings schema is unchanged. What
+changed is under Added below: results built from staged records with
+continuation after a cut-off reply, the ledger with claim registration, the
+per-walk run summary and its `walk_summary`, `claims_refused` and
+`ledger_refused` fields in `findings.json`, transport retries, and the
+`incomplete` walk status.
+
 ### Added
 
 - A Lyrik walk no longer depends on its last reply. Each walk writes every
@@ -47,22 +58,38 @@ tagged.
   (`a_truncated_walk_keeps_what_is_staged_and_resumes`,
   `continuations_stop_at_the_operator_cap`,
   `crates/cli/src/commands/lyrik_walks.rs`;
-  [docs/lyrik.md](docs/lyrik.md#staged-results-truncation-and-the-ledger)).
+  [docs/lyrik.md](docs/lyrik.md#staged-results-and-truncation)).
 
 - Lyrik keeps a ledger of what earlier runs established about a target,
   under the target's `.lyrik/ledger/`: one record per claim with the claim,
   file and line, commit, a hash of the file content, whether it was observed
   by an executed run or only reasoned, and the run that produced it. Records
   come from a run's findings, rejections and fix arm results. Each walk is
-  handed the records before it starts. A staged finding that repeats an
-  observed record is refused with a pointer to the record; a reasoned record
-  is context and may be re-examined; a record whose file has changed is
-  marked stale and blocks nothing. A `--bench` run does not use the ledger.
-  The run prints, per walk, findings staged, truncations and what the ledger
-  refused, and `findings.json` carries it as `walk_summary`
-  (`a_check_that_duplicates_an_observed_record_is_refused_with_a_pointer`,
+  handed, before it starts, the full records for the files of the run's
+  scope and a compact index of the rest, which it reads by id. A walk
+  registers a claim (class, file, line) before it works on it, and a claim
+  that repeats an observed record is refused there, with a pointer to the
+  record and its run; a staged finding that repeats one is refused again when
+  results are put together. A reasoned record is context and may be
+  re-examined; a record whose file has changed is marked stale and blocks
+  nothing. A `--bench` run does not use the ledger. The run prints, per
+  walk, findings staged, truncations, claims registered and what was refused
+  at registration and at aggregation, and `findings.json` carries it as
+  `walk_summary`
+  (`registering_a_settled_claim_is_refused_before_any_work`,
+  `a_check_that_duplicates_an_observed_record_is_refused_with_a_pointer`,
+  `a_walk_is_handed_full_records_for_its_area_and_an_index_of_the_rest`,
   `a_record_whose_file_changed_is_stale_and_blocks_nothing`,
-  `crates/cli/src/commands/lyrik_ledger.rs`).
+  `crates/cli/src/commands/lyrik_ledger.rs`;
+  [docs/lyrik.md](docs/lyrik.md#the-ledger)).
+
+- A Lyrik walk's provider request that fails in transport is sent again,
+  `transport_retries` times in the data directory's `lyrik.json`, default 2.
+  A walk stopped at the tool round limit is recorded as `incomplete` with the
+  limit it reached, where it was a transient failure, and its staged findings
+  are kept (`a_request_that_fails_in_transport_is_sent_again`,
+  `crates/agent/src/tests.rs`; `a_failed_turn_keeps_its_staged_findings`,
+  `crates/cli/src/commands/lyrik_walks.rs`).
 
 - Anthropic's Mythos 5.2 is in the pricing table at $8 input and $40 output
   per million tokens, and it and Fable 5.2 carry Anthropic's listed cache

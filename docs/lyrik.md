@@ -178,7 +178,7 @@ committed; run state lives under `.lyrik/state/`.
 |---|---|
 | Wirken vault | provider API keys |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `fix_tool_rounds` and `walk_continuations` |
+| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `fix_tool_rounds`, `walk_continuations` and `transport_retries` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
@@ -412,7 +412,7 @@ a terminal it writes a `lyrik.phase_0.signoff` row with `decision:
 "pending_adapter_route"` and exits non-zero before dispatch. `scoring_disagreement` has no bench handling and no routing; a
 disagreement is recorded on the finding as `scoring_disagreement: true`.
 
-## Staged results, truncation and the ledger
+## Staged results and truncation
 
 **A walk's results are its staged records, not its last reply.** Each walk
 writes every finding to its own `staging/<walk>/findings/finding-NNN.json` when
@@ -432,8 +432,8 @@ operator caps continuations with `walk_continuations` in the data directory's
 { "walk_continuations": 3 }
 ```
 
-A walk that fails for another reason (a provider error, the tool round limit)
-is not continued; what it staged before failing is still aggregated.
+A walk that stops for another reason is not continued; what it staged before
+stopping is still aggregated.
 
 **A walk reads another walk's output through an index.** The runner writes
 `staging/index.json` before the walks start and again after every turn: one
@@ -441,50 +441,197 @@ entry per staged finding or rejection with its `walk`, `kind`, `id`, `title`,
 `file`, `line`, `tier` and `path`. A walk is told to read the index first and
 then only the records it needs.
 
-**The ledger** is what earlier runs established about the target, kept under
-`.lyrik/ledger/` as one JSON file per claim:
+A walk whose provider request fails in transport (no response arrived) has the
+request sent again, `transport_retries` times in the data directory's
+`lyrik.json`; the default is 2 and 0 sends once. A walk stopped at the tool
+round limit is recorded as `incomplete` with the limit it reached, not as a
+failure; what it staged is aggregated.
+
+## The ledger
+
+### What it is for
+
+A run costs model time, and most of that goes on showing that a finding is
+real: writing a harness, running it, replaying it, checking a patch. Once a
+run has shown something by running it, the next run on the same code should
+not pay for it again. The ledger is the list of what earlier runs established
+about the target, kept in the target under `.lyrik/ledger/`, one small JSON
+file per claim.
+
+It records two strengths of knowledge and treats them differently:
+
+- **Observed**: a command was run and showed it. While the file the claim is
+  about has not changed, an observed claim is settled. A walk that sets out to
+  check it again is told no, and pointed at the record.
+- **Reasoned**: read from the source, nothing run. This is a lead. A walk is
+  shown it and may check it properly.
+
+When a file changes, every claim made about its old content is marked stale.
+A stale claim settles nothing: the work is done again against the new content.
+
+### How to read a record
+
+This is the record run `ledger-a` wrote on the toy `slotcopy` target (a small
+test target kept outside this repository):
+
+```json
+{
+  "id": "8d119573a9960912",
+  "kind": "finding",
+  "key": "missing_bounds_check::len.sh:3",
+  "claim": "decode_len returns the header-declared length unbounded; a.sh and b.sh copy it into an 8-byte slot",
+  "file": "len.sh",
+  "line": 3,
+  "commit": "ceb4ad85a0b581ffe27ea2353ec01cf406a1cf58",
+  "file_sha256": "b498b782f41a27e47d0fa666d6959789fa28cec924a4950d28765314987fcdeb",
+  "evidence": "observed",
+  "run": "ledger-a"
+}
+```
 
 | Field | Meaning |
 |---|---|
-| `id` | stable for a `(kind, key)` pair; also the file name |
-| `kind` | `finding`, `rejection` or `arm_result` |
+| `id` | stable for a `(kind, key)` pair; also the file name, `.lyrik/ledger/<id>.json` |
+| `kind` | `finding` (the defect is there), `rejection` (a proposed defect was set aside) or `arm_result` (a check of a patch gave a result) |
 | `key` | `<class>::<file>:<line>`; for an arm result, the finding's key and `#<arm>` |
 | `claim` | the claim in words |
 | `file`, `line` | where, relative to the target's root |
 | `commit` | the revision it was established at, when the target is a git checkout |
 | `file_sha256` | SHA-256 of the file's content when it was established |
-| `evidence` | `observed` (an executed run showed it) or `reasoned` (read from the source only) |
-| `run` | the run that produced it |
+| `evidence` | `observed` or `reasoned` |
+| `run` | the run that produced it; its `findings.json` and audit log hold the detail |
 | `stale` | present and true when the file's content has changed since |
 
-A record names no model, provider, walk or harness. After a run the runner
-writes one record per kept finding (`observed` when a reproduction ran and its
-replay agreed, else `reasoned`), one per rejection (`observed` for a replay
-rejection, rule 8, else `reasoned`), and one per fix arm that passed or failed
-on an executed run. A reasoned record never replaces an observed one whose file
-is unchanged.
+A record names no model, provider, walk or harness. It is a statement about
+the target.
 
-Before a run's walks start, the runner reads the ledger and hands each walk
-`staging/<walk>/ledger.json`: the records that are not stale, split into
-`settled` (observed, against the file as it is now) and `context` (reasoned),
-with a count of the stale ones left out. A staged finding that repeats a
-settled record is refused before aggregation: it is moved to
+After a run the runner writes one record per kept finding (`observed` when a
+reproduction ran and its replay agreed, else `reasoned`), one per rejection
+(`observed` for a replay rejection, rule 8, else `reasoned`), and one per fix
+arm that passed or failed on an executed run. A reasoned record never replaces
+an observed one whose file is unchanged. After run `ledger-c` the same target
+held the finding and three arm results:
+
+```
+arm_result missing_bounds_check::len.sh:3#functionality  observed  a patch for this finding passed the functionality check
+arm_result missing_bounds_check::len.sh:3#variant        observed  a patch for this finding failed the variant check
+finding    missing_bounds_check::len.sh:3                observed  decode_len passes the header-declared length through unbounded
+arm_result missing_bounds_check::len.sh:3#reproduction   observed  a patch for this finding passed the reproduction check
+```
+
+### What a walk is handed
+
+Before a run's walks start, the runner reads the ledger and writes each walk
+`staging/<walk>/ledger.json`:
+
+- `area`: the full records, not stale, for the files of the run's area. The
+  area is `scope` in `.lyrik/config.json`: a file an `include` pattern matches
+  and no `exclude` pattern does; every file when there is no `include`.
+- `index`: one line for every other record, stale ones included, with `id`,
+  `key`, `evidence` and `stale`. A walk reads one of these whole at
+  `.lyrik/ledger/<id>.json`.
+
+In run `ledger-c`, after the decoder file had changed, the hand-off was:
+
+```json
+{
+  "area": [],
+  "index": [
+    { "evidence": "observed", "id": "8d119573a9960912", "key": "missing_bounds_check::len.sh:3", "stale": true }
+  ],
+  "read_a_record_at": ".lyrik/ledger/<id>.json"
+}
+```
+
+### A claim is registered before the work
+
+Before a walk writes a harness, runs a check or stages a finding for a defect,
+it writes `staging/<walk>/claims/claim-NNN.json` with the class, file and line
+the finding would carry:
+
+```json
+{ "class": "missing_bounds_check", "file": "len.sh", "line": 3 }
+```
+
+The runner answers while the walks run, beside the claim, as
+`claim-NNN.decision.json`. `registered` means go on, and the answer carries the
+ledger records for that file. `refused` means an observed record already
+settles it. This is the answer run `ledger-b` gave on the commit `ledger-a`
+had scanned:
+
+```json
+{
+  "decision": "refused",
+  "established_by_run": "ledger-a",
+  "key": "missing_bounds_check::len.sh:3",
+  "reason": "an earlier run observed this claim against the file as it is now; do not check it again and do not stage a finding for it",
+  "record": "8d119573a9960912",
+  "record_path": ".lyrik/ledger/8d119573a9960912.json"
+}
+```
+
+Each answer is a `lyrik.claim.registered` or `lyrik.claim.refused` row, and
+`findings.json` lists the refusals under `claims_refused`.
+
+A second check stands behind the first. When a run's results are put together,
+a staged finding that repeats a settled record is refused: it is moved to
 `staging/<walk>/ledger-refused/`, a `lyrik.ledger.refused` row names the record
-and the run it came from, and `findings.json` lists it under `ledger_refused`.
-A reasoned record blocks nothing and may be re-examined.
+and its run, and `findings.json` lists it under `ledger_refused`. A walk that
+did not register a claim, or went on after a refusal, is caught there.
+
+A claim matches a record when the class, file and line are the same. A walk
+that names the same defect with another class is not matched.
+
+### What it looks like across runs
+
+Four runs on the toy target, in order. The run prints one line per walk, and
+`findings.json` carries the same under `walk_summary`.
+
+Run `ledger-a`, first run, empty ledger. 293 seconds: two walks, two replays
+and the fix step.
+
+```
+walk sink-walk: 1 finding(s) staged, 1 claim(s) registered, 0 refused at registration as already observed
+walk fuzz-walk: 1 finding(s) staged, 1 claim(s) registered, 0 refused at registration as already observed
+```
+
+Run `ledger-b`, same commit. 58 seconds: both walks were refused at
+registration, nothing was staged, and no harness, replay or fix step ran.
+
+```
+walk sink-walk: 0 finding(s) staged, 0 claim(s) registered, 1 refused at registration as already observed
+walk fuzz-walk: 0 finding(s) staged, 0 claim(s) registered, 1 refused at registration as already observed
+```
+
+Run `ledger-c`, after one line was added to `len.sh`. The run's log has
+`lyrik.ledger.loaded {"records": 1, "settled": 0, "stale": 1}`; both claims
+were registered and the work was done again, in 350 seconds.
+
+```
+walk sink-walk: 1 finding(s) staged, 1 claim(s) registered, 0 refused at registration as already observed
+walk fuzz-walk: 1 finding(s) staged, 1 claim(s) registered, 0 refused at registration as already observed
+```
+
+Run `ledger-d2`, a fresh copy with the output limit set to 350 tokens a reply.
+Each walk's final reply was cut off, the runner kept what was staged and sent
+continuations up to the cap of 2, and each walk ended with one finding.
+
+```
+walk sink-walk: 1 finding(s) staged, truncated 3 time(s) at the output limit (kept 0, 0, 1), 2 continuation(s), 1 claim(s) registered, 0 refused at registration as already observed
+walk fuzz-walk: 1 finding(s) staged, truncated 2 time(s) at the output limit (kept 1, 1), 2 continuation(s), 1 claim(s) registered, 0 refused at registration as already observed
+```
+
+### Staleness, and starting over
 
 A record whose file no longer has the content it was established against is
 marked `stale` in its file the next time the ledger is read. A stale record
-blocks nothing and is not handed to walks. If the file returns to that content
-the mark is removed.
+blocks nothing and is handed to walks only as an index line. If the file
+returns to that content the mark is removed. A new observation of the same
+claim replaces the stale record.
 
 The ledger is read and written only in per-walk runs. A `--bench` run and a
-fixture replay neither read nor write it. Delete `.lyrik/ledger/` to start
-over.
-
-The run prints one line per walk, and `findings.json` carries the same under
-`walk_summary`: findings staged, truncations with the count kept at each,
-continuations sent, findings the ledger refused, and whether the walk completed.
+fixture replay neither read nor write it. `.lyrik/ledger/` can be committed
+with the repository or ignored; delete it to start over.
 
 ## Defender fix step
 
@@ -1153,8 +1300,9 @@ surface: its subcommands, flags, run output, and the fields `findings.json`
 carries outside the schema can change in any minor release. A schema
 contract changes only with a new schema tag.
 
-Lyrik has its own version, 1.0.0 in Wirken 3.4.0. It is the first line of
-the sign-off summary (`Lyrik 1.0.0 run <id> on <target>`), the
+Lyrik has its own version, 1.1.0; it was 1.0.0 in Wirken 3.4.0. It is the
+first line of
+the sign-off summary (`Lyrik 1.1.0 run <id> on <target>`), the
 `lyrik_version` field at the top of `findings.json`, and the
 `lyrik_version` field of the `lyrik.run.started` row, where
 `driver_version` is the Wirken version. What it covers: the tag-pinned
@@ -1242,16 +1390,21 @@ without a marker and exits zero.
 
 ### Carried outside the schema
 
-Nine additions sit outside the schema contract. The validator tolerates unknown
+Ten additions sit outside the schema contract. The validator tolerates unknown
 keys, so they do not change `schema_version`, and a later minor release may
 change them:
 
 - `walk_summary`, a top-level array with one entry per walk: `walk`,
   `findings_staged`, `truncations`, `kept_at_truncation`, `continuations`,
-  `ledger_refused` and `completed`.
-- `ledger_refused`, a top-level array present when the ledger refused a staged
-  finding: `walk`, `file`, `key`, `record` and `established_by_run`. See
-  [Staged results, truncation and the ledger](#staged-results-truncation-and-the-ledger).
+  `claims_registered`, `refused_at_registration`, `refused_at_aggregation`,
+  `completed`, and `incomplete_at_tool_rounds` for a walk stopped at the tool
+  round limit.
+- `claims_refused`, a top-level array present when a claim was refused at
+  registration: `walk`, `file`, `key`, `decision`, `record` and
+  `established_by_run`.
+- `ledger_refused`, a top-level array present when a staged finding was refused
+  at aggregation: `walk`, `file`, `key`, `record` and `established_by_run`. See
+  [The ledger](#the-ledger).
 - `rejected_candidates`, a top-level array. Each entry carries `rule` (1 to 8),
   `walk` (absent in single-call mode), `stable_id`, `title`, `location`,
   `reason`, and `applied_by`. In SARIF each entry is a result under rule
