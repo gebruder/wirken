@@ -308,6 +308,9 @@ contract: connect to the gateway UDS, perform the Ed25519 handshake, convert
 platform messages to and from Cap'n Proto frames. Telegram is the simplest;
 Teams shows the HTTP webhook variant.
 
+People who found, reported, proposed or designed something Wirken shipped are
+named in [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
+
 ## The name
 
 Wirken: German, *to work*, *to weave*, *to have effect*. Named for
