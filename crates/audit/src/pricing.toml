@@ -14,6 +14,11 @@
 #                           input_per_million_usd and
 #                           output_per_million_usd a call pays when its
 #                           whole input is more tokens than that.
+#   [entries.scheduled]     a price change announced for a date: from
+#                           (an RFC 3339 instant), and the
+#                           input_per_million_usd and
+#                           output_per_million_usd a call pays from
+#                           then on. Not combined with long_prompt.
 # A key the parser does not know fails the build's parse test.
 #
 # Prices are USD per million tokens, parsed as f64 and converted to

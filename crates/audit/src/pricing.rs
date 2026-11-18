@@ -32,6 +32,21 @@ pub struct Pricing {
     /// every prompt length.
     #[serde(default)]
     pub long_prompt: Option<LongPrompt>,
+    /// The prices that replace the row's own from a date on. `None`
+    /// for a model with no announced price change.
+    #[serde(default)]
+    pub scheduled: Option<Scheduled>,
+}
+
+/// A price change the vendor has announced for a date.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scheduled {
+    /// The instant from which a call pays the prices below.
+    #[serde(deserialize_with = "wirken_time::serde_z::deserialize")]
+    pub from: wirken_time::Timestamp,
+    pub input_per_million_usd: f64,
+    pub output_per_million_usd: f64,
 }
 
 /// The second price tier of a model priced by prompt length.
@@ -67,6 +82,8 @@ struct PricingEntry {
     cache_read_multiplier: f64,
     #[serde(default)]
     long_prompt: Option<LongPrompt>,
+    #[serde(default)]
+    scheduled: Option<Scheduled>,
 }
 
 const BAKED_PRICING_TOML: &str = include_str!("pricing.toml");
@@ -91,6 +108,7 @@ fn parse_table(raw: &str) -> HashMap<(String, String), Pricing> {
                 output_per_million_usd: e.output_per_million_usd,
                 cache_read_multiplier: e.cache_read_multiplier,
                 long_prompt: e.long_prompt,
+                scheduled: e.scheduled,
             },
         );
     }
@@ -134,7 +152,8 @@ pub const CACHE_READ_MULTIPLIER: f64 = 0.1;
 ///
 /// A model priced by prompt length pays its `long_prompt` prices, for
 /// input and output both, on a call whose three input counts add up to
-/// more than the row's `over_prompt_tokens`.
+/// more than the row's `over_prompt_tokens`. A row with a `scheduled`
+/// price pays it from that date on.
 pub fn cost_micros_cached(
     provider: &str,
     model: &str,
@@ -149,6 +168,7 @@ pub fn cost_micros_cached(
     };
     let (input, output) = cost_at(
         p,
+        wirken_time::now(),
         input_tokens,
         output_tokens,
         cache_creation_input_tokens,
@@ -161,9 +181,11 @@ pub fn cost_micros_cached(
     )
 }
 
-/// Input and output cost in micros of one call at the prices of `p`.
+/// Input and output cost in micros of one call made at `now` at the
+/// prices of `p`.
 fn cost_at(
     p: &Pricing,
+    now: wirken_time::Timestamp,
     input_tokens: u32,
     output_tokens: u32,
     cache_creation_input_tokens: u32,
@@ -176,7 +198,10 @@ fn cost_at(
         Some(long) if prompt_tokens > u64::from(long.over_prompt_tokens) => {
             (long.input_per_million_usd, long.output_per_million_usd)
         }
-        _ => (p.input_per_million_usd, p.output_per_million_usd),
+        _ => match p.scheduled {
+            Some(s) if now >= s.from => (s.input_per_million_usd, s.output_per_million_usd),
+            _ => (p.input_per_million_usd, p.output_per_million_usd),
+        },
     };
     let input = compute_one(input_tokens, input_price)
         .saturating_add(compute_one(
@@ -246,6 +271,27 @@ mod tests {
         parse_table(&raw)[&("p".to_string(), "m".to_string())]
     }
 
+    fn at(text: &str) -> wirken_time::Timestamp {
+        wirken_time::parse_rfc3339(text).unwrap()
+    }
+
+    #[test]
+    fn a_scheduled_price_starts_at_its_instant() {
+        let p = row(
+            "input_per_million_usd = 2.0\noutput_per_million_usd = 10.0\n\
+             [entries.scheduled]\nfrom = \"2026-12-01T00:00:00Z\"\n\
+             input_per_million_usd = 4.0\noutput_per_million_usd = 20.0",
+        );
+        assert_eq!(
+            cost_at(&p, at("2026-11-30T23:59:59Z"), 1_000, 1_000, 0, 0),
+            (2_000, 10_000)
+        );
+        assert_eq!(
+            cost_at(&p, at("2026-12-01T00:00:00Z"), 1_000, 1_000, 0, 0),
+            (4_000, 20_000)
+        );
+    }
+
     #[test]
     fn a_row_sets_its_own_cache_read_multiplier() {
         // $4 / 1M input, read at 0.05 times it: 10_000 read is 2_000.
@@ -253,10 +299,16 @@ mod tests {
             "input_per_million_usd = 4.0\noutput_per_million_usd = 20.0\n\
              cache_read_multiplier = 0.05",
         );
-        assert_eq!(cost_at(&p, 0, 0, 0, 10_000), (2_000, 0));
+        assert_eq!(
+            cost_at(&p, at("2026-01-01T00:00:00Z"), 0, 0, 0, 10_000),
+            (2_000, 0)
+        );
         // A row that sets none reads at 0.1 times input.
         let p = row("input_per_million_usd = 4.0\noutput_per_million_usd = 20.0");
-        assert_eq!(cost_at(&p, 0, 0, 0, 10_000), (4_000, 0));
+        assert_eq!(
+            cost_at(&p, at("2026-01-01T00:00:00Z"), 0, 0, 0, 10_000),
+            (4_000, 0)
+        );
     }
 
     #[test]
@@ -267,13 +319,22 @@ mod tests {
              input_per_million_usd = 0.5\noutput_per_million_usd = 2.5",
         );
         // At the threshold the first tier still applies.
-        assert_eq!(cost_at(&p, 100_000, 1_000, 0, 0), (10_000, 500));
+        assert_eq!(
+            cost_at(&p, at("2026-01-01T00:00:00Z"), 100_000, 1_000, 0, 0),
+            (10_000, 500)
+        );
         // One token over, input and output both move.
-        assert_eq!(cost_at(&p, 100_001, 1_000, 0, 0), (50_000, 2_500));
+        assert_eq!(
+            cost_at(&p, at("2026-01-01T00:00:00Z"), 100_001, 1_000, 0, 0),
+            (50_000, 2_500)
+        );
         // Cache writes and reads count toward the prompt length, and
         // are priced off the second tier's input price:
         // 10_000 * 0.5 + 40_000 * 0.625 + 60_000 * 0.05.
-        assert_eq!(cost_at(&p, 10_000, 0, 40_000, 60_000), (33_000, 0));
+        assert_eq!(
+            cost_at(&p, at("2026-01-01T00:00:00Z"), 10_000, 0, 40_000, 60_000),
+            (33_000, 0)
+        );
     }
 
     #[test]
@@ -332,6 +393,14 @@ mod tests {
                 p.cache_read_multiplier > 0.0 && p.cache_read_multiplier <= 1.0,
                 "{id}"
             );
+            if let Some(s) = p.scheduled {
+                // One second tier per row: a scheduled price does not
+                // reach a long-prompt tier.
+                assert!(p.long_prompt.is_none(), "{id}");
+                for price in [s.input_per_million_usd, s.output_per_million_usd] {
+                    assert!(price.is_finite() && price > 0.0, "{id}");
+                }
+            }
             if let Some(long) = p.long_prompt {
                 assert!(long.over_prompt_tokens > 0, "{id}");
                 assert!(long.input_per_million_usd > p.input_per_million_usd, "{id}");
