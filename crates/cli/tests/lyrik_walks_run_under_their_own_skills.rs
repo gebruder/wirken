@@ -1,5 +1,7 @@
 //! A `wirken lyrik run` walk runs under the run's own skills, and a
-//! refused call skips a step rather than ending the run.
+//! refused call skips a step rather than ending the run. The refused
+//! calls a walk reports are the ones on the chain, however its turn
+//! ended.
 //!
 //! Driven through the binary: a target with one walk selected, a
 //! scripted model making the calls a walk would, and a shared skills
@@ -195,4 +197,85 @@ fn a_refused_exec_is_skipped_and_writes_stay_under_lyrik() {
         )
         .unwrap();
     assert_eq!(denied, 1);
+}
+
+fn audit_row(target: &Path, event: &str) -> serde_json::Value {
+    let audit =
+        std::fs::read_to_string(target.join(format!(".lyrik/state/runs/{RUN}/audit.log"))).unwrap();
+    audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| e["event"] == event)
+        .unwrap_or_else(|| panic!("no {event} row:\n{audit}"))["detail"]
+        .clone()
+}
+
+/// A walk stopped at the tool round limit still reports the calls
+/// that were refused in that turn, and the run's count is the number
+/// of `permission_denied` rows on the chain.
+#[test]
+fn a_walk_stopped_at_the_round_limit_reports_its_refused_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, data, target) = (
+        tmp.path().join("home"),
+        tmp.path().join("data"),
+        tmp.path().join("target"),
+    );
+    let walk = data.join("lyrik/walks/sink-walk");
+    std::fs::create_dir_all(&walk).unwrap();
+    std::fs::write(
+        walk.join("SKILL.md"),
+        "---\nname: sink-walk\ndescription: test walk\n---\n\n# sink-walk\n\nWalk sinks.\n",
+    )
+    .unwrap();
+
+    // The probe, a refused exec, then tool calls until the turn is
+    // stopped: twenty model calls in the walk's one turn.
+    let mut replies = vec![
+        call("probe_ping", serde_json::json!({"marker": "ok"})),
+        call(
+            "exec",
+            serde_json::json!({"command": "git log -p -- src/auth.c"}),
+        ),
+    ];
+    replies.extend((0..19).map(|_| call("list_files", serde_json::json!({}))));
+    let model = ScriptedModel::start(replies);
+    write_target(&target, &model);
+
+    let out = wirken(&data)
+        .env("HOME", &home)
+        .args(["lyrik", "run", "--bench", "--target"])
+        .arg(&target)
+        .args(["--run", RUN])
+        .output()
+        .unwrap();
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let completed = audit_row(&target, "lyrik.walk.completed");
+    assert_eq!(completed["status"], "incomplete", "{completed}\n{report}");
+    assert_eq!(completed["tool_rounds"], 20, "{completed}");
+
+    let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
+    let denied: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM session_events
+              WHERE json_extract(payload, '$.kind') = 'permission_denied'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(denied, 1, "one refused call on the chain");
+
+    assert_eq!(completed["denials"], denied, "{completed}");
+    assert_eq!(
+        completed["skipped"],
+        serde_json::json!(["exec (shell:git)"]),
+        "{completed}"
+    );
+    let dispatch = audit_row(&target, "lyrik.dispatch.completed");
+    assert_eq!(dispatch["denials"], denied, "{dispatch}");
 }

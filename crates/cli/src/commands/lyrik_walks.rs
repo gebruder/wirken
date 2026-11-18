@@ -1079,6 +1079,9 @@ pub struct TurnFailure {
     /// Set when the turn was stopped at the tool round limit: the
     /// limit it reached.
     pub tool_rounds: Option<usize>,
+    /// Each call refused before the turn failed, as `tool (approval
+    /// key)`.
+    pub skipped: Vec<String>,
 }
 
 /// What a walk's turns came to.
@@ -1133,6 +1136,7 @@ pub async fn drive_walk_turns(
         let end = match end {
             Ok(end) => end,
             Err(failure) => {
+                skipped.extend(failure.skipped.iter().cloned());
                 return WalkTurns {
                     last: Err(failure),
                     skipped,
@@ -1297,6 +1301,7 @@ mod tests {
                 Err(why) => Err(TurnFailure {
                     reason: why.to_string(),
                     tool_rounds: (why == "round limit").then_some(20),
+                    skipped: vec!["exec (shell:sh)".to_string()],
                 }),
             }
         }
@@ -1452,6 +1457,7 @@ mod tests {
         let out = drive(&run_dir, &mut session, 2).await;
         assert_eq!(out.last.as_ref().unwrap_err().tool_rounds, Some(20));
         assert_eq!(out.findings_staged, 2);
+        assert_eq!(out.skipped, ["exec (shell:sh)"], "refused before it failed");
 
         let tmp = tempdir().unwrap();
         let (run_dir, mut session) = scripted(tmp.path(), vec![(vec!["a"], Ok("end_turn"))]);

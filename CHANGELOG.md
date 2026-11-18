@@ -27,6 +27,14 @@ tagged.
 
 ### Fixed
 
+- A Lyrik walk or replay whose turn ended in an error, for example at the
+  tool round limit, reports the calls refused in that turn: `denials` and
+  `skipped` on `lyrik.walk.completed`, `skipped` on `lyrik.replay.completed`.
+  They were left out, so the row said `denials: 0` beside `permission_denied`
+  rows on the chain. `denials` on `lyrik.dispatch.completed` now counts the
+  replays' refused calls with the walks'
+  (`a_walk_stopped_at_the_round_limit_reports_its_refused_calls`,
+  `crates/cli/tests/lyrik_walks_run_under_their_own_skills.rs`).
 - The WebChat session list writes `last_activity` in the text form every
   other timestamp has (zero, three, six or nine fractional digits and a
   `Z`). Since 3.4.0 it was written by the time library's own serializer,

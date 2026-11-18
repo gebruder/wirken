@@ -335,6 +335,10 @@ pub struct Agent {
     last_turn_rounds: usize,
     /// Whether the last turn was stopped at `max_tool_rounds`.
     last_turn_exhausted: bool,
+    /// Calls refused since the last turn began. A turn that ends in an
+    /// error returns no [`ProcessResult`], so this is where its refused
+    /// calls are read from.
+    last_turn_denials: Vec<PermissionDenialContext>,
     /// Platform-side identity (adapter + sender) of the inbound that
     /// triggered the current processing round. Set at the top of
     /// `process_message_inner` / `process_message_stream_with` so
@@ -829,6 +833,7 @@ impl Agent {
             max_tool_rounds: MAX_TOOL_ROUNDS,
             last_turn_rounds: 0,
             last_turn_exhausted: false,
+            last_turn_denials: Vec::new(),
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -944,6 +949,7 @@ impl Agent {
             max_tool_rounds: MAX_TOOL_ROUNDS,
             last_turn_rounds: 0,
             last_turn_exhausted: false,
+            last_turn_denials: Vec::new(),
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -1211,6 +1217,12 @@ impl Agent {
     /// not because the model finished.
     pub fn last_turn_exhausted(&self) -> bool {
         self.last_turn_exhausted
+    }
+
+    /// The calls refused since the last turn began, whether that turn
+    /// returned or ended in an error.
+    pub fn last_turn_denials(&self) -> &[PermissionDenialContext] {
+        &self.last_turn_denials
     }
 
     /// Run one tool call that no model asked for, as the harness's own
@@ -3431,6 +3443,7 @@ impl Agent {
         let mut turn_calls = TurnCalls::default();
         let mut rounds = 0;
         let mut denials = Vec::new();
+        self.last_turn_denials.clear();
 
         loop {
             rounds += 1;
@@ -3830,6 +3843,7 @@ impl Agent {
         let mut turn_calls = TurnCalls::default();
         let mut rounds = 0;
         let mut denials = Vec::new();
+        self.last_turn_denials.clear();
 
         loop {
             rounds += 1;
@@ -4810,6 +4824,18 @@ impl Agent {
     /// non-skipped hook outcome plus a `ToolOutputRedacted` row
     /// when the bytes diverged from the original.
     async fn execute_and_record_tool(
+        &mut self,
+        call: &crate::conversation::ToolCallRequest,
+        denials: &mut Vec<PermissionDenialContext>,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        let denied_before = denials.len();
+        let result = self.execute_and_record_tool_inner(call, denials).await;
+        self.last_turn_denials
+            .extend(denials[denied_before..].iter().cloned());
+        result
+    }
+
+    async fn execute_and_record_tool_inner(
         &mut self,
         call: &crate::conversation::ToolCallRequest,
         denials: &mut Vec<PermissionDenialContext>,

@@ -1824,7 +1824,8 @@ async fn dispatch_via_agent_runtime(
                 )?;
             }
             total_response_len = outcomes.iter().map(|o| o.response_len).sum();
-            total_denials = outcomes.iter().map(|o| o.denials).sum();
+            let walk_denials: usize = outcomes.iter().map(|o| o.denials).sum();
+            let mut replay_denials = 0;
             walk_outcomes = Some(outcomes);
             // Fresh-context replay of every reproduction the walks
             // recorded: one agent per record, which sees the record and
@@ -1832,7 +1833,7 @@ async fn dispatch_via_agent_runtime(
             // pairs the replays with the records. Not after the cost
             // ceiling: the run does no more model work.
             if !ceiling_hit.load(std::sync::atomic::Ordering::Acquire) {
-                dispatch_replays(
+                replay_denials = dispatch_replays(
                     &wc.walks,
                     wc.max_concurrent_walks,
                     agent_id.clone(),
@@ -1856,6 +1857,9 @@ async fn dispatch_via_agent_runtime(
                 )
                 .await?;
             }
+            // Every refused call of the run: the walks' and the
+            // replays'.
+            total_denials = walk_denials + replay_denials;
         }
         None => {
             let seed_protocol = if seeds_present {
@@ -3739,7 +3743,7 @@ async fn dispatch_replays(
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
     audit: &mut AuditLogger,
-) -> Result<()> {
+) -> Result<usize> {
     // Every record first, so the skill is staged only when one exists
     // and a refused file is on the log whether or not exec is on.
     let mut jobs: Vec<(String, String, lyrik_replay::ReproductionRecord)> = Vec::new();
@@ -3757,7 +3761,7 @@ async fn dispatch_replays(
         }
     }
     if jobs.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     if !exec_available {
         for (walk, file, _) in &jobs {
@@ -3766,7 +3770,7 @@ async fn dispatch_replays(
                 serde_json::json!({ "walk": walk, "file": file, "reason": "exec unavailable" }),
             )?;
         }
-        return Ok(());
+        return Ok(0);
     }
     let replay_dir = walks_staged_dir.join("replay");
     std::fs::create_dir_all(&replay_dir)
@@ -3814,7 +3818,9 @@ async fn dispatch_replays(
                 permissions_t,
             ) {
                 Ok(a) => a,
-                Err(e) => return (walk, file, Err(format!("agent_construct: {e}"))),
+                Err(e) => {
+                    return (walk, file, Err(format!("agent_construct: {e}")), Vec::new());
+                }
             };
             agent.set_agent_id(agent_id_t);
             agent.set_leak_matcher(leak_t);
@@ -3823,26 +3829,25 @@ async fn dispatch_replays(
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()));
             if let Err(e) = attached {
-                return (walk, file, Err(format!("attach_skills: {e}")));
+                return (walk, file, Err(format!("attach_skills: {e}")), Vec::new());
             }
             let prompt = lyrik_replay::build_replay_prompt(&walk, &file, &record, &run_id_t);
             let inbound_id = format!("lyrik-replay-{}-{}", walk, uuid::Uuid::new_v4());
             match agent.process_message(&prompt, inbound_id).await {
-                Ok(r) => {
-                    let skipped: Vec<String> = r
-                        .denials
-                        .iter()
-                        .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
-                        .collect();
-                    (walk, file, Ok(skipped))
-                }
-                Err(e) => (walk, file, Err(format!("turn: {e}"))),
+                Ok(r) => (walk, file, Ok(()), skipped_calls(&r.denials)),
+                Err(e) => (
+                    walk,
+                    file,
+                    Err(format!("turn: {e}")),
+                    skipped_calls(agent.last_turn_denials()),
+                ),
             }
         });
         handles.push(h);
     }
+    let mut denials = 0;
     for h in handles {
-        let (walk, file, result) = match h.await {
+        let (walk, file, result, skipped) = match h.await {
             Ok(r) => r,
             Err(e) => {
                 audit.emit(
@@ -3852,10 +3857,11 @@ async fn dispatch_replays(
                 continue;
             }
         };
-        let (status, reason, skipped) = match result {
-            Ok(skipped) => ("success", None, skipped),
-            Err(reason) => ("transient_failure", Some(reason), Vec::new()),
+        let (status, reason) = match result {
+            Ok(()) => ("success", None),
+            Err(reason) => ("transient_failure", Some(reason)),
         };
+        denials += skipped.len();
         audit.emit(
             "lyrik.replay.completed",
             serde_json::json!({
@@ -3867,7 +3873,7 @@ async fn dispatch_replays(
             }),
         )?;
     }
-    Ok(())
+    Ok(denials)
 }
 
 /// Per-walk dispatch outcome. Captured per turn and rolled up into
@@ -4018,6 +4024,7 @@ impl super::lyrik_walks::WalkSession for AgentWalkSession<'_> {
                 super::lyrik_walks::TurnFailure {
                     reason: STOPPED_AT_CEILING.to_string(),
                     tool_rounds: None,
+                    skipped: Vec::new(),
                 }
             })
         };
@@ -4026,10 +4033,13 @@ impl super::lyrik_walks::WalkSession for AgentWalkSession<'_> {
         }
         let inbound_id = format!("lyrik-walk-{}-{}", self.walk_name, uuid::Uuid::new_v4());
         let result = self.agent.process_message(&prompt, inbound_id).await;
+        // A turn that failed returns no result to read its refused
+        // calls from; the agent still has them.
+        let skipped = skipped_calls(self.agent.last_turn_denials());
         if result.is_err()
             && let Some(stopped) = at_ceiling()
         {
-            return Err(stopped);
+            return Err(super::lyrik_walks::TurnFailure { skipped, ..stopped });
         }
         match result {
             // A refused call is a step the walk did not take, not the
@@ -4038,17 +4048,14 @@ impl super::lyrik_walks::WalkSession for AgentWalkSession<'_> {
             // steps it skipped.
             Ok(r) => Ok(super::lyrik_walks::TurnEnd {
                 response_len: r.response.len(),
-                skipped: r
-                    .denials
-                    .iter()
-                    .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
-                    .collect(),
+                skipped: skipped_calls(&r.denials),
                 stop_reason: self.agent.last_stop_reason(),
             }),
             Err(AgentError::RateLimitExhausted { attempts }) => {
                 Err(super::lyrik_walks::TurnFailure {
                     reason: format!("rate_limit_exhausted after {attempts} attempts"),
                     tool_rounds: None,
+                    skipped,
                 })
             }
             // Stopped at the round limit: not a failure of the walk's
@@ -4059,9 +4066,18 @@ impl super::lyrik_walks::WalkSession for AgentWalkSession<'_> {
                     .agent
                     .last_turn_exhausted()
                     .then(|| self.agent.max_tool_rounds()),
+                skipped,
             }),
         }
     }
+}
+
+/// Each refused call, as `tool (approval key)`.
+fn skipped_calls(denials: &[wirken_agent::PermissionDenialContext]) -> Vec<String> {
+    denials
+        .iter()
+        .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
+        .collect()
 }
 
 /// Run every selected walk concurrently, gated by a Semaphore
@@ -4277,6 +4293,7 @@ async fn dispatch_walks_concurrent(
                 Err(super::lyrik_walks::TurnFailure {
                     reason,
                     tool_rounds: Some(tool_rounds),
+                    ..
                 }) => (
                     WalkStatus::Incomplete {
                         tool_rounds,
