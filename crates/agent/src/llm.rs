@@ -395,7 +395,7 @@ pub(crate) fn cache_conversation_prefix(messages: &mut [serde_json::Value]) {
     if let Some(block) = content.as_array_mut().and_then(|blocks| blocks.last_mut())
         && block.is_object()
     {
-        block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+        block["cache_control"] = wirken_audit::pricing::requested_cache_control();
     }
 }
 
@@ -977,7 +977,7 @@ impl LlmClient {
             body["system"] = serde_json::json!([{
                 "type": "text",
                 "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": wirken_audit::pricing::requested_cache_control(),
             }]);
         }
 
@@ -995,7 +995,7 @@ impl LlmClient {
             // Mark the last tool def as cacheable so the full tool
             // surface is inside the prompt cache prefix.
             if let Some(last) = tools_json.last_mut() {
-                last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                last["cache_control"] = wirken_audit::pricing::requested_cache_control();
             }
             body["tools"] = serde_json::Value::Array(tools_json);
         }

@@ -24,9 +24,24 @@ pub struct Pricing {
     pub input_per_million_usd: f64,
     pub output_per_million_usd: f64,
     /// What a cache read costs against the input price.
-    /// [`CACHE_READ_MULTIPLIER`] when the row does not set it.
+    /// [`CACHE_READ_MULTIPLIER`] when the row does not set it. Used
+    /// when the row has no `cache_read_per_million_usd`.
     #[serde(default = "default_cache_read_multiplier")]
     pub cache_read_multiplier: f64,
+    /// The vendor's own price for a cache read. `None` for a row that
+    /// lists none; the multiplier above is then the estimate.
+    #[serde(default)]
+    pub cache_read_per_million_usd: Option<f64>,
+    /// The vendor's own price for a cache write kept five minutes.
+    /// `None` for a row that lists none; [`CACHE_WRITE_MULTIPLIER`]
+    /// times input is then the estimate.
+    #[serde(default)]
+    pub cache_write_5m_per_million_usd: Option<f64>,
+    /// The vendor's own price for a cache write kept one hour. `None`
+    /// for a row that lists none; [`CACHE_WRITE_1H_MULTIPLIER`] times
+    /// input is then the estimate.
+    #[serde(default)]
+    pub cache_write_1h_per_million_usd: Option<f64>,
     /// The prices a call pays when its prompt is longer than
     /// `over_prompt_tokens`. `None` for a model with one price at
     /// every prompt length.
@@ -81,6 +96,12 @@ struct PricingEntry {
     #[serde(default = "default_cache_read_multiplier")]
     cache_read_multiplier: f64,
     #[serde(default)]
+    cache_read_per_million_usd: Option<f64>,
+    #[serde(default)]
+    cache_write_5m_per_million_usd: Option<f64>,
+    #[serde(default)]
+    cache_write_1h_per_million_usd: Option<f64>,
+    #[serde(default)]
     long_prompt: Option<LongPrompt>,
     #[serde(default)]
     scheduled: Option<Scheduled>,
@@ -107,6 +128,9 @@ fn parse_table(raw: &str) -> HashMap<(String, String), Pricing> {
                 input_per_million_usd: e.input_per_million_usd,
                 output_per_million_usd: e.output_per_million_usd,
                 cache_read_multiplier: e.cache_read_multiplier,
+                cache_read_per_million_usd: e.cache_read_per_million_usd,
+                cache_write_5m_per_million_usd: e.cache_write_5m_per_million_usd,
+                cache_write_1h_per_million_usd: e.cache_write_1h_per_million_usd,
                 long_prompt: e.long_prompt,
                 scheduled: e.scheduled,
             },
@@ -136,17 +160,46 @@ pub fn cost_micros(
     cost_micros_cached(provider, model, input_tokens, output_tokens, 0, 0)
 }
 
-/// What a prompt-cache write costs against the input price, at the
-/// default five-minute lifetime, and what a cache read costs on a
-/// model whose row sets no `cache_read_multiplier`.
+/// The estimates used for a row that lists no cache price of its own:
+/// what a prompt-cache write costs against the input price at the
+/// five-minute and at the one-hour lifetime, and what a cache read
+/// costs on a model whose row sets no `cache_read_multiplier`. A row
+/// with the vendor's own cache prices does not use them.
 pub const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
+pub const CACHE_WRITE_1H_MULTIPLIER: f64 = 2.0;
 pub const CACHE_READ_MULTIPLIER: f64 = 0.1;
+
+/// How long a prompt-cache write is kept. A vendor prices the two
+/// lifetimes differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheWrite {
+    FiveMinutes,
+    OneHour,
+}
+
+/// The lifetime Wirken asks for on every cache breakpoint it sets: it
+/// sends `cache_control: {"type": "ephemeral"}` with no `ttl`, which
+/// is the five-minute lifetime. Cache writes are priced at this tier.
+/// A change to the request that sets a `ttl` changes this with it.
+pub const REQUESTED_CACHE_WRITE: CacheWrite = CacheWrite::FiveMinutes;
+
+/// The `cache_control` value for [`REQUESTED_CACHE_WRITE`], so the
+/// request and the price are read from one place.
+pub fn requested_cache_control() -> serde_json::Value {
+    match REQUESTED_CACHE_WRITE {
+        CacheWrite::FiveMinutes => serde_json::json!({ "type": "ephemeral" }),
+        CacheWrite::OneHour => serde_json::json!({ "type": "ephemeral", "ttl": "1h" }),
+    }
+}
 
 /// [`cost_micros`] for a call that wrote to or read from a prompt
 /// cache. A provider that reports cache counters reports `input_tokens`
 /// without them, so the input cost is the three together: uncached
-/// input at the input price, cache writes at
-/// [`CACHE_WRITE_MULTIPLIER`] times it and cache reads at the row's
+/// input at the input price, cache writes at the row's price for the
+/// lifetime Wirken requests ([`REQUESTED_CACHE_WRITE`]) and cache
+/// reads at the row's cache-read price. A row that lists no cache
+/// price of its own is estimated: writes at
+/// [`CACHE_WRITE_MULTIPLIER`] times input and reads at the row's
 /// `cache_read_multiplier` times it. Left out, a cached conversation
 /// would be recorded at a fraction of what it cost.
 ///
@@ -194,24 +247,35 @@ fn cost_at(
     let prompt_tokens = u64::from(input_tokens)
         + u64::from(cache_creation_input_tokens)
         + u64::from(cache_read_input_tokens);
-    let (input_price, output_price) = match p.long_prompt {
-        Some(long) if prompt_tokens > u64::from(long.over_prompt_tokens) => {
-            (long.input_per_million_usd, long.output_per_million_usd)
-        }
+    // `base` is false when a second tier or a scheduled price is in
+    // effect. The row's own cache prices belong to its base input
+    // price, so off the base the cache is estimated from the input
+    // price that applies.
+    let (input_price, output_price, base) = match p.long_prompt {
+        Some(long) if prompt_tokens > u64::from(long.over_prompt_tokens) => (
+            long.input_per_million_usd,
+            long.output_per_million_usd,
+            false,
+        ),
         _ => match p.scheduled {
-            Some(s) if now >= s.from => (s.input_per_million_usd, s.output_per_million_usd),
-            _ => (p.input_per_million_usd, p.output_per_million_usd),
+            Some(s) if now >= s.from => (s.input_per_million_usd, s.output_per_million_usd, false),
+            _ => (p.input_per_million_usd, p.output_per_million_usd, true),
         },
     };
+    let (listed_write, write_multiplier) = match REQUESTED_CACHE_WRITE {
+        CacheWrite::FiveMinutes => (p.cache_write_5m_per_million_usd, CACHE_WRITE_MULTIPLIER),
+        CacheWrite::OneHour => (p.cache_write_1h_per_million_usd, CACHE_WRITE_1H_MULTIPLIER),
+    };
+    let write_price = listed_write
+        .filter(|_| base)
+        .unwrap_or(input_price * write_multiplier);
+    let read_price = p
+        .cache_read_per_million_usd
+        .filter(|_| base)
+        .unwrap_or(input_price * p.cache_read_multiplier);
     let input = compute_one(input_tokens, input_price)
-        .saturating_add(compute_one(
-            cache_creation_input_tokens,
-            input_price * CACHE_WRITE_MULTIPLIER,
-        ))
-        .saturating_add(compute_one(
-            cache_read_input_tokens,
-            input_price * p.cache_read_multiplier,
-        ));
+        .saturating_add(compute_one(cache_creation_input_tokens, write_price))
+        .saturating_add(compute_one(cache_read_input_tokens, read_price));
     (input, compute_one(output_tokens, output_price))
 }
 
@@ -382,12 +446,82 @@ mod tests {
         assert_eq!(total, Some(105_000));
     }
 
+    /// The rates Anthropic lists for Mythos 5.2 and Fable 5.2: $8
+    /// input, $40 output, $10 for a five-minute cache write, $16 for a
+    /// one-hour one, $0.20 for a cache read.
+    #[test]
+    fn mythos_and_fable_5_2_pay_their_listed_cache_prices() {
+        for model in ["claude-mythos-5-2", "claude-fable-5-2"] {
+            let p = table()
+                .get(&("anthropic".to_string(), model.to_string()))
+                .unwrap_or_else(|| panic!("{model} has no row"));
+            assert_eq!(p.input_per_million_usd, 8.0, "{model}");
+            assert_eq!(p.output_per_million_usd, 40.0, "{model}");
+            assert_eq!(p.cache_write_5m_per_million_usd, Some(10.0), "{model}");
+            assert_eq!(p.cache_write_1h_per_million_usd, Some(16.0), "{model}");
+            assert_eq!(p.cache_read_per_million_usd, Some(0.2), "{model}");
+            // 2,168 input, 1,281,647 output, 11,947,033 cache read and
+            // 1,749,117 cache write:
+            //   17,344 + 17,491,170 + 2,389,406 input-side micros,
+            //   51,265,880 output micros.
+            let (inp, out, total) =
+                cost_micros_cached("anthropic", model, 2_168, 1_281_647, 1_749_117, 11_947_033);
+            assert_eq!(inp, Some(19_897_920), "{model}");
+            assert_eq!(out, Some(51_265_880), "{model}");
+            assert_eq!(total, Some(71_163_800), "{model}");
+        }
+        // The fallback would have charged the reads at 0.1 times input,
+        // four times the listed price.
+        assert_eq!(
+            compute_one(11_947_033, 8.0 * CACHE_READ_MULTIPLIER),
+            9_557_626
+        );
+        assert_eq!(compute_one(11_947_033, 0.2), 2_389_406);
+    }
+
+    /// Wirken asks for the five-minute lifetime, so a write is priced
+    /// at the five-minute rate and not the one-hour one.
+    #[test]
+    fn a_cache_write_is_priced_at_the_lifetime_wirken_requests() {
+        assert_eq!(REQUESTED_CACHE_WRITE, CacheWrite::FiveMinutes);
+        assert_eq!(
+            requested_cache_control(),
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        let p = row(
+            "input_per_million_usd = 8.0\noutput_per_million_usd = 40.0\n\
+             cache_write_5m_per_million_usd = 10.0\ncache_write_1h_per_million_usd = 16.0\n\
+             cache_read_per_million_usd = 0.2",
+        );
+        let now = at("2026-01-01T00:00:00Z");
+        assert_eq!(cost_at(&p, now, 0, 0, 1_000_000, 0), (10_000_000, 0));
+        assert_eq!(cost_at(&p, now, 0, 0, 0, 1_000_000), (200_000, 0));
+        // A row with no cache price of its own is estimated.
+        let q = row("input_per_million_usd = 8.0\noutput_per_million_usd = 40.0");
+        assert_eq!(cost_at(&q, now, 0, 0, 1_000_000, 0), (10_000_000, 0));
+        assert_eq!(cost_at(&q, now, 0, 0, 0, 1_000_000), (800_000, 0));
+    }
+
     #[test]
     fn every_row_is_a_usable_price() {
         for ((provider, model), p) in table() {
             let id = format!("{provider}/{model}");
             for price in [p.input_per_million_usd, p.output_per_million_usd] {
                 assert!(price.is_finite() && price > 0.0, "{id}");
+            }
+            let listed = [
+                p.cache_read_per_million_usd,
+                p.cache_write_5m_per_million_usd,
+                p.cache_write_1h_per_million_usd,
+            ];
+            for price in listed.into_iter().flatten() {
+                assert!(price.is_finite() && price > 0.0, "{id}");
+            }
+            if let Some(read) = p.cache_read_per_million_usd {
+                assert!(read < p.input_per_million_usd, "{id}");
+            }
+            if let Some(write) = p.cache_write_5m_per_million_usd {
+                assert!(write >= p.input_per_million_usd, "{id}");
             }
             assert!(
                 p.cache_read_multiplier > 0.0 && p.cache_read_multiplier <= 1.0,

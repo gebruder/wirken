@@ -31,6 +31,18 @@ tagged.
 
 ### Added
 
+- Anthropic's Mythos 5.2 is in the pricing table at $8 input and $40 output
+  per million tokens, and it and Fable 5.2 carry Anthropic's listed cache
+  prices: $10 for a five-minute cache write, $16 for a one-hour one and
+  $0.20 for a cache read. A pricing row can now list a model's own cache
+  prices; the multipliers (writes at 1.25 times input, reads at 0.1 times
+  unless the row sets another) remain as the estimate for a row that lists
+  none. A cache write is priced at the five-minute lifetime, the one Wirken
+  requests, and the request and the price now read that lifetime from one
+  place (`mythos_and_fable_5_2_pay_their_listed_cache_prices`,
+  `a_cache_write_is_priced_at_the_lifetime_wirken_requests`,
+  `crates/audit/src/pricing.rs`; `requested_cache_control`).
+
 - The pricing table lists the current Anthropic, OpenAI and Gemini models
   (`crates/audit/src/pricing.toml`). A model absent from it recorded no
   cost. Anthropic's 4.5 models are listed under their dated ids as well as
@@ -39,8 +51,7 @@ tagged.
   with an announced increase are priced at the new rate from that date.
 - A pricing row can set its cache read rate, and a second tier for a model
   priced by prompt length. Cache reads on Anthropic's Opus 5.5 and Sonnet
-  5.5 are priced at 0.05 times input and on Fable 5.1 and 5.2 at 0.025
-  times. Haiku 5.5, the OpenAI models with a long-context price and Gemini
+  5.5 are priced at 0.05 times input and on Fable 5.1 at 0.025 times. Haiku 5.5, the OpenAI models with a long-context price and Gemini
   2.5 Pro and 3.1 Pro pay the higher input and output prices on a call
   whose whole input is over the threshold
   (`a_long_prompt_pays_the_second_tier`, `crates/audit/src/pricing.rs`;

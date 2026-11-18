@@ -372,7 +372,7 @@ impl LlmClient {
             body["system"] = serde_json::json!([{
                 "type": "text",
                 "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": wirken_audit::pricing::requested_cache_control(),
             }]);
         }
 
@@ -388,7 +388,7 @@ impl LlmClient {
                 })
                 .collect();
             if let Some(last) = tools_json.last_mut() {
-                last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                last["cache_control"] = wirken_audit::pricing::requested_cache_control();
             }
             body["tools"] = serde_json::Value::Array(tools_json);
         }

@@ -7,8 +7,17 @@
 # site. Calls do not fail.
 #
 # Optional keys on a row:
-#   cache_read_multiplier   what a cache read costs against the input
-#                           price; 0.1 when absent.
+#   cache_read_per_million_usd, cache_write_5m_per_million_usd,
+#   cache_write_1h_per_million_usd
+#                           the vendor's own cache prices. Set them
+#                           where the vendor lists them. A write is
+#                           priced at the lifetime Wirken requests
+#                           (five minutes).
+#   cache_read_multiplier   the estimate for a row with no listed cache
+#                           read price: what a read costs against the
+#                           input price; 0.1 when absent. A write with
+#                           no listed price is estimated at 1.25 times
+#                           input.
 #   [entries.long_prompt]   a second tier for a model priced by prompt
 #                           length: over_prompt_tokens, and the
 #                           input_per_million_usd and
@@ -38,10 +47,21 @@
 
 [[entries]]
 provider = "anthropic"
+model = "claude-mythos-5-2"
+input_per_million_usd = 8.0
+output_per_million_usd = 40.0
+cache_read_per_million_usd = 0.2
+cache_write_5m_per_million_usd = 10.0
+cache_write_1h_per_million_usd = 16.0
+
+[[entries]]
+provider = "anthropic"
 model = "claude-fable-5-2"
 input_per_million_usd = 8.0
 output_per_million_usd = 40.0
-cache_read_multiplier = 0.025
+cache_read_per_million_usd = 0.2
+cache_write_5m_per_million_usd = 10.0
+cache_write_1h_per_million_usd = 16.0
 
 [[entries]]
 provider = "anthropic"
