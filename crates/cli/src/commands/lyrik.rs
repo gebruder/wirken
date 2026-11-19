@@ -1784,6 +1784,10 @@ async fn dispatch_via_agent_runtime(
         target,
         fix_inputs.functionality.test_command.as_deref(),
     );
+    // The rounds a walk's turn gets, so its text says the number it
+    // has.
+    target_profile.walk_tool_rounds =
+        Some(super::lyrik_walks::load_operator_settings(&cfg.data_dir)?.walk_tool_rounds());
     // Ask the sandbox what it has before the walks are staged, so a
     // walk's text offers no interpreter the image lacks. Only where a
     // command can run at all: with the sandbox on and a terminal.
@@ -1901,6 +1905,7 @@ async fn dispatch_via_agent_runtime(
             "walks_staged_dir": walks_staged_dir.as_ref().map(|p| p.display().to_string()),
             "walks": walks_cfg.as_ref().map(|c| c.walks.clone()),
             "max_concurrent_walks": walks_cfg.as_ref().map(|c| c.max_concurrent_walks),
+            "walk_tool_rounds": walks_cfg.as_ref().and(target_profile.walk_tool_rounds),
             "workspace": target.display().to_string(),
             "context_window": llm_config.context_window,
             "effective_budget_tokens": effective_budget_tokens,
@@ -2009,6 +2014,7 @@ async fn dispatch_via_agent_runtime(
                     .map(str::to_string),
                 operator.walk_continuations(),
                 operator.transport_retries(),
+                operator.walk_tool_rounds(),
                 ceiling_hit.clone(),
                 terminal.clone(),
                 signoff.clone(),
@@ -4477,6 +4483,9 @@ async fn dispatch_walks_concurrent(
     // Times a provider request that failed in transport is sent again:
     // the operator's `transport_retries`.
     transport_retries: u32,
+    // Tool rounds a walk's turn gets: the operator's
+    // `walk_tool_rounds`, else the runtime's default.
+    walk_tool_rounds: usize,
     // Set by the cost watch when the run reached its ceiling: no walk
     // starts another turn.
     ceiling_hit: Arc<std::sync::atomic::AtomicBool>,
@@ -4616,6 +4625,7 @@ async fn dispatch_walks_concurrent(
             local_agent.set_call_step(walk_name.clone());
             local_agent.set_leak_matcher(leak_t);
             local_agent.set_transport_retries(transport_retries);
+            local_agent.set_max_tool_rounds(walk_tool_rounds);
             local_agent.set_file_scope(file_scope_t);
             attach_envelope_gate(&mut local_agent, &walk_name, terminal_t, signoff_t);
 

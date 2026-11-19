@@ -69,6 +69,11 @@ pub struct OperatorSettings {
     /// run's recorded cost reaches it the run stops. Absent, or zero or
     /// less, there is no ceiling.
     pub run_ceiling_usd: Option<f64>,
+    /// Tool rounds a walk's turn gets: the model calls it may make
+    /// before it is stopped. Absent or zero,
+    /// [`wirken_agent::runtime::MAX_TOOL_ROUNDS`]. A target's
+    /// `.lyrik/config.json` does not set this.
+    pub walk_tool_rounds: Option<u32>,
 }
 
 /// Times a walk's provider request that failed in transport is sent
@@ -96,6 +101,15 @@ impl OperatorSettings {
     pub fn walk_continuations(&self) -> u32 {
         self.walk_continuations
             .unwrap_or(WALK_CONTINUATIONS_DEFAULT)
+    }
+
+    /// A walk's round limit: the operator's, else the default. Zero is
+    /// read as the default.
+    pub fn walk_tool_rounds(&self) -> usize {
+        match self.walk_tool_rounds {
+            Some(n) if n > 0 => n as usize,
+            _ => wirken_agent::runtime::MAX_TOOL_ROUNDS,
+        }
     }
 
     /// The fix step's round limit: the operator's, else the default.
@@ -440,6 +454,9 @@ pub struct TargetProfile {
     /// What the `exec` sandbox was found to have. Empty until the run
     /// asks it, which it does before the walks are staged.
     pub sandbox: SandboxFacts,
+    /// The tool rounds a walk's turn gets in this run, when the
+    /// operator set a number. `None` is the default.
+    pub walk_tool_rounds: Option<usize>,
 }
 
 /// What the place `exec` runs was found to have, asked once before the
@@ -499,6 +516,7 @@ impl TargetProfile {
             git: has(".git"),
             languages,
             sandbox: SandboxFacts::default(),
+            walk_tool_rounds: None,
         }
     }
 
@@ -760,7 +778,9 @@ fn run_section(
                 .collect::<Vec<_>>()
                 .join(" or "),
             interpreters[0],
-            wirken_agent::runtime::MAX_TOOL_ROUNDS,
+            profile
+                .walk_tool_rounds
+                .unwrap_or(wirken_agent::runtime::MAX_TOOL_ROUNDS),
         )
     };
     format!(

@@ -182,7 +182,7 @@ committed; run state lives under `.lyrik/state/`.
 |---|---|
 | Wirken vault | provider API keys |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `fix_tool_rounds`, `walk_continuations`, `transport_retries` and `run_ceiling_usd` |
+| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `walk_tool_rounds`, `fix_tool_rounds`, `walk_continuations`, `transport_retries` and `run_ceiling_usd` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
@@ -365,7 +365,11 @@ under its own `staging/<walk>/harness/` directory, with `sh` or the target's
 interpreter, under the marker contract, that this is how a finding gets a
 reproduction, and that the replay runs the same command. The list is what is
 expected, not a limit. The section
-also tells the walk it has 20 tool rounds in its turn. A walk whose turn ends
+also tells the walk how many tool rounds its turn has: 20, or
+`walk_tool_rounds` in the data directory's `lyrik.json` when the operator set
+one (`{ "walk_tool_rounds": 60 }`; zero is read as the default, and a
+target's `.lyrik/config.json` does not set it). The number is on
+`lyrik.dispatch.started`. A walk whose turn ends
 with a reply is recorded on `lyrik.walk.completed` with status `turn_ended`,
 which says the turn ended and nothing about what the walk staged;
 `findings_staged` on the same row says that. A walk that uses its rounds

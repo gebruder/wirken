@@ -79,6 +79,13 @@ tagged.
   (`crates/cli/tests/lyrik_evidence_states.rs`;
   [docs/lyrik-brocards.md](docs/lyrik-brocards.md#execution-evidence)).
 
+- The tool rounds a Lyrik walk's turn gets are an operator setting,
+  `walk_tool_rounds` in the data directory's `lyrik.json`, with the 20 it was
+  fixed at as the default. The staged walk text states the number and
+  `lyrik.dispatch.started` records it
+  (`a_walks_round_limit_is_the_operators_setting`,
+  `crates/cli/tests/lyrik_walks_run_under_their_own_skills.rs`).
+
 ### Fixed
 
 - A command a Lyrik reproduction or step record names is looked for among the

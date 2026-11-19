@@ -349,3 +349,65 @@ fn model_call_rows_name_the_walk_they_were_made_for() {
         ]
     );
 }
+
+/// The tool rounds a walk's turn gets are the operator's to set:
+/// `walk_tool_rounds` in the data directory's `lyrik.json`. A walk
+/// that needs more than the default twenty gets them, and one that
+/// uses its rounds up is stopped at the number set.
+#[test]
+fn a_walks_round_limit_is_the_operators_setting() {
+    let run = |rounds: u32, calls: usize| -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, data, target) = (
+            tmp.path().join("home"),
+            tmp.path().join("data"),
+            tmp.path().join("target"),
+        );
+        let walk = data.join("lyrik/walks/sink-walk");
+        std::fs::create_dir_all(&walk).unwrap();
+        std::fs::write(
+            walk.join("SKILL.md"),
+            "---\nname: sink-walk\ndescription: test walk\n---\n\n# sink-walk\n\nWalk sinks.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("lyrik.json"),
+            format!(r#"{{"walk_tool_rounds": {rounds}}}"#),
+        )
+        .unwrap();
+        let mut replies = vec![call("probe_ping", serde_json::json!({"marker": "ok"}))];
+        replies.extend((0..calls).map(|_| call("list_files", serde_json::json!({}))));
+        replies.push(serde_json::json!({"role": "assistant", "content": "Done."}));
+        let model = ScriptedModel::start(replies);
+        write_target(&target, &model);
+        let out = wirken(&data)
+            .env("HOME", &home)
+            .args(["lyrik", "run", "--bench", "--target"])
+            .arg(&target)
+            .args(["--run", RUN])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The staged walk is told the number it has.
+        let staged = std::fs::read_to_string(target.join(format!(
+            ".lyrik/state/runs/{RUN}/walks-skills/sink-walk/SKILL.md"
+        )))
+        .unwrap();
+        assert!(
+            staged.contains(&format!("This turn has at most {rounds} tool rounds")),
+            "{staged}"
+        );
+        audit_row(&target, "lyrik.walk.completed")
+    };
+    // Twenty-two calls and a reply: past the default, inside the 25 set.
+    let finished = run(25, 22);
+    assert_eq!(finished["status"], "turn_ended", "{finished}");
+    // Stopped at the number set, and the row says which.
+    let stopped = run(3, 10);
+    assert_eq!(stopped["status"], "incomplete", "{stopped}");
+    assert_eq!(stopped["tool_rounds"], 3, "{stopped}");
+}
