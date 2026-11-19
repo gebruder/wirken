@@ -5407,17 +5407,11 @@ fn aggregate_findings_multi(
         (tagged.into_iter().map(|(_, f)| f).collect(), 0)
     };
     // Each finding says what stands behind it: the strongest evidence
-    // any of its reproductions earned, or that it was reasoned.
+    // any of its reproductions earned, or that it was reasoned. A
+    // merged finding's reproductions are those of every finding folded
+    // into it, under the ids the walks gave them.
     for f in &mut findings {
-        let evidence = f
-            .get("stable_id")
-            .and_then(serde_json::Value::as_str)
-            .map_or(super::lyrik_trace::REASONED, |id| {
-                finding_evidence(id, &reproductions)
-            });
-        if let Some(obj) = f.as_object_mut() {
-            obj.insert("evidence".to_string(), serde_json::json!(evidence));
-        }
+        stamp_evidence(f, &reproductions);
     }
     let funnel = Funnel {
         merged: MergedFunnel {
@@ -5493,20 +5487,81 @@ fn aggregate_findings_multi(
     Ok(funnel)
 }
 
-/// What stands behind the finding `stable_id`: `observed` when one of
-/// its reproductions earned it, else `static_confirmed` when one was
-/// agreed as reproduced, else `reasoned`.
-fn finding_evidence(stable_id: &str, reproductions: &[lyrik_replay::Reproduction]) -> &'static str {
+/// Write what stands behind a finding onto it: `evidence`, and, when
+/// a reproduction earned it, `evidence_source` naming the walk, the
+/// reproduction and the id it was recorded under, with the runner's
+/// trace of it.
+///
+/// A finding merged from several is looked up under each member's id
+/// and walk (`merged_from`), so the strongest evidence any source
+/// earned is the merged finding's, whichever source's record survived
+/// the merge.
+fn stamp_evidence(finding: &mut serde_json::Value, reproductions: &[lyrik_replay::Reproduction]) {
+    let members: Vec<(Option<String>, String)> = match finding
+        .get("merged_from")
+        .and_then(serde_json::Value::as_array)
+    {
+        Some(members) => members
+            .iter()
+            .filter_map(|m| {
+                Some((
+                    m.get("walk").and_then(|w| w.as_str()).map(String::from),
+                    m.get("stable_id")?.as_str()?.to_string(),
+                ))
+            })
+            .collect(),
+        None => finding
+            .get("stable_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| vec![(None, id.to_string())])
+            .unwrap_or_default(),
+    };
+    let (evidence, source) = finding_evidence(&members, reproductions);
+    let Some(obj) = finding.as_object_mut() else {
+        return;
+    };
+    obj.insert("evidence".to_string(), serde_json::json!(evidence));
+    if let Some(r) = source {
+        obj.insert(
+            "evidence_source".to_string(),
+            serde_json::json!({
+                "walk": r.walk,
+                "stable_id": r.stable_id,
+                "reproduction": r.file,
+                "execution": r.execution,
+            }),
+        );
+    }
+}
+
+/// What stands behind a finding known by `members`, each an id and the
+/// walk that gave it, when the walk is known: `observed` when one of
+/// their reproductions earned it, else `static_confirmed` when one was
+/// agreed as reproduced, else `reasoned`. With it, the reproduction
+/// that earned it: the first of the strongest.
+fn finding_evidence<'a>(
+    members: &[(Option<String>, String)],
+    reproductions: &'a [lyrik_replay::Reproduction],
+) -> (&'static str, Option<&'a lyrik_replay::Reproduction>) {
     use super::lyrik_trace::{OBSERVED, REASONED, STATIC_CONFIRMED};
-    let mut best = REASONED;
+    let of_a_member = |r: &lyrik_replay::Reproduction| {
+        members.iter().any(|(walk, id)| {
+            *id == r.stable_id
+                && match (walk, &r.walk) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                }
+        })
+    };
+    let mut best: (&'static str, Option<&lyrik_replay::Reproduction>) = (REASONED, None);
     for r in reproductions
         .iter()
-        .filter(|r| r.stable_id == stable_id && r.agreed_reproduced())
+        .filter(|r| of_a_member(r) && r.agreed_reproduced())
     {
         match r.evidence {
-            Some(OBSERVED) => return OBSERVED,
-            Some(_) => best = STATIC_CONFIRMED,
-            None => {}
+            Some(OBSERVED) => return (OBSERVED, Some(r)),
+            Some(_) if best.1.is_none() => best = (STATIC_CONFIRMED, Some(r)),
+            _ => {}
         }
     }
     best
@@ -5853,7 +5908,9 @@ pub(super) fn dedup_findings(
 /// collapse to a sorted unique union. Tier rises to the highest of
 /// the inputs; `dedup_disagreement: true` when inputs disagreed.
 /// `dedup_sources` lists each contributing walk name in
-/// first-seen order. The first finding's other fields (id,
+/// first-seen order, and `merged_from` each member's walk and the id
+/// it gave the finding, which is what that walk's reproductions are
+/// filed under. The first finding's other fields (id,
 /// stable_id, summary, etc.) are kept as the canonical record so
 /// downstream consumers still have one stable identifier per
 /// finding.
@@ -5865,6 +5922,18 @@ fn merge_finding_group(group: Vec<(Option<String>, serde_json::Value)>) -> serde
     let mut tiers_disagree = false;
     let mut detection_sources: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
+
+    // Each member under the id its walk gave it: what its reproductions
+    // and its ledger records are filed under.
+    let merged_from: Vec<serde_json::Value> = group
+        .iter()
+        .filter_map(|(walk, f)| {
+            Some(serde_json::json!({
+                "walk": walk,
+                "stable_id": f.get("stable_id")?.as_str()?,
+            }))
+        })
+        .collect();
 
     for (walk_name, f) in &group {
         if let Some(arr) = f.get("framing").and_then(|v| v.as_array()) {
@@ -5951,6 +6020,12 @@ fn merge_finding_group(group: Vec<(Option<String>, serde_json::Value)>) -> serde
             "dedup_disagreement".to_string(),
             serde_json::Value::Bool(tiers_disagree),
         );
+        if !merged_from.is_empty() {
+            obj.insert(
+                "merged_from".to_string(),
+                serde_json::Value::Array(merged_from),
+            );
+        }
         if let Some(ds) = merged_detection_source {
             obj.insert(
                 "detection_source".to_string(),
@@ -7360,6 +7435,125 @@ mod tests {
         ];
         let merged = dedup_findings(tagged).0;
         assert_eq!(merged.len(), 3);
+    }
+
+    /// Two walks find the same line under their own ids. One traced
+    /// the cited code running; the other only printed its marker. The
+    /// merged finding keeps the first walk's record and the strongest
+    /// evidence either earned, with the trace and the walk it came
+    /// from. A reproduction that was not agreed earns nothing.
+    #[test]
+    fn a_merged_finding_keeps_the_strongest_evidence_of_its_sources() {
+        use super::super::lyrik_replay::{Claimed, Reproduction};
+        use super::super::lyrik_trace::Execution;
+        let repro =
+            |walk: &str, id: &str, evidence: &'static str, executed: Vec<u64>| Reproduction {
+                walk: Some(walk.to_string()),
+                file: "repro-001.json".to_string(),
+                stable_id: id.to_string(),
+                command: "python3 h.py".to_string(),
+                harness: None,
+                expected: String::new(),
+                code_revision: String::new(),
+                outcome: "reproduced",
+                observed: String::new(),
+                reason: None,
+                exit_status_from: None,
+                claimed: Claimed {
+                    outcome: "reproduced",
+                    observed: String::new(),
+                    note: None,
+                },
+                replay: None,
+                agreement: Some(true),
+                evidence: Some(evidence),
+                execution: Some(Execution {
+                    cited_file: "agent.py".to_string(),
+                    cited_line: 43,
+                    cited_function_lines: Some((40, 43)),
+                    executed_lines: executed,
+                    marker: true,
+                    untraced: None,
+                }),
+            };
+        let reproductions = vec![
+            repro(
+                "sink-walk",
+                "provenance_collapse::agent.py:43",
+                "static_confirmed",
+                vec![],
+            ),
+            repro(
+                "chain-walk",
+                "injection::agent.py:43",
+                "observed",
+                vec![39, 43],
+            ),
+        ];
+        let tagged = vec![
+            (
+                Some("sink-walk".to_string()),
+                finding("agent.py", 43, "provenance_collapse", "HIGH"),
+            ),
+            (
+                Some("chain-walk".to_string()),
+                finding("agent.py", 43, "injection", "HIGH"),
+            ),
+        ];
+        let mut merged = dedup_findings(tagged).0;
+        assert_eq!(merged.len(), 1);
+        let mut f = merged.remove(0);
+        assert_eq!(
+            f["merged_from"],
+            serde_json::json!([
+                {"walk": "sink-walk", "stable_id": "provenance_collapse::agent.py:43"},
+                {"walk": "chain-walk", "stable_id": "injection::agent.py:43"},
+            ])
+        );
+        super::stamp_evidence(&mut f, &reproductions);
+        assert_eq!(f["stable_id"], "provenance_collapse::agent.py:43");
+        assert_eq!(f["evidence"], "observed", "{f}");
+        assert_eq!(
+            f["evidence_source"],
+            serde_json::json!({
+                "walk": "chain-walk",
+                "stable_id": "injection::agent.py:43",
+                "reproduction": "repro-001.json",
+                "execution": {
+                    "cited_file": "agent.py", "cited_line": 43,
+                    "cited_function_lines": [40, 43],
+                    "executed_lines": [39, 43], "marker": true,
+                },
+            }),
+            "{f}"
+        );
+
+        // Only the weaker source: static_confirmed, and said to be its.
+        let mut weaker = dedup_findings(vec![(
+            Some("sink-walk".to_string()),
+            finding("agent.py", 43, "provenance_collapse", "HIGH"),
+        )])
+        .0
+        .remove(0);
+        super::stamp_evidence(&mut weaker, &reproductions);
+        assert_eq!(weaker["evidence"], "static_confirmed");
+        assert_eq!(weaker["evidence_source"]["walk"], "sink-walk");
+
+        // An observed trace that the replay did not agree with earns
+        // the merged finding nothing.
+        let mut disputed = reproductions.clone();
+        disputed[1].agreement = Some(false);
+        let mut g = f.clone();
+        super::stamp_evidence(&mut g, &disputed);
+        assert_eq!(g["evidence"], "static_confirmed");
+        assert_eq!(g["evidence_source"]["walk"], "sink-walk");
+
+        // Nothing reproduced: reasoned, with no source.
+        let mut bare = f.clone();
+        bare.as_object_mut().unwrap().remove("evidence_source");
+        super::stamp_evidence(&mut bare, &[]);
+        assert_eq!(bare["evidence"], "reasoned");
+        assert!(bare.get("evidence_source").is_none(), "{bare}");
     }
 
     #[test]

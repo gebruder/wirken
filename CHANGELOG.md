@@ -59,6 +59,13 @@ tagged.
 
 ### Changed
 
+- A Lyrik finding merged from several walks takes the strongest evidence any
+  of them earned. Its reproductions are looked up under each member's own
+  `stable_id` (`merged_from`), and `evidence_source` names the walk and the
+  reproduction, with the trace. The merge had kept the first walk's evidence
+  (`a_merged_finding_keeps_the_strongest_evidence_of_its_sources`,
+  `crates/cli/src/commands/lyrik.rs`).
+
 - An `exec` inside a Lyrik run's sign-off envelope is no longer refused as
   `arguments too long to show for approval`. The sign-off decides it and
   nothing is shown, so there is no card to cut; the whole command is on the

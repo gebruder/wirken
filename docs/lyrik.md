@@ -438,8 +438,11 @@ Dedup on the merged output: findings sharing `(location.file,
 location.line_start)` collapse to one; `framing` becomes the sorted unique
 union; `tier` rises to the highest; `dedup_disagreement: true` when input
 tiers differ; `dedup_sources` lists every contributing walk in first-seen
-order. The first finding's `summary`, `id` and `stable_id` survive as
-canonical. Findings without a file and line pass through unchanged, so a
+order, and `merged_from` each member's walk and the `stable_id` it gave the
+finding. The first finding's `summary`, `id` and `stable_id` survive as
+canonical. Its `evidence` is the strongest any member's reproductions earned,
+looked up under each member's own id, and `evidence_source` names the walk, the
+id and the reproduction that earned it, with the runner's trace (`execution`). Findings without a file and line pass through unchanged, so a
 malformed input does not collapse against everything else under a default key.
 
 Exit `0` when at least one walk completed, was stopped at the tool round
