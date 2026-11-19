@@ -36,6 +36,11 @@ tagged.
 
 ### Changed
 
+- `lyrik.walk.completed` and a fix step agent's record say `turn_ended` where
+  they said `success`: the walk's or agent's turn ended with a reply, inside
+  the round limit and with no error. The row said `success` for a walk that
+  staged nothing (`model_call_rows_name_the_walk_they_were_made_for`,
+  `crates/cli/tests/lyrik_walks_run_under_their_own_skills.rs`).
 - A per-walk Lyrik run no longer asks before each `exec`. A walk's and a
   replay's commands run inside one sandbox envelope: the target mounted
   read-only, the walk's own staging directory the only one writable, another

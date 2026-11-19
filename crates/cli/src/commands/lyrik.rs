@@ -2224,7 +2224,7 @@ async fn dispatch_via_agent_runtime(
                 "registered_as_distinct": claims("registered_distinct"),
                 "refused_at_registration": claims("refused"),
                 "refused_at_aggregation": at_aggregation,
-                "completed": matches!(o.status, WalkStatus::Success),
+                "completed": matches!(o.status, WalkStatus::TurnEnded),
             });
             if let WalkStatus::Incomplete { tool_rounds, .. } = &o.status {
                 entry["incomplete_at_tool_rounds"] = serde_json::json!(tool_rounds);
@@ -3647,13 +3647,15 @@ async fn dispatch_fixes(
         let mut agents = Vec::with_capacity(steps.len());
         for (step, turn) in steps {
             // Stopped at the round limit is `incomplete`, with the
-            // count: not a success, and not a transient failure.
+            // count: not a transient failure. A turn that ended on its
+            // own is `turn_ended`: that it ended, and nothing about
+            // what the agent got done.
             let status = if turn.exhausted {
                 "incomplete"
             } else if turn.error.is_some() {
                 "transient_failure"
             } else {
-                "success"
+                "turn_ended"
             };
             let reason = if turn.exhausted {
                 Some(format!(
@@ -4261,7 +4263,10 @@ impl WalkOutcome {
 /// "partial success" when at least one walk produced findings.
 #[derive(Debug, Clone)]
 pub(super) enum WalkStatus {
-    Success,
+    /// The walk's turn ended with a reply, with no error and inside
+    /// the round limit. It says the turn ended, not that the walk
+    /// found or staged anything: `findings_staged` says that.
+    TurnEnded,
     /// The walk was stopped at the tool round limit before it
     /// finished. What it staged is kept.
     Incomplete {
@@ -4652,7 +4657,7 @@ async fn dispatch_walks_concurrent(
             )
             .await;
             let (status, response_len) = match turns.last {
-                Ok(end) => (WalkStatus::Success, end.response_len),
+                Ok(end) => (WalkStatus::TurnEnded, end.response_len),
                 Err(super::lyrik_walks::TurnFailure {
                     reason,
                     tool_rounds: Some(tool_rounds),
@@ -4695,13 +4700,13 @@ async fn dispatch_walks_concurrent(
             Err(join_err) => WalkOutcome::failed_before_a_turn(&name, format!("join: {join_err}")),
         };
         let status_label = match &outcome.status {
-            WalkStatus::Success => "success",
+            WalkStatus::TurnEnded => "turn_ended",
             WalkStatus::Incomplete { .. } => "incomplete",
             WalkStatus::StoppedAtCeiling => "stopped_at_cost_ceiling",
             WalkStatus::TransientFailure { .. } => "transient_failure",
         };
         let reason = match &outcome.status {
-            WalkStatus::Success => None,
+            WalkStatus::TurnEnded => None,
             WalkStatus::Incomplete { reason, .. } => Some(reason.clone()),
             WalkStatus::StoppedAtCeiling => Some(STOPPED_AT_CEILING.to_string()),
             WalkStatus::TransientFailure { reason } => Some(reason.clone()),

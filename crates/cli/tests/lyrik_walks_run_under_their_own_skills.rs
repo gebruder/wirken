@@ -151,7 +151,7 @@ fn a_refused_exec_is_skipped_and_writes_stay_under_lyrik() {
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .find(|e| e["event"] == "lyrik.walk.completed")
         .unwrap_or_else(|| panic!("no walk.completed row:\n{audit}"));
-    assert_eq!(completed["detail"]["status"], "success", "{completed}");
+    assert_eq!(completed["detail"]["status"], "turn_ended", "{completed}");
     assert_eq!(
         completed["detail"]["skipped"],
         serde_json::json!(["exec (shell:git)"]),
@@ -331,6 +331,11 @@ fn model_call_rows_name_the_walk_they_were_made_for() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
+    // The walk listed files, said it was done and staged nothing. Its
+    // row says its turn ended, which is all that happened.
+    let completed = audit_row(&target, "lyrik.walk.completed");
+    assert_eq!(completed["status"], "turn_ended", "{completed}");
+    assert_eq!(completed["findings_staged"], 0, "{completed}");
     let row = |kind: &str, step: &str| (kind.to_string(), Some(step.to_string()));
     assert_eq!(
         steps,

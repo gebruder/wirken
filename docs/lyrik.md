@@ -363,7 +363,10 @@ under its own `staging/<walk>/harness/` directory, with `sh` or the target's
 interpreter, under the marker contract, that this is how a finding gets a
 reproduction, and that the replay runs the same command. The list is what is
 expected, not a limit. The section
-also tells the walk it has 20 tool rounds in its turn. A walk that uses them
+also tells the walk it has 20 tool rounds in its turn. A walk whose turn ends
+with a reply is recorded on `lyrik.walk.completed` with status `turn_ended`,
+which says the turn ended and nothing about what the walk staged;
+`findings_staged` on the same row says that. A walk that uses its rounds
 up ends there: the per-run log records `lyrik.walk.completed` with status
 `incomplete` and the limit it reached, what it had staged is still aggregated,
 and the walk's `walk_summary` entry in `findings.json` carries
