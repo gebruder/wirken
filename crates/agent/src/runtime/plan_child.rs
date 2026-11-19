@@ -854,6 +854,53 @@ impl Drop for ChildDir {
     }
 }
 
+/// `message` after the conversation's earlier turns, oldest first.
+///
+/// The first message of the conversation is carried whole: it is what
+/// the work was set out in, a walk's instructions, and a later turn
+/// that held only its start would not know what it was continuing.
+/// Every later message is carried up to [`EARLIER_MESSAGE_CHARS`].
+fn prompt_with_earlier(messages: &[crate::conversation::Message], message: &str) -> String {
+    let earlier: Vec<String> = messages
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .enumerate()
+        .map(|(at, m)| {
+            let who = match m.role {
+                Role::User => "user".to_string(),
+                Role::Assistant => match &m.tool_calls {
+                    Some(calls) => format!(
+                        "assistant, calling {}",
+                        calls
+                            .iter()
+                            .map(|c| c.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    None => "assistant".to_string(),
+                },
+                Role::Tool => format!("result of {}", m.tool_name.as_deref().unwrap_or("tool")),
+                Role::System => "system".to_string(),
+                Role::Compaction => "summary of earlier turns".to_string(),
+            };
+            let content = if at == 0 {
+                m.content.clone()
+            } else {
+                cut(&m.content, EARLIER_MESSAGE_CHARS)
+            };
+            format!("[{who}]\n{content}")
+        })
+        .collect();
+    if earlier.is_empty() {
+        return message.to_string();
+    }
+    format!(
+        "Earlier in this conversation, oldest first:\n\n{}\n\nThe message to act on \
+         now:\n\n{message}",
+        earlier.join("\n\n")
+    )
+}
+
 fn cut(text: &str, chars: usize) -> String {
     if text.chars().count() <= chars {
         return text.to_string();
@@ -878,40 +925,7 @@ impl Agent {
     /// conversation already holds. A child keeps nothing between
     /// turns, so a later turn carries the earlier ones.
     fn child_prompt(&self, message: &str) -> String {
-        let earlier: Vec<String> = self
-            .conversation
-            .messages()
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .map(|m| {
-                let who = match m.role {
-                    Role::User => "user".to_string(),
-                    Role::Assistant => match &m.tool_calls {
-                        Some(calls) => format!(
-                            "assistant, calling {}",
-                            calls
-                                .iter()
-                                .map(|c| c.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        None => "assistant".to_string(),
-                    },
-                    Role::Tool => format!("result of {}", m.tool_name.as_deref().unwrap_or("tool")),
-                    Role::System => "system".to_string(),
-                    Role::Compaction => "summary of earlier turns".to_string(),
-                };
-                format!("[{who}]\n{}", cut(&m.content, EARLIER_MESSAGE_CHARS))
-            })
-            .collect();
-        if earlier.is_empty() {
-            return message.to_string();
-        }
-        format!(
-            "Earlier in this conversation, oldest first:\n\n{}\n\nThe message to act on \
-             now:\n\n{message}",
-            earlier.join("\n\n")
-        )
+        prompt_with_earlier(self.conversation.messages(), message)
     }
 
     /// The run's cost on this route so far, as estimates.
@@ -1377,6 +1391,40 @@ mod tests {
     use super::*;
 
     const PIN: &str = "pinned-model-4-5";
+
+    /// A later turn's prompt carries the conversation's first message
+    /// whole, however long, and cuts only the messages after it. A
+    /// first turn is the message alone.
+    #[test]
+    fn a_later_turn_carries_the_first_message_whole() {
+        use crate::conversation::Message;
+        let message = |role: Role, content: String| Message {
+            role,
+            content,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        };
+        let instructions = format!(
+            "# Skill: sink-walk\n{}\nEND-OF-INSTRUCTIONS",
+            "x".repeat(30_000)
+        );
+        let long_reply = format!("{}TAIL-OF-REPLY", "y".repeat(10_000));
+        let earlier = [
+            message(Role::System, "system".to_string()),
+            message(Role::User, instructions.clone()),
+            message(Role::Assistant, long_reply),
+        ];
+        assert_eq!(prompt_with_earlier(&earlier[..1], "go"), "go");
+
+        let prompt = prompt_with_earlier(&earlier, "continue");
+        assert!(prompt.contains(&instructions), "the first message is cut");
+        assert!(prompt.contains("END-OF-INSTRUCTIONS"));
+        assert!(!prompt.contains("TAIL-OF-REPLY"));
+        assert!(prompt.contains(" [cut]"));
+        assert!(prompt.ends_with("The message to act on now:\n\ncontinue"));
+        assert!(!prompt.contains("[system]"));
+    }
 
     fn opening(tools: &[&str]) -> String {
         json!({
