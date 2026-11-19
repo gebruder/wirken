@@ -209,7 +209,9 @@ pub struct LyrikPromptGate {
     asker: String,
     terminal: std::sync::Arc<OneAtATime<StdinApprovalGate>>,
     plan: Option<std::sync::Arc<PlanGrant>>,
-    signoff_covers_exec: bool,
+    /// The action key of the run's sign-off row, when that sign-off
+    /// covers every `exec` this gate is asked about.
+    signoff: Option<String>,
 }
 
 impl LyrikPromptGate {
@@ -218,7 +220,7 @@ impl LyrikPromptGate {
             asker: asker.to_string(),
             terminal,
             plan: None,
-            signoff_covers_exec: false,
+            signoff: None,
         }
     }
 
@@ -226,10 +228,18 @@ impl LyrikPromptGate {
     /// envelope the run's sign-off stated: an `exec` is approved by
     /// that sign-off without another prompt. Only for an agent whose
     /// sandbox enforces the envelope. Any other call that needs
-    /// approval is still asked at the terminal.
-    pub fn with_signoff_envelope(mut self) -> Self {
-        self.signoff_covers_exec = true;
+    /// approval is still asked at the terminal. `signoff` is the
+    /// action key of the sign-off's `PermissionApproved` row, which
+    /// each covered command's row names as its surface.
+    pub fn with_signoff_envelope(mut self, signoff: String) -> Self {
+        self.signoff = Some(signoff);
         self
+    }
+
+    /// The sign-off that covers `ctx`, when one does: an `exec` under
+    /// the envelope.
+    fn covering_signoff(&self, ctx: &PermissionDenialContext) -> Option<&str> {
+        self.signoff.as_deref().filter(|_| ctx.tool_name == "exec")
     }
 
     /// The same gate with a plan the operator approved: a command the
@@ -251,7 +261,7 @@ impl ApprovalGate for LyrikPromptGate {
                 actor: Some(plan.actor()),
             };
         }
-        if self.signoff_covers_exec && ctx.tool_name == "exec" {
+        if self.covering_signoff(ctx).is_some() {
             return ApprovalOutcome::Approved {
                 actor: Some(
                     wirken_gateway::pending_approvals::DecisionActor::new(SIGNOFF_GRANT_ACTOR)
@@ -266,6 +276,17 @@ impl ApprovalGate for LyrikPromptGate {
 
     fn source(&self) -> ApprovalSource {
         ApprovalSource::Stdin
+    }
+
+    /// A command the sign-off covered was not asked at the terminal:
+    /// its surface is that grant.
+    fn source_for(&self, ctx: &PermissionDenialContext) -> ApprovalSource {
+        match self.covering_signoff(ctx) {
+            Some(signoff) => ApprovalSource::Grant {
+                grant: signoff.to_string(),
+            },
+            None => self.source(),
+        }
     }
 }
 

@@ -221,6 +221,26 @@ fn a_signed_off_walk_runs_exec_inside_the_envelope_without_asking() {
         .collect();
     assert_eq!(approved.len(), 1, "{approved:?}\n{shown}");
     assert_eq!(approved[0]["approved_by"], "lyrik-signoff", "{approved:?}");
+    // Nothing was asked at the terminal for it: the surface is the
+    // sign-off, named by the row that recorded it.
+    let signoff = chain_rows(&s.data, "permission_approved")
+        .into_iter()
+        .find(|r| {
+            r["action_key"]
+                .as_str()
+                .unwrap()
+                .starts_with("lyrik:signoff:")
+        })
+        .expect("the sign-off row");
+    assert_eq!(
+        signoff["approved_via"],
+        serde_json::json!({"kind": "stdin"})
+    );
+    assert_eq!(
+        approved[0]["approved_via"],
+        serde_json::json!({"kind": "grant", "grant": signoff["action_key"]}),
+        "{approved:?}"
+    );
     assert_eq!(approved[0]["scope"], "one_shot");
     assert_eq!(chain_rows(&s.data, "assistant_tool_calls").len(), 1);
 

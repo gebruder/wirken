@@ -146,6 +146,10 @@ socket, `webchat:<label>` or `webchat:bearer`, the surface label (`stdin`,
 display name. A denial someone made carries `denied_by` and
 `denier_display`. Rows written before 3.0.0 hold the display name in
 `approved_by`; the `session_start` chain head's `build` says which.
+`approved_via` is the surface that asked: `stdin`, `sse`, `cli`, a
+`channel_adapter` with its `channel`, or `{"kind":"grant","grant":"<action
+key>"}` when no surface asked because a grant given earlier in the session
+covered the call, as a Lyrik run's sign-off covers its walks' `exec` calls.
 
 ```json
 {"kind":"permission_approved","action_key":"shell::pipeline:","agent_id":"default","approved_by":"5f1c0a3e-...","approver_display":"davi","scope":"one_shot","approved_via":{"kind":"channel_adapter","channel":"signal"},"adapter_id":"signal","sender_id":"+15550001111"}

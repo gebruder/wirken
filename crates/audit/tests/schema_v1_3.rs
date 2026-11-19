@@ -365,6 +365,26 @@ fn snapshot_llm_request_size_and_purpose() {
     }
 }
 
+/// A call an earlier grant covered names that grant as its surface,
+/// and the surfaces written before read as they did.
+#[test]
+fn an_approval_surface_can_be_an_earlier_grant() {
+    use wirken_audit::ApprovalSource;
+    let grant = ApprovalSource::Grant {
+        grant: "lyrik:signoff:abc".into(),
+    };
+    let v = serde_json::to_value(&grant).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"kind": "grant", "grant": "lyrik:signoff:abc"})
+    );
+    assert_eq!(serde_json::from_value::<ApprovalSource>(v).unwrap(), grant);
+    assert_eq!(
+        serde_json::from_value::<ApprovalSource>(serde_json::json!({"kind": "stdin"})).unwrap(),
+        ApprovalSource::Stdin
+    );
+}
+
 /// `step` is written only when the caller names one, on the request
 /// and on its response, and a row written before the field existed
 /// reads as naming none.

@@ -5216,7 +5216,7 @@ impl Agent {
             Some(ref g) => Some(g.request_approval(&ctx).await),
             None => None,
         };
-        let source = gate.as_ref().map(|g| g.source());
+        let source = gate.as_ref().map(|g| g.source_for(&ctx));
 
         match outcome {
             Some(crate::approval_gate::ApprovalOutcome::Approved { actor }) => {
@@ -7095,6 +7095,7 @@ fn approved_by_label(source: &wirken_audit::ApprovalSource) -> String {
         wirken_audit::ApprovalSource::ChannelAdapter { channel } => {
             format!("channel-adapter:{channel}")
         }
+        wirken_audit::ApprovalSource::Grant { grant } => format!("grant:{grant}"),
     }
 }
 

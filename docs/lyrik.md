@@ -390,7 +390,9 @@ Each refusal is a `skill_permission_denied` row.
 The sign-off summary states the envelope on its `envelope` line, and the
 summary's sha256 is on the sign-off's `permission_approved` row. Each command
 still gets its own `permission_approved` row, with `approved_by`
-`lyrik-signoff`, then its `assistant_tool_calls` and `tool_result` rows. A
+`lyrik-signoff` and `approved_via` `{"kind":"grant","grant":"lyrik:signoff:<sha256>"}`,
+the action key of the sign-off's own row, then its `assistant_tool_calls` and
+`tool_result` rows. A
 scope that cannot be mounted (a staging directory that is missing or is a
 link) refuses the `exec`. A call that needs approval and is not an `exec` is
 asked at the terminal. The single call (no `walks`) and the fix step have no

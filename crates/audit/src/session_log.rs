@@ -293,6 +293,11 @@ pub enum ApprovalSource {
     /// `channel` carries the adapter id exactly as the registry
     /// stores it, so a SIEM detection can pivot per-channel.
     ChannelAdapter { channel: String },
+    /// No surface asked: a grant the operator gave earlier in the
+    /// session covered the call. `grant` is the action key of the
+    /// `PermissionApproved` row that recorded the grant, so the
+    /// decision can be followed back to where it was made.
+    Grant { grant: String },
 }
 
 /// Which tool-def builder a recorded `tools_hash` was computed over,

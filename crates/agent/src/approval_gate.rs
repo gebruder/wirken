@@ -72,6 +72,13 @@ pub trait ApprovalGate: Send + Sync {
     /// `SessionEvent::PermissionDenied.denied_via` so the audit
     /// chain carries the mediation point.
     fn source(&self) -> ApprovalSource;
+
+    /// The surface behind the decision on `ctx`. [`Self::source`]
+    /// unless the gate decides some calls without asking, in which
+    /// case it says what decided those.
+    fn source_for(&self, _ctx: &PermissionDenialContext) -> ApprovalSource {
+        self.source()
+    }
 }
 
 // Allow `Arc<dyn ApprovalGate>` storage: async_trait already makes

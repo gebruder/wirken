@@ -76,6 +76,11 @@ tagged.
 
 ### Fixed
 
+- A command a Lyrik run's sign-off approves records the sign-off as its
+  approval surface: `approved_via` is `{"kind":"grant","grant":"<action key
+  of the sign-off row>"}`, a new surface kind for a call an earlier grant of
+  the session covered. It said `stdin`, though nothing was asked at the
+  terminal for it (`crates/cli/tests/lyrik_exec_envelope.rs`).
 - A command a Lyrik step record cites is matched against the commands that
   ran word by word, as a shell splits them, and with or without a leading
   `cd <dir> &&`. It was matched as text, so `grep -n 'subprocess' agent.py`

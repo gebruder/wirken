@@ -225,19 +225,38 @@ fn attach_envelope_gate(
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
-    signed_off: bool,
+    signoff: Option<String>,
 ) {
     match terminal {
         Some(terminal) => {
             let gate = super::stdin_approval::LyrikPromptGate::new(asker, terminal);
-            agent.set_approval_gate(Arc::new(if signed_off {
-                gate.with_signoff_envelope()
-            } else {
-                gate
+            agent.set_approval_gate(Arc::new(match signoff {
+                Some(signoff) => gate.with_signoff_envelope(signoff),
+                None => gate,
             }))
         }
         None => agent.set_unmediated_denial_reason(NO_TERMINAL_FOR_APPROVAL),
     }
+}
+
+/// The action key of the run's sign-off, from the last
+/// `PermissionApproved` row of the session that records one. The run
+/// that asks has just written it.
+fn signoff_on_chain(
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+) -> Result<Option<String>> {
+    let rows = log
+        .get_since(handle, 0)
+        .context("read the run's chain rows")?;
+    Ok(rows.into_iter().rev().find_map(|row| match row.event {
+        wirken_audit::SessionEvent::PermissionApproved { action_key, .. }
+            if action_key.starts_with("lyrik:signoff:") =>
+        {
+            Some(action_key)
+        }
+        _ => None,
+    }))
 }
 
 /// What one walk's or one replay's agent may touch, enforced twice:
@@ -1457,6 +1476,14 @@ async fn dispatch_via_agent_runtime(
     let chain_mark = session_log
         .last_index(&run_handle)
         .context("read the run chain's last row")?;
+    // What approves a walk's commands without asking: the sign-off
+    // the operator just gave, as the chain has it. A `--bench` run
+    // was not signed off, whatever an earlier run of its id was.
+    let signoff = if audit.bench_mode {
+        None
+    } else {
+        signoff_on_chain(&*session_log, &run_handle)?
+    };
     // The cost guard, for the whole of the run's model work.
     let run_ceiling_usd =
         super::lyrik_walks::load_operator_settings(&cfg.data_dir)?.run_ceiling_usd();
@@ -1973,7 +2000,7 @@ async fn dispatch_via_agent_runtime(
                 operator.transport_retries(),
                 ceiling_hit.clone(),
                 terminal.clone(),
-                !audit.bench_mode,
+                signoff.clone(),
                 audit,
             )
             .await;
@@ -2022,7 +2049,7 @@ async fn dispatch_via_agent_runtime(
                     &run_dir,
                     exec_available,
                     terminal.clone(),
-                    !audit.bench_mode,
+                    signoff.clone(),
                     audit,
                 )
                 .await?;
@@ -3981,8 +4008,9 @@ async fn dispatch_replays(
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
-    // Whether the operator signed this run off: a `--bench` run was not.
-    signed_off: bool,
+    // The action key of the operator's sign-off of this run, off its
+    // chain. `None` for a `--bench` run, which has none.
+    signoff: Option<String>,
     audit: &mut AuditLogger,
 ) -> Result<usize> {
     // Every record first, so the skill is staged only when one exists
@@ -4056,6 +4084,7 @@ async fn dispatch_replays(
         let permissions_t = permissions.clone();
         let leak_t = leak_matcher.clone();
         let terminal_t = terminal.clone();
+        let signoff_t = signoff.clone();
         let lyrik_staged_dir_t = lyrik_staged_dir.clone();
         let walks_staged_dir_t = walks_staged_dir.clone();
         let h = tokio::spawn(async move {
@@ -4079,7 +4108,7 @@ async fn dispatch_replays(
             agent.set_call_step(REPLAY_STEP);
             agent.set_leak_matcher(leak_t);
             agent.set_file_scope(file_scope_t);
-            attach_envelope_gate(&mut agent, "replay", terminal_t, signed_off);
+            attach_envelope_gate(&mut agent, "replay", terminal_t, signoff_t);
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|skills| agent.attach_skills(skills).map_err(|e| e.to_string()));
@@ -4422,8 +4451,9 @@ async fn dispatch_walks_concurrent(
     terminal: Option<
         Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
     >,
-    // Whether the operator signed this run off: a `--bench` run was not.
-    signed_off: bool,
+    // The action key of the operator's sign-off of this run, off its
+    // chain. `None` for a `--bench` run, which has none.
+    signoff: Option<String>,
     audit: &mut AuditLogger,
 ) -> Result<Vec<WalkOutcome>> {
     // What the run may ask, before the first prompt.
@@ -4456,7 +4486,7 @@ async fn dispatch_walks_concurrent(
             {
                 eprintln!("{line}");
             }
-            if signed_off {
+            if signoff.is_some() {
                 eprintln!(
                     "  These run inside the envelope the sign-off approved, without asking: {}",
                     asks.join("; ")
@@ -4511,6 +4541,7 @@ async fn dispatch_walks_concurrent(
         let permissions_t = permissions.clone();
         let leak_t = leak_matcher.clone();
         let terminal_t = terminal.clone();
+        let signoff_t = signoff.clone();
         let lyrik_staged_dir_t = lyrik_staged_dir.clone();
         let walks_staged_dir_t = walks_staged_dir.clone();
         let walk_name = name.clone();
@@ -4554,7 +4585,7 @@ async fn dispatch_walks_concurrent(
             local_agent.set_leak_matcher(leak_t);
             local_agent.set_transport_retries(transport_retries);
             local_agent.set_file_scope(file_scope_t);
-            attach_envelope_gate(&mut local_agent, &walk_name, terminal_t, signed_off);
+            attach_envelope_gate(&mut local_agent, &walk_name, terminal_t, signoff_t);
 
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))
