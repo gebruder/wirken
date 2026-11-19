@@ -258,7 +258,7 @@ pub fn banner_lines(
 ) -> Vec<(String, String)> {
     let priced = plan.is_none() && wirken_audit::pricing::is_priced(provider, model);
     let why_unpriced = match plan {
-        Some(entry) => format!("the plan sign-in '{entry}' records no cost"),
+        Some(plan) => format!("{plan} records no cost"),
         None => format!("{provider} {model} has no price entry"),
     };
     let ceiling = match bounds.usd {
@@ -312,9 +312,9 @@ pub fn summary_lines(
         "walks were ended, staged findings were kept, and no replay or fix step ran after it";
     let mut lines = Vec::new();
     match plan {
-        Some(entry) => lines.push(format!(
-            "cost: not recorded, the run was on the plan sign-in '{entry}': {} model call(s), {} \
-             second(s) of model time",
+        Some(plan) => lines.push(format!(
+            "cost: not recorded, the run was on {plan}: {} model call(s), {} second(s) of model \
+             time",
             spend.calls,
             spend.model_millis / 1000
         )),
@@ -621,7 +621,12 @@ mod tests {
             model_seconds: Some(3600),
             model_calls: Some(400),
         };
-        let banner = banner_lines("openai", "gpt-6.2-astra", Some("openai-plan"), &bounds);
+        let banner = banner_lines(
+            "openai",
+            "gpt-6.2-astra",
+            Some("the plan sign-in 'openai-plan'"),
+            &bounds,
+        );
         assert_eq!(
             banner,
             [
@@ -655,13 +660,25 @@ mod tests {
             ..bounds
         };
         assert_eq!(
-            banner_lines("openai", "gpt-6.2-astra", Some("openai-plan"), &no_usd)[0].1,
+            banner_lines(
+                "openai",
+                "gpt-6.2-astra",
+                Some("the plan sign-in 'openai-plan'"),
+                &no_usd
+            )[0]
+            .1,
             "no cost ceiling applies: the run is held by the ceilings below"
         );
 
         let s = spend(&[timed(30_000), timed(45_000)]);
         assert_eq!(
-            summary_lines(&s, &bounds, None, Some("openai-plan"), None),
+            summary_lines(
+                &s,
+                &bounds,
+                None,
+                Some("the plan sign-in 'openai-plan'"),
+                None
+            ),
             [
                 "cost: not recorded, the run was on the plan sign-in 'openai-plan': 2 model \
                  call(s), 75 second(s) of model time",
@@ -674,7 +691,7 @@ mod tests {
             &s,
             &no_usd,
             Some(Reached::ModelCalls),
-            Some("openai-plan"),
+            Some("the plan sign-in 'openai-plan'"),
             None,
         );
         assert!(

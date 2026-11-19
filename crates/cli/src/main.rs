@@ -233,6 +233,10 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum LyrikCommands {
+    /// Join standard input and output to a run's tool server socket.
+    /// Started by a run's child process, not by an operator.
+    #[command(name = "tool-bridge", hide = true)]
+    ToolBridge { socket: std::path::PathBuf },
     /// Drive Lyrik phases against a target directory.
     Run {
         /// Path to the target directory containing `.lyrik/config.json`.
@@ -2263,6 +2267,7 @@ async fn main() -> Result<()> {
                 commands::lyrik::report(&format, findings.as_deref(), run.as_deref(), &output).await
             }
             LyrikCommands::Validate { path } => commands::lyrik_validate::run(&path),
+            LyrikCommands::ToolBridge { socket } => commands::lyrik::tool_bridge(&socket),
         },
     }
 }

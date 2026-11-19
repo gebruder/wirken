@@ -174,6 +174,9 @@ impl ExecutedCommands {
                 SessionEvent::AssistantToolCalls {
                     calls: made, step, ..
                 } => {
+                    // A turn run by a child process has no request row;
+                    // its calls name the step themselves.
+                    replays_began = replays_began || step.as_deref() == Some("replay");
                     for call in made.into_iter().filter(|c| c.name == "exec") {
                         let command = serde_json::from_str::<serde_json::Value>(&call.arguments)
                             .ok()

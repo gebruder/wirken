@@ -467,7 +467,7 @@ pub async fn run(
             &super::lyrik_cost::banner_lines(
                 &pin.provider,
                 &pin.model,
-                pin.plan_entry.as_deref(),
+                pin.plan_phrase().as_deref(),
                 &super::lyrik_walks::load_operator_settings(&super::config().data_dir)?
                     .run_bounds(),
             ),
@@ -1318,7 +1318,7 @@ fn executed_commands(
 /// Where the run's code went, from its chain rows: the provider and
 /// model each call named (a list if they ever differ), how many
 /// calls, and the bytes they sent (`null` if any row predates the
-/// field).
+/// field, or reports a call a child process made).
 fn inference_from_chain(
     log: &dyn wirken_audit::SessionLog,
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
@@ -1332,17 +1332,31 @@ fn inference_from_chain(
     let mut calls = 0u64;
     let mut bytes = Some(0u64);
     for row in rows {
-        if let wirken_audit::SessionEvent::LlmRequest {
-            provider,
-            model,
-            request_bytes,
-            ..
-        } = row.event
-        {
-            calls += 1;
-            providers.insert(provider);
-            models.insert(model);
-            bytes = bytes.zip(request_bytes).map(|(a, b)| a + b);
+        match row.event {
+            wirken_audit::SessionEvent::LlmRequest {
+                provider,
+                model,
+                request_bytes,
+                ..
+            } => {
+                calls += 1;
+                providers.insert(provider);
+                models.insert(model);
+                bytes = bytes.zip(request_bytes).map(|(a, b)| a + b);
+            }
+            // A call a child process made has no request row. It
+            // counts, under the model the child reported, and what it
+            // sent was not seen here.
+            wirken_audit::SessionEvent::LlmResponse {
+                reported: Some(reported),
+                ..
+            } => {
+                calls += 1;
+                providers.insert(PLAN_CHILD_PROVIDER.to_string());
+                models.insert(reported.model);
+                bytes = None;
+            }
+            _ => {}
         }
     }
     let one_or_all = |set: std::collections::BTreeSet<String>| match set.len() {
@@ -1456,7 +1470,7 @@ async fn dispatch_via_agent_runtime(
     // A run on a plan sign-in has no API key and asks for none: its
     // calls take their bearer from the sign-in's entry, one source for
     // every agent of the run so a rotating token is refreshed once.
-    let plan_source: PlanSource = match &pin.plan_entry {
+    let plan_token = match &pin.plan_entry {
         Some(entry) => {
             let pp = super::cached_vault_passphrase()?;
             let keychain = probe_keychain(&cfg.data_dir, move || pp);
@@ -1474,7 +1488,16 @@ async fn dispatch_via_agent_runtime(
         }
         None => None,
     };
-    let api_key = if plan_source.is_some() {
+    // On the child route there is nothing to resolve: the sign-in is the
+    // child binary's own, and this process neither holds nor reads it.
+    let plan_source = PlanSource {
+        token: plan_token,
+        child: pin
+            .plan_child
+            .then(|| plan_child_of(&cfg.data_dir))
+            .transpose()?,
+    };
+    let api_key = if pin.on_plan() {
         None
     } else if pin.provider != "ollama" {
         let pp = super::cached_vault_passphrase()?;
@@ -1543,77 +1566,38 @@ async fn dispatch_via_agent_runtime(
         cache_warning.clone(),
         cost_watch_done.clone(),
     );
-    // Preflight tool-call probe. Mirrors the dispatch path the real
-    // run uses (LlmClient::complete) with one tool defined and a
-    // prompt asking the model to call it. Fail-closed: a model that
-    // cannot return a structured tool_call here would produce zero
-    // staged findings, so bail before any audit work begins.
-    let probe_record = super::lyrik_preflight::ProbeRecord {
-        log: &*session_log,
-        handle: &run_handle,
-        agent_id: agent_id.clone(),
-        credential_id: api_key_credential.clone(),
-        leak_matcher: &leak_matcher,
-    };
-    match super::lyrik_preflight::probe_tool_calling(
-        &llm_config,
-        api_key.as_deref(),
-        plan_source.as_ref(),
-        Some(&probe_record),
-    )
-    .await
-    {
-        Ok(super::lyrik_preflight::ProbeOutcome::Pass) => {
-            audit.emit(
-                "lyrik.model.tool_calls_supported",
-                serde_json::json!({
-                    "provider": pin.provider,
-                    "model": pin.model,
-                }),
-            )?;
-        }
-        Ok(super::lyrik_preflight::ProbeOutcome::Fail { case, detail }) => {
-            audit.emit(
-                "lyrik.model.tool_calls_unsupported",
-                serde_json::json!({
-                    "provider": pin.provider,
-                    "model": pin.model,
-                    "case": case.as_str(),
-                    "detail": detail,
-                }),
-            )?;
-            anyhow::bail!(
-                "preflight: model {} (provider {}) cannot emit tool calls (case: {}); aborting before any audit work",
-                pin.model,
-                pin.provider,
-                case.as_str(),
-            );
-        }
-        Err(e) => {
-            audit.emit(
-                "lyrik.model.tool_calls_unsupported",
-                serde_json::json!({
-                    "provider": pin.provider,
-                    "model": pin.model,
-                    "case": "preflight_error",
-                    "detail": e.to_string(),
-                }),
-            )?;
-            return Err(e.context("preflight tool-call probe"));
-        }
-    }
-    // Each distinct per-walk override model is probed too, fail-closed:
-    // a walk pinned to a model that cannot emit tool calls would stage
-    // nothing, so abort before any audit work rather than mid-run.
-    let mut probed_models = std::collections::HashSet::from([llm_config.model.clone()]);
-    for walk_cfg in walk_configs.values() {
-        if !probed_models.insert(walk_cfg.model.clone()) {
-            continue;
-        }
+    // On the child route this process makes no model call, so there is
+    // no probe to send. What is checked is that the binary runs; that
+    // it has this run's tools and no other is checked on every turn,
+    // from its opening message.
+    if let Some(child) = &plan_source.child {
+        let version = plan_child_version(child).await?;
+        audit.emit(
+            "lyrik.model.plan_child",
+            serde_json::json!({
+                "provider": pin.provider,
+                "model": pin.model,
+                "binary": child.binary.display().to_string(),
+                "version": version,
+            }),
+        )?;
+    } else {
+        // Preflight tool-call probe. Mirrors the dispatch path the real
+        // run uses (LlmClient::complete) with one tool defined and a
+        // prompt asking the model to call it. Fail-closed: a model that
+        // cannot return a structured tool_call here would produce zero
+        // staged findings, so bail before any audit work begins.
+        let probe_record = super::lyrik_preflight::ProbeRecord {
+            log: &*session_log,
+            handle: &run_handle,
+            agent_id: agent_id.clone(),
+            credential_id: api_key_credential.clone(),
+            leak_matcher: &leak_matcher,
+        };
         match super::lyrik_preflight::probe_tool_calling(
-            walk_cfg,
+            &llm_config,
             api_key.as_deref(),
-            plan_source.as_ref(),
+            plan_source.token.as_ref(),
             Some(&probe_record),
         )
         .await
@@ -1621,23 +1605,26 @@ async fn dispatch_via_agent_runtime(
             Ok(super::lyrik_preflight::ProbeOutcome::Pass) => {
                 audit.emit(
                     "lyrik.model.tool_calls_supported",
-                    serde_json::json!({ "provider": walk_cfg.provider, "model": walk_cfg.model }),
+                    serde_json::json!({
+                        "provider": pin.provider,
+                        "model": pin.model,
+                    }),
                 )?;
             }
             Ok(super::lyrik_preflight::ProbeOutcome::Fail { case, detail }) => {
                 audit.emit(
                     "lyrik.model.tool_calls_unsupported",
                     serde_json::json!({
-                        "provider": walk_cfg.provider,
-                        "model": walk_cfg.model,
+                        "provider": pin.provider,
+                        "model": pin.model,
                         "case": case.as_str(),
                         "detail": detail,
                     }),
                 )?;
                 anyhow::bail!(
-                    "preflight: per-walk model {} (provider {}) cannot emit tool calls (case: {}); aborting before any audit work",
-                    walk_cfg.model,
-                    walk_cfg.provider,
+                    "preflight: model {} (provider {}) cannot emit tool calls (case: {}); aborting before any audit work",
+                    pin.model,
+                    pin.provider,
                     case.as_str(),
                 );
             }
@@ -1645,13 +1632,66 @@ async fn dispatch_via_agent_runtime(
                 audit.emit(
                     "lyrik.model.tool_calls_unsupported",
                     serde_json::json!({
-                        "provider": walk_cfg.provider,
-                        "model": walk_cfg.model,
+                        "provider": pin.provider,
+                        "model": pin.model,
                         "case": "preflight_error",
                         "detail": e.to_string(),
                     }),
                 )?;
-                return Err(e.context("preflight tool-call probe for a per-walk model"));
+                return Err(e.context("preflight tool-call probe"));
+            }
+        }
+        // Each distinct per-walk override model is probed too, fail-closed:
+        // a walk pinned to a model that cannot emit tool calls would stage
+        // nothing, so abort before any audit work rather than mid-run.
+        let mut probed_models = std::collections::HashSet::from([llm_config.model.clone()]);
+        for walk_cfg in walk_configs.values() {
+            if !probed_models.insert(walk_cfg.model.clone()) {
+                continue;
+            }
+            match super::lyrik_preflight::probe_tool_calling(
+                walk_cfg,
+                api_key.as_deref(),
+                plan_source.token.as_ref(),
+                Some(&probe_record),
+            )
+            .await
+            {
+                Ok(super::lyrik_preflight::ProbeOutcome::Pass) => {
+                    audit.emit(
+                        "lyrik.model.tool_calls_supported",
+                        serde_json::json!({ "provider": walk_cfg.provider, "model": walk_cfg.model }),
+                    )?;
+                }
+                Ok(super::lyrik_preflight::ProbeOutcome::Fail { case, detail }) => {
+                    audit.emit(
+                        "lyrik.model.tool_calls_unsupported",
+                        serde_json::json!({
+                            "provider": walk_cfg.provider,
+                            "model": walk_cfg.model,
+                            "case": case.as_str(),
+                            "detail": detail,
+                        }),
+                    )?;
+                    anyhow::bail!(
+                        "preflight: per-walk model {} (provider {}) cannot emit tool calls (case: {}); aborting before any audit work",
+                        walk_cfg.model,
+                        walk_cfg.provider,
+                        case.as_str(),
+                    );
+                }
+                Err(e) => {
+                    audit.emit(
+                        "lyrik.model.tool_calls_unsupported",
+                        serde_json::json!({
+                            "provider": walk_cfg.provider,
+                            "model": walk_cfg.model,
+                            "case": "preflight_error",
+                            "detail": e.to_string(),
+                        }),
+                    )?;
+                    return Err(e.context("preflight tool-call probe for a per-walk model"));
+                }
             }
         }
     }
@@ -2499,9 +2539,9 @@ async fn dispatch_via_agent_runtime(
         "ceiling_model_calls": run_bounds.model_calls,
         "stopped_at_ceiling": stopped_at_ceiling,
         "ceiling_reached": stopped_at,
-        "priced": pin.plan_entry.is_none()
-            && wirken_audit::pricing::is_priced(&pin.provider, &pin.model),
+        "priced": !pin.on_plan() && wirken_audit::pricing::is_priced(&pin.provider, &pin.model),
         "plan_sign_in": pin.plan_entry,
+        "plan_child": pin.plan_child,
         "cache_warning": warning,
     });
     audit.emit("lyrik.cost.summary", cost.clone())?;
@@ -2509,7 +2549,7 @@ async fn dispatch_via_agent_runtime(
         &spend,
         &run_bounds,
         stopped_at,
-        pin.plan_entry.as_deref(),
+        pin.plan_phrase().as_deref(),
         warning.as_ref(),
     ) {
         println!("{line}");
@@ -4796,6 +4836,13 @@ async fn dispatch_walks_concurrent(
             WalkStatus::StoppedAtCeiling => Some(STOPPED_AT_CEILING.to_string()),
             WalkStatus::TransientFailure { reason } => Some(reason.clone()),
         };
+        // A child that was refused, or reported another model, is why
+        // the walk failed; say it where the run is read.
+        if plan_source.child.is_some()
+            && let WalkStatus::TransientFailure { reason } = &outcome.status
+        {
+            eprintln!("wirken lyrik: walk {name} failed: {}", one_line(reason));
+        }
         audit.emit(
             "lyrik.walk.completed",
             serde_json::json!({
@@ -6129,15 +6176,48 @@ struct PhasePin {
     /// says `"auth": "plan"`. Then there is no API key: every model
     /// call takes its bearer from this entry.
     plan_entry: Option<String>,
+    /// Set when the pin is the `anthropic` provider with `"auth":
+    /// "plan"`: every turn of the run is run by a child process of the
+    /// agent binary the operator names in `lyrik.json`, signed in by
+    /// the operator, with this process's tools and no other. There is
+    /// no API key and no vault entry.
+    plan_child: bool,
 }
 
-/// The token source of a run on a plan sign-in; `None` on a key.
-type PlanSource = Option<Arc<wirken_agent::plan_auth::PlanTokenSource>>;
+impl PhasePin {
+    /// Whether the run's calls are on a plan and record no cost.
+    fn on_plan(&self) -> bool {
+        self.plan_entry.is_some() || self.plan_child
+    }
 
-/// Put an agent of a run on the run's plan sign-in, when it has one.
+    /// The plan the run is on, as the banner and the summary name it.
+    fn plan_phrase(&self) -> Option<String> {
+        match &self.plan_entry {
+            Some(entry) => Some(format!("the plan sign-in '{entry}'")),
+            None if self.plan_child => {
+                Some("the plan the child process is signed in to".to_string())
+            }
+            None => None,
+        }
+    }
+}
+
+/// What puts a run's agents on a plan: the token source of a plan
+/// sign-in, or the child process that runs their turns. Neither on a
+/// key.
+#[derive(Clone, Default)]
+struct PlanSource {
+    token: Option<Arc<wirken_agent::plan_auth::PlanTokenSource>>,
+    child: Option<wirken_agent::runtime::PlanChild>,
+}
+
+/// Put an agent of a run on the run's plan, when it has one.
 fn attach_plan(agent: &mut Agent, plan_source: &PlanSource) {
-    if let Some(source) = plan_source {
+    if let Some(source) = &plan_source.token {
         agent.set_plan_token_source(source.clone());
+    }
+    if let Some(child) = &plan_source.child {
+        agent.set_plan_child(child.clone());
     }
 }
 
@@ -6201,6 +6281,9 @@ fn pin_llm_config(pin: &PhasePin) -> LlmConfig {
         Some(_) => LlmConfig::plan(&pin.model),
         None => LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model),
     };
+    if pin.plan_child {
+        llm_config.auth = wirken_gateway::agent_config::ProviderAuth::Plan;
+    }
     if let Some(cw) = pin.context_window {
         llm_config.context_window = cw as usize;
     }
@@ -6252,10 +6335,29 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
     // `"auth": "plan"` puts the run on a plan sign-in, as it does an
     // agent in `provider.json`: one provider, a fixed endpoint, and a
     // vault entry in place of an API key.
-    let plan_entry = super::plan_sign_in::auth_of(pin_obj, "phase pin")?
-        .is_plan()
-        .then(|| super::plan_sign_in::provider_plan_entry(pin_obj));
-    let base_url = if plan_entry.is_some() {
+    let plan_child = provider == PLAN_CHILD_PROVIDER
+        && pin_obj.get("auth").and_then(|v| v.as_str()) == Some("plan");
+    if plan_child {
+        for key in ["base_url", "credential"] {
+            if pin_obj.get(key).is_some() {
+                anyhow::bail!(
+                    "phase pin: `{key}` does not apply to provider `{provider}` with auth \
+                     'plan': the run's turns are run by the operator's own signed-in agent \
+                     binary, which Wirken gives no endpoint and no credential"
+                );
+            }
+        }
+    }
+    let plan_entry = if plan_child {
+        None
+    } else {
+        super::plan_sign_in::auth_of(pin_obj, "phase pin")?
+            .is_plan()
+            .then(|| super::plan_sign_in::provider_plan_entry(pin_obj))
+    };
+    let base_url = if plan_child {
+        wirken_agent::runtime::PLAN_CHILD_BASE_URL.to_string()
+    } else if plan_entry.is_some() {
         wirken_agent::plan_auth::API_BASE.to_string()
     } else {
         pin_obj
@@ -6283,12 +6385,104 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
         context_window,
         max_tokens,
         plan_entry,
+        plan_child,
     })
+}
+
+/// The provider whose `"auth": "plan"` is the child route.
+const PLAN_CHILD_PROVIDER: &str = "anthropic";
+
+/// The child a run on the child route starts for each turn: the agent
+/// binary the operator's `lyrik.json` names, and this binary as the
+/// bridge to the run's tool server.
+fn plan_child_of(data_dir: &Path) -> Result<wirken_agent::runtime::PlanChild> {
+    let settings = super::lyrik_walks::operator_settings_path(data_dir);
+    let Some(binary) = super::lyrik_walks::load_operator_settings(data_dir)?.plan_child_binary
+    else {
+        anyhow::bail!(
+            "this run is pinned to provider `{PLAN_CHILD_PROVIDER}` with auth 'plan', which \
+             runs each turn as a child process of your own installed, signed-in agent binary. \
+             Name that binary as `plan_child_binary` in {}",
+            settings.display()
+        );
+    };
+    let binary = PathBuf::from(binary);
+    if !binary.is_absolute() {
+        anyhow::bail!(
+            "`plan_child_binary` in {} must be an absolute path, not `{}`",
+            settings.display(),
+            binary.display()
+        );
+    }
+    let this = std::env::current_exe().context("find this binary, for the tool bridge")?;
+    Ok(wirken_agent::runtime::PlanChild {
+        binary,
+        bridge: vec![
+            this.display().to_string(),
+            "lyrik".to_string(),
+            "tool-bridge".to_string(),
+        ],
+    })
+}
+
+/// What the child binary says its version is. The run does not start
+/// on a binary that cannot be run.
+async fn plan_child_version(child: &wirken_agent::runtime::PlanChild) -> Result<String> {
+    let out = tokio::process::Command::new(&child.binary)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("run {} --version", child.binary.display()))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "{} --version exited with {}",
+            child.binary.display(),
+            out.status
+        );
+    }
+    Ok(one_line(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// Join standard input and output to the Unix socket at `socket`: what
+/// a child process starts as its tool server, which is the run's own.
+pub fn tool_bridge(socket: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let stream = std::os::unix::net::UnixStream::connect(socket)
+            .with_context(|| format!("connect to {}", socket.display()))?;
+        let mut to_socket = stream.try_clone().context("clone the socket")?;
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = stdin.read(&mut buf) {
+                if n == 0 || to_socket.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+            let _ = to_socket.shutdown(std::net::Shutdown::Both);
+        });
+        let mut from_socket = stream;
+        let mut stdout = std::io::stdout().lock();
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = from_socket.read(&mut buf) {
+            if n == 0 || stdout.write_all(&buf[..n]).is_err() || stdout.flush().is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        anyhow::bail!("the tool bridge needs Unix sockets")
+    }
 }
 
 /// Refuse a run on a plan sign-in that no ceiling would stop.
 fn refuse_unbounded_plan_run(pin: &PhasePin, data_dir: &Path) -> Result<()> {
-    if pin.plan_entry.is_none() {
+    if !pin.on_plan() {
         return Ok(());
     }
     let bounds = super::lyrik_walks::load_operator_settings(data_dir)?.run_bounds();
@@ -6654,7 +6848,7 @@ mod tests {
         }
 
         let other = pin_of(serde_json::json!({
-            "provider": "anthropic", "auth": "plan", "model": "m"
+            "provider": "gemini", "auth": "plan", "model": "m"
         }))
         .unwrap_err()
         .to_string();
@@ -6673,6 +6867,67 @@ mod tests {
             pin_of(serde_json::json!({ "provider": "openai", "auth": "token", "model": "m" }))
                 .is_err()
         );
+    }
+
+    /// The `anthropic` provider with `"auth": "plan"` is the child
+    /// route: no vault entry, no endpoint, a config no model call can
+    /// be sent on from here, and the operator's `lyrik.json` naming the
+    /// binary. A pin that gives it an endpoint or a credential is
+    /// refused, and so is a run whose operator named no binary.
+    #[test]
+    fn an_anthropic_plan_pin_is_the_child_route() {
+        let pin_of = |pin: serde_json::Value| {
+            super::resolve_phase_pin(&serde_json::json!({ "phases": { "framing": pin } }))
+        };
+        let pin = pin_of(serde_json::json!({
+            "provider": "anthropic", "auth": "plan", "model": "pinned-1"
+        }))
+        .unwrap();
+        assert!(pin.plan_child && pin.on_plan());
+        assert_eq!(pin.plan_entry, None);
+        assert_eq!(pin.base_url, wirken_agent::runtime::PLAN_CHILD_BASE_URL);
+        let config = super::pin_llm_config(&pin);
+        assert!(config.auth.is_plan());
+        assert_eq!(
+            (config.provider.as_str(), config.model.as_str()),
+            ("anthropic", "pinned-1")
+        );
+        assert_eq!(
+            pin.plan_phrase().as_deref(),
+            Some("the plan the child process is signed in to")
+        );
+
+        // The same provider on a key is not the child route.
+        let key =
+            pin_of(serde_json::json!({ "provider": "anthropic", "model": "pinned-1" })).unwrap();
+        assert!(!key.plan_child && !key.on_plan());
+
+        for extra in ["base_url", "credential"] {
+            let mut obj =
+                serde_json::json!({ "provider": "anthropic", "auth": "plan", "model": "m" });
+            obj[extra] = "x".into();
+            let err = pin_of(obj).unwrap_err().to_string();
+            assert!(err.contains(&format!("`{extra}` does not apply")), "{err}");
+        }
+
+        let data = tempfile::tempdir().unwrap();
+        let err = super::plan_child_of(data.path()).unwrap_err().to_string();
+        assert!(err.contains("`plan_child_binary`"), "{err}");
+        std::fs::write(
+            data.path().join("lyrik.json"),
+            r#"{ "plan_child_binary": "agent" }"#,
+        )
+        .unwrap();
+        let err = super::plan_child_of(data.path()).unwrap_err().to_string();
+        assert!(err.contains("must be an absolute path"), "{err}");
+        std::fs::write(
+            data.path().join("lyrik.json"),
+            r#"{ "plan_child_binary": "/opt/agent" }"#,
+        )
+        .unwrap();
+        let child = super::plan_child_of(data.path()).unwrap();
+        assert_eq!(child.binary, std::path::Path::new("/opt/agent"));
+        assert_eq!(child.bridge[1..], ["lyrik", "tool-bridge"]);
     }
 
     /// A per-walk model override on a plan run changes the model and
@@ -7571,6 +7826,7 @@ mod tests {
             context_window: None,
             max_tokens: None,
             plan_entry: None,
+            plan_child: false,
         };
         let walks = vec!["sink-walk".to_string(), "chain-walk".to_string()];
         let summary = super::signoff_summary(
@@ -7636,6 +7892,7 @@ mod tests {
             context_window: None,
             max_tokens: None,
             plan_entry: None,
+            plan_child: false,
         };
         let walks = vec!["sink-walk".to_string()];
         let summary = |limits| {
@@ -7727,6 +7984,7 @@ mod tests {
             context_window: None,
             max_tokens: None,
             plan_entry: None,
+            plan_child: false,
         };
         let walks = vec!["sink-walk".to_string()];
         let summary = super::signoff_summary(

@@ -79,6 +79,12 @@ pub struct OperatorSettings {
     /// the run stops. It holds for a run on a plan sign-in. Absent or
     /// zero, there is no such ceiling.
     pub run_ceiling_model_calls: Option<u64>,
+    /// The absolute path of the agent binary a run pinned to the
+    /// `anthropic` provider with auth `plan` starts for each turn. The
+    /// operator installs it and signs in to it; Wirken holds no
+    /// credential for it. A target's `.lyrik/config.json` does not set
+    /// this.
+    pub plan_child_binary: Option<String>,
     /// Tool rounds a walk's turn gets: the model calls it may make
     /// before it is stopped. Absent or zero,
     /// [`wirken_agent::runtime::MAX_TOOL_ROUNDS`]. A target's

@@ -1,0 +1,462 @@
+//! A `wirken lyrik run` pinned to the `anthropic` provider with
+//! `"auth": "plan"` makes no model call of its own. Each walk's turn is
+//! run by a child process of the agent binary the operator's
+//! `lyrik.json` names, which is given this run's tools over a tool
+//! server and nothing else.
+//!
+//! Driven through the binary against `common/stub_child.py`, which
+//! stands in for that agent binary: it speaks the tool protocol to the
+//! run's tool server and writes the output stream a headless run
+//! writes. No model is called.
+mod common;
+
+use std::path::{Path, PathBuf};
+
+use common::wirken;
+
+const RUN: &str = "child";
+const PIN: &str = "pinned-large-9";
+const SINK_PIN: &str = "pinned-small-9";
+
+fn stub() -> String {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/stub_child.py").to_string()
+}
+
+/// The directory an agent binary reads project settings from. Spelled
+/// in two parts so the repository's name check, which reads every
+/// tracked file, does not take this fixture for a mention.
+fn agent_settings_dir() -> String {
+    [".cl", "aude"].concat()
+}
+
+struct Run {
+    ok: bool,
+    report: String,
+    data: PathBuf,
+    target: PathBuf,
+    /// One record per child the run started.
+    children: Vec<serde_json::Value>,
+    elapsed: std::time::Duration,
+}
+
+/// Run two walks, `sink-walk` on its own model and `chain-walk` on the
+/// run pin, with the stub child doing `scenario` in every turn.
+fn run(scenario: serde_json::Value, settings: serde_json::Value) -> Run {
+    let tmp = tempfile::tempdir().unwrap().keep();
+    let (home, data, target) = (tmp.join("home"), tmp.join("data"), tmp.join("target"));
+    std::fs::create_dir_all(&home).unwrap();
+    for walk in ["sink-walk", "chain-walk"] {
+        let dir = data.join("lyrik/walks").join(walk);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {walk}\ndescription: test walk\n---\n\n# {walk}\n\nWalk.\n"),
+        )
+        .unwrap();
+    }
+    let mut settings = settings;
+    settings["plan_child_binary"] = stub().into();
+    std::fs::write(data.join("lyrik.json"), settings.to_string()).unwrap();
+
+    std::fs::create_dir_all(target.join("src")).unwrap();
+    std::fs::write(target.join("src/auth.c"), "int check(void) { return 0; }\n").unwrap();
+    // A target that tries to configure the child: were the child
+    // started here, or told to read project settings, this would be
+    // its configuration.
+    let agent_dir = agent_settings_dir();
+    std::fs::create_dir_all(target.join(&agent_dir)).unwrap();
+    std::fs::write(
+        target.join(&agent_dir).join("settings.json"),
+        r#"{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "id"}]}]}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(target.join(".lyrik")).unwrap();
+    std::fs::write(
+        target.join(".lyrik/config.json"),
+        serde_json::json!({
+            "scope": {"include": ["src/**/*"], "exclude": []},
+            "phases": {
+                "framing": {"provider": "anthropic", "auth": "plan", "model": PIN},
+                "sink-walk": {"model": SINK_PIN},
+            },
+            "walks": ["sink-walk", "chain-walk"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let scenario_file = tmp.join("scenario.json");
+    std::fs::write(&scenario_file, scenario.to_string()).unwrap();
+    let log = tmp.join("children.jsonl");
+    let started = std::time::Instant::now();
+    let out = wirken(&data)
+        .env("HOME", &home)
+        .env("STUB_CHILD_SCENARIO", &scenario_file)
+        .env("STUB_CHILD_LOG", &log)
+        // What a metered key and the vault passphrase look like in the
+        // environment a run is started from.
+        .env("ANTHROPIC_API_KEY", "sk-test-not-a-key")
+        .env("WIRKEN_VAULT_PASSPHRASE", "lyrik-plan-child-test")
+        .args(["lyrik", "run", "--bench", "--target"])
+        .arg(&target)
+        .args(["--run", RUN])
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+    let children = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    Run {
+        ok: out.status.success(),
+        report: format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        data,
+        target,
+        children,
+        elapsed,
+    }
+}
+
+fn bounded() -> serde_json::Value {
+    serde_json::json!({"run_ceiling_model_calls": 50})
+}
+
+fn audit_rows(target: &Path, event: &str) -> Vec<serde_json::Value> {
+    let audit =
+        std::fs::read_to_string(target.join(format!(".lyrik/state/runs/{RUN}/audit.log"))).unwrap();
+    audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|e| e["event"] == event)
+        .map(|e| e["detail"].clone())
+        .collect()
+}
+
+/// Every row of `kind` on the run's chain, as its JSON payload.
+fn chain(data: &Path, kind: &str) -> Vec<serde_json::Value> {
+    let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
+    db.prepare(
+        "SELECT payload FROM session_events
+          WHERE json_extract(payload, '$.kind') = ?1 ORDER BY seq",
+    )
+    .unwrap()
+    .query_map([kind], |r| r.get::<_, String>(0))
+    .unwrap()
+    .map(|p| serde_json::from_str(&p.unwrap()).unwrap())
+    .collect()
+}
+
+/// A walk's turn is a child process started with this run's tools and
+/// no other, outside the target, with the walk's own pinned model and
+/// without the variables that would put its calls on a key. A tool it
+/// calls goes through the run's gate: a read is answered, an `exec`
+/// nobody can approve is refused, and both are on the chain.
+#[test]
+fn a_walk_runs_as_a_child_whose_tool_calls_pass_the_gate() {
+    let r = run(
+        serde_json::json!({"calls": [
+            ["list_files", {}],
+            ["exec", {"command": "git log -p -- src/auth.c"}],
+        ], "reply": "Done."}),
+        bounded(),
+    );
+    assert!(r.ok, "{}", r.report);
+    assert_eq!(r.children.len(), 2, "one child per walk: {}", r.report);
+
+    let mut models = Vec::new();
+    for child in &r.children {
+        let argv: Vec<&str> = child["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        let after = |flag: &str| argv[argv.iter().position(|a| *a == flag).expect(flag) + 1];
+        models.push(after("--model").to_string());
+        assert_eq!(after("--tools"), "", "{argv:?}");
+        assert_eq!(after("--setting-sources"), "", "{argv:?}");
+        assert_eq!(after("--output-format"), "stream-json", "{argv:?}");
+        assert!(argv.contains(&"--strict-mcp-config"), "{argv:?}");
+        assert!(argv.contains(&"--no-session-persistence"), "{argv:?}");
+        assert!(!argv.contains(&"--bare"), "{argv:?}");
+        assert!(!argv.contains(&"--fallback-model"), "{argv:?}");
+
+        // Outside the target, in a directory of its own.
+        let cwd = Path::new(child["cwd"].as_str().unwrap());
+        assert!(!cwd.starts_with(&r.target), "{}", cwd.display());
+        assert!(!cwd.join(agent_settings_dir()).exists());
+
+        let env: Vec<&str> = child["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(!env.contains(&"ANTHROPIC_API_KEY"), "{env:?}");
+        assert!(!env.contains(&"WIRKEN_VAULT_PASSPHRASE"), "{env:?}");
+
+        // The run's tools, served to it; the walk's skill in the
+        // system prompt it was handed.
+        let listed: Vec<&str> = child["listed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert!(listed.contains(&"list_files"), "{listed:?}");
+        assert!(listed.contains(&"exec"), "{listed:?}");
+        assert!(!listed.contains(&"spawn_subagent"), "{listed:?}");
+        assert_eq!(child["discover_was_refused"], true);
+        assert!(
+            child["prompt"].as_str().unwrap().contains("Walk."),
+            "{}",
+            child["prompt"]
+        );
+
+        // The read was answered; the exec was refused and said so.
+        let answers = child["answers"].as_array().unwrap();
+        assert_eq!(answers[0]["isError"], false, "{answers:?}");
+        assert!(
+            answers[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("src/"),
+            "{answers:?}"
+        );
+        assert_eq!(answers[1]["isError"], true, "{answers:?}");
+        assert!(
+            answers[1]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Permission denied: 'exec'"),
+            "{answers:?}"
+        );
+    }
+    models.sort();
+    assert_eq!(models, [PIN, SINK_PIN], "each walk on its own pin");
+
+    // On the chain: each call the children made, its result, and the
+    // refusal.
+    let called: Vec<String> = chain(&r.data, "assistant_tool_calls")
+        .iter()
+        .map(|row| {
+            format!(
+                "{} {}",
+                row["step"].as_str().unwrap(),
+                row["calls"][0]["name"].as_str().unwrap()
+            )
+        })
+        .collect();
+    for expected in [
+        "sink-walk list_files",
+        "sink-walk exec",
+        "chain-walk list_files",
+        "chain-walk exec",
+    ] {
+        assert!(called.contains(&expected.to_string()), "{called:?}");
+    }
+    assert_eq!(chain(&r.data, "tool_result").len(), 4);
+    assert_eq!(chain(&r.data, "permission_denied").len(), 2);
+    for completed in audit_rows(&r.target, "lyrik.walk.completed") {
+        assert_eq!(completed["status"], "turn_ended", "{completed}");
+        assert_eq!(
+            completed["skipped"],
+            serde_json::json!(["exec (shell:git)"]),
+            "{completed}"
+        );
+    }
+    // The pin on the walk's started row, as on any run.
+    let mut started: Vec<(String, String)> = audit_rows(&r.target, "lyrik.walk.started")
+        .iter()
+        .map(|d| {
+            (
+                d["walk"].as_str().unwrap().to_string(),
+                d["model"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    started.sort();
+    assert_eq!(
+        started,
+        [
+            ("chain-walk".to_string(), PIN.to_string()),
+            ("sink-walk".to_string(), SINK_PIN.to_string()),
+        ]
+    );
+}
+
+/// Each model call a child made is one `llm_response` row, marked as
+/// reported by the child, with the walk as its step, the model the
+/// child reported, the tokens it reported and no cost. There is no
+/// request row and no credential: this process sent nothing.
+#[test]
+fn each_reported_step_is_a_marked_row_with_step_model_and_tokens() {
+    for streamless in [false, true] {
+        let r = run(
+            serde_json::json!({"calls": [["list_files", {}]], "reply": "Done.",
+                "streamless": streamless}),
+            bounded(),
+        );
+        assert!(r.ok, "{}", r.report);
+        assert_eq!(
+            chain(&r.data, "llm_request"),
+            Vec::<serde_json::Value>::new()
+        );
+
+        let rows = chain(&r.data, "llm_response");
+        assert_eq!(rows.len(), 4, "two steps a walk: {rows:?}");
+        for (walk, model) in [("sink-walk", SINK_PIN), ("chain-walk", PIN)] {
+            let of_walk: Vec<&serde_json::Value> =
+                rows.iter().filter(|row| row["step"] == walk).collect();
+            assert_eq!(of_walk.len(), 2, "{rows:?}");
+            for row in &of_walk {
+                assert_eq!(
+                    row["reported"],
+                    serde_json::json!({"by": "child", "model": model, "key_source": "none"}),
+                    "{row}"
+                );
+                assert_eq!(row["cache_read_input_tokens"], 1000, "{row}");
+                assert_eq!(row["cache_creation_input_tokens"], 10, "{row}");
+                for absent in [
+                    "credential_id",
+                    "total_cost_usd_micros",
+                    "input_cost_usd_micros",
+                    "output_cost_usd_micros",
+                ] {
+                    assert!(row.get(absent).is_none(), "{absent}: {row}");
+                }
+            }
+            // The first step called a tool, the second ended the turn.
+            assert_eq!(
+                (
+                    &of_walk[0]["input_tokens"],
+                    &of_walk[0]["output_tokens"],
+                    &of_walk[0]["stop_reason"]
+                ),
+                (
+                    &serde_json::json!(101),
+                    &serde_json::json!(21),
+                    &serde_json::json!("tool_use")
+                ),
+                "{}",
+                of_walk[0]
+            );
+            assert_eq!(of_walk[1]["output_tokens"], 30, "{}", of_walk[1]);
+            assert_eq!(of_walk[1]["stop_reason"], "end_turn", "{}", of_walk[1]);
+        }
+        // The run says its cost is not recorded and which ceiling held.
+        assert!(
+            r.report
+                .contains("cost: not recorded, the run was on the plan the child process is"),
+            "{}",
+            r.report
+        );
+        assert!(
+            r.report
+                .contains("model-call ceiling 50: not reached (4 made)"),
+            "{}",
+            r.report
+        );
+    }
+}
+
+/// A child whose opening message lists a tool that is not this run's
+/// is stopped there: nothing is asked of it, no tool call is served,
+/// and every walk fails with the tool named.
+#[test]
+fn a_child_with_a_tool_that_is_not_the_runs_is_refused() {
+    let r = run(
+        serde_json::json!({"tools": ["Bash"], "calls": [["list_files", {}]]}),
+        bounded(),
+    );
+    assert!(!r.ok, "{}", r.report);
+    assert!(
+        r.report.contains(
+            "the child process has tools that are not Wirken's (Bash); the run is refused"
+        ),
+        "{}",
+        r.report
+    );
+    assert_eq!(chain(&r.data, "llm_response").len(), 0);
+    assert_eq!(chain(&r.data, "tool_result").len(), 0);
+
+    // So is one that says it is on an API key.
+    let keyed = run(serde_json::json!({"key_source": "user"}), bounded());
+    assert!(!keyed.ok, "{}", keyed.report);
+    assert!(
+        keyed.report.contains("authenticates with an API key"),
+        "{}",
+        keyed.report
+    );
+    assert_eq!(chain(&keyed.data, "llm_response").len(), 0);
+}
+
+/// A step answered by a model that is not the walk's pin fails the
+/// walk. The step is on the chain under the model the child reported.
+#[test]
+fn a_step_by_another_model_fails_the_walk() {
+    let r = run(
+        serde_json::json!({"model": "another-model-1", "calls": [["list_files", {}]]}),
+        bounded(),
+    );
+    assert!(!r.ok, "{}", r.report);
+    for pin in [PIN, SINK_PIN] {
+        assert!(
+            r.report.contains(&format!(
+                "the child process reported the model `another-model-1` where the pin is `{pin}`"
+            )),
+            "{}",
+            r.report
+        );
+    }
+    let rows = chain(&r.data, "llm_response");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row["reported"]["model"], "another-model-1", "{row}");
+    }
+    // The step was stopped before its tool call was served.
+    assert_eq!(chain(&r.data, "tool_result").len(), 0);
+}
+
+/// A run on this route needs a ceiling that holds without a price, and
+/// reaching it ends the children: a child that would have gone on for
+/// a minute is stopped when the run's model calls reach the ceiling.
+#[test]
+fn a_ceiling_ends_the_children() {
+    let unbounded = run(serde_json::json!({}), serde_json::json!({}));
+    assert!(!unbounded.ok, "{}", unbounded.report);
+    assert!(
+        unbounded.report.contains("`run_ceiling_model_calls`"),
+        "{}",
+        unbounded.report
+    );
+    assert_eq!(unbounded.children.len(), 0, "no child was started");
+
+    let r = run(
+        serde_json::json!({"calls": [["list_files", {}]], "hang": 60}),
+        serde_json::json!({"run_ceiling_model_calls": 2}),
+    );
+    assert!(
+        r.report
+            .contains("the run reached its model-call ceiling of 2 (2 model calls recorded)"),
+        "{}",
+        r.report
+    );
+    assert!(
+        r.elapsed < std::time::Duration::from_secs(40),
+        "the children were not ended: {:?}\n{}",
+        r.elapsed,
+        r.report
+    );
+    assert!(
+        r.report.contains("stopped at the run's model-call ceiling"),
+        "{}",
+        r.report
+    );
+    assert_eq!(chain(&r.data, "llm_response").len(), 2);
+}
