@@ -507,11 +507,19 @@ not pay for it again. The ledger is the list of what earlier runs established
 about the target, kept in the target under `.lyrik/ledger/`, one small JSON
 file per claim.
 
-It records two strengths of knowledge and treats them differently:
+It records three strengths of knowledge and treats them differently:
 
-- **Observed**: a command was run and showed it. While the file the claim is
-  about has not changed, an observed claim is settled. A walk that sets out to
-  check it again is told no, and pointed at the record.
+- **Observed**: code the claim is about ran, and the run is on record. For a
+  finding or a replay rejection that means the runner's own trace of the
+  reproduction shows a line of the cited function executing
+  ([execution evidence](lyrik-brocards.md#execution-evidence)); for a fix arm,
+  that the patch's check ran. While the file the claim is about has not
+  changed, an observed claim is settled. A walk that sets out to check it
+  again is told no, and pointed at the record.
+- **Static confirmed**: a check of the claim ran and agreed, and nothing shows
+  the code ran: a harness that read or parsed the source and printed the
+  marker, a harness the tracer cannot follow. It settles nothing and is not
+  carried.
 - **Reasoned**: read from the source, nothing run. This is a lead. A walk is
   shown it and may check it properly.
 
@@ -547,7 +555,7 @@ test target kept outside this repository):
 | `file`, `line` | where, relative to the target's root |
 | `commit` | the revision it was established at, when the target is a git checkout |
 | `file_sha256` | SHA-256 of the file's content when it was established |
-| `evidence` | `observed` or `reasoned` |
+| `evidence` | `observed`, `static_confirmed` or `reasoned` |
 | `run` | the run that produced it; its `findings.json` and audit log hold the detail |
 | `tier` | on a finding, the severity tier the run gave it |
 | `stale` | present and true when the file's content has changed since |
@@ -556,10 +564,18 @@ A record names no model, provider, walk or harness. It is a statement about
 the target.
 
 After a run the runner writes one record per kept finding (`observed` when a
-reproduction ran and its replay agreed, else `reasoned`), one per rejection
-(`observed` for a replay rejection, rule 8, else `reasoned`), and one per fix
-arm that passed or failed on an executed run. A reasoned record never replaces
-an observed one whose file is unchanged. After run `ledger-c` the same target
+reproduction was agreed and its trace shows cited code ran, `static_confirmed`
+when one was agreed without that, else `reasoned`), one per rejection (a replay
+rejection, rule 8, is `observed` when its trace shows cited code ran and
+`static_confirmed` otherwise; any other is `reasoned`), and one per fix
+arm that passed or failed on an executed run. A finding or rejection record
+written as `observed` carries `traced`; one stored without it, by a build that
+took no traces, is rewritten as `static_confirmed` when the ledger is read. A
+reasoned record never replaces
+an observed one whose file is unchanged. The example that follows is of a shell
+target, recorded before traces were taken: its finding record would now be
+`static_confirmed`, and would not be settled or carried. After run `ledger-c`
+the same target
 held the finding and three arm results:
 
 ```
@@ -1594,7 +1610,10 @@ change them:
   record whose `check` names a command also carries `check_status`.
 - `reproductions`, a top-level array, one entry per reproduction record a
   walk wrote, with the fresh-context replay beside it when one ran: `walk`,
-  `file`, the record's fields, `replay` and `agreement`. See
+  `file`, the record's fields, `replay`, `agreement`, and for a reproduction
+  that was agreed or disagreed `evidence` (`observed` or `static_confirmed`)
+  with the runner's traced run as `execution`. Each finding carries `evidence`
+  too: `observed`, `static_confirmed` or `reasoned`. See
   [lyrik-brocards.md](lyrik-brocards.md#reproductions-and-replay).
 - `fixes`, a top-level array present after a defender-mode run with at least
   one confirmed finding, one record per finding: `stable_id`, `dir`,

@@ -26,8 +26,13 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Evidence {
-    /// A command was run and its result is on record.
+    /// Code the claim is about ran, and the run is on record: the
+    /// runner traced a reproduction into the cited code, or ran a
+    /// patch's check.
     Observed,
+    /// A check of the claim ran and agreed, and nothing shows the code
+    /// it is about ran: a harness that read or parsed the source.
+    StaticConfirmed,
     /// Read from the source; nothing was run.
     Reasoned,
 }
@@ -79,6 +84,12 @@ pub struct Record {
     /// was established against.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
+    /// Set on a finding or rejection whose `observed` rests on the
+    /// runner's trace of cited code running. A stored one without it
+    /// was written before traces were taken, and is rewritten as
+    /// `static_confirmed` when the ledger is read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub traced: bool,
 }
 
 impl Record {
@@ -154,7 +165,15 @@ pub fn load(target: &Path) -> Result<Vec<Record>> {
             Some(was) => file_sha256(target, &record.file).as_ref() != Some(was),
             None => false,
         };
-        if stale != record.stale {
+        // An `observed` finding or rejection with no trace behind it
+        // was never shown to be more than a check that passed.
+        let untraced = record.evidence == Evidence::Observed
+            && !record.traced
+            && record.kind != Kind::ArmResult;
+        if untraced {
+            record.evidence = Evidence::StaticConfirmed;
+        }
+        if stale != record.stale || untraced {
             record.stale = stale;
             write_record(&dir, &record)?;
         }
@@ -240,12 +259,23 @@ pub fn records_from_run(
         .get("reproductions")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
-    let observed = |key: &str| {
-        reproductions.iter().any(|r| {
+    // What the reproductions of `key` are evidence of: `observed`
+    // where the runner's trace shows cited code ran, a check that
+    // agreed where one was reproduced without that, else nothing run.
+    let evidence_of = |key: &str, agreed: bool| {
+        let mut best = Evidence::Reasoned;
+        for r in reproductions.iter().filter(|r| {
             r.get("stable_id").and_then(Value::as_str) == Some(key)
-                && r.get("outcome").and_then(Value::as_str) == Some("reproduced")
-                && r.get("agreement").and_then(Value::as_bool) == Some(true)
-        })
+                && r.get("agreement").and_then(Value::as_bool) == Some(agreed)
+                && (!agreed || r.get("outcome").and_then(Value::as_str) == Some("reproduced"))
+        }) {
+            match r.get("evidence").and_then(Value::as_str) {
+                Some("observed") => return Evidence::Observed,
+                Some(_) => best = Evidence::StaticConfirmed,
+                None => {}
+            }
+        }
+        best
     };
     let record =
         |kind: Kind, key: String, claim: String, file: String, line: u64, ev: Evidence| Record {
@@ -261,6 +291,7 @@ pub fn records_from_run(
             run: run_id.to_string(),
             tier: None,
             stale: false,
+            traced: ev == Evidence::Observed && kind != Kind::ArmResult,
         };
     let mut out: Vec<Record> = Vec::new();
     let findings = body
@@ -281,11 +312,7 @@ pub fn records_from_run(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let ev = if observed(&key) {
-            Evidence::Observed
-        } else {
-            Evidence::Reasoned
-        };
+        let ev = evidence_of(&key, true);
         let mut made = record(Kind::Finding, key, claim, file, line, ev);
         made.tier = f.get("tier").and_then(Value::as_str).map(str::to_string);
         out.push(made);
@@ -296,8 +323,14 @@ pub fn records_from_run(
         };
         let title = r.get("title").and_then(Value::as_str).unwrap_or_default();
         let reason = r.get("reason").and_then(Value::as_str).unwrap_or_default();
+        // A replay that disagreed ran the command and saw otherwise.
+        // It observed that only where the runner's trace of it shows
+        // cited code ran; else it is a check that ran, and no more.
         let ev = if r.get("rule").and_then(Value::as_u64) == Some(8) {
-            Evidence::Observed
+            match evidence_of(&key, false) {
+                Evidence::Observed => Evidence::Observed,
+                _ => Evidence::StaticConfirmed,
+            }
         } else {
             Evidence::Reasoned
         };
@@ -784,7 +817,10 @@ mod tests {
                  "framing": ["injection"], "location": {"file": "src/a.rs", "line_start": 20}}
             ],
             "reproductions": [
-                {"stable_id": "auth::src/a.rs:10", "outcome": "reproduced", "agreement": true}
+                {"stable_id": "auth::src/a.rs:10", "outcome": "reproduced", "agreement": true,
+                 "evidence": "observed"},
+                {"stable_id": "auth::src/a.rs:40", "outcome": "reproduced", "agreement": false,
+                 "evidence": "observed"}
             ],
             "fixes": [
                 {"stable_id": "auth::src/a.rs:10", "arms": [
@@ -813,14 +849,16 @@ mod tests {
         let records = records_from_run(tmp.path(), &run_body(), &rejections(), "r1");
         let by_key = |k: &str| records.iter().find(|r| r.key == k).unwrap();
         assert_eq!(records.len(), 5);
-        // Reproduced and replayed: observed. Read only: reasoned.
+        // Reproduced, replayed and traced into the code: observed. Read
+        // only: reasoned.
         assert_eq!(by_key("auth::src/a.rs:10").evidence, Evidence::Observed);
         assert_eq!(by_key("auth::src/a.rs:10").kind, Kind::Finding);
         assert_eq!(
             by_key("injection::src/a.rs:20").evidence,
             Evidence::Reasoned
         );
-        // A judgment rejection is reasoned; a replay rejection is observed.
+        // A judgment rejection is reasoned; a replay rejection whose
+        // trace shows the code ran is observed.
         assert_eq!(by_key("auth::src/a.rs:30").evidence, Evidence::Reasoned);
         assert_eq!(by_key("auth::src/a.rs:40").evidence, Evidence::Observed);
         assert_eq!(by_key("auth::src/a.rs:40").kind, Kind::Rejection);
@@ -840,6 +878,84 @@ mod tests {
         assert_eq!(load(tmp.path()).unwrap().len(), 5);
         // Writing the same records again changes nothing.
         assert_eq!(upsert(tmp.path(), &records).unwrap(), 0);
+    }
+
+    /// A reproduction that agreed without a trace of cited code
+    /// running is a check that passed: the finding is
+    /// `static_confirmed`, and so is a replay rejection with no trace.
+    /// Neither settles its claim.
+    #[test]
+    fn an_agreed_reproduction_with_no_trace_is_static_confirmed_and_settles_nothing() {
+        let tmp = target_with("src/a.rs", "fn a() {}\n");
+        let mut body = run_body();
+        body["reproductions"] = json!([
+            {"stable_id": "auth::src/a.rs:10", "outcome": "reproduced", "agreement": true,
+             "evidence": "static_confirmed"},
+            {"stable_id": "auth::src/a.rs:40", "outcome": "reproduced", "agreement": false,
+             "evidence": "static_confirmed"},
+            // Written before evidence was recorded: no claim to it.
+            {"stable_id": "injection::src/a.rs:20", "outcome": "reproduced", "agreement": true}
+        ]);
+        let records = records_from_run(tmp.path(), &body, &rejections(), "r1");
+        let by_key = |k: &str| records.iter().find(|r| r.key == k).unwrap();
+        for key in ["auth::src/a.rs:10", "auth::src/a.rs:40"] {
+            assert_eq!(by_key(key).evidence, Evidence::StaticConfirmed, "{key}");
+            assert!(!by_key(key).traced && !by_key(key).settled(), "{key}");
+        }
+        assert_eq!(
+            by_key("injection::src/a.rs:20").evidence,
+            Evidence::Reasoned
+        );
+        assert_eq!(
+            serde_json::to_value(by_key("auth::src/a.rs:10")).unwrap()["evidence"],
+            "static_confirmed"
+        );
+    }
+
+    /// A finding or rejection stored as `observed` before traces were
+    /// taken has nothing behind the word. Reading the ledger rewrites
+    /// it, on disk too, so the next reader of the file sees the same.
+    /// A patch check that ran is observed as it was.
+    #[test]
+    fn a_stored_observed_record_with_no_trace_is_rewritten_when_the_ledger_is_read() {
+        let tmp = target_with("src/a.rs", "fn a() {}\n");
+        let mut records = records_from_run(tmp.path(), &run_body(), &rejections(), "r1");
+        // As an earlier build wrote them.
+        for r in &mut records {
+            r.traced = false;
+        }
+        upsert(tmp.path(), &records).unwrap();
+        let on_disk = |id: &str| -> Value {
+            serde_json::from_str(
+                &std::fs::read_to_string(ledger_dir(tmp.path()).join(format!("{id}.json")))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let finding = record_id(Kind::Finding, "auth::src/a.rs:10");
+        assert_eq!(on_disk(&finding)["evidence"], "observed");
+
+        let loaded = load(tmp.path()).unwrap();
+        let by_key = |k: &str| loaded.iter().find(|r| r.key == k).unwrap();
+        assert_eq!(
+            by_key("auth::src/a.rs:10").evidence,
+            Evidence::StaticConfirmed
+        );
+        assert!(!by_key("auth::src/a.rs:10").settled());
+        assert_eq!(
+            by_key("auth::src/a.rs:40").evidence,
+            Evidence::StaticConfirmed
+        );
+        assert_eq!(on_disk(&finding)["evidence"], "static_confirmed");
+        let arm = by_key("auth::src/a.rs:10#original");
+        assert_eq!(arm.evidence, Evidence::Observed);
+        // A traced one stands.
+        let traced = records_from_run(tmp.path(), &run_body(), &rejections(), "r2");
+        upsert(tmp.path(), &traced).unwrap();
+        let again = load(tmp.path()).unwrap();
+        let finding = again.iter().find(|r| r.key == "auth::src/a.rs:10").unwrap();
+        assert_eq!(finding.evidence, Evidence::Observed);
+        assert!(finding.traced && finding.settled());
     }
 
     /// A record is plain data about the target: its fields are the
@@ -867,7 +983,8 @@ mod tests {
                         "evidence",
                         "run",
                         "stale",
-                        "tier"
+                        "tier",
+                        "traced"
                     ]
                     .contains(k),
                     "{k}"
@@ -1171,7 +1288,8 @@ mod tests {
             "location": {"file": "lib/z.rs", "line_start": 1}
         }));
         body["reproductions"].as_array_mut().unwrap().push(json!(
-            {"stable_id": "auth::lib/z.rs:1", "outcome": "reproduced", "agreement": true}
+            {"stable_id": "auth::lib/z.rs:1", "outcome": "reproduced", "agreement": true,
+                 "evidence": "observed"}
         ));
         upsert(tmp.path(), &records_from_run(tmp.path(), &body, &[], "r1")).unwrap();
         let ledger = load(tmp.path()).unwrap();
@@ -1341,7 +1459,8 @@ mod tests {
         upsert(tmp.path(), &first).unwrap();
         let mut later = run_body();
         later["reproductions"] = json!([
-            {"stable_id": "injection::src/a.rs:20", "outcome": "reproduced", "agreement": true}
+            {"stable_id": "injection::src/a.rs:20", "outcome": "reproduced", "agreement": true,
+                 "evidence": "observed"}
         ]);
         later["fixes"] = json!([]);
         let second = records_from_run(tmp.path(), &later, &[], "r2");

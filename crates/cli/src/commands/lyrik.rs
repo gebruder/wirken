@@ -3886,6 +3886,72 @@ async fn dispatch_fixes(
     Ok(())
 }
 
+/// Run a reproduction's command once more under the runner's tracer
+/// and say which lines of the cited file executed. The run is the
+/// runner's own: it is not an agent's tool call, it sees the target
+/// read-only with the walk's `harness/` the one writable directory,
+/// and its result is kept where no agent of the run can write. A
+/// reproduction the tracer cannot follow comes back untraced, with
+/// why.
+async fn trace_reproduction(
+    sandbox: &wirken_agent::sandbox::SandboxConfig,
+    target: &Path,
+    run_id: &str,
+    walks: &[String],
+    walk: &str,
+    stable_id: &str,
+    command: &str,
+) -> super::lyrik_trace::Execution {
+    use super::lyrik_trace::Execution;
+    let staging = format!(".lyrik/state/runs/{run_id}/staging/{walk}");
+    let Some((cited_file, cited_line)) =
+        super::lyrik_trace::cited_location(&target.join(&staging).join("findings"), stable_id)
+    else {
+        return Execution::untraced("", 0, "no staged finding carries the record's stable_id");
+    };
+    let untraced = |why: &str| Execution::untraced(&cited_file, cited_line, why);
+    let plain_path = !cited_file.contains(['\'', '\\'])
+        && Path::new(&cited_file)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if !cited_file.ends_with(".py") || !plain_path {
+        return untraced("the cited file is not a Python file the tracer can follow");
+    }
+    let harness_dir = format!("{staging}/harness");
+    let Some(script) = super::lyrik_trace::traceable_script(command, &harness_dir) else {
+        return untraced("the command is not `python3` and one harness path");
+    };
+    if sandbox.mode == wirken_agent::sandbox::SandboxMode::Off {
+        return untraced("the sandbox is off");
+    }
+    let mut mounts = envelope_for(target, run_id, walks, walk, "harness").mounts;
+    if !target.join(&harness_dir).is_dir() {
+        mounts.writable.clear();
+    }
+    let config = wirken_agent::sandbox::SandboxConfig {
+        workspace_scope: Some(mounts),
+        ..sandbox.clone()
+    };
+    let nonce = format!("lyrik-trace-{}", uuid::Uuid::new_v4());
+    let traced = match wirken_agent::sandbox::DockerSandbox::new(config) {
+        Ok(docker) => docker
+            .exec(
+                &super::lyrik_trace::tracer_command(&nonce, &cited_file, cited_line, &script),
+                target,
+                None,
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    match traced {
+        Ok(result) => {
+            super::lyrik_trace::parse_traced(&result.output, &nonce, &cited_file, cited_line)
+        }
+        Err(e) => untraced(&format!("the traced run could not start: {e}")),
+    }
+}
+
 /// Run a fresh-context replay for each reproduction record the walks
 /// wrote. The replay skill is staged beside the walks and signed;
 /// each record gets its own Agent, built like a walk's, whose prompt is
@@ -3959,6 +4025,7 @@ async fn dispatch_replays(
     let permits = std::cmp::max(1, std::cmp::min(max_concurrent, jobs.len() as u32));
     let sem = Arc::new(Semaphore::new(permits as usize));
     let mut handles = Vec::with_capacity(jobs.len());
+    let mut traced_inputs: Vec<(String, String)> = Vec::with_capacity(jobs.len());
     for (walk, file, record) in jobs {
         audit.emit(
             "lyrik.replay.started",
@@ -3982,6 +4049,8 @@ async fn dispatch_replays(
         let mut sandbox_t = sandbox.clone();
         sandbox_t.workspace_scope = Some(envelope.mounts);
         let file_scope_t = envelope.files;
+        // What the runner's own traced run of the record needs.
+        traced_inputs.push((record.stable_id.clone(), record.command.clone()));
         let permissions_t = permissions.clone();
         let leak_t = leak_matcher.clone();
         let terminal_t = terminal.clone();
@@ -4030,7 +4099,7 @@ async fn dispatch_replays(
         handles.push(h);
     }
     let mut denials = 0;
-    for h in handles {
+    for (h, (stable_id, command)) in handles.into_iter().zip(traced_inputs) {
         let (walk, file, result, skipped) = match h.await {
             Ok(r) => r,
             Err(e) => {
@@ -4048,15 +4117,40 @@ async fn dispatch_replays(
             &file,
             &result,
         );
+        // A replay that recorded `reproduced` ran a command and saw
+        // the marker. Whether the cited code ran is the runner's to
+        // establish: it runs the command once more under a tracer,
+        // and only a trace that shows it leaves the status standing.
+        let reproduced = came_to.status == lyrik_replay::ReplayOutcome::Reproduced.label();
+        let ran_a_command =
+            reproduced || came_to.status == lyrik_replay::ReplayOutcome::NotReproduced.label();
+        let (status, execution) = if ran_a_command {
+            let execution = trace_reproduction(
+                &sandbox, &target, &run_id, walks, &walk, &stable_id, &command,
+            )
+            .await;
+            super::lyrik_trace::write_trace(run_dir, &walk, &file, &execution)?;
+            // `not_reproduced` stands as recorded; its trace says
+            // whether the code ran when the finding did not show.
+            let status = if reproduced && !execution.cited_code_ran() {
+                super::lyrik_trace::STATIC_CONFIRMED
+            } else {
+                came_to.status
+            };
+            (status, Some(execution))
+        } else {
+            (came_to.status, None)
+        };
         denials += skipped.len();
         audit.emit(
             "lyrik.replay.completed",
             serde_json::json!({
                 "walk": walk,
                 "file": file,
-                "status": came_to.status,
+                "status": status,
                 "observed": came_to.observed,
                 "reason": came_to.reason,
+                "execution": execution,
                 "skipped": skipped,
             }),
         )?;
@@ -4748,7 +4842,33 @@ fn aggregate_findings_multi(
                     serde_json::json!({ "walk": walk_name, "file": r.file, "reason": r.reason }),
                 )?;
             }
-            let paired = lyrik_replay::pair(walk_name.as_deref(), repros, &replays);
+            let mut paired = lyrik_replay::pair(walk_name.as_deref(), repros, &replays);
+            // An agreed reproduction is evidence of execution only
+            // where the runner's own trace of it shows cited code
+            // ran. With no trace it is a check that passed.
+            // A disagreement is held to the same: the replay saw
+            // otherwise, and only a trace shows it saw the code run.
+            for r in paired
+                .iter_mut()
+                .filter(|r| r.agreed_reproduced() || r.agreement == Some(false))
+            {
+                r.execution = dest
+                    .parent()
+                    .zip(walk_name.as_deref())
+                    .and_then(|(run, walk)| super::lyrik_trace::read_trace(run, walk, &r.file));
+                let ran = r.execution.as_ref().is_some_and(|e| {
+                    if r.agreement == Some(true) {
+                        e.cited_code_ran()
+                    } else {
+                        e.cited_lines_ran()
+                    }
+                });
+                r.evidence = Some(if ran {
+                    super::lyrik_trace::OBSERVED
+                } else {
+                    super::lyrik_trace::STATIC_CONFIRMED
+                });
+            }
             walk_side.extend(paired.iter().filter_map(lyrik_replay::rejection_for));
             reproductions.extend(paired);
             for d in [repro_dir, replay_dir] {
@@ -4948,11 +5068,24 @@ fn aggregate_findings_multi(
             lyrik_brocards::fill_from_finding(r, f);
         }
     }
-    let (findings, collapsed): (Vec<serde_json::Value>, usize) = if dedup_active {
+    let (mut findings, collapsed): (Vec<serde_json::Value>, usize) = if dedup_active {
         dedup_findings(tagged)
     } else {
         (tagged.into_iter().map(|(_, f)| f).collect(), 0)
     };
+    // Each finding says what stands behind it: the strongest evidence
+    // any of its reproductions earned, or that it was reasoned.
+    for f in &mut findings {
+        let evidence = f
+            .get("stable_id")
+            .and_then(serde_json::Value::as_str)
+            .map_or(super::lyrik_trace::REASONED, |id| {
+                finding_evidence(id, &reproductions)
+            });
+        if let Some(obj) = f.as_object_mut() {
+            obj.insert("evidence".to_string(), serde_json::json!(evidence));
+        }
+    }
     let funnel = Funnel {
         merged: MergedFunnel {
             emitted: walks.values().map(|w| w.emitted).sum(),
@@ -5022,6 +5155,25 @@ fn aggregate_findings_multi(
             .with_context(|| format!("remove staging dir {}", source.display()))?;
     }
     Ok(funnel)
+}
+
+/// What stands behind the finding `stable_id`: `observed` when one of
+/// its reproductions earned it, else `static_confirmed` when one was
+/// agreed as reproduced, else `reasoned`.
+fn finding_evidence(stable_id: &str, reproductions: &[lyrik_replay::Reproduction]) -> &'static str {
+    use super::lyrik_trace::{OBSERVED, REASONED, STATIC_CONFIRMED};
+    let mut best = REASONED;
+    for r in reproductions
+        .iter()
+        .filter(|r| r.record.stable_id == stable_id && r.agreed_reproduced())
+    {
+        match r.evidence {
+            Some(OBSERVED) => return OBSERVED,
+            Some(_) => best = STATIC_CONFIRMED,
+            None => {}
+        }
+    }
+    best
 }
 
 /// Funnel key for the single-call turn, which has no walk name.
@@ -8641,7 +8793,8 @@ mod tests {
             "target_sha": "abc",
             "findings": [{"stable_id": "auth::src/a.rs:1", "title": "t", "tier": "HIGH",
                 "framing": ["auth"], "location": {"file": "src/a.rs", "line_start": 1}}],
-            "reproductions": [{"stable_id": "auth::src/a.rs:1", "outcome": "reproduced", "agreement": true}]
+            "reproductions": [{"stable_id": "auth::src/a.rs:1", "outcome": "reproduced", "agreement": true,
+                 "evidence": "observed"}]
         });
         let records = super::super::lyrik_ledger::records_from_run(target, &earlier, &[], "r1");
         super::super::lyrik_ledger::upsert(target, &records).unwrap();

@@ -104,6 +104,24 @@ pub struct Reproduction {
     /// differs, absent when no replay ran or the replay was blocked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agreement: Option<bool>,
+    /// What the reproduction is evidence of. Agreed as reproduced:
+    /// `observed` when the runner's trace shows the marker and cited
+    /// code running, else `static_confirmed`. Disagreed: `observed`
+    /// when the trace shows cited code ran and the finding still did
+    /// not show, else `static_confirmed`. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<&'static str>,
+    /// The runner's traced run behind `evidence`, when it made one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<super::lyrik_trace::Execution>,
+}
+
+impl Reproduction {
+    /// Whether the walk and its replay both recorded the finding as
+    /// reproduced.
+    pub fn agreed_reproduced(&self) -> bool {
+        self.agreement == Some(true) && self.record.outcome == ReproductionOutcome::Reproduced
+    }
 }
 
 /// What a reader returns: the accepted records with their file names,
@@ -264,6 +282,8 @@ pub fn pair(
                 record,
                 replay,
                 agreement,
+                evidence: None,
+                execution: None,
             }
         })
         .collect()

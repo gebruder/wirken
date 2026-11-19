@@ -710,8 +710,9 @@ fn staging_section(walk_name: &str) -> String {
          you read one of those whole at `.lyrik/ledger/<id>.json` when you need it. A \
          record with `evidence: observed` and no `stale` mark was shown by an executed \
          run against the file as it is now: it is settled. A record with `evidence: \
-         reasoned` was read from the source only: use it as a lead, and re-examine it \
-         if your work depends on it. A stale record is about an older version of the \
+         static_confirmed` had a check agree with it and nothing shows the code ran, \
+         and one with `evidence: reasoned` was read from the source only: use either \
+         as a lead, and re-examine it if your work depends on it. A stale record is about an older version of the \
          file and settles nothing.\n\
          - Register a claim before you work on it. Before you write a harness, run a \
          check or stage a finding for a defect, write \
@@ -927,7 +928,17 @@ fn reproduction_section(walk_name: &str) -> String {
          harness that reads or writes elsewhere under `.lyrik/` behaves differently \
          there. A failed build or a missing dependency never reaches the line, and is read \
          as neither. A command outside the contract still gets its record and its replay; \
-         a defender-mode fix for its finding cannot be checked and stays inconclusive.\n",
+         a defender-mode fix for its finding cannot be checked and stays inconclusive.\n\n\
+         A reproduction shows a finding only when the code the finding is about runs. \
+         After the replay, the runner runs a `python3 <harness>` command once more under \
+         a line tracer of its own. The finding is `observed` when the marker was printed \
+         and a line of the function it cites, in the file it cites, executed. A harness \
+         that reads or parses the source and prints the marker is `static_confirmed`, and \
+         so is one in another language, one whose command is more than `python3` and the \
+         harness path, and one that runs the code in a child process. So import the cited \
+         module and call the cited function with the input that shows the defect, stand \
+         in for an import the sandbox lacks before importing, and give the finding's \
+         `location` a line inside that function.\n",
         reached = super::lyrik_fix_arms::REACHED
     )
 }

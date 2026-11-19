@@ -59,6 +59,21 @@ tagged.
   (`a_walk_is_told_what_the_sandbox_lacks_before_it_starts`,
   `crates/cli/tests/lyrik_exec_envelope.rs`).
 
+- Lyrik findings carry one of three evidence states, `reasoned`,
+  `static_confirmed` and `observed`, as `evidence` on each finding and on its
+  reproductions in `findings.json` and on ledger records. `observed`, and
+  `reproduced` on `lyrik.replay.completed`, are said only when the runner's
+  own traced run of the reproduction shows the marker and a line of the cited
+  function executing; the trace is carried as `execution`. A harness that reads
+  or parses the source and prints the marker is `static_confirmed`, as is any
+  harness the tracer cannot follow: only `python3 <harness>` against a cited
+  `.py` file is traced. `static_confirmed` settles nothing and is not carried.
+  A finding or rejection stored in a ledger as `observed` by an earlier build
+  is rewritten as `static_confirmed` when the ledger is read. A replay
+  rejection is `observed` only with a trace too
+  (`crates/cli/tests/lyrik_evidence_states.rs`;
+  [docs/lyrik-brocards.md](docs/lyrik-brocards.md#execution-evidence)).
+
 ### Fixed
 
 - A step record that names a command as its `check` is held to the run's

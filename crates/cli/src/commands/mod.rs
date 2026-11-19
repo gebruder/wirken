@@ -32,6 +32,7 @@ pub mod lyrik_replay;
 pub mod lyrik_sarif;
 pub mod lyrik_semgrep;
 pub mod lyrik_steps;
+pub mod lyrik_trace;
 pub mod lyrik_validate;
 pub mod lyrik_walks;
 pub mod mcp;

@@ -1,6 +1,7 @@
 //! `lyrik.replay.completed` says what the replay found, not that its
-//! turn finished: `reproduced`, `not_reproduced` or `blocked`, as the
-//! replay recorded it, and `no_record` when it recorded nothing.
+//! turn finished: `not_reproduced` or `blocked` as the replay recorded
+//! it, `static_confirmed` for a recorded `reproduced` with no trace of
+//! cited code running, and `no_record` when it recorded nothing.
 //!
 //! Driven through the binary with a scripted model: one walk writes
 //! one reproduction record, and the replay of it writes its own.
@@ -109,13 +110,19 @@ fn completed(target: &Path) -> serde_json::Value {
 
 #[test]
 fn a_replays_completion_row_carries_the_outcome_it_recorded() {
-    for outcome in ["reproduced", "not_reproduced", "blocked"] {
+    // A replay that recorded `reproduced` with no trace of cited code
+    // running behind it is `static_confirmed`: here nothing ran at all.
+    for (outcome, status) in [
+        ("reproduced", "static_confirmed"),
+        ("not_reproduced", "not_reproduced"),
+        ("blocked", "blocked"),
+    ] {
         let row = replay_completed(Some(serde_json::json!({
             "command_run": "sh harness/h.sh",
             "observed": "sh: 1: python3: not found",
             "outcome": outcome,
         })));
-        assert_eq!(row["status"], outcome, "{row}");
+        assert_eq!(row["status"], status, "{row}");
         assert_eq!(row["observed"], "sh: 1: python3: not found", "{row}");
         assert_eq!(row["file"], "repro-001.json", "{row}");
         assert_eq!(row["walk"], "sink-walk", "{row}");
