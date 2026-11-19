@@ -3318,6 +3318,15 @@ use crate::{
 /// [`SESSION_EVENT_VARIANTS`].
 fn every_session_event() -> Vec<SessionEvent> {
     vec![
+        SessionEvent::ChildOpened {
+            agent_id: String::new(),
+            step: None,
+            tools: Vec::new(),
+            servers: None,
+            key_source: None,
+            model: None,
+            refused: None,
+        },
         SessionEvent::UserMessage {
             content: String::new(),
             inbound_id: None,
@@ -4052,6 +4061,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::Attestation { .. } => "Attestation",
         SessionEvent::ChainHead { .. } => "ChainHead",
         SessionEvent::SystemPromptSet { .. } => "SystemPromptSet",
+        SessionEvent::ChildOpened { .. } => "ChildOpened",
         SessionEvent::Rewind { .. } => "Rewind",
         SessionEvent::SubagentSpawned { .. } => "SubagentSpawned",
         SessionEvent::SubagentResult { .. } => "SubagentResult",
@@ -4111,7 +4121,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 92;
+const SESSION_EVENT_VARIANTS: usize = 93;
 
 /// The list covers the enum.
 #[test]

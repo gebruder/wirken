@@ -254,9 +254,10 @@ fn usd_micros(usd: Option<f64>) -> Option<u64> {
 /// What one line of the child's output stream came to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reported {
-    /// The opening message: the tools and model the child has, and
-    /// what it authenticates with.
-    Opened { key_source: Option<String> },
+    /// The opening message: the tools, tool servers and model the
+    /// child has and what it authenticates with, as it said them, and
+    /// why the turn is refused on it, when it is.
+    Opened(Opening),
     /// A model call began: the child has the start of its reply.
     Began(String),
     /// A model call finished.
@@ -265,6 +266,16 @@ pub enum Reported {
     Text(String),
     /// The run ended.
     Ended(Outcome),
+}
+
+/// A child's opening message, as it goes on the chain.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Opening {
+    pub tools: Vec<String>,
+    pub servers: Option<Vec<wirken_audit::ChildToolServer>>,
+    pub key_source: Option<String>,
+    pub model: Option<String>,
+    pub refused: Option<String>,
 }
 
 /// A model name the child gives a message it wrote itself, an error
@@ -360,7 +371,7 @@ impl Stream {
             if msg.get("subtype").and_then(Value::as_str) != Some("init") {
                 return Ok(Vec::new());
             }
-            return self.opening(&msg).map(|r| vec![r]);
+            return Ok(vec![self.opening(&msg)]);
         }
         if !self.opened && matches!(kind, "assistant" | "user" | "stream_event" | "result") {
             return Err(format!(
@@ -376,60 +387,102 @@ impl Stream {
         }
     }
 
-    fn opening(&mut self, msg: &Value) -> Result<Reported, String> {
-        let Some(tools) = msg.get("tools").and_then(Value::as_array) else {
-            return Err(
+    /// Read the opening message. It is always reported, so it goes on
+    /// the chain; `refused` on it says why the turn does not go on.
+    fn opening(&mut self, msg: &Value) -> Reported {
+        let mut opening = Opening {
+            tools: msg
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .map(|t| t.as_str().unwrap_or("<not a name>").to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            servers: msg
+                .get("mcp_servers")
+                .and_then(Value::as_array)
+                .map(|servers| {
+                    servers
+                        .iter()
+                        .map(|server| {
+                            let field = |k: &str| {
+                                server
+                                    .get(k)
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string()
+                            };
+                            wirken_audit::ChildToolServer {
+                                name: field("name"),
+                                status: field("status"),
+                            }
+                        })
+                        .collect()
+                }),
+            key_source: msg
+                .get("apiKeySource")
+                .and_then(Value::as_str)
+                .map(String::from),
+            model: msg.get("model").and_then(Value::as_str).map(String::from),
+            refused: None,
+        };
+        opening.refused = self.refusal(msg, &opening);
+        self.opened = opening.refused.is_none();
+        Reported::Opened(opening)
+    }
+
+    /// Why a turn does not go on from this opening message.
+    fn refusal(&self, msg: &Value, opening: &Opening) -> Option<String> {
+        if msg.get("tools").and_then(Value::as_array).is_none() {
+            return Some(
                 "the child process's opening message lists no tools, so the tools it has are \
                  not known"
                     .to_string(),
             );
-        };
+        }
         let prefix = tool_prefix();
-        let foreign: Vec<&str> = tools
+        let foreign: Vec<&str> = opening
+            .tools
             .iter()
-            .map(|t| t.as_str().unwrap_or("<not a name>"))
+            .map(String::as_str)
             .filter(|t| !t.starts_with(&prefix))
             .collect();
         if !foreign.is_empty() {
-            return Err(format!(
+            return Some(format!(
                 "the child process has tools that are not Wirken's ({}); the run is refused",
                 foreign.join(", ")
             ));
         }
-        if let Some(servers) = msg.get("mcp_servers").and_then(Value::as_array) {
-            for server in servers {
-                let name = server.get("name").and_then(Value::as_str).unwrap_or("");
-                let status = server.get("status").and_then(Value::as_str).unwrap_or("");
-                if name != SERVER {
-                    return Err(format!(
-                        "the child process has a tool server that is not Wirken's ({name}); the \
-                         run is refused"
-                    ));
-                }
-                if status != "connected" {
-                    return Err(format!(
-                        "the child process did not reach Wirken's tool server (status {status})"
-                    ));
-                }
+        for server in opening.servers.iter().flatten() {
+            if server.name != SERVER {
+                return Some(format!(
+                    "the child process has a tool server that is not Wirken's ({}); the run is \
+                     refused",
+                    server.name
+                ));
+            }
+            if server.status != "connected" {
+                return Some(format!(
+                    "the child process did not reach Wirken's tool server (status {})",
+                    server.status
+                ));
             }
         }
-        let key_source = msg
-            .get("apiKeySource")
-            .and_then(Value::as_str)
-            .map(String::from);
-        if let Some(source) = &key_source
+        if let Some(source) = &opening.key_source
             && !KEYLESS_SOURCES.contains(&source.as_str())
         {
-            return Err(format!(
+            return Some(format!(
                 "the child process says it authenticates with an API key (source `{source}`), \
                  not its own sign-in; the run is refused"
             ));
         }
-        if let Some(model) = msg.get("model").and_then(Value::as_str) {
-            self.check_model(model)?;
-        }
-        self.opened = true;
-        Ok(Reported::Opened { key_source })
+        opening
+            .model
+            .as_deref()
+            .and_then(|model| self.check_model(model).err())
     }
 
     fn stream_event(&mut self, msg: &Value) -> Result<Vec<Reported>, String> {
@@ -1105,7 +1158,26 @@ impl Agent {
                     let reported = stream.line(&line).map_err(AgentError::Tool)?;
                     for item in reported {
                         match item {
-                            Reported::Opened { key_source: source } => key_source = source,
+                            Reported::Opened(opening) => {
+                                // On the chain before anything else the
+                                // child does, and when it is refused.
+                                self.log_event(
+                                    TrustLevel::System,
+                                    SessionEvent::ChildOpened {
+                                        agent_id: self.audited_agent_id(),
+                                        step: self.call_step.clone(),
+                                        tools: opening.tools,
+                                        servers: opening.servers,
+                                        key_source: opening.key_source.clone(),
+                                        model: opening.model,
+                                        refused: opening.refused.clone(),
+                                    },
+                                )?;
+                                if let Some(reason) = opening.refused {
+                                    return Err(AgentError::Tool(reason));
+                                }
+                                key_source = opening.key_source;
+                            }
                             Reported::Text(text) => {
                                 pending_text = Some(self.withhold_leaked_reply(text).0);
                             }
@@ -1361,31 +1433,46 @@ mod tests {
     /// the turn there.
     #[test]
     fn an_opening_message_with_anything_but_wirkens_tools_is_refused() {
-        let mut ok = Stream::new(PIN);
+        let opened = |line: &str| match Stream::new(PIN).line(line).unwrap().remove(0) {
+            Reported::Opened(opening) => opening,
+            other => panic!("{other:?}"),
+        };
+        let ok = opened(&opening(&["mcp__wirken__read_file", "mcp__wirken__exec"]));
+        assert_eq!(ok.refused, None);
+        assert_eq!(ok.tools, ["mcp__wirken__read_file", "mcp__wirken__exec"]);
         assert_eq!(
-            ok.line(&opening(&["mcp__wirken__read_file", "mcp__wirken__exec"])),
-            Ok(vec![Reported::Opened {
-                key_source: Some("none".to_string())
+            ok.servers,
+            Some(vec![wirken_audit::ChildToolServer {
+                name: "wirken".to_string(),
+                status: "connected".to_string(),
             }])
         );
+        assert_eq!(ok.key_source.as_deref(), Some("none"));
+        assert_eq!(ok.model.as_deref(), Some(PIN));
 
-        let err = Stream::new(PIN)
-            .line(&opening(&[
-                "mcp__wirken__read_file",
-                "Bash",
-                "mcp__other__x",
-            ]))
-            .unwrap_err();
+        // A refused opening still says what the child had.
+        let foreign = opened(&opening(&[
+            "mcp__wirken__read_file",
+            "Bash",
+            "mcp__other__x",
+        ]));
+        assert_eq!(foreign.tools.len(), 3);
+        let err = foreign.refused.unwrap();
         assert!(err.contains("not Wirken's (Bash, mcp__other__x)"), "{err}");
 
         let mut keyed: Value = serde_json::from_str(&opening(&[])).unwrap();
         keyed["apiKeySource"] = "user".into();
-        let err = Stream::new(PIN).line(&keyed.to_string()).unwrap_err();
+        let err = opened(&keyed.to_string()).refused.unwrap();
         assert!(err.contains("API key (source `user`)"), "{err}");
 
         let mut other_model: Value = serde_json::from_str(&opening(&[])).unwrap();
         other_model["model"] = "another-model".into();
-        assert!(Stream::new(PIN).line(&other_model.to_string()).is_err());
+        assert!(opened(&other_model.to_string()).refused.is_some());
+
+        // After a refused opening nothing else is read as a turn.
+        let mut s = Stream::new(PIN);
+        s.line(&opening(&["Bash"])).unwrap();
+        assert!(s.line(r#"{"type":"result","subtype":"success"}"#).is_err());
 
         let err = Stream::new(PIN)
             .line(r#"{"type":"assistant","message":{"id":"m1","model":"x","content":[]}}"#)

@@ -523,6 +523,7 @@ impl OtelProjector {
             SessionEvent::ChainHead { .. } => Vec::new(),
             // Set before the run opens.
             SessionEvent::SystemPromptSet { .. } => Vec::new(),
+            SessionEvent::ChildOpened { .. } => Vec::new(),
             // Rows removed. The spans they produced are already exported.
             SessionEvent::Rewind { .. } => Vec::new(),
             // The child's own run closes the child's own span.

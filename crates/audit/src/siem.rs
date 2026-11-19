@@ -747,6 +747,7 @@ fn extract_identity_for_sentinel(
         SessionEvent::SkillPermissionDenied { agent_id, .. }
         | SessionEvent::AssistantMessage { agent_id, .. }
         | SessionEvent::SystemPromptSet { agent_id, .. }
+        | SessionEvent::ChildOpened { agent_id, .. }
         | SessionEvent::Compaction { agent_id, .. }
         | SessionEvent::BudgetExceeded { agent_id, .. }
         | SessionEvent::ExternalToolOutput { agent_id, .. } => (None, None, Some(agent_id.clone())),
@@ -1172,6 +1173,7 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         // Opt-in only; the debug form then carries up to 80 characters of
         // the prompt.
         SessionEvent::SystemPromptSet { .. } => debug_summary(event),
+        SessionEvent::ChildOpened { .. } => debug_summary(event),
         // A sequence, a count and a reason.
         SessionEvent::Rewind { .. } => debug_summary(event),
         // A target and a message id.

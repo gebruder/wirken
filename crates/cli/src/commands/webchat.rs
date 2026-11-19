@@ -4600,6 +4600,7 @@ pub fn session_events(
             SessionEvent::ExternalToolOutput { .. } => None,
             // The prompt body, withheld from the page on purpose.
             SessionEvent::SystemPromptSet { .. } => None,
+            SessionEvent::ChildOpened { .. } => None,
             // Rows removed from the chain. The page draws what is left.
             SessionEvent::Rewind { .. } => None,
             // An adapter's receipt for an outbound message. The webchat

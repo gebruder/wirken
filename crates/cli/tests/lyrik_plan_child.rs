@@ -272,6 +272,35 @@ fn a_walk_runs_as_a_child_whose_tool_calls_pass_the_gate() {
     }
     assert_eq!(chain(&r.data, "tool_result").len(), 4);
     assert_eq!(chain(&r.data, "permission_denied").len(), 2);
+    // Each child's opening message is on the chain: the tools it
+    // listed, every one this run's, the one tool server and its
+    // status, and what it authenticates with.
+    let opened = chain(&r.data, "child_opened");
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    let mut steps = Vec::new();
+    for row in &opened {
+        steps.push(row["step"].as_str().unwrap().to_string());
+        let tools: Vec<&str> = row["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert!(tools.contains(&"mcp__wirken__exec"), "{tools:?}");
+        assert!(
+            tools.iter().all(|t| t.starts_with("mcp__wirken__")),
+            "{tools:?}"
+        );
+        assert_eq!(
+            row["servers"],
+            serde_json::json!([{"name": "wirken", "status": "connected"}]),
+            "{row}"
+        );
+        assert_eq!(row["key_source"], "none", "{row}");
+        assert!(row.get("refused").is_none(), "{row}");
+    }
+    steps.sort();
+    assert_eq!(steps, ["chain-walk", "sink-walk"]);
     for completed in audit_rows(&r.target, "lyrik.walk.completed") {
         assert_eq!(completed["status"], "turn_ended", "{completed}");
         assert_eq!(
@@ -402,6 +431,20 @@ fn a_child_with_a_tool_that_is_not_the_runs_is_refused() {
     );
     assert_eq!(chain(&r.data, "llm_response").len(), 0);
     assert_eq!(chain(&r.data, "tool_result").len(), 0);
+    // What the refused child had is on the chain, with why.
+    let opened = chain(&r.data, "child_opened");
+    assert_eq!(opened.len(), 2, "one a walk: {opened:?}");
+    for row in &opened {
+        let tools = row["tools"].as_array().unwrap();
+        assert!(tools.contains(&serde_json::json!("Bash")), "{row}");
+        assert!(
+            row["refused"]
+                .as_str()
+                .unwrap()
+                .contains("not Wirken's (Bash)"),
+            "{row}"
+        );
+    }
 
     // So is one that says it is on an API key.
     let keyed = run(serde_json::json!({"key_source": "user"}), bounded());

@@ -334,6 +334,16 @@ pub enum ToolsHashVersion {
     V2,
 }
 
+/// A tool server a child process said it has, on
+/// [`SessionEvent::ChildOpened`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChildToolServer {
+    pub name: String,
+    /// The child's word for the connection: `connected` when it
+    /// reached the server.
+    pub status: String,
+}
+
 /// A model call a child process made and reported, on
 /// [`SessionEvent::LlmResponse::reported`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -996,6 +1006,34 @@ pub enum SessionEvent {
         /// Wirken made itself, and on rows written before the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reported: Option<ReportedCall>,
+    },
+    /// A child process that runs a turn sent its opening message: the
+    /// tools it has, the tool servers it reached and what it
+    /// authenticates with, as it said them, before any model call of
+    /// the turn. Written for every child that opens, the ones refused
+    /// on this message included, so what a child had is on the chain
+    /// whether or not it went on.
+    ChildOpened {
+        #[serde(default)]
+        agent_id: String,
+        /// The step of a run the child was started for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<String>,
+        /// Every tool the child listed, by the name it gave.
+        tools: Vec<String>,
+        /// Every tool server it listed, with its status. `None` when
+        /// the message named none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        servers: Option<Vec<ChildToolServer>>,
+        /// See [`ReportedCall::key_source`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_source: Option<String>,
+        /// The model the child said it would use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Why the turn was refused on this message, when it was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refused: Option<String>,
     },
     /// The model call an [`Self::LlmRequest`] started failed: the
     /// request was refused before it was sent, the provider answered

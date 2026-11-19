@@ -230,6 +230,7 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::Attestation { .. } => false,
         // Carries the prompt body.
         SessionEvent::SystemPromptSet { .. } => false,
+        SessionEvent::ChildOpened { .. } => false,
         // Chain housekeeping.
         SessionEvent::Rewind { .. } => false,
         // Adapter delivery receipts, not gate outcomes.
@@ -329,6 +330,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::Attestation { .. } => "attestation",
         SessionEvent::ChainHead { .. } => "chain_head",
         SessionEvent::SystemPromptSet { .. } => "system_prompt_set",
+        SessionEvent::ChildOpened { .. } => "child_opened",
         SessionEvent::Rewind { .. } => "rewind",
         SessionEvent::SubagentSpawned { .. } => "subagent_spawned",
         SessionEvent::SubagentSessionBound { .. } => "subagent_session_bound",
