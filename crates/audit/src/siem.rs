@@ -2184,6 +2184,7 @@ mod identity_tests {
                     sender_id: sender(),
                     text: None,
                     reasoning: None,
+                    step: None,
                 },
                 Some("slack"),
                 Some("U123"),

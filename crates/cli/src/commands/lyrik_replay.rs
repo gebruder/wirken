@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use super::lyrik_steps::{ExecutedCommands, Phase, Shown};
+use super::lyrik_steps::{By, ExecutedCommands, Shown};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -114,6 +114,11 @@ pub struct Replayed {
     /// Why there is no verdict, when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Set to `walk` when the replay ran the command inside a longer
+    /// line and the exit status behind `outcome` is the one the walk's
+    /// run of the command by itself recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_status_from: Option<&'static str>,
     /// What the replay's own record said, when it wrote one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claimed: Option<Claimed>,
@@ -145,6 +150,12 @@ pub struct Reproduction {
     /// Why there is no verdict, when there is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Set to `replay` when the walk ran the command inside a longer
+    /// line, so the line's exit status was not the command's own, and
+    /// the exit status behind `outcome` is the one the replay's run of
+    /// the command by itself recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_status_from: Option<&'static str>,
     pub claimed: Claimed,
     /// The replay, when one was dispatched for the record.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -276,13 +287,14 @@ pub struct ReplayStatus {
 pub fn replay_status(
     executed: &ExecutedCommands,
     command: &str,
+    walk: Option<&str>,
     replays_dir: &Path,
     repro_file: &str,
     turn: &std::result::Result<(), String>,
 ) -> ReplayStatus {
+    let (_, replay) = judge(executed, command, walk);
     let replayed = replayed(
-        executed,
-        command,
+        replay,
         std::fs::read_to_string(replays_dir.join(replay_file_for(repro_file)))
             .ok()
             .and_then(|body| serde_json::from_str::<ReplayRecord>(&body).ok())
@@ -302,17 +314,61 @@ pub fn replay_status(
     }
 }
 
-/// The replay of `command` as the chain has it, with the replay's own
-/// record beside it as its claim.
-fn replayed(executed: &ExecutedCommands, command: &str, record: Option<&ReplayRecord>) -> Replayed {
-    let shown = executed.shown(command, Phase::Replay);
+/// What one run of a command came to, once the walk's run and the
+/// replay's are read together.
+struct Verdict {
+    label: &'static str,
+    observed: Option<String>,
+    reason: Option<String>,
+    /// Whose run the exit status came from, when not this one's.
+    exit_status_from: Option<&'static str>,
+}
+
+/// What the walk's run of `command` and the replay's each showed.
+///
+/// A command run as one of several in a line reached its assertion
+/// when the marker is in the line's output, and the line's exit status
+/// is another command's. Its own exit status is then taken from the
+/// other run of the same command, when that run was of the command by
+/// itself, and the verdict says so. With no such run there is no
+/// verdict.
+fn judge(executed: &ExecutedCommands, command: &str, walk: Option<&str>) -> (Verdict, Verdict) {
+    let by_walk = executed.shown(command, By::Walk(walk));
+    let by_replay = executed.shown(command, By::Replay);
+    let read = |own: &Shown, other: &Shown, others: &'static str| {
+        let lent = matches!(own, Shown::Reached { .. })
+            && matches!(
+                other,
+                Shown::Reproduced { .. } | Shown::NotReproduced { .. }
+            );
+        Verdict {
+            label: if lent { other.label() } else { own.label() },
+            observed: own.output().map(str::to_string),
+            reason: if lent {
+                None
+            } else {
+                own.why().map(str::to_string)
+            },
+            exit_status_from: lent.then_some(others),
+        }
+    };
+    (
+        read(&by_walk, &by_replay, "replay"),
+        read(&by_replay, &by_walk, "walk"),
+    )
+}
+
+/// The replay's verdict as `findings.json` carries it, with the
+/// replay's own record beside it as its claim.
+fn replayed(replay: Verdict, record: Option<&ReplayRecord>) -> Replayed {
     Replayed {
-        outcome: match &shown {
-            Shown::NotRun { .. } => ReplayOutcome::Blocked.label(),
-            other => other.label(),
+        outcome: match replay.label {
+            "not_run" => ReplayOutcome::Blocked.label(),
+            other => other,
         },
-        observed: shown.output().map(str::to_string),
-        reason: shown.why().map(str::to_string),
+        observed: replay.observed,
+        reason: replay.reason,
+        exit_status_from: replay.exit_status_from,
         claimed: record.map(|r| Claimed {
             outcome: r.outcome.label(),
             observed: r.observed.clone(),
@@ -340,20 +396,14 @@ pub fn pair(
         .map(|(file, record)| {
             let wanted = replay_file_for(&file);
             let written = replays.iter().find(|(f, _)| *f == wanted).map(|(_, r)| r);
-            let ran = executed.shown(&record.command, Phase::Walk);
-            let replay = replayed(executed, &record.command, written);
+            let (ran, replay) = judge(executed, &record.command, walk);
+            let replay = replayed(replay, written);
             let replay = (written.is_some() || replay.observed.is_some()).then_some(replay);
-            let agreement = replay
-                .as_ref()
-                .and_then(|r| match (ran.label(), r.outcome) {
-                    ("reproduced", "reproduced") | ("not_reproduced", "not_reproduced") => {
-                        Some(true)
-                    }
-                    ("reproduced", "not_reproduced") | ("not_reproduced", "reproduced") => {
-                        Some(false)
-                    }
-                    _ => None,
-                });
+            let agreement = replay.as_ref().and_then(|r| match (ran.label, r.outcome) {
+                ("reproduced", "reproduced") | ("not_reproduced", "not_reproduced") => Some(true),
+                ("reproduced", "not_reproduced") | ("not_reproduced", "reproduced") => Some(false),
+                _ => None,
+            });
             Reproduction {
                 walk: walk.map(str::to_string),
                 file,
@@ -362,9 +412,10 @@ pub fn pair(
                 harness: record.harness,
                 expected: record.expected,
                 code_revision: record.code_revision,
-                outcome: ran.label(),
-                observed: ran.output().unwrap_or_default().to_string(),
-                reason: ran.why().map(str::to_string),
+                outcome: ran.label,
+                observed: ran.observed.unwrap_or_default(),
+                reason: ran.reason,
+                exit_status_from: ran.exit_status_from,
                 claimed: Claimed {
                     outcome: match record.outcome {
                         ReproductionOutcome::Reproduced => "reproduced",
@@ -648,6 +699,128 @@ mod tests {
         assert!(unreplayed[0].replay.is_none());
     }
 
+    /// The chain rows of one `exec` of a whole shell `line` by the
+    /// agent of `step`, with the output and exit of the line.
+    fn exec_line(
+        id: &str,
+        step: &str,
+        line: &str,
+        output: &str,
+        exit_zero: bool,
+    ) -> Vec<wirken_audit::SessionEvent> {
+        vec![
+            serde_json::from_value(serde_json::json!({
+                "kind": "assistant_tool_calls", "step": step,
+                "calls": [{"id": id, "name": "exec",
+                           "arguments": serde_json::json!({"command": line}).to_string()}],
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "kind": "tool_result", "call_id": id, "tool_name": "exec",
+                "output": output, "success": exit_zero,
+                "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c"},
+            }))
+            .unwrap(),
+        ]
+    }
+
+    fn one_record(command: &str) -> Vec<(String, ReproductionRecord)> {
+        let mut r: serde_json::Value = serde_json::from_str(&repro("reproduced")).unwrap();
+        r["command"] = serde_json::json!(command);
+        vec![(
+            "repro-001.json".to_string(),
+            serde_json::from_value(r).unwrap(),
+        )]
+    }
+
+    /// A walk ran its harness as one command of a longer line, as a
+    /// walk in a real run did, and recorded the harness command alone.
+    /// The command is one of the line's simple commands, so it ran. The
+    /// line's exit status is the last command's, not the harness's; the
+    /// replay ran the command by itself, and its exit status is the
+    /// command's own.
+    #[test]
+    fn a_command_run_inside_a_longer_line_is_the_command_that_ran() {
+        let harness = "python3 .lyrik/state/runs/r/staging/fuzz-walk/harness/h.py";
+        let mut rows = exec_line(
+            "w1",
+            "fuzz-walk",
+            &format!("{harness}; echo \"EXIT:$?\""),
+            "LYRIK_REACHED\neval executed\nEXIT:1\n",
+            true,
+        );
+        rows.extend(exec_line(
+            "r1",
+            "replay",
+            harness,
+            "LYRIK_REACHED\neval executed\n",
+            false,
+        ));
+        let executed = ExecutedCommands::from_rows(rows);
+        let paired = pair(Some("fuzz-walk"), one_record(harness), &[], &executed);
+        assert_eq!(paired[0].outcome, "reproduced", "{:?}", paired[0]);
+        assert_eq!(paired[0].replay.as_ref().unwrap().outcome, "reproduced");
+        assert_eq!(paired[0].agreement, Some(true));
+        // It says where the walk's exit status came from.
+        assert_eq!(paired[0].exit_status_from, Some("replay"));
+
+        // The other ways a line holds the command: after `cd` and `&&`,
+        // before a pipe, with its output redirected.
+        for (line, own_exit) in [
+            (format!("cd /workspace && {harness}"), true),
+            (format!("{harness} 2>&1"), true),
+            (format!("{harness} 2>&1 | head -20"), false),
+            (format!("{harness} || echo failed"), false),
+            (format!("echo start; {harness}"), true),
+        ] {
+            let mut rows = exec_line("w1", "fuzz-walk", &line, "LYRIK_REACHED\n", !own_exit);
+            rows.extend(exec_line("r1", "replay", harness, "LYRIK_REACHED\n", false));
+            let executed = ExecutedCommands::from_rows(rows);
+            let p = &pair(Some("fuzz-walk"), one_record(harness), &[], &executed)[0];
+            assert_eq!(p.outcome, "reproduced", "{line}");
+            assert_eq!(p.agreement, Some(true), "{line}");
+            assert_eq!(
+                p.exit_status_from,
+                (!own_exit).then_some("replay"),
+                "{line}"
+            );
+        }
+
+        // A different command in the line is not the command.
+        let mut rows = exec_line(
+            "w1",
+            "fuzz-walk",
+            "python3 other.py; echo done",
+            "LYRIK_REACHED\n",
+            true,
+        );
+        rows.extend(exec_line("r1", "replay", harness, "LYRIK_REACHED\n", false));
+        let executed = ExecutedCommands::from_rows(rows);
+        let p = &pair(Some("fuzz-walk"), one_record(harness), &[], &executed)[0];
+        assert_eq!(p.outcome, "not_run");
+        // Another walk's run of it is not this walk's.
+        let mut rows = exec_line("w1", "sink-walk", harness, "LYRIK_REACHED\n", false);
+        rows.extend(exec_line("r1", "replay", harness, "LYRIK_REACHED\n", false));
+        let executed = ExecutedCommands::from_rows(rows);
+        let p = &pair(Some("fuzz-walk"), one_record(harness), &[], &executed)[0];
+        assert_eq!(p.outcome, "not_run");
+        // With no run whose exit status is the command's own, there is
+        // no verdict.
+        let line = format!("{harness}; echo \"EXIT:$?\"");
+        let mut rows = exec_line("w1", "fuzz-walk", &line, "LYRIK_REACHED\nEXIT:1\n", true);
+        rows.extend(exec_line(
+            "r1",
+            "replay",
+            &line,
+            "LYRIK_REACHED\nEXIT:1\n",
+            true,
+        ));
+        let executed = ExecutedCommands::from_rows(rows);
+        let p = &pair(Some("fuzz-walk"), one_record(harness), &[], &executed)[0];
+        assert_eq!(p.outcome, "inconclusive");
+        assert_eq!(p.agreement, None);
+    }
+
     #[test]
     fn only_a_disagreement_is_a_rule_eight_rejection() {
         let repros: Vec<_> = (1..=3).map(|n| record(n, "reproduced")).collect();
@@ -688,12 +861,20 @@ mod tests {
         let mut rows = vec![replays_begin()];
         rows.extend(exec(1, true, true, true));
         let executed = ExecutedCommands::from_rows(rows);
-        let ran = replay_status(&executed, "sh h1.sh", tmp.path(), "repro-001.json", &Ok(()));
+        let ran = replay_status(
+            &executed,
+            "sh h1.sh",
+            None,
+            tmp.path(),
+            "repro-001.json",
+            &Ok(()),
+        );
         assert_eq!(ran.status, "not_reproduced");
         assert_eq!(ran.claimed.unwrap().outcome, "reproduced");
         let none = replay_status(
             &executed,
             "sh h2.sh",
+            None,
             tmp.path(),
             "repro-002.json",
             &Err("turn: boom".to_string()),

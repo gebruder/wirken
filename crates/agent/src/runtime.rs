@@ -1300,6 +1300,7 @@ impl Agent {
                 agent_id: self.audited_agent_id(),
                 adapter_id: self.current_inbound.adapter_id.clone(),
                 sender_id: self.current_inbound.sender_id.clone(),
+                step: self.call_step.clone(),
             },
         )?;
         let mut denials = Vec::new();
@@ -3667,6 +3668,7 @@ impl Agent {
                             agent_id: self.audited_agent_id(),
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
+                            step: self.call_step.clone(),
                         },
                     )?;
 
@@ -4088,6 +4090,7 @@ impl Agent {
                             agent_id: self.audited_agent_id(),
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
+                            step: self.call_step.clone(),
                         },
                     )?;
                     // After the row, so a client shown a call can find

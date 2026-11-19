@@ -1980,6 +1980,7 @@ mod durability {
                     sender_id: None,
                     text: None,
                     reasoning: None,
+                    step: None,
                 },
             )
             .unwrap();
@@ -2318,6 +2319,7 @@ mod wake {
                 sender_id: None,
                 text: None,
                 reasoning: None,
+                step: None,
             },
         )
         .unwrap();
@@ -8468,6 +8470,7 @@ mod verify {
                     sender_id: None,
                     text: None,
                     reasoning: None,
+                    step: None,
                 },
             )
             .unwrap();
@@ -8520,6 +8523,7 @@ mod verify {
                     sender_id: None,
                     text: None,
                     reasoning: None,
+                    step: None,
                 },
             )
             .unwrap();
@@ -8569,6 +8573,7 @@ mod verify {
                     sender_id: None,
                     text: None,
                     reasoning: None,
+                    step: None,
                 },
             )
             .unwrap();

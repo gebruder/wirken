@@ -4171,6 +4171,7 @@ async fn dispatch_replays(
         let came_to = lyrik_replay::replay_status(
             &executed,
             &command,
+            Some(&walk),
             &run_dir.join("staging").join(&walk).join("replays"),
             &file,
             &result,

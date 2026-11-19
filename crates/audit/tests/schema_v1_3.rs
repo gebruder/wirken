@@ -100,7 +100,9 @@ fn pre_1_2_0_assistant_tool_calls_deserializes_with_empty_agent_id() {
             agent_id,
             adapter_id,
             sender_id,
+            step,
         } => {
+            assert_eq!(step, None);
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, "c1");
             assert!(
@@ -178,6 +180,7 @@ fn a1_assistant_tool_calls_emitted_with_webchat_identity() {
         sender_id: Some("webchat-user".into()),
         text: None,
         reasoning: None,
+        step: None,
     };
     let v = serde_json::to_value(&ev).unwrap();
     assert_eq!(
@@ -1082,6 +1085,7 @@ fn assistant_tool_calls_reasoning_is_additive() {
         agent_id: "default".into(),
         adapter_id: None,
         sender_id: None,
+        step: None,
     };
     assert_eq!(
         serde_json::to_string(&without).unwrap(),
@@ -1096,6 +1100,7 @@ fn assistant_tool_calls_reasoning_is_additive() {
         agent_id: "default".into(),
         adapter_id: None,
         sender_id: None,
+        step: None,
     };
     let wire = serde_json::to_string(&with).unwrap();
     assert_eq!(

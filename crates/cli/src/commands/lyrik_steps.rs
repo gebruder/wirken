@@ -59,17 +59,32 @@ pub struct AcceptedStep {
     pub check_status: Option<&'static str>,
 }
 
+/// One simple command of a shell line: its words, without its
+/// redirections.
+#[derive(Debug, Clone, PartialEq)]
+struct Simple {
+    words: Vec<String>,
+}
+
 /// One `exec` call of the run as its chain has it.
 #[derive(Debug, Clone, PartialEq)]
 struct Call {
-    words: Vec<String>,
+    /// The step that made it, as its row says: a walk's name, or
+    /// `replay`. Absent on a row written before rows carried it, and
+    /// for the single call.
+    step: Option<String>,
+    /// For a row with no `step`: whether it came after the first model
+    /// call of the replay step.
+    after_replays_began: bool,
+    /// The line's simple commands, in order.
+    simple: Vec<Simple>,
     /// Whether it ran: its result says where. A refused call has no
     /// such result.
     ran: bool,
     output: String,
+    /// The exit status of the line, which is that of its last simple
+    /// command.
     exit_zero: bool,
-    /// Whether it was made in the replay step, after the walks.
-    replay: bool,
 }
 
 /// The `exec` calls of a run, read off its chain. What a walk or a
@@ -78,29 +93,32 @@ struct Call {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutedCommands(Vec<Call>);
 
-/// The step of a run a call was made in.
+/// Whose calls to look among.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    /// By a walk, or by the single call.
-    Walk,
-    /// By a replay.
+pub enum By<'a> {
+    /// The walk of this name, or the single call when there is none.
+    Walk(Option<&'a str>),
+    /// The replays.
     Replay,
 }
 
-/// What the chain shows a defect-showing command did in one phase,
-/// under the contract a harness follows: the marker on a line of its
-/// own on stdout, then a non-zero exit when the finding holds.
+/// What the chain shows a defect-showing command did, under the
+/// contract a harness follows: the marker on a line of its own on
+/// stdout, then a non-zero exit when the finding holds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shown {
     /// It ran, printed the marker and exited non-zero.
     Reproduced { output: String },
     /// It ran, printed the marker and exited zero.
     NotReproduced { output: String },
+    /// It ran and printed the marker inside a longer line whose exit
+    /// status is another command's: that it reached its assertion is
+    /// on record, and how it exited is not.
+    Reached { output: String },
     /// It ran and the result says neither: no marker line, or runs
     /// that disagree.
     Inconclusive { why: String, output: String },
-    /// No call of it ran in the phase: none was made, or each was
-    /// refused.
+    /// No call of it ran: none was made, or each was refused.
     NotRun { why: String },
 }
 
@@ -109,7 +127,7 @@ impl Shown {
         match self {
             Shown::Reproduced { .. } => "reproduced",
             Shown::NotReproduced { .. } => "not_reproduced",
-            Shown::Inconclusive { .. } => "inconclusive",
+            Shown::Reached { .. } | Shown::Inconclusive { .. } => "inconclusive",
             Shown::NotRun { .. } => "not_run",
         }
     }
@@ -119,6 +137,7 @@ impl Shown {
         match self {
             Shown::Reproduced { output }
             | Shown::NotReproduced { output }
+            | Shown::Reached { output }
             | Shown::Inconclusive { output, .. } => Some(output),
             Shown::NotRun { .. } => None,
         }
@@ -128,6 +147,10 @@ impl Shown {
     pub fn why(&self) -> Option<&str> {
         match self {
             Shown::Inconclusive { why, .. } | Shown::NotRun { why } => Some(why),
+            Shown::Reached { .. } => Some(
+                "it ran inside a longer line, so the line's exit status is another \
+                 command's and its own is not on record",
+            ),
             _ => None,
         }
     }
@@ -135,26 +158,32 @@ impl Shown {
 
 impl ExecutedCommands {
     /// From the run's rows, in order. A result is paired with the
-    /// earliest unanswered `exec` call of its id. The replay step
-    /// begins at the first model call a replay made.
+    /// earliest unanswered `exec` call of its id.
     pub fn from_rows(rows: impl IntoIterator<Item = wirken_audit::SessionEvent>) -> Self {
         use wirken_audit::SessionEvent;
-        let mut asked: std::collections::HashMap<String, std::collections::VecDeque<String>> =
+        type Asked = (String, Option<String>, bool);
+        let mut asked: std::collections::HashMap<String, std::collections::VecDeque<Asked>> =
             std::collections::HashMap::new();
         let mut calls = Vec::new();
-        let mut replay = false;
+        let mut replays_began = false;
         for event in rows {
             match event {
                 SessionEvent::LlmRequest { step, .. } => {
-                    replay = replay || step.as_deref() == Some("replay");
+                    replays_began = replays_began || step.as_deref() == Some("replay");
                 }
-                SessionEvent::AssistantToolCalls { calls: made, .. } => {
+                SessionEvent::AssistantToolCalls {
+                    calls: made, step, ..
+                } => {
                     for call in made.into_iter().filter(|c| c.name == "exec") {
                         let command = serde_json::from_str::<serde_json::Value>(&call.arguments)
                             .ok()
                             .and_then(|a| wirken_agent::tool::extract_exec_command(&a).ok());
                         if let Some(command) = command {
-                            asked.entry(call.id).or_default().push_back(command);
+                            asked.entry(call.id).or_default().push_back((
+                                command,
+                                step.clone(),
+                                replays_began,
+                            ));
                         }
                     }
                 }
@@ -166,13 +195,16 @@ impl ExecutedCommands {
                     sandbox,
                     ..
                 } if tool_name == "exec" => {
-                    if let Some(command) = asked.get_mut(&call_id).and_then(|q| q.pop_front()) {
+                    if let Some((command, step, after_replays_began)) =
+                        asked.get_mut(&call_id).and_then(|q| q.pop_front())
+                    {
                         calls.push(Call {
-                            words: words(&command),
+                            step,
+                            after_replays_began,
+                            simple: simple_commands(&command),
                             ran: sandbox.is_some(),
                             output,
                             exit_zero: success,
-                            replay,
                         });
                     }
                 }
@@ -182,24 +214,49 @@ impl ExecutedCommands {
         Self(calls)
     }
 
-    /// Whether `command` is one that ran: the same words in the same
-    /// order, however each was quoted, and with or without a leading
-    /// `cd <dir> &&`.
-    pub fn ran(&self, command: &str) -> bool {
-        let words = words(command);
-        self.0.iter().any(|c| c.ran && c.words == words)
+    /// The calls made by `by`. A row that names its step is taken at
+    /// its word; one that names none is a walk's before the replays
+    /// began and a replay's after.
+    fn made_by<'a>(&'a self, by: By<'a>) -> impl Iterator<Item = &'a Call> {
+        self.0.iter().filter(move |c| match (&c.step, by) {
+            (Some(step), By::Replay) => step == "replay",
+            (Some(step), By::Walk(walk)) => walk == Some(step.as_str()),
+            (None, By::Replay) => c.after_replays_began,
+            (None, By::Walk(_)) => !c.after_replays_began,
+        })
     }
 
-    /// What `command` showed in `phase`, from its recorded results.
-    pub fn shown(&self, command: &str, phase: Phase) -> Shown {
-        let words = words(command);
-        let made: Vec<&Call> = self
-            .0
-            .iter()
-            .filter(|c| c.words == words && c.replay == (phase == Phase::Replay))
-            .collect();
-        let ran: Vec<&Call> = made.iter().copied().filter(|c| c.ran).collect();
-        let Some(first) = ran.first() else {
+    /// Each call by `by` whose line holds `command`, with whether the
+    /// line's exit status is the command's own: it is when the command
+    /// ends the line.
+    fn holding<'a>(&'a self, command: &str, by: By<'a>) -> Vec<(&'a Call, bool)> {
+        let wanted = simple_commands(command);
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        self.made_by(by)
+            .filter_map(|call| {
+                let at = call
+                    .simple
+                    .windows(wanted.len())
+                    .position(|w| w == wanted.as_slice())?;
+                Some((call, at + wanted.len() == call.simple.len()))
+            })
+            .collect()
+    }
+
+    /// Whether `by` ran `command`: as a whole line, or as one of the
+    /// simple commands of a longer one, word for word.
+    pub fn ran(&self, command: &str, by: By<'_>) -> bool {
+        self.holding(command, by).iter().any(|(c, _)| c.ran)
+    }
+
+    /// What `command` showed when `by` ran it, from its recorded
+    /// results.
+    pub fn shown(&self, command: &str, by: By<'_>) -> Shown {
+        let made = self.holding(command, by);
+        let ran: Vec<(&Call, bool)> = made.iter().copied().filter(|(c, _)| c.ran).collect();
+        if ran.is_empty() {
             return Shown::NotRun {
                 why: if made.is_empty() {
                     "no `exec` call of the command is on the chain for this step".to_string()
@@ -207,9 +264,26 @@ impl ExecutedCommands {
                     "every `exec` call of the command was refused".to_string()
                 },
             };
+        }
+        // A run whose exit status is the command's own says the most.
+        let own: Vec<&Call> = ran
+            .iter()
+            .filter(|(_, own)| *own)
+            .map(|(c, _)| *c)
+            .collect();
+        let Some(first) = own.first() else {
+            let output = ran[0].0.output.clone();
+            return if super::lyrik_fix_arms::has_marker(&output) {
+                Shown::Reached { output }
+            } else {
+                Shown::Inconclusive {
+                    why: no_marker(),
+                    output,
+                }
+            };
         };
         let output = first.output.clone();
-        if ran.iter().any(|c| c.exit_zero != first.exit_zero) {
+        if own.iter().any(|c| c.exit_zero != first.exit_zero) {
             return Shown::Inconclusive {
                 why: "its runs exited differently".to_string(),
                 output,
@@ -217,10 +291,7 @@ impl ExecutedCommands {
         }
         if !super::lyrik_fix_arms::has_marker(&output) {
             return Shown::Inconclusive {
-                why: format!(
-                    "no {} line in its output: the harness did not reach its assertion",
-                    super::lyrik_fix_arms::REACHED
-                ),
+                why: no_marker(),
                 output,
             };
         }
@@ -232,17 +303,99 @@ impl ExecutedCommands {
     }
 }
 
-/// A command as the words a shell would read, without a leading
-/// `cd <dir> &&`: `grep -n 'a' f` and `grep -n a f` are the same
-/// words. A command a shell could not split, an unclosed quote, is
-/// split on whitespace instead, so it still equals itself.
-fn words(command: &str) -> Vec<String> {
-    let mut words = shlex::split(command)
-        .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect());
-    while words.len() > 3 && words[0] == "cd" && words[2] == "&&" {
-        words.drain(..3);
+fn no_marker() -> String {
+    format!(
+        "no {} line in its output: the harness did not reach its assertion",
+        super::lyrik_fix_arms::REACHED
+    )
+}
+
+/// The simple commands of a shell line, in order: the line split on
+/// `;`, `&&`, `||`, `|`, `&`, newlines and parentheses outside quotes,
+/// each part taken as the words a shell would read, without its
+/// redirections. `cd /w && python3 h.py 2>&1; echo "$?"` is `cd /w`,
+/// `python3 h.py` and `echo $?`.
+fn simple_commands(line: &str) -> Vec<Simple> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    let mut prev = ' ';
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == '\\' && q == '"' {
+                    if let Some(next) = chars.next() {
+                        cur.push(next);
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    cur.push(c);
+                }
+                '\\' => {
+                    cur.push(c);
+                    if let Some(next) = chars.next() {
+                        cur.push(next);
+                    }
+                }
+                ';' | '\n' | '(' | ')' => parts.push(std::mem::take(&mut cur)),
+                '|' => {
+                    if chars.peek() == Some(&'|') {
+                        chars.next();
+                    }
+                    parts.push(std::mem::take(&mut cur));
+                }
+                // `&&` and a lone `&` end a command; the `&` of a
+                // redirection (`2>&1`, `&>file`) is part of one.
+                '&' if prev != '>' && chars.peek() != Some(&'>') => {
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                    }
+                    parts.push(std::mem::take(&mut cur));
+                }
+                _ => cur.push(c),
+            },
+        }
+        prev = c;
     }
-    words
+    parts.push(cur);
+    parts
+        .iter()
+        .map(|part| Simple {
+            words: without_redirections(
+                shlex::split(part)
+                    .unwrap_or_else(|| part.split_whitespace().map(str::to_string).collect()),
+            ),
+        })
+        .filter(|s| !s.words.is_empty())
+        .collect()
+}
+
+/// `words` without the redirections among them: `2>&1`, `>/dev/null`,
+/// `< in`, and the target that follows a bare `>`, `>>` or `<`.
+fn without_redirections(words: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(words.len());
+    let mut skip_target = false;
+    for w in words {
+        if skip_target {
+            skip_target = false;
+            continue;
+        }
+        let op = w.trim_start_matches(|c: char| c.is_ascii_digit());
+        let op = op.strip_prefix('&').unwrap_or(op);
+        if op.starts_with('>') || op.starts_with('<') {
+            skip_target = matches!(op, ">" | ">>" | "<");
+            continue;
+        }
+        out.push(w);
+    }
+    out
 }
 
 /// Whether a record's `check` names a read and not a command: it opens
@@ -278,7 +431,7 @@ pub fn mark_checks<'a>(
     for s in steps.iter_mut() {
         s.check_status = if check_is_a_read(&s.record.check, workspace) {
             None
-        } else if executed.ran(&s.record.check) {
+        } else if executed.ran(&s.record.check, By::Walk(s.walk.as_deref())) {
             Some("executed")
         } else {
             Some("not_executed")
@@ -428,9 +581,10 @@ mod tests {
     }
 
     /// A command is the same command however its words were quoted,
-    /// and wherever it was run from. A walk ran
+    /// and whatever else its line ran. A walk ran
     /// `grep -n subprocess agent.py` and cited it with the pattern in
-    /// quotes; another ran its command after `cd /workspace &&`.
+    /// quotes; another ran its command after `cd /workspace &&`, and
+    /// another before `; echo "EXIT:$?"`.
     #[test]
     fn a_cited_command_matches_what_ran_whatever_the_quoting() {
         let tmp = tempdir().unwrap();
@@ -440,15 +594,27 @@ mod tests {
             true,
         ));
         rows.extend(exec_rows("grep -n \"shell=True\" agent.py", true));
+        rows.extend(exec_rows(
+            "python3 harness/repro.py 2>&1; echo \"EXIT:$?\"",
+            true,
+        ));
+        rows.extend(exec_rows(
+            "find . -name '*.py' | grep -v '.lyrik' | head -20",
+            true,
+        ));
         let executed = ExecutedCommands::from_rows(rows);
         for cited in [
             "grep -n 'subprocess' agent.py",
             "grep -n \"subprocess\" agent.py",
             "python3 .lyrik/state/runs/r/staging/sink-walk/harness/h.py",
-            "cd /workspace && grep -n subprocess agent.py",
             "grep -n shell=True agent.py",
+            // One command of a longer line, and several in a row.
+            "python3 harness/repro.py",
+            "find . -name '*.py'",
+            "grep -v .lyrik | head -20",
+            "cd /workspace && python3 .lyrik/state/runs/r/staging/sink-walk/harness/h.py",
         ] {
-            assert!(executed.ran(cited), "{cited}");
+            assert!(executed.ran(cited, By::Walk(None)), "{cited}");
         }
         // Different words are a different command.
         for cited in [
@@ -456,13 +622,40 @@ mod tests {
             "grep -rn subprocess agent.py",
             "grep -n 'sub process' agent.py",
             "rg -n subprocess agent.py",
-            // A `cd` that is not a prefix is part of the command.
+            // A cited line is held to every command in it: this `cd`
+            // did not run.
+            "cd /workspace && grep -n subprocess agent.py",
             "grep -n subprocess agent.py && cd /workspace",
+            // Commands that ran, in an order they did not run in.
+            "head -20 | grep -v .lyrik",
         ] {
-            assert!(!executed.ran(cited), "{cited}");
+            assert!(!executed.ran(cited, By::Walk(None)), "{cited}");
         }
         let mut steps = vec![accepted("grep -n 'subprocess' agent.py")];
         assert!(mark_checks(&mut steps, &executed, tmp.path()).is_empty());
+        assert_eq!(steps[0].check_status, Some("executed"));
+
+        // A step record is held to its own walk's commands: one only
+        // another walk or a replay ran is not one it ran.
+        let by = |step: &str| -> Vec<wirken_audit::SessionEvent> {
+            let mut rows = exec_rows("grep -n eval agent.py", true);
+            if let wirken_audit::SessionEvent::AssistantToolCalls { step: s, .. } = &mut rows[0] {
+                *s = Some(step.to_string());
+            }
+            rows
+        };
+        let mut rows = by("chain-walk");
+        rows.extend(by("replay"));
+        let executed = ExecutedCommands::from_rows(rows);
+        let mut steps = vec![accepted("grep -n eval agent.py")];
+        mark_checks(&mut steps, &executed, tmp.path());
+        assert_eq!(
+            steps[0].check_status,
+            Some("not_executed"),
+            "sink-walk ran none"
+        );
+        steps[0].walk = Some("chain-walk".into());
+        mark_checks(&mut steps, &executed, tmp.path());
         assert_eq!(steps[0].check_status, Some("executed"));
     }
 

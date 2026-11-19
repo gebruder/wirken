@@ -57,6 +57,7 @@ fn fixture_tool_calls() -> SessionEvent {
         sender_id: Some("U123".into()),
         text: None,
         reasoning: None,
+        step: None,
     }
 }
 

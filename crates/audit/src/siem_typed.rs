@@ -776,6 +776,7 @@ mod tests {
             sender_id: Some("U123".into()),
             text: None,
             reasoning: None,
+            step: None,
         }
     }
 

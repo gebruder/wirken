@@ -758,6 +758,12 @@ pub enum SessionEvent {
         /// the row an earlier build wrote.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
+        /// The step of a run the calls were made for, when the caller
+        /// names one: the same value as on the [`Self::LlmRequest`]
+        /// whose reply carried them. Absent on rows written before the
+        /// field existed and for a caller that names no step.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<String>,
         #[serde(default)]
         agent_id: String,
         /// Adapter that delivered the inbound message that drove

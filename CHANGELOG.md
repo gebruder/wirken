@@ -81,6 +81,18 @@ tagged.
 
 ### Fixed
 
+- A command a Lyrik reproduction or step record names is looked for among the
+  simple commands of each line the step ran, split on `;`, `&&`, `||` and
+  pipes and compared word for word, redirections aside. A harness run as
+  `python3 h.py; echo "EXIT:$?"` is the recorded `python3 h.py`. Its exit
+  status, which the line's does not give, is taken from the other run of the
+  command when that run was of the command alone, and the entry says so in
+  `exit_status_from`. A step record's command is matched among its own
+  walk's calls, which `assistant_tool_calls` rows now name in `step`. A
+  command was matched as a whole line, so a walk that appended an `echo`
+  had its reproduction read as `not_run`
+  (`a_command_run_inside_a_longer_line_is_the_command_that_ran`,
+  `crates/cli/src/commands/lyrik_replay.rs`).
 - `executionSuccessful` on a Lyrik SARIF report is `false` when a walk of the
   run was stopped at the tool round limit or the cost ceiling, or its turn
   failed. It was `true` on every report

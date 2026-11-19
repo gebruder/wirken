@@ -1410,6 +1410,7 @@ mod tests {
             sender_id: None,
             text: None,
             reasoning: None,
+            step: None,
         }
     }
 
