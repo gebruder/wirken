@@ -1648,8 +1648,20 @@ Every run writes the per-run `audit.log` with no opt-out, each row carrying
 the run ID. The SARIF report carries the same ID as `automationDetails.id`
 (`lyrik/run/<run-id>`) and on every finding result (a rejection result carries
 `rule`, `walk`, `stable_id` and `applied_by` only), so a reader can pull the rows for
-a finding. `findings.json` carries a `citation_check` block with resolved and
-unresolved counts per citation sub-gate; what the run set aside is in
+a finding. Each finding carries `citation_check` with a `status`. `resolved`
+means the cited line holds the text the finding quotes in `location.quote`,
+compared with whitespace folded, and the sub-gate that ran on the line passed.
+A quote found on exactly one other line of the file moves `line_start` there,
+and `corrected_from` records the line the finding gave. A quote found nowhere
+or on several lines leaves the lines as cited with status `mismatch`, and a
+finding with no quote of three characters or more is `unquoted`. `unresolved`
+is a missing file or line, or a sub-gate that did not pass. An `origin` whose
+`function` is one identifier is held the same way to the line that defines it
+(`origin_corrected_from`). The bundled single-call skill does not ask for a
+quote, so its findings are `unquoted`. `findings.json` carries a
+`citation_check` block with resolved and unresolved counts per citation
+sub-gate, and `corrected`, `mismatch` and `unquoted` across them; what the run
+set aside is in
 `audit.log`, one row each: `lyrik.candidate.declined`,
 `lyrik.candidate.unaddressed`, `lyrik.finding.refused`,
 `lyrik.finding.framing_stripped` and `lyrik.finding.grade_corrected`.

@@ -1,5 +1,12 @@
 //! Citation-resolution gate for staged Lyrik findings.
 //!
+//! A citation resolves only when its cited line holds the text the
+//! finding quotes ([`check_quoted`], [`settle_lines`]): the quote is
+//! looked for on the cited line, the line is moved to it when the file
+//! holds it exactly once elsewhere, and a quote the file does not
+//! place is a mismatch. The sub-gates below then read the line as
+//! settled; what they call resolved is resolved only with the quote.
+//!
 //! Runs between staging emission and report aggregation. For every
 //! finding the runner confirms the cited file exists and the cited
 //! line resolves. Beyond that, class-specific structural sub-gates
@@ -177,15 +184,30 @@ pub struct Outcome {
     /// claim-shape keywords were present and only file+line existence
     /// was checked.
     pub gate: Gate,
-    /// Human-readable reason when `status` is `Unresolved`. None on
+    /// Human-readable reason when `status` is not `Resolved`. None on
     /// resolved outcomes.
     pub reason: Option<String>,
+    /// The line the finding cited, when the quoted text was found
+    /// once elsewhere in the file and `location.line_start` was moved
+    /// to it.
+    pub corrected_from: Option<u64>,
+    /// The line `origin` cited, when the function it names is defined
+    /// once elsewhere in the file and `origin.line_start` was moved.
+    pub origin_corrected_from: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
+    /// The cited lines hold the text the finding quotes, and the
+    /// sub-gate that ran on them passed.
     Resolved,
+    /// The file or line is not there, or the sub-gate did not pass.
     Unresolved,
+    /// The quoted text is not on the cited lines and the file does not
+    /// say where it should be: it has it nowhere, or on several lines.
+    Mismatch,
+    /// The finding quotes no text, so nothing holds its lines.
+    Unquoted,
 }
 
 impl Status {
@@ -193,8 +215,206 @@ impl Status {
         match self {
             Status::Resolved => "resolved",
             Status::Unresolved => "unresolved",
+            Status::Mismatch => "mismatch",
+            Status::Unquoted => "unquoted",
         }
     }
+}
+
+/// How a quoted text sits against the lines cited for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placement {
+    /// On a cited line.
+    Cited,
+    /// On exactly one line of the file, not a cited one: that line.
+    Elsewhere(u64),
+    /// On this many lines of the file, none of them cited: zero, or
+    /// more than one.
+    Unplaced(usize),
+}
+
+/// A quote is compared with runs of whitespace folded to one space.
+fn folded(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Where `quote` sits in `text` against the 1-based lines `from..=to`.
+/// `holds` says whether a line holds the quote.
+fn place(text: &str, from: u64, to: u64, holds: impl Fn(&str) -> bool) -> Placement {
+    let hits: Vec<u64> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| holds(l))
+        .map(|(i, _)| i as u64 + 1)
+        .collect();
+    if hits.iter().any(|n| (from..=to).contains(n)) {
+        Placement::Cited
+    } else if let [only] = hits[..] {
+        Placement::Elsewhere(only)
+    } else {
+        Placement::Unplaced(hits.len())
+    }
+}
+
+/// Whether `line` holds `name` as a whole word.
+fn holds_word(line: &str, name: &str) -> bool {
+    let bytes = line.as_bytes();
+    line.match_indices(name).any(|(at, _)| {
+        let before = at.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(at + name.len()).copied();
+        !before.is_some_and(is_ident_char) && !after.is_some_and(is_ident_char)
+    })
+}
+
+/// Whether `line` defines `name`: the word, after a definition keyword.
+fn defines(line: &str, name: &str) -> bool {
+    const KEYWORDS: &[&str] = &["def", "fn", "func", "function", "class", "sub", "proc"];
+    holds_word(line, name)
+        && line
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .take_while(|w| *w != name)
+            .any(|w| KEYWORDS.contains(&w))
+}
+
+/// Hold a finding's cited lines to the text it quotes, before the
+/// sub-gates read them.
+///
+/// `location.quote` is one line of the cited range as the finding
+/// copied it. On a cited line it stands. On exactly one other line of
+/// the file, `location.line_start` is moved there (and `line_end` with
+/// it) and the outcome records the line it came from. Nowhere or on
+/// several lines, the lines stay as cited and the outcome is a
+/// mismatch. A quote shorter than three characters holds nothing, like
+/// no quote.
+///
+/// `origin` is held the same way when its `function` is one
+/// identifier: the cited line names it, or the one line of the file
+/// that defines it is taken instead.
+///
+/// Returns `None` when there is nothing to read the lines from; the
+/// sub-gates then report the missing file or line.
+pub fn settle_lines(finding: &mut serde_json::Value, workspace: &Path) -> Option<Settled> {
+    let read = |file: &str| -> Option<String> {
+        let rel = Path::new(file);
+        let plain = !rel.is_absolute()
+            && rel
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        plain
+            .then(|| std::fs::read_to_string(workspace.join(rel)).ok())
+            .flatten()
+    };
+    let mut settled = Settled::default();
+
+    let loc = finding.get("location")?;
+    let file = loc.get("file")?.as_str()?.to_string();
+    let from = loc.get("line_start")?.as_u64()?;
+    let to = loc
+        .get("line_end")
+        .and_then(|v| v.as_u64())
+        .filter(|e| *e >= from)
+        .unwrap_or(from);
+    let text = read(&file)?;
+    let quote = loc
+        .get("quote")
+        .and_then(|v| v.as_str())
+        .map(folded)
+        .filter(|q| q.chars().count() >= 3);
+    settled.quote = quote.map(|q| place(&text, from, to, |l| folded(l).contains(&q)));
+    if let Some(Placement::Elsewhere(line)) = settled.quote {
+        let loc = finding.get_mut("location")?.as_object_mut()?;
+        loc.insert("line_start".into(), serde_json::json!(line));
+        if loc.contains_key("line_end") {
+            loc.insert("line_end".into(), serde_json::json!(line + (to - from)));
+        }
+        settled.corrected_from = Some(from);
+    }
+
+    let origin = finding.get("origin").and_then(|o| o.as_object());
+    let named = origin.and_then(|o| {
+        let name = o.get("function")?.as_str()?;
+        let line = o.get("line_start")?.as_u64()?;
+        let file = o.get("file")?.as_str()?;
+        let ident = !name.is_empty() && name.bytes().all(is_ident_char);
+        ident.then(|| (name.to_string(), line, file.to_string()))
+    });
+    if let Some((name, line, origin_file)) = named
+        && let Some(text) = read(&origin_file)
+    {
+        let cited = text
+            .lines()
+            .nth(line as usize - 1)
+            .is_some_and(|l| holds_word(l, &name));
+        if !cited {
+            match place(&text, line, line, |l| defines(l, &name)) {
+                Placement::Elsewhere(defined) => {
+                    if let Some(o) = finding.get_mut("origin").and_then(|o| o.as_object_mut()) {
+                        o.insert("line_start".into(), serde_json::json!(defined));
+                    }
+                    settled.origin_corrected_from = Some(line);
+                }
+                Placement::Cited => {}
+                Placement::Unplaced(n) => settled.origin_unplaced = Some((name, n)),
+            }
+        }
+    }
+    Some(settled)
+}
+
+/// What [`settle_lines`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settled {
+    /// Where the quoted text sits. `None` when the finding quotes none.
+    pub quote: Option<Placement>,
+    pub corrected_from: Option<u64>,
+    pub origin_corrected_from: Option<u64>,
+    /// The function `origin` names and the number of lines defining
+    /// it, when its cited line does not name it and that number is not
+    /// one.
+    pub origin_unplaced: Option<(String, usize)>,
+}
+
+/// [`settle_lines`], then [`check`] on the lines as settled. A
+/// citation resolves only when its quoted text is on the cited lines,
+/// as cited or as corrected, and the sub-gate passes.
+pub fn check_quoted(finding: &mut serde_json::Value, workspace: &Path) -> Outcome {
+    let settled = settle_lines(finding, workspace);
+    let mut outcome = check(finding, workspace);
+    let Some(settled) = settled else {
+        return outcome;
+    };
+    outcome.corrected_from = settled.corrected_from;
+    outcome.origin_corrected_from = settled.origin_corrected_from;
+    if outcome.status != Status::Resolved {
+        return outcome;
+    }
+    let lines = |n: usize| match n {
+        0 => "no line".to_string(),
+        n => format!("{n} lines"),
+    };
+    match (settled.quote, settled.origin_unplaced) {
+        (None, _) => {
+            outcome.status = Status::Unquoted;
+            outcome.reason =
+                Some("the finding quotes no text of the cited line (`location.quote`)".to_string());
+        }
+        (Some(Placement::Unplaced(n)), _) => {
+            outcome.status = Status::Mismatch;
+            outcome.reason = Some(format!(
+                "the quoted text is not on the cited lines and is on {} of the file",
+                lines(n)
+            ));
+        }
+        (Some(_), Some((name, n))) => {
+            outcome.status = Status::Mismatch;
+            outcome.reason = Some(format!(
+                "the cited origin line does not name `{name}` and {} of the file define it",
+                lines(n)
+            ));
+        }
+        (Some(_), None) => {}
+    }
+    outcome
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +643,8 @@ fn resolved(gate: Gate) -> Outcome {
         status: Status::Resolved,
         gate,
         reason: None,
+        corrected_from: None,
+        origin_corrected_from: None,
     }
 }
 
@@ -431,6 +653,8 @@ fn unresolved(gate: Gate, reason: String) -> Outcome {
         status: Status::Unresolved,
         gate,
         reason: Some(reason),
+        corrected_from: None,
+        origin_corrected_from: None,
     }
 }
 
@@ -786,6 +1010,12 @@ pub fn annotate(finding: &mut serde_json::Value, outcome: &Outcome) {
             serde_json::Value::String(reason.clone()),
         );
     }
+    if let Some(from) = outcome.corrected_from {
+        block.insert("corrected_from".to_string(), serde_json::json!(from));
+    }
+    if let Some(from) = outcome.origin_corrected_from {
+        block.insert("origin_corrected_from".to_string(), serde_json::json!(from));
+    }
     obj.insert(
         "citation_check".to_string(),
         serde_json::Value::Object(block),
@@ -798,6 +1028,117 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+
+    /// The line numbers a walk gave for a real file against where its
+    /// text is: sinks on 22, 29 and 36, `build_prompt` on 39 to 43,
+    /// cited as 26 and 32.
+    #[test]
+    fn a_citation_is_held_to_its_quote_and_moved_to_it_when_the_file_places_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lines: Vec<String> = (1..=43).map(|n| format!("# line {n}")).collect();
+        for (n, text) in [
+            (18, "@tool"),
+            (22, "    return str(eval(expr))"),
+            (25, "@tool"),
+            (29, "    return requests.get(url, timeout=10).content"),
+            (32, "@tool"),
+            (36, "    return subprocess.run(cmd, shell=True).stdout"),
+            (39, "def build_prompt(user_input):"),
+            (41, "    prompt = build_prompt_header()"),
+        ] {
+            lines[n - 1] = text.to_string();
+        }
+        fs::write(tmp.path().join("agent.py"), lines.join("\n")).unwrap();
+        let cite = |line: u64, quote: Option<&str>, origin: Option<(&str, u64)>| {
+            let mut f = json!({
+                "title": "t", "summary": "s",
+                "location": {"file": "agent.py", "line_start": line},
+            });
+            if let Some(q) = quote {
+                f["location"]["quote"] = json!(q);
+            }
+            if let Some((function, line)) = origin {
+                f["origin"] = json!({"file": "agent.py", "function": function, "line_start": line});
+            }
+            f
+        };
+
+        // Cited at 26, quoted on 29; spacing does not matter.
+        let mut moved = cite(
+            26,
+            Some("return  requests.get(url, timeout=10).content"),
+            None,
+        );
+        let out = check_quoted(&mut moved, tmp.path());
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.corrected_from, Some(26));
+        assert_eq!(moved["location"]["line_start"], 29);
+
+        // On the cited line: nothing moves.
+        let mut exact = cite(22, Some("return str(eval(expr))"), None);
+        let out = check_quoted(&mut exact, tmp.path());
+        assert_eq!((out.status, out.corrected_from), (Status::Resolved, None));
+
+        // Nowhere, and on three lines.
+        let mut nowhere = cite(36, Some("os.system(cmd)"), None);
+        assert_eq!(
+            check_quoted(&mut nowhere, tmp.path()).status,
+            Status::Mismatch
+        );
+        assert_eq!(nowhere["location"]["line_start"], 36, "left as cited");
+        let mut several = cite(5, Some("@tool"), None);
+        let out = check_quoted(&mut several, tmp.path());
+        assert_eq!(out.status, Status::Mismatch);
+        assert!(out.reason.unwrap().contains("3 lines"));
+        // One of several is the cited line: that is the one meant.
+        let mut one_of = cite(25, Some("@tool"), None);
+        assert_eq!(
+            check_quoted(&mut one_of, tmp.path()).status,
+            Status::Resolved
+        );
+
+        // No quote, and one too short to hold anything.
+        for quote in [None, Some("()")] {
+            let mut bare = cite(22, quote, None);
+            assert_eq!(check_quoted(&mut bare, tmp.path()).status, Status::Unquoted);
+        }
+
+        // The function cited at 32 is defined on 39. A call of another
+        // name that contains it is not a definition of it.
+        let mut origin = cite(
+            22,
+            Some("return str(eval(expr))"),
+            Some(("build_prompt", 32)),
+        );
+        let out = check_quoted(&mut origin, tmp.path());
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.origin_corrected_from, Some(32));
+        assert_eq!(origin["origin"]["line_start"], 39);
+        // A function the file does not define.
+        let mut absent = cite(22, Some("return str(eval(expr))"), Some(("no_such_fn", 32)));
+        assert_eq!(
+            check_quoted(&mut absent, tmp.path()).status,
+            Status::Mismatch
+        );
+        // An `origin.function` that is not one identifier is not held.
+        let mut loose = cite(
+            22,
+            Some("return str(eval(expr))"),
+            Some(("the first @tool", 1)),
+        );
+        assert_eq!(
+            check_quoted(&mut loose, tmp.path()).status,
+            Status::Resolved
+        );
+
+        // A missing file is still the sub-gate's to report.
+        let mut gone = json!({"title": "t", "summary": "s",
+            "location": {"file": "missing.py", "line_start": 1, "quote": "anything"}});
+        assert_eq!(
+            check_quoted(&mut gone, tmp.path()).status,
+            Status::Unresolved
+        );
+    }
 
     fn tmpdir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1202,6 +1543,8 @@ fn check(token: &str, expected: &str) -> bool {
             status: Status::Unresolved,
             gate: Gate::LiteralClaim,
             reason: Some("x".to_string()),
+            corrected_from: None,
+            origin_corrected_from: None,
         };
         annotate(&mut finding, &out);
         let block = finding.get("citation_check").unwrap();
@@ -1220,6 +1563,8 @@ fn check(token: &str, expected: &str) -> bool {
             status: Status::Resolved,
             gate: Gate::FileLineOnly,
             reason: None,
+            corrected_from: None,
+            origin_corrected_from: None,
         };
         annotate(&mut finding, &out);
         let block = finding.get("citation_check").unwrap();

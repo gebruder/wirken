@@ -224,8 +224,14 @@ pub fn read_trace(run_dir: &Path, walk: &str, repro_file: &str) -> Option<Execut
 }
 
 /// The file and line the staged finding `stable_id` cites, from the
-/// walk's `findings/` directory.
-pub fn cited_location(findings_dir: &Path, stable_id: &str) -> Option<(String, u64)> {
+/// walk's `findings/` directory, with the line moved to the text the
+/// finding quotes where the file places it, as the citation check
+/// will move it.
+pub fn cited_location(
+    findings_dir: &Path,
+    stable_id: &str,
+    workspace: &Path,
+) -> Option<(String, u64)> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(findings_dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -233,11 +239,12 @@ pub fn cited_location(findings_dir: &Path, stable_id: &str) -> Option<(String, u
         .collect();
     files.sort();
     files.into_iter().find_map(|path| {
-        let v: serde_json::Value =
+        let mut v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
         if v.get("stable_id")?.as_str()? != stable_id {
             return None;
         }
+        super::lyrik_citation::settle_lines(&mut v, workspace);
         Some((
             v.pointer("/location/file")?.as_str()?.to_string(),
             v.pointer("/location/line_start")?.as_u64()?,

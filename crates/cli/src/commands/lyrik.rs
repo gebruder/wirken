@@ -3904,9 +3904,11 @@ async fn trace_reproduction(
 ) -> super::lyrik_trace::Execution {
     use super::lyrik_trace::Execution;
     let staging = format!(".lyrik/state/runs/{run_id}/staging/{walk}");
-    let Some((cited_file, cited_line)) =
-        super::lyrik_trace::cited_location(&target.join(&staging).join("findings"), stable_id)
-    else {
+    let Some((cited_file, cited_line)) = super::lyrik_trace::cited_location(
+        &target.join(&staging).join("findings"),
+        stable_id,
+        target,
+    ) else {
         return Execution::untraced("", 0, "no staged finding carries the record's stable_id");
     };
     let untraced = |why: &str| Execution::untraced(&cited_file, cited_line, why);
@@ -4755,6 +4757,12 @@ fn aggregate_findings_multi(
     let mut command_injection_structural_unresolved: usize = 0;
     let mut file_line_only_resolved: usize = 0;
     let mut file_line_only_unresolved: usize = 0;
+    // Across the sub-gates: citations whose lines were moved to the
+    // quoted text, whose quoted text the file does not place, and
+    // that quote nothing.
+    let mut citation_corrected: usize = 0;
+    let mut citation_mismatch: usize = 0;
+    let mut citation_unquoted: usize = 0;
     for (walk_name, source) in sources {
         let counts = walks
             .entry(walk_name.as_deref().unwrap_or(SINGLE_CALL_KEY).to_string())
@@ -4977,9 +4985,16 @@ fn aggregate_findings_multi(
                 }
             }
 
-            let outcome = lyrik_citation::check(&parsed, workspace);
+            // The cited lines are held to the quoted text first, and
+            // moved to it where the file says where it is.
+            let outcome = lyrik_citation::check_quoted(&mut parsed, workspace);
             use lyrik_citation::{Gate, Status};
+            if outcome.corrected_from.is_some() {
+                citation_corrected += 1;
+            }
             match (outcome.gate, outcome.status) {
+                (_, Status::Mismatch) => citation_mismatch += 1,
+                (_, Status::Unquoted) => citation_unquoted += 1,
                 (Gate::LiteralClaim, Status::Resolved) => literal_claim_resolved += 1,
                 (Gate::LiteralClaim, Status::Unresolved) => literal_claim_unresolved += 1,
                 (Gate::PromptInjectionDeferred, Status::Resolved) => {
@@ -5038,6 +5053,8 @@ fn aggregate_findings_multi(
                     "gate": outcome.gate.as_str(),
                     "status": outcome.status.as_str(),
                     "reason": outcome.reason,
+                    "corrected_from": outcome.corrected_from,
+                    "origin_corrected_from": outcome.origin_corrected_from,
                 }),
             )?;
             lyrik_citation::annotate(&mut parsed, &outcome);
@@ -5143,6 +5160,9 @@ fn aggregate_findings_multi(
                 "resolved": file_line_only_resolved,
                 "unresolved": file_line_only_unresolved,
             },
+            "corrected": citation_corrected,
+            "mismatch": citation_mismatch,
+            "unquoted": citation_unquoted,
         },
         "rejected_candidates": rejected,
         "step_records": step_records,

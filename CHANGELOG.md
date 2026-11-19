@@ -76,6 +76,15 @@ tagged.
 
 ### Fixed
 
+- A Lyrik citation is `resolved` only when the cited line holds the text the
+  finding quotes in `location.quote`. A quote found on exactly one other line
+  of the file moves `line_start` to it and records `corrected_from`; one found
+  nowhere or on several lines is status `mismatch`; a finding with no quote is
+  `unquoted`. An `origin` naming a function is held to the line that defines
+  it. `findings.json` counts `corrected`, `mismatch` and `unquoted`. A
+  citation resolved on the file and line existing, so a finding could cite
+  line 26 for code on line 29 and read as resolved
+  (`crates/cli/tests/lyrik_citation_quotes.rs`).
 - A step record that names a command as its `check` is held to the run's
   chain. A command with no `exec` row that ran is marked `check_status`
   `not_executed` on the record in `findings.json`, logged as

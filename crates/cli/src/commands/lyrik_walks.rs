@@ -741,8 +741,14 @@ fn finding_section() -> String {
      - `framing`: a list of one or more classes, each a lower-case name such as \
      `auth`, `injection`, `memory_safety`, `unbounded_alloc`, `race_condition`. A finding \
      of any class is kept; name the class the finding is, not the nearest familiar one.\n\
-     - `location`: `{\"file\", \"line_start\"}`, the file relative to the project root and \
-     the 1-based line where the finding surfaces.\n\
+     - `location`: `{\"file\", \"line_start\", \"quote\"}`, the file relative to the project \
+     root, the 1-based line where the finding surfaces, and `quote`, that line copied from \
+     the file exactly as you read it with `read_file`, without the line number. The runner \
+     looks for the quote on the cited line. Found once elsewhere in the file, it moves the \
+     line there and records that it did; found nowhere or on several lines, the citation \
+     is a `mismatch`; with no quote it is `unquoted`. Only a citation whose line holds its \
+     quote is `resolved`. An `origin` that names a `function` is held to the line that \
+     defines it the same way.\n\
      - `stable_id`: `<framing>::<file>:<line>`, built from the first `framing` and \
      `location`, for example `injection::src/run.sh:12`. Use this same string wherever \
      a rejection or a reproduction record names the finding.\n\
