@@ -384,7 +384,7 @@ pub fn wrap_for_target(
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
     let mut section = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        run_section(walk_name, exec_available, profile),
+        run_section(walk_name, exec_available, profile, body),
         staging_section(walk_name),
         finding_section(),
         brocard_section(walk_name),
@@ -591,28 +591,119 @@ pub fn sandbox_banner(where_exec_runs: &str, missing: Option<&[String]>) -> Opti
     }
 }
 
-/// What a walk is told the sandbox lacks, one list item for each: the
-/// binaries its commands would need that are not there, and brace
-/// expansion when the shell there has none. Nothing when the sandbox
-/// was not asked or lacks neither.
-fn sandbox_lines(facts: &SandboxFacts) -> String {
+/// The tools a walk commonly reaches for through `exec`, asked of the
+/// sandbox on every run whatever the walk text names.
+pub const COMMON_TOOLS: &[&str] = &["rg", "grep", "find", "jq", "sha256sum"];
+
+/// Other tools, asked of the sandbox when a selected walk's own text
+/// names them. A name that is also an ordinary word counts only where
+/// it opens a code span.
+const NAMED_TOOLS: &[(&str, bool)] = &[
+    ("git", false),
+    ("sed", false),
+    ("awk", false),
+    ("curl", false),
+    ("cargo", false),
+    ("semgrep", false),
+    ("python3", false),
+    ("npm", false),
+    ("go", true),
+    ("make", true),
+    ("node", true),
+];
+
+/// What to use where a tool is not there. `None` where there is
+/// nothing to offer in its place.
+fn fallback_for(tool: &str) -> Option<&'static str> {
+    Some(match tool {
+        "rg" => "use `grep -rn` in its place, or `read_file` and search what it returns",
+        "grep" => "read the file with `read_file` and search what it returns",
+        "find" => "list directories with `list_files`",
+        "jq" => "read the file with `read_file` and take the value from the JSON yourself",
+        "sha256sum" => "do not compute hashes; `code_revision` comes from the dispatch prompt",
+        _ => return None,
+    })
+}
+
+/// The tools the sandbox is asked about for a run: what its walks'
+/// commands need, the common tools, and any named tool a selected
+/// walk's text mentions. First-seen order, no repeats.
+pub fn tools_to_probe(needed: &[String], walk_texts: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |tool: &str| {
+        if !out.iter().any(|t| t == tool) {
+            out.push(tool.to_string());
+        }
+    };
+    for b in binaries_for(needed) {
+        add(&b);
+    }
+    for t in COMMON_TOOLS {
+        add(t);
+    }
+    for (tool, only_in_code) in NAMED_TOOLS {
+        let named = walk_texts.iter().any(|text| {
+            text.match_indices(tool).any(|(at, _)| {
+                let before = text.get(..at).and_then(|s| s.chars().next_back());
+                let after = text.get(at + tool.len()..).and_then(|s| s.chars().next());
+                let word = |c: Option<char>| {
+                    c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                };
+                !word(before) && !word(after) && (!only_in_code || before == Some('`'))
+            })
+        });
+        if named {
+            add(tool);
+        }
+    }
+    out
+}
+
+/// Whether `text` shows a brace expansion, `a/{b,c}`: a word with a
+/// brace group that holds a comma. A JSON object or a format string
+/// has quotes or spaces inside its braces and is not one.
+pub fn shows_brace_expansion(text: &str) -> bool {
+    text.split(|c: char| c.is_whitespace() || c == '`')
+        .any(|w| {
+            let Some((_, after_open)) = w.split_once('{') else {
+                return false;
+            };
+            let Some((group, _)) = after_open.split_once('}') else {
+                return false;
+            };
+            group.contains(',') && !group.contains(['"', ':', '\''])
+        })
+}
+
+/// What a walk is told the sandbox lacks, one list item for each: each
+/// tool that is not there with what to use in its place, and brace
+/// expansion when the shell there has none. `body` is the walk text
+/// the lines are placed ahead of. Nothing when the sandbox was not
+/// asked or lacks nothing.
+fn sandbox_lines(facts: &SandboxFacts, body: &str) -> String {
     let mut out = String::new();
-    if let Some(missing) = facts.missing.as_deref().filter(|m| !m.is_empty()) {
-        out.push_str(&format!(
-            "- The sandbox has no {}: a command that needs it fails. Do not write a \
-             harness or a check that needs it.\n",
-            missing
-                .iter()
-                .map(|m| format!("`{m}`"))
-                .collect::<Vec<_>>()
-                .join(" or ")
-        ));
+    for tool in facts.missing.as_deref().unwrap_or_default() {
+        out.push_str(&match fallback_for(tool) {
+            Some(instead) => format!("- The sandbox has no `{tool}`: {instead}.\n"),
+            None => format!(
+                "- The sandbox has no `{tool}`: a command that needs it fails. Do not \
+                 write a harness or a check that needs it.\n"
+            ),
+        });
     }
     if facts.brace_expansion == Some(false) {
+        // Said without an example of one: a walk shown the form uses it.
         out.push_str(
-            "- The sandbox shell does not expand braces: `mkdir -p a/{b,c}` makes one \
-             directory named `{b,c}`. Name each path in full.\n",
+            "- The sandbox shell does not expand braces. Write every path out in full, \
+             one path to a word, and one `mkdir -p` for each directory you make.",
         );
+        if shows_brace_expansion(body) {
+            out.push_str(
+                " Where the walk text below groups paths in braces, write each of them \
+                 out.",
+            );
+        }
+        out.push('\n');
     }
     out
 }
@@ -620,7 +711,12 @@ fn sandbox_lines(facts: &SandboxFacts) -> String {
 /// The rules a walk runs under inside `wirken lyrik run`, placed ahead
 /// of the operator's walk text. They take precedence over a location
 /// the walk text names, such as a harness in the project's test tree.
-fn run_section(walk_name: &str, exec_available: bool, profile: &TargetProfile) -> String {
+fn run_section(
+    walk_name: &str,
+    exec_available: bool,
+    profile: &TargetProfile,
+    body: &str,
+) -> String {
     let exec_lines = if !exec_available {
         "- `exec` is not available in this run: the sandbox is off, so a command \
          would run on the host. A call to it is refused: record the step as skipped \
@@ -657,7 +753,7 @@ fn run_section(walk_name: &str, exec_available: bool, profile: &TargetProfile) -
                 .map(|c| format!("`{c}`"))
                 .collect::<Vec<_>>()
                 .join(", "),
-            sandbox_lines(&profile.sandbox),
+            sandbox_lines(&profile.sandbox, body),
             interpreters
                 .iter()
                 .map(|i| format!("`{i}`"))
@@ -1539,6 +1635,62 @@ mod tests {
         assert_eq!(session.prompts.len(), 1);
     }
 
+    /// The sandbox is asked about what the walks' commands need, the
+    /// tools a walk commonly reaches for, and any other a selected
+    /// walk's text names. A name that is also a word counts only where
+    /// it opens a code span.
+    #[test]
+    fn the_probe_covers_common_tools_and_the_ones_the_walk_text_names() {
+        let needed = vec![
+            "sh|python3 harness/<script>".to_string(),
+            "git log".to_string(),
+        ];
+        let texts = vec![
+            "Use ripgrep. Run `cargo audit`, then go and find each sink; make a note.".to_string(),
+            "Build with `make check` and `go vet`. See the semgrep-rules page.".to_string(),
+        ];
+        assert_eq!(
+            tools_to_probe(&needed, &texts),
+            [
+                "sh",
+                "python3",
+                "git",
+                "rg",
+                "grep",
+                "find",
+                "jq",
+                "sha256sum",
+                "cargo",
+                "go",
+                "make"
+            ]
+        );
+        assert_eq!(
+            tools_to_probe(&[], &[]),
+            ["rg", "grep", "find", "jq", "sha256sum"]
+        );
+    }
+
+    #[test]
+    fn a_brace_expansion_is_told_from_json_and_format_strings() {
+        for shown in [
+            "mkdir -p a/{b,c}",
+            "`staging/{findings,claims,steps}`",
+            "x{1,2}y",
+        ] {
+            assert!(shows_brace_expansion(shown), "{shown}");
+        }
+        for not in [
+            "`{\"file\", \"line_start\"}`",
+            "{\"a\":1,\"b\":2}",
+            "format!(\"{walk_name}\")",
+            "a {b, c} d",
+            "<run-id>/staging/{walk_name}/",
+        ] {
+            assert!(!shows_brace_expansion(not), "{not}");
+        }
+    }
+
     /// The cap on continuations is the operator's: `lyrik.json` in the
     /// data directory sets it, zero is a real setting, and it defaults
     /// to two.
@@ -1944,9 +2096,41 @@ mod tests {
         assert!(told.contains("root, with `sh`: for example"), "{told}");
         assert!(!told.contains("python3 .lyrik"), "{told}");
         assert!(told.contains("The sandbox has no `python3`"), "{told}");
+        assert!(told.contains("does not expand braces."), "{told}");
+        // Told there is none, the walk is shown no command that uses
+        // it, by the runner's own text at least.
+        assert!(!shows_brace_expansion(&told), "{told}");
+        // A walk body that groups paths in braces is pointed at them.
+        let grouped = wrap_for_target(
+            "sink-walk",
+            "r1",
+            None,
+            true,
+            &bare,
+            "Make `staging/{findings,claims}`.\n",
+        );
+        assert!(grouped.contains("groups paths in braces"), "{grouped}");
+        assert!(!told.contains("groups paths in braces"), "{told}");
+        // A missing tool comes with what to use in its place.
+        let no_rg = TargetProfile {
+            sandbox: SandboxFacts {
+                missing: Some(vec!["rg".into(), "jq".into(), "git".into()]),
+                brace_expansion: Some(true),
+            },
+            ..Default::default()
+        };
+        let text = wrap_for_target("sink-walk", "r1", None, true, &no_rg, "body\n");
         assert!(
-            told.contains("does not expand braces: `mkdir -p a/{b,c}`"),
-            "{told}"
+            text.contains("no `rg`: use `grep -rn` in its place"),
+            "{text}"
+        );
+        assert!(
+            text.contains("no `jq`: read the file with `read_file`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("no `git`: a command that needs it fails"),
+            "{text}"
         );
         let whole = TargetProfile {
             sandbox: SandboxFacts {

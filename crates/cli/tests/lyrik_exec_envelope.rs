@@ -278,6 +278,13 @@ fn a_walk_is_told_what_the_sandbox_lacks_before_it_starts() {
     ]);
     let s = scene(&model);
     std::fs::write(s.target.join("agent.py"), "print('hi')\n").unwrap();
+    // The installed walk reaches for a tool of its own.
+    let installed = s.data.join("lyrik/walks/sink-walk/SKILL.md");
+    std::fs::write(
+        &installed,
+        std::fs::read_to_string(&installed).unwrap() + "\nRun `git log -p` on each sink.\n",
+    )
+    .unwrap();
     let shown = run_on_terminal(&s, RUN, "y\n");
 
     let run_dir = s.target.join(format!(".lyrik/state/runs/{RUN}"));
@@ -296,14 +303,35 @@ fn a_walk_is_told_what_the_sandbox_lacks_before_it_starts() {
             "{walk}:\n{text}"
         );
         assert!(text.contains("does not expand braces"), "{walk}:\n{text}");
+        // Told there is none, the walk is shown no command that uses it.
+        let brace_example = text
+            .split(['`', ' ', '\n'])
+            .any(|w| w.contains('{') && w.contains(',') && w.contains('}') && !w.contains('"'));
+        assert!(!brace_example, "{walk} is shown a brace expansion:\n{text}");
+        // The tools a walk commonly reaches for that the image lacks,
+        // each with what to use instead.
+        assert!(text.contains("no `rg`: use `grep -rn`"), "{walk}:\n{text}");
+        assert!(text.contains("no `jq`:"), "{walk}:\n{text}");
+        for present in ["`grep`:", "`find`:", "`sha256sum`:"] {
+            assert!(
+                !text.contains(&format!("no {present}")),
+                "{walk}: {present}\n{text}"
+            );
+        }
     }
+    // A tool only one walk's own text names is probed for that run.
+    let sink = std::fs::read_to_string(run_dir.join("walks-skills/sink-walk/SKILL.md")).unwrap();
+    assert!(sink.contains("no `git`"), "{sink}");
     let audit = std::fs::read_to_string(run_dir.join("audit.log")).unwrap();
     let probed: serde_json::Value = audit
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .find(|e| e["event"] == "lyrik.sandbox.probed")
         .unwrap_or_else(|| panic!("no lyrik.sandbox.probed row:\n{audit}"));
-    assert_eq!(probed["detail"]["missing"], serde_json::json!(["python3"]));
+    assert_eq!(
+        probed["detail"]["missing"],
+        serde_json::json!(["python3", "rg", "jq", "git"])
+    );
     assert_eq!(probed["detail"]["brace_expansion"], false);
     assert_eq!(probed["detail"]["image"], "debian:bookworm-slim");
 }

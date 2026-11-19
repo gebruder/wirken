@@ -76,6 +76,13 @@ tagged.
 
 ### Fixed
 
+- The sandbox probe of a per-walk Lyrik run covers the tools a walk reaches
+  for, not only the ones the run offers: `rg`, `grep`, `find`, `jq` and
+  `sha256sum` on every run, and others a selected walk's text names. A walk is
+  told each one the image lacks with what to use in its place. The note that
+  the shell does not expand braces no longer shows a command that uses them
+  (`a_walk_is_told_what_the_sandbox_lacks_before_it_starts`,
+  `crates/cli/tests/lyrik_exec_envelope.rs`).
 - A command a Lyrik run's sign-off approves records the sign-off as its
   approval surface: `approved_via` is `{"kind":"grant","grant":"<action key
   of the sign-off row>"}`, a new surface kind for a call an earlier grant of

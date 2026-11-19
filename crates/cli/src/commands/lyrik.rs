@@ -1796,9 +1796,20 @@ async fn dispatch_via_agent_runtime(
             .iter()
             .flat_map(|w| super::lyrik_walks::walk_commands(w, &target_profile))
             .collect();
+        // What the walks' commands need, the tools a walk commonly
+        // reaches for, and any other the selected walks' own text names.
+        let walk_texts: Vec<String> = wc
+            .walks
+            .iter()
+            .filter_map(|w| std::fs::read_to_string(walks_source_dir.join(w).join("SKILL.md")).ok())
+            .collect();
         let sandbox = super::load_sandbox_config(&cfg.data_dir)?;
-        target_profile.sandbox =
-            probe_exec_sandbox(&sandbox, target, &super::lyrik_walks::binaries_for(&needed)).await;
+        target_profile.sandbox = probe_exec_sandbox(
+            &sandbox,
+            target,
+            &super::lyrik_walks::tools_to_probe(&needed, &walk_texts),
+        )
+        .await;
         audit.emit(
             "lyrik.sandbox.probed",
             serde_json::json!({

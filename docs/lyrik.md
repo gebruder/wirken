@@ -407,12 +407,17 @@ approval`. A refused command is a skipped step, not a failed
 walk. A command runs in the `exec` sandbox, so the sandbox image
 needs the binaries those commands name; the default image has neither `git`
 nor `cargo`. Before
-the walks are staged the run asks the sandbox which of the binaries its walks
-need are missing and whether its shell expands braces, with the target mounted
-read-only, and records the answer as `lyrik.sandbox.probed`. It names what is
-missing, and the staged walk text carries the answer: a walk is not offered an
-interpreter the image lacks, is told which binaries are not there, and is told
-when `{a,b}` is not expanded.
+the walks are staged the run asks the sandbox, with the target mounted
+read-only, which tools are missing and whether its shell expands braces, and
+records the answer as `lyrik.sandbox.probed`. It asks about the binaries the
+walks' commands need, about `rg`, `grep`, `find`, `jq` and `sha256sum` on
+every run, and about `git`, `sed`, `awk`, `curl`, `cargo`, `semgrep`,
+`python3`, `npm`, `go`, `make` and `node` when a selected walk's own text
+names them. It names what is missing, and the staged walk text carries the
+answer: a walk is not offered an interpreter the image lacks, is told each
+tool that is not there with what to use in its place (`grep -rn` for `rg`,
+`read_file` for `grep` and `jq`, `list_files` for `find`), and is told when
+the shell does not expand braces, without being shown the form.
 
 With sandbox `mode: off`, `exec` is not available in a run: an approved
 command such as `cargo test` would run the target's build scripts on the host
