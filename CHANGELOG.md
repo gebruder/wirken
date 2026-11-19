@@ -81,6 +81,11 @@ tagged.
 
 ### Fixed
 
+- `executionSuccessful` on a Lyrik SARIF report is `false` when a walk of the
+  run was stopped at the tool round limit or the cost ceiling, or its turn
+  failed. It was `true` on every report
+  (`execution_successful_is_false_when_a_walk_stopped_short`,
+  `crates/cli/src/commands/lyrik_sarif.rs`).
 - What a Lyrik reproduction and its replay showed is read from the run's
   chain: the result recorded for the walk's own `exec` of the record's
   command and for the replay's. `outcome`, `agreement`, the rule 8 rejection,

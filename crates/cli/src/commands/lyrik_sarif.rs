@@ -94,6 +94,10 @@ struct LyrikReport {
     /// The run's funnel, carried as-is into the run properties.
     #[serde(default)]
     funnel: Option<serde_json::Value>,
+    /// One entry per walk of a per-walk run, with `completed`: whether
+    /// its turn ended on its own. Absent for the single call.
+    #[serde(default)]
+    walk_summary: Vec<serde_json::Value>,
     /// Candidates a brocard rule rejected. Each becomes a SARIF result
     /// suppressed as external.
     #[serde(default)]
@@ -430,7 +434,14 @@ pub fn build_sarif(findings_path: &Path, driver_version: &str) -> Result<Sarif> 
                 id: format!("lyrik/run/{}", report.run_id),
             },
             invocations: vec![Invocation {
-                execution_successful: true,
+                // Every walk's turn ended on its own: none was stopped
+                // at the round limit or the cost ceiling, and none
+                // failed. The single call has no walk summary; its
+                // report exists because the call returned.
+                execution_successful: report
+                    .walk_summary
+                    .iter()
+                    .all(|w| w.get("completed").and_then(|c| c.as_bool()) == Some(true)),
                 properties: invocation_props,
             }],
             results,
@@ -788,6 +799,40 @@ mod tests {
             sarif.runs[0].tool.driver.rules.len(),
             FRAMINGS.len() + RULES.len()
         );
+    }
+
+    /// `executionSuccessful` is said of a run whose walks all ended
+    /// their turns. A walk stopped at the round limit or at the cost
+    /// ceiling, or one whose turn failed, makes it false.
+    #[test]
+    fn execution_successful_is_false_when_a_walk_stopped_short() {
+        let successful = |walk_summary: &str| -> bool {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("findings.json");
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"run_id":"r","produced_at":"2026-05-03T00:00:00Z","findings":[]{walk_summary}}}"#
+                ),
+            )
+            .unwrap();
+            let sarif = serde_json::to_value(build_sarif(&path, "0.0.0").unwrap()).unwrap();
+            sarif["runs"][0]["invocations"][0]["executionSuccessful"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(successful(
+            r#","walk_summary":[{"walk":"sink-walk","completed":true},{"walk":"chain-walk","completed":true}]"#
+        ));
+        assert!(!successful(
+            r#","walk_summary":[{"walk":"sink-walk","completed":false,"incomplete_at_tool_rounds":20},{"walk":"chain-walk","completed":true}]"#
+        ));
+        assert!(!successful(
+            r#","walk_summary":[{"walk":"sink-walk","completed":false,"stopped_at_cost_ceiling":true}]"#
+        ));
+        // The single call writes no walk summary: its report exists
+        // because the call returned.
+        assert!(successful(""));
     }
 
     #[test]
