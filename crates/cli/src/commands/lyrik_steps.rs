@@ -159,12 +159,22 @@ impl Shown {
 impl ExecutedCommands {
     /// From the run's rows, in order. A result is paired with the
     /// earliest unanswered `exec` call of its id.
+    ///
+    /// A step that writes a file drops its own earlier runs of any
+    /// command that names the file. A walk writes a harness, runs it,
+    /// finds it wrong and writes it again; the runs before the last
+    /// write were of a file that no longer exists, and what they
+    /// showed says nothing about the harness the record cites.
     pub fn from_rows(rows: impl IntoIterator<Item = wirken_audit::SessionEvent>) -> Self {
         use wirken_audit::SessionEvent;
         type Asked = (String, Option<String>, bool);
         let mut asked: std::collections::HashMap<String, std::collections::VecDeque<Asked>> =
             std::collections::HashMap::new();
-        let mut calls = Vec::new();
+        let mut calls: Vec<Call> = Vec::new();
+        // Each `write_file` asked for and not yet answered: its path
+        // and the step that asked.
+        let mut writing: std::collections::HashMap<String, (String, Option<String>)> =
+            std::collections::HashMap::new();
         let mut replays_began = false;
         for event in rows {
             match event {
@@ -177,9 +187,23 @@ impl ExecutedCommands {
                     // A turn run by a child process has no request row;
                     // its calls name the step themselves.
                     replays_began = replays_began || step.as_deref() == Some("replay");
-                    for call in made.into_iter().filter(|c| c.name == "exec") {
-                        let command = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                            .ok()
+                    for call in made {
+                        let arguments =
+                            serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
+                        if call.name == "write_file" {
+                            if let Some(path) = arguments
+                                .as_ref()
+                                .and_then(|a| a.get("path"))
+                                .and_then(|p| p.as_str())
+                            {
+                                writing.insert(call.id, (path.to_string(), step.clone()));
+                            }
+                            continue;
+                        }
+                        if call.name != "exec" {
+                            continue;
+                        }
+                        let command = arguments
                             .and_then(|a| wirken_agent::tool::extract_exec_command(&a).ok());
                         if let Some(command) = command {
                             asked.entry(call.id).or_default().push_back((
@@ -208,6 +232,25 @@ impl ExecutedCommands {
                             ran: sandbox.is_some(),
                             output,
                             exit_zero: success,
+                        });
+                    }
+                }
+                SessionEvent::ToolResult {
+                    call_id,
+                    tool_name,
+                    success: true,
+                    ..
+                } if tool_name == "write_file" => {
+                    if let Some((path, step)) = writing.remove(&call_id) {
+                        let written = path.trim_start_matches("./");
+                        calls.retain(|c| {
+                            c.step != step
+                                || !c.simple.iter().any(|simple| {
+                                    simple
+                                        .words
+                                        .iter()
+                                        .any(|w| w.trim_start_matches("./") == written)
+                                })
                         });
                     }
                 }
@@ -581,6 +624,90 @@ mod tests {
             });
         }
         vec![call, serde_json::from_value(result).unwrap()]
+    }
+
+    /// A walk ran its harness, which crashed before its marker, wrote
+    /// the harness again and ran it to its assertion. What the command
+    /// showed is what the harness as last written showed: the run
+    /// before the write was of a file that is gone. A write by another
+    /// step, a write that was refused and a write of another file drop
+    /// nothing.
+    #[test]
+    fn a_run_of_a_harness_before_it_was_rewritten_is_not_counted() {
+        const HARNESS: &str = ".lyrik/state/runs/r/staging/sink-walk/harness/h.py";
+        let row = |v: serde_json::Value| -> wirken_audit::SessionEvent {
+            serde_json::from_value(v).unwrap()
+        };
+        let exec = |id: &str, output: &str| {
+            vec![
+                row(serde_json::json!({
+                    "kind": "assistant_tool_calls", "step": "sink-walk",
+                    "calls": [{"id": id, "name": "exec", "arguments":
+                        serde_json::json!({"command": format!("python3 {HARNESS}")}).to_string()}],
+                })),
+                row(serde_json::json!({
+                    "kind": "tool_result", "call_id": id, "tool_name": "exec",
+                    "output": output, "success": false,
+                    "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c0"},
+                })),
+            ]
+        };
+        let write = |id: &str, step: &str, path: &str, success: bool| {
+            vec![
+                row(serde_json::json!({
+                    "kind": "assistant_tool_calls", "step": step,
+                    "calls": [{"id": id, "name": "write_file", "arguments":
+                        serde_json::json!({"path": path, "content": "x"}).to_string()}],
+                })),
+                row(serde_json::json!({
+                    "kind": "tool_result", "call_id": id, "tool_name": "write_file",
+                    "output": "", "success": success,
+                })),
+            ]
+        };
+        let crashed = || exec("c1", "Traceback (most recent call last):\n");
+        let reached = || exec("c3", "LYRIK_REACHED\nOutput: X\n");
+        let shown = |rows: Vec<Vec<wirken_audit::SessionEvent>>| {
+            ExecutedCommands::from_rows(rows.into_iter().flatten())
+                .shown(&format!("python3 {HARNESS}"), By::Walk(Some("sink-walk")))
+                .label()
+        };
+
+        // Without a write between them the first run decides, as ever.
+        assert_eq!(shown(vec![crashed(), reached()]), "inconclusive");
+        // Rewritten between the runs: the first is of a file that is gone.
+        assert_eq!(
+            shown(vec![
+                crashed(),
+                write("w", "sink-walk", HARNESS, true),
+                reached()
+            ]),
+            "reproduced"
+        );
+        assert_eq!(
+            shown(vec![
+                crashed(),
+                write("w", "sink-walk", &format!("./{HARNESS}"), true),
+                reached()
+            ]),
+            "reproduced"
+        );
+        // Written last and not run since: nothing is on record for it.
+        assert_eq!(
+            shown(vec![
+                crashed(),
+                reached(),
+                write("w", "sink-walk", HARNESS, true)
+            ]),
+            "not_run"
+        );
+        for kept in [
+            write("w", "chain-walk", HARNESS, true),
+            write("w", "sink-walk", HARNESS, false),
+            write("w", "sink-walk", "notes.md", true),
+        ] {
+            assert_eq!(shown(vec![crashed(), kept, reached()]), "inconclusive");
+        }
     }
 
     /// A command is the same command however its words were quoted,

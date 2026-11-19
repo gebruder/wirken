@@ -59,6 +59,12 @@ tagged.
 
 ### Changed
 
+- What a Lyrik reproduction's command showed is read from the step's runs
+  since it last wrote a file the command names. A run of a harness from
+  before the walk rewrote it no longer decides the outcome
+  (`a_run_of_a_harness_before_it_was_rewritten_is_not_counted`,
+  `crates/cli/src/commands/lyrik_steps.rs`).
+
 - The Lyrik tracer follows a reproduction whose command is `python3 -I
   <harness>`, and traces it with `-I`. It was left untraced, which held the
   finding at `static_confirmed`
