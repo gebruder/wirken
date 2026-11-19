@@ -79,6 +79,15 @@ pub trait ApprovalGate: Send + Sync {
     fn source_for(&self, _ctx: &PermissionDenialContext) -> ApprovalSource {
         self.source()
     }
+
+    /// Whether the gate decides `ctx` itself, putting it to nobody: a
+    /// call a standing grant covers, such as a run's sign-off. Nothing
+    /// is shown for such a call, so the rule that refuses a call whose
+    /// arguments an approval could not show whole does not apply to
+    /// it. `false` for every gate that asks a person.
+    fn decides_without_asking(&self, _ctx: &PermissionDenialContext) -> bool {
+        false
+    }
 }
 
 // Allow `Arc<dyn ApprovalGate>` storage: async_trait already makes

@@ -278,6 +278,12 @@ impl ApprovalGate for LyrikPromptGate {
         ApprovalSource::Stdin
     }
 
+    /// A command the sign-off covers is approved by it and shown to
+    /// nobody, however long it is.
+    fn decides_without_asking(&self, ctx: &PermissionDenialContext) -> bool {
+        self.covering_signoff(ctx).is_some()
+    }
+
     /// A command the sign-off covered was not asked at the terminal:
     /// its surface is that grant.
     fn source_for(&self, ctx: &PermissionDenialContext) -> ApprovalSource {
@@ -452,6 +458,22 @@ mod tests {
             Some(arguments),
             None,
         )
+    }
+
+    /// Under the run's sign-off an `exec` is decided by the sign-off
+    /// and shown to nobody, whatever its length, and the gate says so.
+    /// Anything else, and every call without the envelope, is put to
+    /// the operator.
+    #[test]
+    fn an_exec_under_the_signoff_envelope_is_decided_without_asking() {
+        let long = serde_json::json!({ "command": "x".repeat(10_000) }).to_string();
+        let terminal = || std::sync::Arc::new(OneAtATime::new(StdinApprovalGate::new()));
+        let under = LyrikPromptGate::new("sink-walk", terminal())
+            .with_signoff_envelope("lyrik:signoff:abc".to_string());
+        assert!(under.decides_without_asking(&exec_ctx("exec", &long)));
+        assert!(!under.decides_without_asking(&exec_ctx("write_file", &long)));
+        let asking = LyrikPromptGate::new("sink-walk", terminal());
+        assert!(!asking.decides_without_asking(&exec_ctx("exec", &long)));
     }
 
     #[tokio::test]

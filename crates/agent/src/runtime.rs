@@ -5220,7 +5220,17 @@ impl Agent {
         // put to an operator: they would be asked to approve text they
         // were not shown. It is refused here, before any surface
         // renders it, and the model is told the size that can be asked.
-        if let Some(arguments) = ctx.arguments.as_deref()
+        //
+        // A call the gate decides itself, under a grant that covers it,
+        // is put to nobody and shown to nobody, so there is no text to
+        // cut: it goes on to the gate. Its arguments are on the chain
+        // whole, on its `AssistantToolCalls` row.
+        let shown_to_someone = !self
+            .approval_gate
+            .as_ref()
+            .is_some_and(|gate| gate.decides_without_asking(&ctx));
+        if shown_to_someone
+            && let Some(arguments) = ctx.arguments.as_deref()
             && !wirken_adapter_core::approval_card::shown_whole(arguments)
         {
             let limit = wirken_adapter_core::approval_card::MAX_VALUE_CHARS;

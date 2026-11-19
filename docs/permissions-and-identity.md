@@ -204,7 +204,10 @@ The arguments are never approved from a cut card. A call whose arguments
 are past 2000 characters is refused before any surface is asked: the
 `PermissionDenied` row carries `denial_reason`
 `arguments too long to show for approval`, and the tool result tells the
-model that a shorter call can be asked. The chat screen gives the
+model that a shorter call can be asked. A call that a standing grant decides
+is shown to nobody, so the rule does not apply to it: an `exec` inside a Lyrik
+run's sign-off envelope runs whatever its length, with the whole command on
+its `assistant_tool_calls` row. The chat screen gives the
 arguments every row they need, and a card that does not fit the terminal
 takes a refusal and no approval until it does.
 

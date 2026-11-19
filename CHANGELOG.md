@@ -59,6 +59,11 @@ tagged.
 
 ### Changed
 
+- An `exec` inside a Lyrik run's sign-off envelope is no longer refused as
+  `arguments too long to show for approval`. The sign-off decides it and
+  nothing is shown, so there is no card to cut; the whole command is on the
+  chain ([docs/permissions-and-identity.md](docs/permissions-and-identity.md)).
+
 - What a Lyrik reproduction's command showed is read from the step's runs
   since it last wrote a file the command names. A run of a harness from
   before the walk rewrote it no longer decides the outcome
