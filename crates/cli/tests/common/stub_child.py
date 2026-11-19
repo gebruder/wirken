@@ -14,6 +14,7 @@ set by the scenario file named in STUB_CHILD_SCENARIO, a JSON object:
   hang          seconds to sleep after the calls, before the result
   reply         the final reply text
   streamless    report steps from messages only, with no stream events
+  think         seconds the model takes to answer each call
 
 Every start is appended to STUB_CHILD_LOG as one JSON line: the
 arguments, the working directory, the variables it was handed, the
@@ -93,36 +94,49 @@ def main():
           "mcp_servers": [{"name": server_name, "status": "connected"}],
           "model": pin, "apiKeySource": scenario.get("key_source", "none")})
 
-    def step(n, content, stop, usage_out):
+    think = scenario.get("think", 0)
+
+    def step(n, content, stop, usage_out, call=None):
+        """One model call. As the real binary does, a tool the reply
+        names is called as soon as it is named, before the reply's own
+        stream ends. `think` is how long the model takes to answer."""
         mid = "msg_%s_%d" % (os.getpid(), n)
         usage = {"input_tokens": 100 + n, "cache_read_input_tokens": 1000,
                  "cache_creation_input_tokens": 10, "output_tokens": 1}
         message = {"id": mid, "model": model, "role": "assistant",
                    "content": content, "usage": usage, "stop_reason": None}
         if scenario.get("streamless"):
+            time.sleep(think)
             usage["output_tokens"] = usage_out
             message["stop_reason"] = stop
             emit({"type": "assistant", "message": message})
-            return
+            return call() if call else None
+        time.sleep(think)
         emit({"type": "stream_event", "event": {
             "type": "message_start", "message": dict(message, content=[])}})
         emit({"type": "assistant", "message": message})
+        answer = call() if call else None
         emit({"type": "stream_event", "event": {
             "type": "message_delta", "delta": {"stop_reason": stop},
             "usage": {"output_tokens": usage_out}}})
         emit({"type": "stream_event", "event": {"type": "message_stop"}})
+        return answer
 
     n = 0
     for tool, arguments in scenario.get("calls", []):
         n += 1
-        step(n, [{"type": "text", "text": "calling %s" % tool},
-                 {"type": "tool_use", "id": "toolu_%d" % n, "name": prefix + tool,
-                  "input": arguments}], "tool_use", 20 + n)
-        answer = rpc("tools/call", {"name": tool, "arguments": arguments,
-                                    "_meta": {"stub/toolUseId": "toolu_%d" % n}})
+        tool_id = "toolu_%d" % n
+        answer = step(
+            n,
+            [{"type": "text", "text": "calling %s" % tool},
+             {"type": "tool_use", "id": tool_id, "name": prefix + tool,
+              "input": arguments}],
+            "tool_use", 20 + n,
+            lambda: rpc("tools/call", {"name": tool, "arguments": arguments,
+                                       "_meta": {"stub/toolUseId": tool_id}}))
         record["answers"].append(answer.get("result", answer))
         emit({"type": "user", "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "toolu_%d" % n}]}})
+            {"type": "tool_result", "tool_use_id": tool_id}]}})
     log()
     time.sleep(scenario.get("hang", 0))
     n += 1
@@ -130,6 +144,7 @@ def main():
     step(n, [{"type": "text", "text": reply}], "end_turn", 30)
     emit({"type": "result", "subtype": "success", "is_error": False,
           "result": reply, "num_turns": n, "total_cost_usd": 0.0123,
+          "duration_api_ms": int(think * 1000) * n,
           "usage": {"input_tokens": 100 * n, "output_tokens": 30 * n},
           "modelUsage": {model: {"inputTokens": 100 * n, "outputTokens": 400 * n,
                                  "cacheReadInputTokens": 1000 * n,

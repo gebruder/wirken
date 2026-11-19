@@ -659,3 +659,49 @@ fn the_cost_ceiling_holds_a_plan_run_on_its_estimate() {
     );
     assert_eq!(unpriced.children.len(), 0);
 }
+
+/// A call's model time is the child's wait on the model: from when it
+/// could next ask to the end of the reply. The child starts a tool the
+/// reply names before the reply ends, and the time the tool takes is
+/// not model time and does not erase it. The child's own figure is on
+/// the walk's completed row beside the rows' sum, and the time ceiling
+/// holds on it.
+#[test]
+fn model_time_is_the_wait_on_the_model_and_the_time_ceiling_holds() {
+    let r = run(
+        serde_json::json!({"calls": [["list_files", {}]], "think": 0.4, "reply": "Done."}),
+        bounded(),
+    );
+    assert!(r.ok, "{}", r.report);
+    let rows = chain(&r.data, "llm_response");
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    for row in &rows {
+        let ms = row["latency_ms"].as_u64().unwrap();
+        assert!((350..5000).contains(&ms), "{ms} ms: {row}");
+    }
+    for completed in audit_rows(&r.target, "lyrik.walk.completed") {
+        let cost = &completed["estimated_cost"];
+        let ours = cost["model_millis"].as_u64().unwrap();
+        assert!((700..10_000).contains(&ours), "{cost}");
+        assert_eq!(cost["child_reported_api_millis"], 800, "{cost}");
+    }
+
+    // A second of model time, used up by the first calls: the children
+    // are ended though they would have gone on for a minute.
+    let stopped = run(
+        serde_json::json!({"calls": [["list_files", {}]], "think": 0.7, "hang": 60}),
+        serde_json::json!({"run_ceiling_model_seconds": 1}),
+    );
+    assert!(
+        stopped
+            .report
+            .contains("the run reached its model-time ceiling of 1 second(s)"),
+        "{}",
+        stopped.report
+    );
+    assert!(
+        stopped.elapsed < std::time::Duration::from_secs(40),
+        "{:?}",
+        stopped.elapsed
+    );
+}

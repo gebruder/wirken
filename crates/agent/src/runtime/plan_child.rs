@@ -181,6 +181,9 @@ pub struct Outcome {
     /// What the child says the run cost, its own estimate at API
     /// rates, in USD micros.
     pub reported_cost_usd_micros: Option<u64>,
+    /// How long the child says it spent waiting on the model over the
+    /// run, in milliseconds.
+    pub reported_api_millis: Option<u64>,
 }
 
 /// One model's line of the child's usage summary.
@@ -218,6 +221,13 @@ pub struct PlanChildCost {
     pub summary_estimated_usd_micros: Option<u64>,
     /// The child's own cost figures, summed. `None` when it gave none.
     pub child_reported_usd_micros: Option<u64>,
+    /// Model time as the steps' rows have it, summed: for each call,
+    /// from when the child could next ask the model to the end of the
+    /// reply.
+    pub model_millis: u64,
+    /// The child's own figure for the time it spent waiting on the
+    /// model, summed over the turns that gave one.
+    pub child_reported_api_millis: Option<u64>,
 }
 
 impl PlanChildCost {
@@ -247,6 +257,8 @@ pub enum Reported {
     /// The opening message: the tools and model the child has, and
     /// what it authenticates with.
     Opened { key_source: Option<String> },
+    /// A model call began: the child has the start of its reply.
+    Began(String),
     /// A model call finished.
     Step(Step),
     /// Text the model wrote, beside its tool calls or as its reply.
@@ -445,7 +457,7 @@ impl Stream {
                 if let Err(e) = self.check_model(model) {
                     return Ok(self.mismatch(id, e));
                 }
-                Ok(Vec::new())
+                Ok(vec![Reported::Began(id.to_string())])
             }
             "message_delta" => {
                 if let Some(id) = self.streaming.clone()
@@ -510,7 +522,8 @@ impl Stream {
         }
         // A new message closes the ones before it that no stream event
         // closed.
-        if !self.open.contains_key(id) {
+        let new = !self.open.contains_key(id);
+        if new {
             out.extend(self.finish_all().into_iter().map(Reported::Step));
         }
         let step = self.begin(id, model);
@@ -520,8 +533,10 @@ impl Stream {
         if let Some(stop) = message.get("stop_reason").and_then(Value::as_str) {
             step.stop_reason = Some(stop.to_string());
         }
-        if let Err(e) = self.check_model(model) {
-            out.extend(self.mismatch(id, e));
+        match self.check_model(model) {
+            Err(e) => out.extend(self.mismatch(id, e)),
+            Ok(()) if new => out.push(Reported::Began(id.to_string())),
+            Ok(()) => {}
         }
         Ok(out)
     }
@@ -570,6 +585,7 @@ impl Stream {
             models,
             usage,
             reported_cost_usd_micros: usd_micros(msg.get("total_cost_usd").and_then(Value::as_f64)),
+            reported_api_millis: msg.get("duration_api_ms").and_then(Value::as_u64),
         };
         if let Some(other) = outcome
             .models
@@ -1068,10 +1084,15 @@ impl Agent {
         let mut pending_text: Option<String> = None;
         let mut last_stop: Option<String> = None;
         let mut steps = 0usize;
-        // A step's time runs from when the child could next ask the
-        // model: its start, the end of the step before, or the answer
-        // to the tool call it was waiting on.
-        let mut step_started = Instant::now();
+        // A call's time runs from when the child could next ask the
+        // model, which is its start, the end of the reply before or the
+        // answer to a tool call, whichever came last, to the end of the
+        // call's own reply. The child starts a tool call as soon as the
+        // reply has named it, before the reply ends, so the start is
+        // fixed when the reply begins: an answer given inside a reply
+        // moves the next call's start, never this one's.
+        let mut could_ask = Instant::now();
+        let mut began: HashMap<String, Instant> = HashMap::new();
 
         while outcome.is_none() {
             tokio::select! {
@@ -1088,11 +1109,17 @@ impl Agent {
                             Reported::Text(text) => {
                                 pending_text = Some(self.withhold_leaked_reply(text).0);
                             }
+                            Reported::Began(id) => {
+                                began.entry(id).or_insert(could_ask);
+                            }
                             Reported::Step(step) => {
                                 steps += 1;
                                 self.last_turn_rounds = steps;
-                                let latency_ms = step_started.elapsed().as_millis() as u64;
-                                step_started = Instant::now();
+                                let ended = Instant::now();
+                                let started = began.remove(&step.id).unwrap_or(could_ask);
+                                let latency_ms = ended.duration_since(started).as_millis() as u64;
+                                could_ask = ended;
+                                self.plan_child_cost.model_millis += latency_ms;
                                 last_stop = step.stop_reason.clone();
                                 self.plan_child_cost.steps += 1;
                                 match self.child_estimate(
@@ -1146,7 +1173,7 @@ impl Agent {
                         .add_tool_result(&call.id, &call.name, &result.output);
                     self.record_tool_result(&call.id, &call.name, &result)?;
                     let _ = request.reply.send((result.output, !result.success));
-                    step_started = Instant::now();
+                    could_ask = Instant::now();
                 }
             }
         }
@@ -1188,6 +1215,11 @@ impl Agent {
                 (_, None) => None,
             };
             cost.turns_summarized += 1;
+        }
+        if let Some(millis) = outcome.reported_api_millis {
+            let cost = &mut self.plan_child_cost;
+            cost.child_reported_api_millis =
+                Some(cost.child_reported_api_millis.unwrap_or(0) + millis);
         }
         if let Some(reported) = outcome.reported_cost_usd_micros {
             let cost = &mut self.plan_child_cost;
@@ -1374,7 +1406,7 @@ mod tests {
                 "id": "m1", "model": "pinned-model-4-5-20251001",
                 "usage": {"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 1},
             }}))),
-            Ok(vec![])
+            Ok(vec![Reported::Began("m1".to_string())])
         );
         // The message itself, sent before its stream ends, adds text
         // and no second step.
@@ -1437,6 +1469,7 @@ mod tests {
                     ..ModelUsage::default()
                 }],
                 reported_cost_usd_micros: None,
+                reported_api_millis: None,
             })
         );
     }

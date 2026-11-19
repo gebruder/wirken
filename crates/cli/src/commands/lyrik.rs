@@ -4477,6 +4477,8 @@ fn child_cost_record(cost: &wirken_agent::runtime::PlanChildCost) -> serde_json:
         "child_reported_less_corrected_usd_micros": cost
             .child_reported_usd_micros
             .map(|r| r as i64 - corrected as i64),
+        "model_millis": cost.model_millis,
+        "child_reported_api_millis": cost.child_reported_api_millis,
         "steps": cost.steps,
         "steps_unpriced": cost.steps_unpriced,
         "turns": cost.turns,
