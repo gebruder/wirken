@@ -175,6 +175,70 @@ pub struct Outcome {
     pub text: String,
     /// Every model its usage summary names.
     pub models: Vec<String>,
+    /// The usage summary itself: what the child says each model was
+    /// sent and wrote over the whole run.
+    pub usage: Vec<ModelUsage>,
+    /// What the child says the run cost, its own estimate at API
+    /// rates, in USD micros.
+    pub reported_cost_usd_micros: Option<u64>,
+}
+
+/// One model's line of the child's usage summary.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ModelUsage {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    /// The child's own cost figure for the model, in USD micros.
+    pub reported_cost_usd_micros: Option<u64>,
+}
+
+/// What an agent's turns on this route came to, as estimates at the
+/// pricing table's API rates. Nothing here was billed.
+///
+/// There are two estimates. One is the sum over the steps as they
+/// were reported, which is what the rows carry. The other prices the
+/// usage summary the child gives when a turn ends, which is the
+/// child's final count: where a step's output count was a placeholder,
+/// the summary has the real one. The second corrects the first.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct PlanChildCost {
+    /// Turns begun, and those that ended with a usage summary.
+    pub turns: u32,
+    pub turns_summarized: u32,
+    /// Steps reported, and those whose model has no price entry.
+    pub steps: u32,
+    pub steps_unpriced: u32,
+    /// The steps' estimates, summed.
+    pub steps_estimated_usd_micros: u64,
+    /// The usage summaries priced at the same rates, summed. `None`
+    /// when no turn gave one or one names a model with no price entry.
+    pub summary_estimated_usd_micros: Option<u64>,
+    /// The child's own cost figures, summed. `None` when it gave none.
+    pub child_reported_usd_micros: Option<u64>,
+}
+
+impl PlanChildCost {
+    /// The estimate to go by: the priced summaries when every turn
+    /// gave one, the steps' sum otherwise.
+    pub fn corrected_usd_micros(&self) -> u64 {
+        match self.summary_estimated_usd_micros {
+            Some(summary) if self.turns_summarized == self.turns => summary,
+            _ => self.steps_estimated_usd_micros,
+        }
+    }
+
+    /// The corrected estimate less the steps' sum.
+    pub fn correction_usd_micros(&self) -> i64 {
+        self.corrected_usd_micros() as i64 - self.steps_estimated_usd_micros as i64
+    }
+}
+
+fn usd_micros(usd: Option<f64>) -> Option<u64> {
+    usd.filter(|c| c.is_finite() && *c >= 0.0)
+        .map(|c| (c * 1e6).round() as u64)
 }
 
 /// What one line of the child's output stream came to.
@@ -419,7 +483,7 @@ impl Stream {
             is_error: true,
             subtype: "model_mismatch".to_string(),
             text: reason,
-            models: Vec::new(),
+            ..Outcome::default()
         }));
         out
     }
@@ -464,11 +528,28 @@ impl Stream {
 
     fn result(&mut self, msg: &Value) -> Result<Vec<Reported>, String> {
         let mut out: Vec<Reported> = self.finish_all().into_iter().map(Reported::Step).collect();
-        let models: Vec<String> = msg
+        let usage: Vec<ModelUsage> = msg
             .get("modelUsage")
             .and_then(Value::as_object)
-            .map(|m| m.keys().cloned().collect())
+            .map(|m| {
+                m.iter()
+                    .map(|(model, u)| {
+                        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                        ModelUsage {
+                            model: model.clone(),
+                            input_tokens: n("inputTokens"),
+                            output_tokens: n("outputTokens"),
+                            cache_creation_input_tokens: n("cacheCreationInputTokens"),
+                            cache_read_input_tokens: n("cacheReadInputTokens"),
+                            reported_cost_usd_micros: usd_micros(
+                                u.get("costUSD").and_then(Value::as_f64),
+                            ),
+                        }
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
+        let models: Vec<String> = usage.iter().map(|u| u.model.clone()).collect();
         let subtype = msg
             .get("subtype")
             .and_then(Value::as_str)
@@ -487,6 +568,8 @@ impl Stream {
                 .unwrap_or("")
                 .to_string(),
             models,
+            usage,
+            reported_cost_usd_micros: usd_micros(msg.get("total_cost_usd").and_then(Value::as_f64)),
         };
         if let Some(other) = outcome
             .models
@@ -718,6 +801,26 @@ impl Agent {
         )
     }
 
+    /// The run's cost on this route so far, as estimates.
+    pub fn plan_child_cost(&self) -> &PlanChildCost {
+        &self.plan_child_cost
+    }
+
+    /// What `tokens` cost at the table's rates for this agent's pinned
+    /// model. A reported model is the pin, or the turn has failed, so
+    /// the pin is what the table is asked for.
+    fn child_estimate(&self, input: u64, output: u64, written: u64, read: u64) -> Option<u64> {
+        let n = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+        super::estimate_at_api_rates(
+            &self.llm.config().provider,
+            &self.llm.config().model,
+            n(input),
+            n(output),
+            n(written),
+            n(read),
+        )
+    }
+
     fn reported_row(
         &self,
         step: &Step,
@@ -753,6 +856,12 @@ impl Agent {
                 model: step.model.clone(),
                 key_source: key_source.clone(),
             }),
+            estimated_cost_usd_micros: self.child_estimate(
+                step.input_tokens,
+                step.output_tokens,
+                step.cache_creation_input_tokens,
+                step.cache_read_input_tokens,
+            ),
         }
     }
 
@@ -951,6 +1060,7 @@ impl Agent {
             .ok_or_else(|| AgentError::Tool("the child process has no output".to_string()))?;
         let mut lines = BufReader::new(stdout).lines();
 
+        self.plan_child_cost.turns += 1;
         let mut stream = Stream::new(&pin);
         let mut key_source: Option<String> = None;
         let mut denials: Vec<PermissionDenialContext> = Vec::new();
@@ -984,6 +1094,16 @@ impl Agent {
                                 let latency_ms = step_started.elapsed().as_millis() as u64;
                                 step_started = Instant::now();
                                 last_stop = step.stop_reason.clone();
+                                self.plan_child_cost.steps += 1;
+                                match self.child_estimate(
+                                    step.input_tokens,
+                                    step.output_tokens,
+                                    step.cache_creation_input_tokens,
+                                    step.cache_read_input_tokens,
+                                ) {
+                                    Some(e) => self.plan_child_cost.steps_estimated_usd_micros += e,
+                                    None => self.plan_child_cost.steps_unpriced += 1,
+                                }
                                 self.log_event(
                                     TrustLevel::System,
                                     self.reported_row(&step, &key_source, latency_ms),
@@ -1046,6 +1166,34 @@ impl Agent {
                 stderr_tail()
             )));
         };
+        // The child's own count of the turn, priced at the same rates,
+        // and its own cost figure.
+        if !outcome.usage.is_empty() {
+            let priced: Option<u64> = outcome
+                .usage
+                .iter()
+                .map(|u| {
+                    self.child_estimate(
+                        u.input_tokens,
+                        u.output_tokens,
+                        u.cache_creation_input_tokens,
+                        u.cache_read_input_tokens,
+                    )
+                })
+                .sum();
+            let cost = &mut self.plan_child_cost;
+            cost.summary_estimated_usd_micros = match (cost.turns_summarized, priced) {
+                (0, p) => p,
+                (_, Some(p)) => cost.summary_estimated_usd_micros.map(|s| s + p),
+                (_, None) => None,
+            };
+            cost.turns_summarized += 1;
+        }
+        if let Some(reported) = outcome.reported_cost_usd_micros {
+            let cost = &mut self.plan_child_cost;
+            cost.child_reported_usd_micros =
+                Some(cost.child_reported_usd_micros.unwrap_or(0) + reported);
+        }
         // The result is the child's last word. One that was stopped on
         // a step it should not have made is still running; end it.
         let _ = process.start_kill();
@@ -1284,6 +1432,11 @@ mod tests {
                 subtype: "success".to_string(),
                 text: "done".to_string(),
                 models: vec!["pinned-model-4-5-20251001".to_string()],
+                usage: vec![ModelUsage {
+                    model: "pinned-model-4-5-20251001".to_string(),
+                    ..ModelUsage::default()
+                }],
+                reported_cost_usd_micros: None,
             })
         );
     }

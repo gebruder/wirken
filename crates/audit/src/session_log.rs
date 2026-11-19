@@ -970,6 +970,15 @@ pub enum SessionEvent {
         /// arithmetic. `None` if either operand is `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_cost_usd_micros: Option<u64>,
+        /// What the call would have cost at the pricing table's API
+        /// rates, for a call that is not billed by the token: one made
+        /// on a plan. It is an estimate from the row's token counts.
+        /// Nothing was billed, and the three `*_cost_usd_micros`
+        /// fields above stay `None`. `None` on a call that was billed,
+        /// on a plan call whose model has no price entry, and on rows
+        /// written before the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        estimated_cost_usd_micros: Option<u64>,
         /// See [`Self::LlmRequest::sender_id`]. Populated on emit from
         /// the same inbound identity so a `LlmRequest` and its paired
         /// `LlmResponse` always agree on the human principal.

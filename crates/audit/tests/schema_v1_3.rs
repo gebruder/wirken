@@ -518,6 +518,7 @@ fn llm_response_with_credential_id_round_trips() {
         sender_id: None,
         step: None,
         reported: None,
+        estimated_cost_usd_micros: None,
     };
     let json = serde_json::to_string(&original).unwrap();
     assert!(json.contains("\"credential_id\":\"anthropic-api-key\""));
@@ -792,6 +793,7 @@ fn snapshot_llm_response_renames_tokens_and_carries_agent_id() {
         sender_id: None,
         step: None,
         reported: None,
+        estimated_cost_usd_micros: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["input_tokens", "output_tokens", "agent_id"]);

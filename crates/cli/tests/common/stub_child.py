@@ -131,7 +131,7 @@ def main():
     emit({"type": "result", "subtype": "success", "is_error": False,
           "result": reply, "num_turns": n, "total_cost_usd": 0.0123,
           "usage": {"input_tokens": 100 * n, "output_tokens": 30 * n},
-          "modelUsage": {model: {"inputTokens": 100 * n, "outputTokens": 30 * n,
+          "modelUsage": {model: {"inputTokens": 100 * n, "outputTokens": 400 * n,
                                  "cacheReadInputTokens": 1000 * n,
                                  "cacheCreationInputTokens": 10 * n,
                                  "costUSD": 0.0123}}})

@@ -430,7 +430,7 @@ pub async fn run(
         let pin = resolve_phase_pin(&config)?;
         // Before the operator is asked: a run that would be refused is
         // not put to them.
-        refuse_unbounded_plan_run(&pin, &super::config().data_dir)?;
+        refuse_unbounded_plan_run(&pin, &config, &super::config().data_dir)?;
         let walks_dir = resolve_walks_dir(&config, &super::config().data_dir)?;
         let walks = parse_walks_config(&config, &walks_dir)
             .context("parse walks config")?
@@ -1443,7 +1443,7 @@ async fn dispatch_via_agent_runtime(
     // beats wasting a run.
     let pin = resolve_phase_pin(config)?;
     // Here too, for a run that was not put to the operator.
-    refuse_unbounded_plan_run(&pin, &super::config().data_dir)?;
+    refuse_unbounded_plan_run(&pin, config, &super::config().data_dir)?;
     let llm_config = pin_llm_config(&pin);
     // Per-walk model overrides, resolved before the probe so each
     // distinct model is probed. Empty for the one-call slice.
@@ -2309,6 +2309,9 @@ async fn dispatch_via_agent_runtime(
                 "refused_at_aggregation": at_aggregation,
                 "completed": matches!(o.status, WalkStatus::TurnEnded),
             });
+            if let Some(cost) = &o.child_cost {
+                entry["estimated_cost"] = child_cost_record(cost);
+            }
             if let WalkStatus::Incomplete { tool_rounds, .. } = &o.status {
                 entry["incomplete_at_tool_rounds"] = serde_json::json!(tool_rounds);
             }
@@ -2508,6 +2511,48 @@ async fn dispatch_via_agent_runtime(
     let _ = cost_watch.await;
     let calls = super::lyrik_cost::calls_since(&*session_log, &run_handle, chain_mark);
     let spend = super::lyrik_cost::spend(&calls);
+    // A plan run's cost is an estimate at API rates. By step and model
+    // from the chain, and, on the child route, each walk's corrected
+    // figure from the child's own final counts.
+    let estimate_lines = if pin.on_plan() {
+        super::lyrik_cost::estimate_lines(&*session_log, &run_handle, chain_mark)
+    } else {
+        Vec::new()
+    };
+    let walk_costs: Vec<(&str, &wirken_agent::runtime::PlanChildCost)> = walk_outcomes
+        .iter()
+        .flatten()
+        .filter_map(|o| Some((o.walk_name.as_str(), o.child_cost.as_ref()?)))
+        .collect();
+    let estimate = pin.on_plan().then(|| {
+        let corrected: u64 = walk_costs
+            .iter()
+            .map(|(_, c)| c.corrected_usd_micros())
+            .sum();
+        let from_steps: u64 = walk_costs
+            .iter()
+            .map(|(_, c)| c.steps_estimated_usd_micros)
+            .sum();
+        serde_json::json!({
+            "billed": false,
+            "rates": "the pricing table's API rates",
+            "total_usd_micros": spend.estimated_usd_micros,
+            "unestimated_calls": spend.unpriced_calls,
+            "by_step_and_model": estimate_lines,
+            // The walks' corrected figures in place of their steps',
+            // the rest of the run (replays, the fix step) as estimated.
+            "corrected_total_usd_micros": (!walk_costs.is_empty())
+                .then(|| spend.estimated_usd_micros.saturating_sub(from_steps) + corrected),
+            "walks": walk_costs
+                .iter()
+                .map(|(walk, cost)| {
+                    let mut record = child_cost_record(cost);
+                    record["walk"] = serde_json::json!(walk);
+                    record
+                })
+                .collect::<Vec<_>>(),
+        })
+    });
     let warning = cache_warning
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -2542,6 +2587,7 @@ async fn dispatch_via_agent_runtime(
         "priced": !pin.on_plan() && wirken_audit::pricing::is_priced(&pin.provider, &pin.model),
         "plan_sign_in": pin.plan_entry,
         "plan_child": pin.plan_child,
+        "estimate": estimate,
         "cache_warning": warning,
     });
     audit.emit("lyrik.cost.summary", cost.clone())?;
@@ -2553,6 +2599,21 @@ async fn dispatch_via_agent_runtime(
         warning.as_ref(),
     ) {
         println!("{line}");
+    }
+    for line in super::lyrik_cost::estimate_summary_lines(&estimate_lines) {
+        println!("{line}");
+    }
+    for (walk, cost) in &walk_costs {
+        println!(
+            "  walk {walk}: ${:.4} estimated, corrected against the child's final count \
+             (${:.4} from its steps{})",
+            cost.corrected_usd_micros() as f64 / 1e6,
+            cost.steps_estimated_usd_micros as f64 / 1e6,
+            match cost.child_reported_usd_micros {
+                Some(r) => format!(", ${:.4} by the child's own figure", r as f64 / 1e6),
+                None => String::new(),
+            }
+        );
     }
     if let Ok(text) = std::fs::read_to_string(expected_findings)
         && let Ok(mut body) = serde_json::from_str::<serde_json::Value>(&text)
@@ -4350,6 +4411,10 @@ pub(super) struct WalkOutcome {
     pub truncations: Vec<usize>,
     /// Continuation turns the runner sent after a cut-off reply.
     pub continuations: u32,
+    /// On the child route: what the walk's turns came to as estimates,
+    /// with the child's own count and cost figure. `None` on every
+    /// other route.
+    pub child_cost: Option<wirken_agent::runtime::PlanChildCost>,
 }
 
 impl WalkOutcome {
@@ -4364,6 +4429,7 @@ impl WalkOutcome {
             findings_staged: 0,
             truncations: Vec::new(),
             continuations: 0,
+            child_cost: None,
         }
     }
 }
@@ -4390,6 +4456,32 @@ pub(super) enum WalkStatus {
     TransientFailure {
         reason: String,
     },
+}
+
+/// A walk's estimate on the child route, as its completed row and its
+/// `walk_summary` record carry it. Every figure is an estimate at the
+/// pricing table's API rates; nothing was billed. `corrected` is the
+/// one to go by: the child's final count of each turn, priced, in
+/// place of the sum over the steps as they were reported, whose output
+/// counts can be placeholders. `child_reported` is the child's own
+/// cost figure, and the two differences say how far apart they are.
+fn child_cost_record(cost: &wirken_agent::runtime::PlanChildCost) -> serde_json::Value {
+    let corrected = cost.corrected_usd_micros();
+    serde_json::json!({
+        "billed": false,
+        "steps_estimated_usd_micros": cost.steps_estimated_usd_micros,
+        "summary_estimated_usd_micros": cost.summary_estimated_usd_micros,
+        "corrected_usd_micros": corrected,
+        "correction_usd_micros": cost.correction_usd_micros(),
+        "child_reported_usd_micros": cost.child_reported_usd_micros,
+        "child_reported_less_corrected_usd_micros": cost
+            .child_reported_usd_micros
+            .map(|r| r as i64 - corrected as i64),
+        "steps": cost.steps,
+        "steps_unpriced": cost.steps_unpriced,
+        "turns": cost.turns,
+        "turns_summarized": cost.turns_summarized,
+    })
 }
 
 /// The run summary's per-walk lines, from the `walk_summary` records.
@@ -4813,6 +4905,10 @@ async fn dispatch_walks_concurrent(
                 findings_staged: turns.findings_staged,
                 truncations: turns.truncations,
                 continuations: turns.continuations,
+                child_cost: plan_source_t
+                    .child
+                    .is_some()
+                    .then(|| local_agent.plan_child_cost().clone()),
             }
         });
         handles.push((name, h));
@@ -4860,6 +4956,7 @@ async fn dispatch_walks_concurrent(
                 "truncated": !outcome.truncations.is_empty(),
                 "truncations": outcome.truncations,
                 "continuations": outcome.continuations,
+                "estimated_cost": outcome.child_cost.as_ref().map(child_cost_record),
             }),
         )?;
         outcomes.push(outcome);
@@ -6480,14 +6577,42 @@ pub fn tool_bridge(socket: &Path) -> Result<()> {
     }
 }
 
-/// Refuse a run on a plan sign-in that no ceiling would stop.
-fn refuse_unbounded_plan_run(pin: &PhasePin, data_dir: &Path) -> Result<()> {
+/// Refuse a run on a plan that no ceiling would stop. `config` is the
+/// target's, read for the models the run's walks are pinned to: the
+/// cost ceiling holds only where every one of them can be estimated.
+fn refuse_unbounded_plan_run(
+    pin: &PhasePin,
+    config: &serde_json::Value,
+    data_dir: &Path,
+) -> Result<()> {
     if !pin.on_plan() {
         return Ok(());
     }
+    let mut models = vec![pin.model.clone()];
+    if let Some(phases) = config.get("phases").and_then(|p| p.as_object()) {
+        let walks: Vec<&str> = config
+            .get("walks")
+            .and_then(|w| w.as_array())
+            .map(|w| w.iter().filter_map(|n| n.as_str()).collect())
+            .unwrap_or_default();
+        for walk in walks {
+            if let Some(model) = phases
+                .get(walk)
+                .and_then(|e| e.get("model"))
+                .and_then(|m| m.as_str())
+            {
+                models.push(model.to_string());
+            }
+        }
+    }
+    let unpriced = models
+        .iter()
+        .find(|m| !wirken_audit::pricing::is_priced(&pin.provider, m))
+        .map(|m| format!("{} {m}", pin.provider));
     let bounds = super::lyrik_walks::load_operator_settings(data_dir)?.run_bounds();
     match super::lyrik_cost::refuse_unbounded_plan_run(
         &bounds,
+        unpriced.as_deref(),
         &super::lyrik_walks::operator_settings_path(data_dir),
     ) {
         Some(reason) => anyhow::bail!("{reason}"),
@@ -6978,36 +7103,59 @@ mod tests {
     }
 
     /// A plan run starts only when the operator's `lyrik.json` sets a
-    /// ceiling that holds without a price. A key run needs none.
+    /// ceiling that can count its calls. Model time and model calls
+    /// always can. Cost can where every model the run is pinned to has
+    /// a price entry, a walk's own model included. A key run needs
+    /// none.
     #[test]
     fn a_plan_run_is_refused_until_lyrik_json_sets_a_ceiling_that_holds() {
         let data = tempfile::tempdir().unwrap();
-        let pin = |auth: &str| {
-            super::resolve_phase_pin(&serde_json::json!({ "phases": { "framing": {
-                "provider": "openai", "auth": auth, "model": "m"
-            }}}))
-            .unwrap()
+        let config = |auth: &str, model: &str, walk_model: &str| {
+            serde_json::json!({
+                "phases": {
+                    "framing": { "provider": "openai", "auth": auth, "model": model },
+                    "sink-walk": { "model": walk_model },
+                },
+                "walks": ["sink-walk"],
+            })
+        };
+        let refused = |config: &serde_json::Value| {
+            super::refuse_unbounded_plan_run(
+                &super::resolve_phase_pin(config).unwrap(),
+                config,
+                data.path(),
+            )
         };
         let settings = data.path().join("lyrik.json");
+        // A model the price table has, and one it does not.
+        const PRICED: &str = "gpt-6.2-astra";
+        assert!(wirken_audit::pricing::is_priced("openai", PRICED));
+        let priced = config("plan", PRICED, PRICED);
+        let walk_unpriced = config("plan", PRICED, "no-such-model");
 
-        let err = super::refuse_unbounded_plan_run(&pin("plan"), data.path())
-            .unwrap_err()
-            .to_string();
+        let err = refused(&priced).unwrap_err().to_string();
         assert!(err.contains("`run_ceiling_model_calls`"), "{err}");
+        assert!(err.contains("`run_ceiling_usd`"), "{err}");
         assert!(err.contains(&settings.display().to_string()), "{err}");
-        assert!(super::refuse_unbounded_plan_run(&pin("key"), data.path()).is_ok());
+        assert!(refused(&config("key", PRICED, PRICED)).is_ok());
 
+        // A cost ceiling: enough where every model can be estimated.
         std::fs::write(&settings, r#"{ "run_ceiling_usd": 20.0 }"#).unwrap();
-        assert!(super::refuse_unbounded_plan_run(&pin("plan"), data.path()).is_err());
+        assert!(refused(&priced).is_ok());
+        let err = refused(&walk_unpriced).unwrap_err().to_string();
+        assert!(
+            err.contains("openai no-such-model has no price entry"),
+            "{err}"
+        );
         std::fs::write(&settings, r#"{ "run_ceiling_model_calls": 0 }"#).unwrap();
-        assert!(super::refuse_unbounded_plan_run(&pin("plan"), data.path()).is_err());
+        assert!(refused(&priced).is_err());
 
         for held in [
             r#"{ "run_ceiling_model_seconds": 3600 }"#,
             r#"{ "run_ceiling_usd": 20.0, "run_ceiling_model_calls": 400 }"#,
         ] {
             std::fs::write(&settings, held).unwrap();
-            assert!(super::refuse_unbounded_plan_run(&pin("plan"), data.path()).is_ok());
+            assert!(refused(&walk_unpriced).is_ok());
         }
     }
 

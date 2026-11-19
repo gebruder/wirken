@@ -22,11 +22,9 @@ fn stub() -> String {
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/common/stub_child.py").to_string()
 }
 
-/// The directory an agent binary reads project settings from. Spelled
-/// in two parts so the repository's name check, which reads every
-/// tracked file, does not take this fixture for a mention.
+/// The directory an agent binary reads project settings from.
 fn agent_settings_dir() -> String {
-    [".cl", "aude"].concat()
+    ".claude".to_string()
 }
 
 struct Run {
@@ -42,6 +40,16 @@ struct Run {
 /// Run two walks, `sink-walk` on its own model and `chain-walk` on the
 /// run pin, with the stub child doing `scenario` in every turn.
 fn run(scenario: serde_json::Value, settings: serde_json::Value) -> Run {
+    run_pinned(PIN, SINK_PIN, scenario, settings)
+}
+
+/// [`run`] with the run pinned to `pin` and `sink-walk` to `sink_pin`.
+fn run_pinned(
+    pin: &str,
+    sink_pin: &str,
+    scenario: serde_json::Value,
+    settings: serde_json::Value,
+) -> Run {
     let tmp = tempfile::tempdir().unwrap().keep();
     let (home, data, target) = (tmp.join("home"), tmp.join("data"), tmp.join("target"));
     std::fs::create_dir_all(&home).unwrap();
@@ -76,8 +84,8 @@ fn run(scenario: serde_json::Value, settings: serde_json::Value) -> Run {
         serde_json::json!({
             "scope": {"include": ["src/**/*"], "exclude": []},
             "phases": {
-                "framing": {"provider": "anthropic", "auth": "plan", "model": PIN},
-                "sink-walk": {"model": SINK_PIN},
+                "framing": {"provider": "anthropic", "auth": "plan", "model": pin},
+                "sink-walk": {"model": sink_pin},
             },
             "walks": ["sink-walk", "chain-walk"],
         })
@@ -106,7 +114,9 @@ fn run(scenario: serde_json::Value, settings: serde_json::Value) -> Run {
     let children = std::fs::read_to_string(&log)
         .unwrap_or_default()
         .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
+        // A child ended while it was writing its record leaves a cut
+        // line; that child is not counted.
+        .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
     Run {
         ok: out.status.success(),
@@ -350,12 +360,20 @@ fn each_reported_step_is_a_marked_row_with_step_model_and_tokens() {
             assert_eq!(of_walk[1]["stop_reason"], "end_turn", "{}", of_walk[1]);
         }
         // The run says its cost is not recorded and which ceiling held.
+        // These pins have no price entry, so nothing is estimated,
+        // and the run says so.
         assert!(
-            r.report
-                .contains("cost: not recorded, the run was on the plan the child process is"),
+            r.report.contains(
+                "cost: nothing billed, the run was on the plan the child process is signed in \
+                 to; an estimated $0.00 at API rates over 4 model call(s), 4 of them with no \
+                 price entry and not estimated"
+            ),
             "{}",
             r.report
         );
+        for row in &rows {
+            assert!(row.get("estimated_cost_usd_micros").is_none(), "{row}");
+        }
         assert!(
             r.report
                 .contains("model-call ceiling 50: not reached (4 made)"),
@@ -459,4 +477,185 @@ fn a_ceiling_ends_the_children() {
         r.report
     );
     assert_eq!(chain(&r.data, "llm_response").len(), 2);
+}
+
+/// Two models the price table has, as a run on this route pins them.
+const PRICED_LARGE: &str = "claude-sonnet-4-6";
+const PRICED_SMALL: &str = "claude-haiku-4-5";
+
+/// A plan call is not billed, and its row says what it would have cost
+/// at API rates, in a field of its own beside the cost fields, which
+/// stay absent. The run may start on a cost ceiling alone, held
+/// against that estimate. The summary and `findings.json` give the
+/// estimate by walk and model and say nothing was billed, and each
+/// walk's completed row carries the figure corrected against the
+/// child's final count, with the child's own cost figure beside it.
+#[test]
+fn a_plan_runs_cost_is_an_estimate_at_api_rates_by_walk_and_model() {
+    let r = run_pinned(
+        PRICED_LARGE,
+        PRICED_SMALL,
+        serde_json::json!({"calls": [["list_files", {}]], "reply": "Done."}),
+        serde_json::json!({"run_ceiling_usd": 5.0}),
+    );
+    assert!(r.ok, "{}", r.report);
+
+    let rows = chain(&r.data, "llm_response");
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    let estimate_of = |walk: &str| -> u64 {
+        rows.iter()
+            .filter(|row| row["step"] == walk)
+            .map(|row| {
+                assert!(row.get("total_cost_usd_micros").is_none(), "{row}");
+                row["estimated_cost_usd_micros"]
+                    .as_u64()
+                    .expect("an estimate")
+            })
+            .sum()
+    };
+    let (small, large) = (estimate_of("sink-walk"), estimate_of("chain-walk"));
+    // The same tokens on the two models: the larger costs more.
+    assert!(small > 0 && large > small, "{small} {large}");
+
+    for said in [
+        "cost: nothing billed, the run was on the plan the child process is signed in to; an \
+         estimated $",
+        "cost ceiling $5.00 on estimated cost: not reached",
+        "estimated cost at API rates, by step and model (nothing billed):",
+        &format!("  sink-walk on {PRICED_SMALL}: $"),
+        &format!("  chain-walk on {PRICED_LARGE}: $"),
+        "  walk sink-walk: $",
+    ] {
+        assert!(r.report.contains(said), "{said}\n{}", r.report);
+    }
+
+    let findings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            r.target
+                .join(format!(".lyrik/state/runs/{RUN}/findings.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cost = &findings["cost"];
+    assert_eq!(cost["priced"], false, "{cost}");
+    assert_eq!(cost["spend"]["usd_micros"], 0, "{cost}");
+    assert_eq!(
+        cost["spend"]["estimated_usd_micros"],
+        small + large,
+        "{cost}"
+    );
+    let estimate = &cost["estimate"];
+    assert_eq!(estimate["billed"], false, "{estimate}");
+    assert_eq!(estimate["total_usd_micros"], small + large, "{estimate}");
+    let mut lines: Vec<(String, String, u64, u64)> = estimate["by_step_and_model"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["step"].as_str().unwrap().to_string(),
+                l["model"].as_str().unwrap().to_string(),
+                l["calls"].as_u64().unwrap(),
+                l["estimated_usd_micros"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        [
+            ("chain-walk".to_string(), PRICED_LARGE.to_string(), 2, large),
+            ("sink-walk".to_string(), PRICED_SMALL.to_string(), 2, small),
+        ]
+    );
+
+    // Each walk's completed row: the steps' sum, the child's final
+    // count priced at the same rates, which is the corrected figure,
+    // and the child's own cost figure with how far it is from ours.
+    for completed in audit_rows(&r.target, "lyrik.walk.completed") {
+        let walk = completed["walk"].as_str().unwrap();
+        let cost = &completed["estimated_cost"];
+        let steps = if walk == "sink-walk" { small } else { large };
+        assert_eq!(cost["billed"], false, "{cost}");
+        assert_eq!(cost["steps_estimated_usd_micros"], steps, "{cost}");
+        let corrected = cost["corrected_usd_micros"].as_u64().unwrap();
+        assert_eq!(cost["summary_estimated_usd_micros"], corrected, "{cost}");
+        // The stub's final count differs from its steps', as a real
+        // child's does where a step's output count was a placeholder.
+        assert_ne!(corrected, steps, "{cost}");
+        assert_eq!(
+            cost["correction_usd_micros"].as_i64().unwrap(),
+            corrected as i64 - steps as i64,
+            "{cost}"
+        );
+        assert_eq!(cost["child_reported_usd_micros"], 12_300, "{cost}");
+        assert_eq!(
+            cost["child_reported_less_corrected_usd_micros"]
+                .as_i64()
+                .unwrap(),
+            12_300 - corrected as i64,
+            "{cost}"
+        );
+        let in_summary = findings["walk_summary"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["walk"] == walk)
+            .unwrap();
+        assert_eq!(&in_summary["estimated_cost"], cost, "{in_summary}");
+    }
+    let corrected_total = estimate["corrected_total_usd_micros"].as_u64().unwrap();
+    let walks_corrected: u64 = estimate["walks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["corrected_usd_micros"].as_u64().unwrap())
+        .sum();
+    assert_eq!(corrected_total, walks_corrected, "{estimate}");
+}
+
+/// The cost ceiling stops a plan run on its estimate, and says the
+/// figure is one. Where a pinned model has no price entry there is
+/// nothing to hold the ceiling against, and the run does not start on
+/// it alone.
+#[test]
+fn the_cost_ceiling_holds_a_plan_run_on_its_estimate() {
+    let r = run_pinned(
+        PRICED_LARGE,
+        PRICED_SMALL,
+        serde_json::json!({"calls": [["list_files", {}]], "hang": 60}),
+        serde_json::json!({"run_ceiling_usd": 0.0001}),
+    );
+    assert!(
+        r.report.contains("the run reached its cost ceiling of $0.00 ($0.00 estimated at API rates, nothing billed, over 2 model calls)"),
+        "{}",
+        r.report
+    );
+    assert!(
+        r.elapsed < std::time::Duration::from_secs(40),
+        "{:?}\n{}",
+        r.elapsed,
+        r.report
+    );
+    assert!(
+        r.report
+            .contains("stopped at the cost ceiling of $0.00 on estimated cost"),
+        "{}",
+        r.report
+    );
+
+    let unpriced = run(
+        serde_json::json!({}),
+        serde_json::json!({"run_ceiling_usd": 5.0}),
+    );
+    assert!(!unpriced.ok, "{}", unpriced.report);
+    assert!(
+        unpriced.report.contains(
+            "anthropic pinned-large-9 has no price entry, so its calls cannot be estimated"
+        ),
+        "{}",
+        unpriced.report
+    );
+    assert_eq!(unpriced.children.len(), 0);
 }

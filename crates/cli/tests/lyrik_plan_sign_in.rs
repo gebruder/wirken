@@ -55,11 +55,13 @@ fn run(settings: Option<&str>) -> (bool, String, std::path::PathBuf) {
 
 #[test]
 fn a_plan_run_does_not_start_without_a_ceiling_that_holds() {
+    // No ceiling at all, and a cost ceiling on a model the price table
+    // does not have, which has nothing to count.
     for settings in [None, Some(r#"{ "run_ceiling_usd": 20.0 }"#)] {
         let (ok, report, data) = run(settings);
         assert!(!ok, "{report}");
         assert!(
-            report.contains("pinned to a plan sign-in, whose calls record no cost"),
+            report.contains("this run is on a plan, whose calls are not billed"),
             "{report}"
         );
         assert!(report.contains("`run_ceiling_model_seconds`"), "{report}");

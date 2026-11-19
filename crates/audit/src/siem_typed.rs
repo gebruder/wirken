@@ -1052,6 +1052,7 @@ mod tests {
             sender_id: None,
             step: None,
             reported: None,
+            estimated_cost_usd_micros: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(

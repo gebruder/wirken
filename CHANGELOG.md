@@ -20,12 +20,20 @@ tagged.
   (`crates/cli/tests/lyrik_plan_sign_in.rs`;
   [docs/lyrik.md](docs/lyrik.md#cost-guard)).
 
+- `estimated_cost_usd_micros` on the `llm_response` row of a plan call whose
+  model the pricing table has: what the call's tokens would have cost at API
+  rates. An estimate, apart from the cost fields, which stay null on a plan
+  call ([docs/cost-monitoring.md](docs/cost-monitoring.md)).
+
 - `run_ceiling_model_seconds` and `run_ceiling_model_calls` in `lyrik.json`:
-  ceilings on a Lyrik run's model time and model calls, which hold where no
-  cost is recorded. A run on a plan sign-in does not start without one of
-  them. The sign-off banner, the run summary and `cost` in `findings.json`
-  show each ceiling set, which one stopped the run, and that a plan run's
-  cost is not recorded ([docs/lyrik.md](docs/lyrik.md#cost-guard)).
+  ceilings on a Lyrik run's model time and model calls, which need no price.
+  A run on a plan sign-in starts with any one ceiling that can count its
+  calls: either of these, or `run_ceiling_usd`, held there against the
+  estimated cost and so needing a price entry for every pinned model. The
+  sign-off banner, the run summary and `cost` in `findings.json` show each
+  ceiling set and which one stopped the run, and for a plan run that nothing
+  is billed and the estimate by step and model
+  ([docs/lyrik.md](docs/lyrik.md#cost-guard)).
 
 - A Lyrik walk can run on its own model. An entry in `.lyrik/config.json`
   keyed by a walk's name under `phases` (for example `phases.sink-walk`)

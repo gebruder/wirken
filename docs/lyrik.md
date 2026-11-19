@@ -819,7 +819,7 @@ most model time a run may take: the `latency_ms` of its `llm_response` rows,
 summed, so calls that overlap in concurrent walks each count in full.
 `run_ceiling_model_calls` is the most model calls it may make, the preflight
 probe included. Neither depends on a price, so both hold for a model with no
-price entry and for a plan sign-in. They are checked with the cost ceiling,
+price entry and for any plan sign-in. They are checked with the cost ceiling,
 every two seconds, and a run stopped at one ends as a run stopped at the cost
 ceiling does. Zero is read as unset.
 
@@ -850,19 +850,39 @@ operator's plan at the `openai` provider in place of an API key (see
 `openai-api-key`; every walk, replay and fix agent and the probe use the one
 sign-in, and a per-walk entry changes the model only. The `llm_request` and
 `llm_response` rows carry the step, the model and the token counts as on any
-run, with the entry as `credential_id` and null cost fields.
+run, with the entry as `credential_id`, null cost fields and, where the model
+has a price entry, an estimate.
 
-Plan calls record no cost, so `run_ceiling_usd` cannot stop such a run. It
-does not start unless `run_ceiling_model_seconds` or `run_ceiling_model_calls`
-is set, and is refused before the sign-off and before the vault is opened.
-The banner and the summary say that cost is not recorded (from the test
-`a_plan_run_shows_its_ceilings_and_that_cost_is_not_recorded`, not a run):
+Plan calls are not billed, so they record no cost. Where the price table has
+the model, each `llm_response` row carries `estimated_cost_usd_micros`: what
+the call's tokens would have cost at the table's API rates. It is an estimate,
+kept apart from the cost fields, which stay null. Where the table does not have
+the model there is no estimate.
+
+A plan run does not start unless a ceiling is set that can count its calls:
+`run_ceiling_model_seconds`, `run_ceiling_model_calls`, or `run_ceiling_usd`,
+which on a plan run is held against the estimated cost and so needs every
+model the run is pinned to, a walk's own included, to have a price entry. A
+run with none is refused before the sign-off and before the vault is opened.
+The banner, the stop and the summary say the figure is an estimate and that
+nothing is billed, and the summary lists the estimate by step and model (from
+the tests in `crates/cli/src/commands/lyrik_cost.rs`, not a run):
 
 ```
-  ceiling  $20.00 is set but cannot be enforced: the plan sign-in 'openai-plan' records no cost
-  pricing  the plan sign-in 'openai-plan' records no cost: this run's cost is not recorded
-cost: not recorded, the run was on the plan sign-in 'openai-plan': 2 model call(s), 75 second(s) of model time
-cost ceiling $20.00: not applied, cost is not recorded
+  ceiling  the run stops at $20.00 of estimated cost at API rates; nothing is billed (`run_ceiling_usd` in lyrik.json)
+  pricing  the run is on the plan sign-in 'openai-plan': nothing is billed, and every cost figure is an estimate at API rates
+wirken lyrik: the run reached its cost ceiling of $1.00 ($1.05 estimated at API rates, nothing billed, over 3 model calls); stopping, staged findings are kept
+cost: nothing billed, the run was on the plan sign-in 'openai-plan'; an estimated $1.54 at API rates over 3 model call(s), 1 of them with no price entry and not estimated, 75 second(s) of model time
+cost ceiling $20.00 on estimated cost: not reached
+estimated cost at API rates, by step and model (nothing billed):
+  sink-walk on small: $0.0412 over 12 model call(s)
+```
+
+For a model with no price entry the banner says so:
+
+```
+  ceiling  $20.00 is set but cannot be enforced: openai no-such-model has no price entry
+  pricing  the run is on the plan sign-in 'openai-plan': nothing is billed, and openai no-such-model has no price entry, so no cost estimate is recorded
 ```
 
 **A model with no price entry.** Cost comes from the price table
@@ -889,7 +909,8 @@ difference between the model's input and cache-read rates.
 Every run ends with its cost, and `findings.json` carries it under `cost`:
 the recorded spend, the number of calls, how many had no price and the model
 time they took, each ceiling and which one stopped the run, the plan sign-in
-when the run was on one, and the cache warning if there was one.
+and the estimated cost by step and model when the run was on one, and the
+cache warning if there was one.
 
 ## Defender fix step
 
@@ -1663,10 +1684,13 @@ change them:
   keys; the funnel's `merged.carried` is the same count. See
   [The ledger](#settled-findings-are-carried-into-a-runs-output).
 - `cost`, a top-level object: `spend` (`usd_micros`, `calls`,
-  `unpriced_calls`, `model_millis`), `ceiling_usd`, `ceiling_model_seconds`,
-  `ceiling_model_calls`, `stopped_at_ceiling`, `ceiling_reached` (`usd`,
-  `model_seconds`, `model_calls` or null), `priced`, `plan_sign_in` and
-  `cache_warning`. See [Cost guard](#cost-guard).
+  `unpriced_calls`, `model_millis`, `estimated_usd_micros`), `ceiling_usd`,
+  `ceiling_model_seconds`, `ceiling_model_calls`, `stopped_at_ceiling`,
+  `ceiling_reached` (`usd`, `model_seconds`, `model_calls` or null), `priced`,
+  `plan_sign_in`, `cache_warning` and, on a plan run, `estimate`: `billed`
+  (false), `total_usd_micros`, `unestimated_calls` and `by_step_and_model`
+  (`step`, `model`, `calls`, `estimated_usd_micros`, `unpriced_calls`). See
+  [Cost guard](#cost-guard).
 - `claims_refused`, a top-level array present when a claim was refused at
   registration: `walk`, `file`, `key`, `decision`, `record` and
   `established_by_run`.

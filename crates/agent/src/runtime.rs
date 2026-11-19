@@ -346,6 +346,8 @@ pub struct Agent {
     /// operator's own plan ([`plan_child`]), in place of model calls
     /// made here.
     plan_child: Option<PlanChild>,
+    /// What this agent's turns on that route came to, as estimates.
+    plan_child_cost: plan_child::PlanChildCost,
     /// Calls refused since the last turn began. A turn that ends in an
     /// error returns no [`ProcessResult`], so this is where its refused
     /// calls are read from.
@@ -572,7 +574,7 @@ pub(crate) fn leak_refusal(credential: &str) -> String {
 /// that own the `Vec` afterwards, and taking it is deliberate and
 /// visible rather than something a dispatch does by accident.
 mod plan_child;
-pub use plan_child::{PLAN_CHILD_BASE_URL, PlanChild, REPORTED_BY};
+pub use plan_child::{PLAN_CHILD_BASE_URL, PlanChild, PlanChildCost, REPORTED_BY};
 
 mod turn_tools {
     use super::*;
@@ -850,6 +852,7 @@ impl Agent {
             last_turn_denials: Vec::new(),
             call_step: None,
             plan_child: None,
+            plan_child_cost: plan_child::PlanChildCost::default(),
             file_scope: None,
             current_inbound: InboundContext::default(),
             session_log,
@@ -969,6 +972,7 @@ impl Agent {
             last_turn_denials: Vec::new(),
             call_step: None,
             plan_child: None,
+            plan_child_cost: plan_child::PlanChildCost::default(),
             file_scope: None,
             current_inbound: InboundContext::default(),
             session_log,
@@ -3615,6 +3619,7 @@ impl Agent {
                 input_cost_usd_micros,
                 output_cost_usd_micros,
                 total_cost_usd_micros,
+                estimated_cost_usd_micros,
             } = attribute_call_usage(self.llm.config(), usage);
             self.log_event(
                 TrustLevel::System,
@@ -3636,6 +3641,7 @@ impl Agent {
                     sender_id: self.current_inbound.sender_id.clone(),
                     step: self.call_step.clone(),
                     reported: None,
+                    estimated_cost_usd_micros,
                 },
             )?;
             self.charge_budget(total_cost_usd_micros);
@@ -4046,6 +4052,7 @@ impl Agent {
                 input_cost_usd_micros,
                 output_cost_usd_micros,
                 total_cost_usd_micros,
+                estimated_cost_usd_micros,
             } = attribute_call_usage(self.llm.config(), usage);
             self.log_event(
                 TrustLevel::System,
@@ -4067,6 +4074,7 @@ impl Agent {
                     sender_id: self.current_inbound.sender_id.clone(),
                     step: self.call_step.clone(),
                     reported: None,
+                    estimated_cost_usd_micros,
                 },
             )?;
             self.charge_budget(total_cost_usd_micros);
@@ -7087,6 +7095,7 @@ pub fn side_call_response(
         input_cost_usd_micros,
         output_cost_usd_micros,
         total_cost_usd_micros,
+        estimated_cost_usd_micros,
     } = attribute_call_usage(config, usage);
     (
         SessionEvent::LlmResponse {
@@ -7107,6 +7116,7 @@ pub fn side_call_response(
             sender_id,
             step,
             reported: None,
+            estimated_cost_usd_micros,
         },
         total_cost_usd_micros,
     )
@@ -7259,6 +7269,9 @@ pub(crate) struct LlmResponseAttribution {
     pub input_cost_usd_micros: Option<u64>,
     pub output_cost_usd_micros: Option<u64>,
     pub total_cost_usd_micros: Option<u64>,
+    /// What a plan call would have cost at the table's API rates.
+    /// `None` on a billed call and where the model has no price entry.
+    pub estimated_cost_usd_micros: Option<u64>,
 }
 
 /// [`attribute_llm_usage`] for a call made under `config`. A plan-mode
@@ -7272,6 +7285,18 @@ pub(crate) fn attribute_call_usage(
     if !config.auth.is_plan() {
         return attribute_llm_usage(&config.provider, &config.model, usage);
     }
+    // Not billed, so no cost. What the same tokens cost at the API is
+    // kept beside it as an estimate, where the table prices the model.
+    let estimated_cost_usd_micros = usage.as_ref().and_then(|u| {
+        estimate_at_api_rates(
+            &config.provider,
+            &config.model,
+            u.input_tokens,
+            u.output_tokens,
+            u.cache_creation_input_tokens,
+            u.cache_read_input_tokens,
+        )
+    });
     let u = usage.unwrap_or_default();
     LlmResponseAttribution {
         input_tokens: u.input_tokens,
@@ -7281,7 +7306,30 @@ pub(crate) fn attribute_call_usage(
         input_cost_usd_micros: None,
         output_cost_usd_micros: None,
         total_cost_usd_micros: None,
+        estimated_cost_usd_micros,
     }
+}
+
+/// What a call's tokens cost at the pricing table's API rates, when
+/// the table prices the model. Used for a plan call, which is not
+/// billed: the figure is an estimate, recorded apart from cost.
+pub(crate) fn estimate_at_api_rates(
+    provider: &str,
+    model: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+) -> Option<u64> {
+    wirken_audit::pricing::cost_micros_cached(
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+    )
+    .2
 }
 
 pub(crate) fn attribute_llm_usage(
@@ -7301,6 +7349,7 @@ pub(crate) fn attribute_llm_usage(
                 input_cost_usd_micros,
                 output_cost_usd_micros,
                 total_cost_usd_micros,
+                estimated_cost_usd_micros: None,
             }
         }
         None => LlmResponseAttribution {
@@ -7311,6 +7360,7 @@ pub(crate) fn attribute_llm_usage(
             input_cost_usd_micros: None,
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
+            estimated_cost_usd_micros: None,
         },
     }
 }
@@ -7319,6 +7369,44 @@ pub(crate) fn attribute_llm_usage(
 mod attribution_tests {
     use super::*;
     use crate::llm::Usage;
+
+    /// A plan call is not billed: its cost fields stay `None` whatever
+    /// the table has. Where the table prices the model, the same
+    /// tokens' price at the API is kept apart as an estimate, equal to
+    /// what a key call would have recorded as cost. Where it does not,
+    /// there is no estimate either.
+    #[test]
+    fn a_plan_call_carries_an_estimate_at_api_rates_and_no_cost() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            ..Default::default()
+        };
+        let on_key = attribute_call_usage(&LlmConfig::openai("gpt-6.2-astra"), Some(usage));
+        assert!(on_key.total_cost_usd_micros.is_some_and(|c| c > 0));
+        assert_eq!(on_key.estimated_cost_usd_micros, None);
+
+        let on_plan = attribute_call_usage(&LlmConfig::plan("gpt-6.2-astra"), Some(usage));
+        assert_eq!(
+            (
+                on_plan.input_cost_usd_micros,
+                on_plan.output_cost_usd_micros,
+                on_plan.total_cost_usd_micros
+            ),
+            (None, None, None)
+        );
+        assert_eq!(
+            on_plan.estimated_cost_usd_micros,
+            on_key.total_cost_usd_micros
+        );
+
+        let unpriced = attribute_call_usage(&LlmConfig::plan("no-such-model"), Some(usage));
+        assert_eq!(unpriced.total_cost_usd_micros, None);
+        assert_eq!(unpriced.estimated_cost_usd_micros, None);
+        // No usage reported: nothing to estimate from.
+        let silent = attribute_call_usage(&LlmConfig::plan("gpt-6.2-astra"), None);
+        assert_eq!(silent.estimated_cost_usd_micros, None);
+    }
 
     /// Regression guard for the Some(0) vs None distinction. A future
     /// refactor that flattens the unreported-usage case to

@@ -8105,6 +8105,7 @@ mod verify {
                 sender_id: None,
                 step: None,
                 reported: None,
+                estimated_cost_usd_micros: None,
             },
         )
         .unwrap();
