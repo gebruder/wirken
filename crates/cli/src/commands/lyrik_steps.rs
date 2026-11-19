@@ -63,7 +63,7 @@ pub struct AcceptedStep {
 /// run's chain: an `exec` call whose result says where it ran. A call
 /// that was refused has no such result and is not one of them.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct ExecutedCommands(std::collections::BTreeSet<String>);
+pub struct ExecutedCommands(std::collections::BTreeSet<Vec<String>>);
 
 impl ExecutedCommands {
     /// From the run's rows, in order. A result is paired with the
@@ -93,7 +93,7 @@ impl ExecutedCommands {
                 } if tool_name == "exec" => {
                     let command = asked.get_mut(&call_id).and_then(|q| q.pop_front());
                     if let (Some(command), Some(_)) = (command, sandbox) {
-                        ran.insert(one_spaced(&command));
+                        ran.insert(words(&command));
                     }
                 }
                 _ => {}
@@ -102,15 +102,25 @@ impl ExecutedCommands {
         Self(ran)
     }
 
-    /// Whether `command` is one of them, exactly as run but for runs
-    /// of whitespace.
+    /// Whether `command` is one of them: the same words in the same
+    /// order, however each was quoted, and with or without a leading
+    /// `cd <dir> &&`.
     pub fn ran(&self, command: &str) -> bool {
-        self.0.contains(&one_spaced(command))
+        self.0.contains(&words(command))
     }
 }
 
-fn one_spaced(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+/// A command as the words a shell would read, without a leading
+/// `cd <dir> &&`: `grep -n 'a' f` and `grep -n a f` are the same
+/// words. A command a shell could not split, an unclosed quote, is
+/// split on whitespace instead, so it still equals itself.
+fn words(command: &str) -> Vec<String> {
+    let mut words = shlex::split(command)
+        .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect());
+    while words.len() > 3 && words[0] == "cd" && words[2] == "&&" {
+        words.drain(..3);
+    }
+    words
 }
 
 /// Whether a record's `check` names a read and not a command: it opens
@@ -293,6 +303,45 @@ mod tests {
             });
         }
         vec![call, serde_json::from_value(result).unwrap()]
+    }
+
+    /// A command is the same command however its words were quoted,
+    /// and wherever it was run from. A walk ran
+    /// `grep -n subprocess agent.py` and cited it with the pattern in
+    /// quotes; another ran its command after `cd /workspace &&`.
+    #[test]
+    fn a_cited_command_matches_what_ran_whatever_the_quoting() {
+        let tmp = tempdir().unwrap();
+        let mut rows = exec_rows("grep -n subprocess agent.py", true);
+        rows.extend(exec_rows(
+            "cd /workspace && python3 .lyrik/state/runs/r/staging/sink-walk/harness/h.py",
+            true,
+        ));
+        rows.extend(exec_rows("grep -n \"shell=True\" agent.py", true));
+        let executed = ExecutedCommands::from_rows(rows);
+        for cited in [
+            "grep -n 'subprocess' agent.py",
+            "grep -n \"subprocess\" agent.py",
+            "python3 .lyrik/state/runs/r/staging/sink-walk/harness/h.py",
+            "cd /workspace && grep -n subprocess agent.py",
+            "grep -n shell=True agent.py",
+        ] {
+            assert!(executed.ran(cited), "{cited}");
+        }
+        // Different words are a different command.
+        for cited in [
+            "grep -n subprocess other.py",
+            "grep -rn subprocess agent.py",
+            "grep -n 'sub process' agent.py",
+            "rg -n subprocess agent.py",
+            // A `cd` that is not a prefix is part of the command.
+            "grep -n subprocess agent.py && cd /workspace",
+        ] {
+            assert!(!executed.ran(cited), "{cited}");
+        }
+        let mut steps = vec![accepted("grep -n 'subprocess' agent.py")];
+        assert!(mark_checks(&mut steps, &executed, tmp.path()).is_empty());
+        assert_eq!(steps[0].check_status, Some("executed"));
     }
 
     /// The checks a walk cited in a real run. It ran `sha256sum`, `pwd`

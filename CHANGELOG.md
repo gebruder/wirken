@@ -76,6 +76,12 @@ tagged.
 
 ### Fixed
 
+- A command a Lyrik step record cites is matched against the commands that
+  ran word by word, as a shell splits them, and with or without a leading
+  `cd <dir> &&`. It was matched as text, so `grep -n 'subprocess' agent.py`
+  cited for `grep -n subprocess agent.py` was marked `not_executed`
+  (`a_cited_command_matches_what_ran_whatever_the_quoting`,
+  `crates/cli/src/commands/lyrik_steps.rs`).
 - A Lyrik citation is `resolved` only when the cited line holds the text the
   finding quotes in `location.quote`. A quote found on exactly one other line
   of the file moves `line_start` to it and records `corrected_from`; one found

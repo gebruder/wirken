@@ -319,7 +319,8 @@ records stand. Accepted records are carried in `findings.json` under
 `step_records`. A `check` that names a command is held to the run's chain: it
 is a read when it opens with `read`, `read_file`, `list_files` or a file of
 the target, and a command otherwise, and a command must be one an `exec` call
-of the run ran, exactly as run but for spacing. The record carries
+of the run ran: the same words in the same order as a shell splits them, so
+quoting and spacing do not matter, with or without a leading `cd <dir> &&`. The record carries
 `check_status` `executed` or `not_executed`; a `not_executed` one is also a
 `lyrik.step.check_not_executed` row and is counted in the walk's funnel. The staged wrapper tells the walk all of this; the walk text
 itself is not edited.

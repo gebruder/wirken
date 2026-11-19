@@ -36,6 +36,10 @@ uuid = { version = "1", features = ["v4"] }
 # matches against cannot drift. Already a transitive dep through
 # wirken-agent, listed directly here so the cli can pull it.
 url = "2"
+# Splits a shell command into its words, so a command a Lyrik step
+# record cites is compared with the one that ran word for word and not
+# quote for quote. Already in the lockfile as a transitive dependency.
+shlex = "1.3"
 reqwest = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
