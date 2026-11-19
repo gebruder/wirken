@@ -2256,6 +2256,7 @@ mod identity_tests {
                     total_cost_usd_micros: None,
                     sender_id: sender(),
                     step: None,
+                    reported: None,
                 },
                 None,
                 Some("U123"),

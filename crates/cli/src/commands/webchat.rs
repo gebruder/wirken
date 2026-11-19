@@ -6601,6 +6601,7 @@ mod tests {
                     total_cost_usd_micros: Some(15),
                     sender_id: None,
                     step: None,
+                    reported: None,
                 },
             ),
             (

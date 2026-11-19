@@ -334,6 +334,22 @@ pub enum ToolsHashVersion {
     V2,
 }
 
+/// A model call a child process made and reported, on
+/// [`SessionEvent::LlmResponse::reported`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReportedCall {
+    /// What reported it. `child` is a child process Wirken started
+    /// and served its tools to.
+    pub by: String,
+    /// The model the child said answered.
+    pub model: String,
+    /// What the child said it authenticates with, when it said:
+    /// `none` or `oauth` for its own sign-in. A child that names an
+    /// API key is refused before it makes a call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_source: Option<String>,
+}
+
 /// What a model call on [`SessionEvent::LlmRequest`] was for.
 ///
 /// `Turn` is a turn of the conversation the session records, the
@@ -963,6 +979,14 @@ pub enum SessionEvent {
         /// request this row answers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<String>,
+        /// Set when Wirken did not make this call and did not see it: a
+        /// child process made it and reported it. The row then has no
+        /// [`Self::LlmRequest`], its `request_id` is the id the child
+        /// gave the reply, and its token counts and `latency_ms` are
+        /// what the child's output stream showed. Absent on every call
+        /// Wirken made itself, and on rows written before the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reported: Option<ReportedCall>,
     },
     /// The model call an [`Self::LlmRequest`] started failed: the
     /// request was refused before it was sent, the provider answered

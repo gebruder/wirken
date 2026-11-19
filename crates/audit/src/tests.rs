@@ -1132,6 +1132,7 @@ mod session {
                     total_cost_usd_micros: None,
                     sender_id: None,
                     step: None,
+                    reported: None,
                 },
             ),
             (
@@ -1523,6 +1524,7 @@ mod session {
                 total_cost_usd_micros: None,
                 sender_id: None,
                 step: None,
+                reported: None,
             },
         )
         .unwrap();
@@ -1594,6 +1596,7 @@ mod session {
                 total_cost_usd_micros: Some(52_500),
                 sender_id: None,
                 step: None,
+                reported: None,
             },
         )
         .unwrap();
@@ -1660,6 +1663,7 @@ mod session {
             total_cost_usd_micros: None,
             sender_id: None,
             step: None,
+            reported: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -1715,6 +1719,7 @@ mod session {
                 total_cost_usd_micros: Some(2),
                 sender_id: None,
                 step: None,
+                reported: None,
             },
         )
         .unwrap();
@@ -1748,6 +1753,7 @@ mod session {
             total_cost_usd_micros: None,
             sender_id: None,
             step: None,
+            reported: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -3375,6 +3381,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             total_cost_usd_micros: None,
             sender_id: None,
             step: None,
+            reported: None,
         },
         SessionEvent::BudgetExceeded {
             agent_id: String::new(),

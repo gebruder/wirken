@@ -39,7 +39,7 @@ pub use session_log::{
     INBOUND_SENDERS_SESSION, ImportedSearchOutcome, InboundRefusalReason, LIVE_RELOAD_SESSION,
     LeakSurface, LlmCallPurpose, MCP_CREDENTIAL_SESSION, McpServerRestartCause,
     OPERATOR_APPROVERS_SESSION, OPERATOR_COMMANDS_SESSION, OPERATOR_SENDERS_SESSION, OwnSession,
-    PermissionDenialRecord, PhaseDenyContent, PhaseExitReason, RedactionRecord,
+    PermissionDenialRecord, PhaseDenyContent, PhaseExitReason, RedactionRecord, ReportedCall,
     SANDBOX_RUNTIME_SESSION, SandboxEgressDenyReason, SandboxEgressModeLabel, SandboxLimits,
     SandboxModeLabel, SandboxProvenance, SandboxRuntimeLabel, SchemaDriftRecord, SessionEvent,
     SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason,

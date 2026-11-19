@@ -342,6 +342,10 @@ pub struct Agent {
     /// on their `LlmRequest` and `LlmResponse` rows. `None` unless the
     /// harness names one.
     call_step: Option<String>,
+    /// Set when this agent's turns are run by a child process on the
+    /// operator's own plan ([`plan_child`]), in place of model calls
+    /// made here.
+    plan_child: Option<PlanChild>,
     /// Calls refused since the last turn began. A turn that ends in an
     /// error returns no [`ProcessResult`], so this is where its refused
     /// calls are read from.
@@ -567,6 +571,9 @@ pub(crate) fn leak_refusal(credential: &str) -> String {
 /// unwrapping it. [`Self::into_inner`] exists for the two callers
 /// that own the `Vec` afterwards, and taking it is deliberate and
 /// visible rather than something a dispatch does by accident.
+mod plan_child;
+pub use plan_child::{PLAN_CHILD_BASE_URL, PlanChild, REPORTED_BY};
+
 mod turn_tools {
     use super::*;
 
@@ -842,6 +849,7 @@ impl Agent {
             last_turn_exhausted: false,
             last_turn_denials: Vec::new(),
             call_step: None,
+            plan_child: None,
             file_scope: None,
             current_inbound: InboundContext::default(),
             session_log,
@@ -960,6 +968,7 @@ impl Agent {
             last_turn_exhausted: false,
             last_turn_denials: Vec::new(),
             call_step: None,
+            plan_child: None,
             file_scope: None,
             current_inbound: InboundContext::default(),
             session_log,
@@ -3379,11 +3388,22 @@ impl Agent {
     ) -> Result<ProcessResult, AgentError> {
         self.refuse_if_stopped()?;
         let agent_id = self.agent_id.clone();
-        let result = crate::stop::until_stopped(
-            agent_id,
-            self.process_message_turn(user_message, inbound_id, max_rounds_budget, inbound),
-        )
-        .await;
+        let result = match self.plan_child.clone() {
+            Some(child) => {
+                crate::stop::until_stopped(
+                    agent_id,
+                    self.process_message_turn_by_child(child, user_message, inbound_id, inbound),
+                )
+                .await
+            }
+            None => {
+                crate::stop::until_stopped(
+                    agent_id,
+                    self.process_message_turn(user_message, inbound_id, max_rounds_budget, inbound),
+                )
+                .await
+            }
+        };
         if matches!(result, Err(AgentError::AgentStopped { .. })) {
             self.close_stopped_round();
         }
@@ -3615,6 +3635,7 @@ impl Agent {
                     total_cost_usd_micros,
                     sender_id: self.current_inbound.sender_id.clone(),
                     step: self.call_step.clone(),
+                    reported: None,
                 },
             )?;
             self.charge_budget(total_cost_usd_micros);
@@ -3785,6 +3806,13 @@ impl Agent {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
         inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
+        // A child's turn is not streamed from here: the reply comes
+        // back whole.
+        if self.plan_child.is_some() {
+            return self
+                .process_message_inner(user_message, inbound_id, None, inbound)
+                .await;
+        }
         self.refuse_if_stopped()?;
         let agent_id = self.agent_id.clone();
         let result = crate::stop::until_stopped(
@@ -4038,6 +4066,7 @@ impl Agent {
                     total_cost_usd_micros,
                     sender_id: self.current_inbound.sender_id.clone(),
                     step: self.call_step.clone(),
+                    reported: None,
                 },
             )?;
             self.charge_budget(total_cost_usd_micros);
@@ -7077,6 +7106,7 @@ pub fn side_call_response(
             total_cost_usd_micros,
             sender_id,
             step,
+            reported: None,
         },
         total_cost_usd_micros,
     )

@@ -1392,6 +1392,7 @@ mod tests {
             total_cost_usd_micros: None,
             sender_id: None,
             step: None,
+            reported: None,
         }
     }
 
