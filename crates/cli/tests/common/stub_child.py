@@ -15,6 +15,7 @@ set by the scenario file named in STUB_CHILD_SCENARIO, a JSON object:
   reply         the final reply text
   streamless    report steps from messages only, with no stream events
   think         seconds the model takes to answer each call
+  no_write_lifetime  leave out the lifetime of each step's cache write
 
 Every start is appended to STUB_CHILD_LOG as one JSON line: the
 arguments, the working directory, the variables it was handed, the
@@ -103,6 +104,10 @@ def main():
         mid = "msg_%s_%d" % (os.getpid(), n)
         usage = {"input_tokens": 100 + n, "cache_read_input_tokens": 1000,
                  "cache_creation_input_tokens": 10, "output_tokens": 1}
+        if not scenario.get("no_write_lifetime"):
+            # Written to the cache for an hour, as the real binary does.
+            usage["cache_creation"] = {"ephemeral_5m_input_tokens": 0,
+                                       "ephemeral_1h_input_tokens": 10}
         message = {"id": mid, "model": model, "role": "assistant",
                    "content": content, "usage": usage, "stop_reason": None}
         if scenario.get("streamless"):

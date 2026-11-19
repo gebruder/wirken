@@ -368,7 +368,13 @@ fn each_reported_step_is_a_marked_row_with_step_model_and_tokens() {
             for row in &of_walk {
                 assert_eq!(
                     row["reported"],
-                    serde_json::json!({"by": "child", "model": model, "key_source": "none"}),
+                    serde_json::json!({
+                        "by": "child", "model": model, "key_source": "none",
+                        "cache_write": {
+                            "ephemeral_5m_input_tokens": 0,
+                            "ephemeral_1h_input_tokens": 10,
+                        },
+                    }),
                     "{row}"
                 );
                 assert_eq!(row["cache_read_input_tokens"], 1000, "{row}");
@@ -759,4 +765,47 @@ fn model_time_is_the_wait_on_the_model_and_the_time_ceiling_holds() {
         "{:?}",
         stopped.elapsed
     );
+}
+
+/// A step's cache write is priced at the lifetime the child wrote it
+/// at, which the row records. Written for an hour it costs twice the
+/// input price; a child that does not say is priced at five minutes,
+/// one and a quarter, and the row carries no lifetime.
+#[test]
+fn a_cache_write_is_estimated_at_the_lifetime_the_child_used() {
+    let first_step_of_sink_walk = |scenario: serde_json::Value| {
+        let r = run_pinned(
+            PRICED_LARGE,
+            PRICED_SMALL,
+            scenario,
+            serde_json::json!({"run_ceiling_usd": 5.0}),
+        );
+        assert!(r.ok, "{}", r.report);
+        chain(&r.data, "llm_response")
+            .into_iter()
+            .find(|row| row["step"] == "sink-walk")
+            .unwrap()
+    };
+    // 101 input and 1,000 cache-read tokens, 21 out, 10 written, at
+    // $1 and $5 a million: 101 + 100 + 105, and the write.
+    let hour = first_step_of_sink_walk(serde_json::json!({"calls": [["list_files", {}]]}));
+    assert_eq!(
+        hour["estimated_cost_usd_micros"],
+        101 + 100 + 105 + 20,
+        "{hour}"
+    );
+    assert_eq!(
+        hour["reported"]["cache_write"],
+        serde_json::json!({"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 10}),
+        "{hour}"
+    );
+    let unsaid = first_step_of_sink_walk(
+        serde_json::json!({"calls": [["list_files", {}]], "no_write_lifetime": true}),
+    );
+    assert_eq!(
+        unsaid["estimated_cost_usd_micros"],
+        101 + 100 + 105 + 12,
+        "{unsaid}"
+    );
+    assert!(unsaid["reported"].get("cache_write").is_none(), "{unsaid}");
 }

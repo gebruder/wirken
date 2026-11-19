@@ -4481,6 +4481,7 @@ fn child_cost_record(cost: &wirken_agent::runtime::PlanChildCost) -> serde_json:
         "child_reported_api_millis": cost.child_reported_api_millis,
         "steps": cost.steps,
         "steps_unpriced": cost.steps_unpriced,
+        "steps_without_write_lifetime": cost.steps_without_write_lifetime,
         "turns": cost.turns,
         "turns_summarized": cost.turns_summarized,
     })

@@ -234,6 +234,38 @@ pub fn cost_micros_cached(
     )
 }
 
+/// The cache-write tokens of one call, by the lifetime they were
+/// written at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheWrites {
+    pub five_minutes: u32,
+    pub one_hour: u32,
+}
+
+/// The total cost in micros of a call whose cache writes are known by
+/// lifetime, as a call some other client made reports them. Wirken's
+/// own calls write at one lifetime and use [`cost_micros_cached`].
+/// `None` when the table has no row for the pair.
+pub fn cost_micros_by_write_lifetime(
+    provider: &str,
+    model: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    writes: CacheWrites,
+    cache_read_input_tokens: u32,
+) -> Option<u64> {
+    let p = table().get(&(provider.to_string(), model.to_string()))?;
+    let (input, output) = cost_at_writes(
+        p,
+        wirken_time::now(),
+        input_tokens,
+        output_tokens,
+        writes,
+        cache_read_input_tokens,
+    );
+    Some(input.saturating_add(output))
+}
+
 /// Whether the table has a row for `(provider, model)`: whether a call
 /// to it records a cost.
 pub fn is_priced(provider: &str, model: &str) -> bool {
@@ -261,8 +293,39 @@ fn cost_at(
     cache_creation_input_tokens: u32,
     cache_read_input_tokens: u32,
 ) -> (u64, u64) {
+    // A call Wirken made wrote at the lifetime Wirken asked for.
+    let writes = match REQUESTED_CACHE_WRITE {
+        CacheWrite::FiveMinutes => CacheWrites {
+            five_minutes: cache_creation_input_tokens,
+            one_hour: 0,
+        },
+        CacheWrite::OneHour => CacheWrites {
+            five_minutes: 0,
+            one_hour: cache_creation_input_tokens,
+        },
+    };
+    cost_at_writes(
+        p,
+        now,
+        input_tokens,
+        output_tokens,
+        writes,
+        cache_read_input_tokens,
+    )
+}
+
+/// [`cost_at`] with the cache writes given by lifetime.
+fn cost_at_writes(
+    p: &Pricing,
+    now: wirken_time::Timestamp,
+    input_tokens: u32,
+    output_tokens: u32,
+    writes: CacheWrites,
+    cache_read_input_tokens: u32,
+) -> (u64, u64) {
     let prompt_tokens = u64::from(input_tokens)
-        + u64::from(cache_creation_input_tokens)
+        + u64::from(writes.five_minutes)
+        + u64::from(writes.one_hour)
         + u64::from(cache_read_input_tokens);
     // `base` is false when a second tier or a scheduled price is in
     // effect. The row's own cache prices belong to its base input
@@ -279,19 +342,26 @@ fn cost_at(
             _ => (p.input_per_million_usd, p.output_per_million_usd, true),
         },
     };
-    let (listed_write, write_multiplier) = match REQUESTED_CACHE_WRITE {
-        CacheWrite::FiveMinutes => (p.cache_write_5m_per_million_usd, CACHE_WRITE_MULTIPLIER),
-        CacheWrite::OneHour => (p.cache_write_1h_per_million_usd, CACHE_WRITE_1H_MULTIPLIER),
+    let write_price = |lifetime: CacheWrite| {
+        let (listed, multiplier) = match lifetime {
+            CacheWrite::FiveMinutes => (p.cache_write_5m_per_million_usd, CACHE_WRITE_MULTIPLIER),
+            CacheWrite::OneHour => (p.cache_write_1h_per_million_usd, CACHE_WRITE_1H_MULTIPLIER),
+        };
+        listed.filter(|_| base).unwrap_or(input_price * multiplier)
     };
-    let write_price = listed_write
-        .filter(|_| base)
-        .unwrap_or(input_price * write_multiplier);
     let read_price = p
         .cache_read_per_million_usd
         .filter(|_| base)
         .unwrap_or(input_price * p.cache_read_multiplier);
     let input = compute_one(input_tokens, input_price)
-        .saturating_add(compute_one(cache_creation_input_tokens, write_price))
+        .saturating_add(compute_one(
+            writes.five_minutes,
+            write_price(CacheWrite::FiveMinutes),
+        ))
+        .saturating_add(compute_one(
+            writes.one_hour,
+            write_price(CacheWrite::OneHour),
+        ))
         .saturating_add(compute_one(cache_read_input_tokens, read_price));
     (input, compute_one(output_tokens, output_price))
 }
@@ -653,5 +723,44 @@ mod tests {
         assert_eq!(inp, Some(0));
         assert_eq!(out, Some(0));
         assert_eq!(total, Some(0));
+    }
+
+    /// A cache write is priced at the lifetime it was written at: an
+    /// hour costs twice the input price where the row lists none,
+    /// five minutes one and a quarter.
+    #[test]
+    fn a_cache_write_is_priced_at_its_own_lifetime() {
+        let at = |five_minutes, one_hour| {
+            cost_micros_by_write_lifetime(
+                "anthropic",
+                "claude-sonnet-4-6",
+                0,
+                0,
+                CacheWrites {
+                    five_minutes,
+                    one_hour,
+                },
+                0,
+            )
+        };
+        assert_eq!(at(1_000_000, 0), Some(3_750_000));
+        assert_eq!(at(0, 1_000_000), Some(6_000_000));
+        assert_eq!(at(1_000_000, 1_000_000), Some(9_750_000));
+        // The five-minute price is the one a call of Wirken's own pays.
+        assert_eq!(
+            at(1_000_000, 0),
+            cost_micros_cached("anthropic", "claude-sonnet-4-6", 0, 0, 1_000_000, 0).2
+        );
+        assert_eq!(
+            cost_micros_by_write_lifetime(
+                "anthropic",
+                "no-such-model",
+                1,
+                1,
+                CacheWrites::default(),
+                0
+            ),
+            None
+        );
     }
 }

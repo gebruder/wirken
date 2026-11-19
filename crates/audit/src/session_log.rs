@@ -358,6 +358,21 @@ pub struct ReportedCall {
     /// API key is refused before it makes a call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_source: Option<String>,
+    /// The call's cache-write tokens by the lifetime the child wrote
+    /// them at, when the child said. The row's
+    /// `cache_creation_input_tokens` is their sum. `None` when it did
+    /// not say, and then the estimate prices the writes at five
+    /// minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<ReportedCacheWrite>,
+}
+
+/// Cache-write tokens by lifetime, on [`ReportedCall::cache_write`],
+/// under the names the provider gives them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReportedCacheWrite {
+    pub ephemeral_5m_input_tokens: u32,
+    pub ephemeral_1h_input_tokens: u32,
 }
 
 /// What a model call on [`SessionEvent::LlmRequest`] was for.

@@ -179,6 +179,9 @@ pub struct Step {
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,
     pub cache_read_input_tokens: u64,
+    /// The cache-write tokens by lifetime, five minutes then an hour,
+    /// when the child gave them.
+    pub cache_write: Option<(u64, u64)>,
     pub stop_reason: Option<String>,
 }
 
@@ -229,6 +232,10 @@ pub struct PlanChildCost {
     /// Steps reported, and those whose model has no price entry.
     pub steps: u32,
     pub steps_unpriced: u32,
+    /// Steps that wrote to the prompt cache without the child saying
+    /// at which lifetime. Their writes are priced at five minutes,
+    /// which is the lower price.
+    pub steps_without_write_lifetime: u32,
     /// The steps' estimates, summed.
     pub steps_estimated_usd_micros: u64,
     /// The usage summaries priced at the same rates, summed. `None`
@@ -325,6 +332,13 @@ fn usage_into(step: &mut Step, usage: &Value) {
     }
     if let Some(n) = read("cache_read_input_tokens") {
         step.cache_read_input_tokens = n;
+    }
+    if let Some(by_lifetime) = usage.get("cache_creation").filter(|c| c.is_object()) {
+        let n = |k: &str| by_lifetime.get(k).and_then(Value::as_u64).unwrap_or(0);
+        step.cache_write = Some((
+            n("ephemeral_5m_input_tokens"),
+            n("ephemeral_1h_input_tokens"),
+        ));
     }
 }
 
@@ -890,9 +904,32 @@ impl Agent {
         &self.plan_child_cost
     }
 
+    /// What a step cost at the table's rates for this agent's pinned
+    /// model, with its cache writes at the lifetime the child wrote
+    /// them at, or at five minutes where it gave none. A reported
+    /// model is the pin, or the turn has failed, so the pin is what
+    /// the table is asked for.
+    fn step_estimate(&self, step: &Step) -> Option<u64> {
+        let n = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+        let (five_minutes, one_hour) = step
+            .cache_write
+            .unwrap_or((step.cache_creation_input_tokens, 0));
+        wirken_audit::pricing::cost_micros_by_write_lifetime(
+            &self.llm.config().provider,
+            &self.llm.config().model,
+            n(step.input_tokens),
+            n(step.output_tokens),
+            wirken_audit::pricing::CacheWrites {
+                five_minutes: n(five_minutes),
+                one_hour: n(one_hour),
+            },
+            n(step.cache_read_input_tokens),
+        )
+    }
+
     /// What `tokens` cost at the table's rates for this agent's pinned
-    /// model. A reported model is the pin, or the turn has failed, so
-    /// the pin is what the table is asked for.
+    /// model, for a count that does not say how its cache writes were
+    /// written: the child's usage summary.
     fn child_estimate(&self, input: u64, output: u64, written: u64, read: u64) -> Option<u64> {
         let n = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
         super::estimate_at_api_rates(
@@ -939,13 +976,14 @@ impl Agent {
                 by: REPORTED_BY.to_string(),
                 model: step.model.clone(),
                 key_source: key_source.clone(),
+                cache_write: step.cache_write.map(|(five_minutes, one_hour)| {
+                    wirken_audit::ReportedCacheWrite {
+                        ephemeral_5m_input_tokens: tokens(five_minutes),
+                        ephemeral_1h_input_tokens: tokens(one_hour),
+                    }
+                }),
             }),
-            estimated_cost_usd_micros: self.child_estimate(
-                step.input_tokens,
-                step.output_tokens,
-                step.cache_creation_input_tokens,
-                step.cache_read_input_tokens,
-            ),
+            estimated_cost_usd_micros: self.step_estimate(step),
         }
     }
 
@@ -1212,12 +1250,12 @@ impl Agent {
                                 self.plan_child_cost.model_millis += latency_ms;
                                 last_stop = step.stop_reason.clone();
                                 self.plan_child_cost.steps += 1;
-                                match self.child_estimate(
-                                    step.input_tokens,
-                                    step.output_tokens,
-                                    step.cache_creation_input_tokens,
-                                    step.cache_read_input_tokens,
-                                ) {
+                                if step.cache_write.is_none()
+                                    && step.cache_creation_input_tokens > 0
+                                {
+                                    self.plan_child_cost.steps_without_write_lifetime += 1;
+                                }
+                                match self.step_estimate(&step) {
                                     Some(e) => self.plan_child_cost.steps_estimated_usd_micros += e,
                                     None => self.plan_child_cost.steps_unpriced += 1,
                                 }
@@ -1538,6 +1576,7 @@ mod tests {
                 output_tokens: 42,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 90,
+                cache_write: None,
                 stop_reason: Some("tool_use".to_string()),
             })])
         );
