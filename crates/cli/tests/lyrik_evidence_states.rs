@@ -144,6 +144,9 @@ fn run(run: &str, harness: &str) -> Option<Outcome> {
                 &repro.to_string(),
             ),
         ]),
+        // The walk runs its harness, as the record says it did: the
+        // run on the chain is what makes it a reproduction.
+        call(&[("exec", serde_json::json!({"command": command}))]),
         serde_json::json!({"role": "assistant", "content": "Done."}),
         // The replay: the same command, and its record.
         call(&[("exec", serde_json::json!({"command": command}))]),

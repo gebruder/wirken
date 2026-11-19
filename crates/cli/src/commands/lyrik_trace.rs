@@ -189,9 +189,7 @@ pub fn parse_traced(output: &str, nonce: &str, cited_file: &str, cited_line: u64
             cited_line,
             cited_function_lines: t.span,
             executed_lines: t.executed,
-            marker: output
-                .lines()
-                .any(|l| l.trim() == super::lyrik_fix_arms::REACHED),
+            marker: super::lyrik_fix_arms::has_marker(output),
             untraced: None,
         },
         None => Execution::untraced(

@@ -2061,6 +2061,7 @@ async fn dispatch_via_agent_runtime(
                     exec_available,
                     terminal.clone(),
                     signoff.clone(),
+                    chain_mark,
                     audit,
                 )
                 .await?;
@@ -4022,6 +4023,8 @@ async fn dispatch_replays(
     // The action key of the operator's sign-off of this run, off its
     // chain. `None` for a `--bench` run, which has none.
     signoff: Option<String>,
+    // Where this run's rows begin on its chain.
+    chain_mark: Option<u64>,
     audit: &mut AuditLogger,
 ) -> Result<usize> {
     // Every record first, so the skill is staged only when one exists
@@ -4154,7 +4157,18 @@ async fn dispatch_replays(
         };
         // What the replay recorded, not that its turn finished: a
         // replay that could not run its command did not succeed.
+        // What the replay did is what the chain recorded it doing:
+        // the result of its own `exec` of the record's command. The
+        // record it wrote says what it thought it saw, and is carried
+        // as that.
+        let executed = executed_commands(
+            &*session_log,
+            &session_log.handle_for(wirken_audit::SessionId::new(agent_id.clone())),
+            chain_mark,
+        )?;
         let came_to = lyrik_replay::replay_status(
+            &executed,
+            &command,
             &run_dir.join("staging").join(&walk).join("replays"),
             &file,
             &result,
@@ -4192,6 +4206,7 @@ async fn dispatch_replays(
                 "status": status,
                 "observed": came_to.observed,
                 "reason": came_to.reason,
+                "claimed": came_to.claimed,
                 "execution": execution,
                 "skipped": skipped,
             }),
@@ -4892,7 +4907,15 @@ fn aggregate_findings_multi(
                     serde_json::json!({ "walk": walk_name, "file": r.file, "reason": r.reason }),
                 )?;
             }
-            let mut paired = lyrik_replay::pair(walk_name.as_deref(), repros, &replays);
+            // What each run showed is read off the chain; with no
+            // chain to read, nothing is on record as having run.
+            let nothing_ran = lyrik_steps::ExecutedCommands::default();
+            let mut paired = lyrik_replay::pair(
+                walk_name.as_deref(),
+                repros,
+                &replays,
+                executed.unwrap_or(&nothing_ran),
+            );
             // An agreed reproduction is evidence of execution only
             // where the runner's own trace of it shows cited code
             // ran. With no trace it is a check that passed.
@@ -5227,7 +5250,7 @@ fn finding_evidence(stable_id: &str, reproductions: &[lyrik_replay::Reproduction
     let mut best = REASONED;
     for r in reproductions
         .iter()
-        .filter(|r| r.record.stable_id == stable_id && r.agreed_reproduced())
+        .filter(|r| r.stable_id == stable_id && r.agreed_reproduced())
     {
         match r.evidence {
             Some(OBSERVED) => return OBSERVED,
@@ -7893,6 +7916,17 @@ mod tests {
         dir: std::path::PathBuf,
         mode: lyrik_brocards::Mode,
     ) -> serde_json::Value {
+        run_brocard_fixture_ran(tmp, dir, mode, None)
+    }
+
+    /// [`run_brocard_fixture`] with the run's `exec` calls as its chain
+    /// had them.
+    fn run_brocard_fixture_ran(
+        tmp: &std::path::Path,
+        dir: std::path::PathBuf,
+        mode: lyrik_brocards::Mode,
+        executed: Option<&super::super::lyrik_steps::ExecutedCommands>,
+    ) -> serde_json::Value {
         let dest = tmp.join("findings.json");
         let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
         let log = tmp.join("audit.log");
@@ -7908,11 +7942,30 @@ mod tests {
             &Default::default(),
             None,
             mode,
-            None,
+            executed,
             &mut audit,
         )
         .unwrap();
         serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap()
+    }
+
+    /// The chain rows of one `exec` of `command` that printed the
+    /// marker and exited as `exit_zero` says.
+    fn exec_rows(command: &str, exit_zero: bool) -> Vec<wirken_audit::SessionEvent> {
+        vec![
+            serde_json::from_value(serde_json::json!({
+                "kind": "assistant_tool_calls",
+                "calls": [{"id": command, "name": "exec",
+                           "arguments": serde_json::json!({"command": command}).to_string()}],
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "kind": "tool_result", "call_id": command, "tool_name": "exec",
+                "output": "LYRIK_REACHED\nassertion failed\n", "success": exit_zero,
+                "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c"},
+            }))
+            .unwrap(),
+        ]
     }
 
     #[test]
@@ -7994,7 +8047,28 @@ mod tests {
             r#"{"command_run":"cargo test -p x two","observed":"test passed","outcome":"not_reproduced"}"#,
         )
         .unwrap();
-        let body = run_brocard_fixture(tmp.path(), dir, lyrik_brocards::Mode::Pentest);
+        // The walk's run of each showed the finding. The replay's run of
+        // the first did too, and of the second exited zero. Both replay
+        // records say what their runs showed; it is the runs that count.
+        let mut rows = exec_rows("cargo test -p x one", false);
+        rows.extend(exec_rows("cargo test -p x two", false));
+        rows.push(
+            serde_json::from_value(serde_json::json!({
+                "kind": "llm_request", "provider": "p", "model": "m", "request_id": "r",
+                "tools_hash": "aa".repeat(32), "messages_hash": "bb".repeat(32),
+                "step": "replay",
+            }))
+            .unwrap(),
+        );
+        rows.extend(exec_rows("cargo test -p x one", false));
+        rows.extend(exec_rows("cargo test -p x two", true));
+        let executed = super::super::lyrik_steps::ExecutedCommands::from_rows(rows);
+        let body = run_brocard_fixture_ran(
+            tmp.path(),
+            dir,
+            lyrik_brocards::Mode::Pentest,
+            Some(&executed),
+        );
         // One distinct rule applied, rule 8: one halving.
         assert_eq!(body["findings"][0]["grade"], serde_json::json!(0.25));
         let rejected = body["rejected_candidates"].as_array().unwrap();

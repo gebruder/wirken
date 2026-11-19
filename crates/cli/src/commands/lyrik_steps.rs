@@ -59,24 +59,97 @@ pub struct AcceptedStep {
     pub check_status: Option<&'static str>,
 }
 
-/// The commands the run's agents ran through `exec`, read off the
-/// run's chain: an `exec` call whose result says where it ran. A call
-/// that was refused has no such result and is not one of them.
+/// One `exec` call of the run as its chain has it.
+#[derive(Debug, Clone, PartialEq)]
+struct Call {
+    words: Vec<String>,
+    /// Whether it ran: its result says where. A refused call has no
+    /// such result.
+    ran: bool,
+    output: String,
+    exit_zero: bool,
+    /// Whether it was made in the replay step, after the walks.
+    replay: bool,
+}
+
+/// The `exec` calls of a run, read off its chain. What a walk or a
+/// replay did is decided from these and from nothing either wrote
+/// about itself.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct ExecutedCommands(std::collections::BTreeSet<Vec<String>>);
+pub struct ExecutedCommands(Vec<Call>);
+
+/// The step of a run a call was made in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// By a walk, or by the single call.
+    Walk,
+    /// By a replay.
+    Replay,
+}
+
+/// What the chain shows a defect-showing command did in one phase,
+/// under the contract a harness follows: the marker on a line of its
+/// own on stdout, then a non-zero exit when the finding holds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shown {
+    /// It ran, printed the marker and exited non-zero.
+    Reproduced { output: String },
+    /// It ran, printed the marker and exited zero.
+    NotReproduced { output: String },
+    /// It ran and the result says neither: no marker line, or runs
+    /// that disagree.
+    Inconclusive { why: String, output: String },
+    /// No call of it ran in the phase: none was made, or each was
+    /// refused.
+    NotRun { why: String },
+}
+
+impl Shown {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Shown::Reproduced { .. } => "reproduced",
+            Shown::NotReproduced { .. } => "not_reproduced",
+            Shown::Inconclusive { .. } => "inconclusive",
+            Shown::NotRun { .. } => "not_run",
+        }
+    }
+
+    /// The output the chain recorded, when the command ran.
+    pub fn output(&self) -> Option<&str> {
+        match self {
+            Shown::Reproduced { output }
+            | Shown::NotReproduced { output }
+            | Shown::Inconclusive { output, .. } => Some(output),
+            Shown::NotRun { .. } => None,
+        }
+    }
+
+    /// Why there is no verdict, when there is none.
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            Shown::Inconclusive { why, .. } | Shown::NotRun { why } => Some(why),
+            _ => None,
+        }
+    }
+}
 
 impl ExecutedCommands {
     /// From the run's rows, in order. A result is paired with the
-    /// earliest unanswered `exec` call of its id.
+    /// earliest unanswered `exec` call of its id. The replay step
+    /// begins at the first model call a replay made.
     pub fn from_rows(rows: impl IntoIterator<Item = wirken_audit::SessionEvent>) -> Self {
         use wirken_audit::SessionEvent;
         let mut asked: std::collections::HashMap<String, std::collections::VecDeque<String>> =
             std::collections::HashMap::new();
-        let mut ran = std::collections::BTreeSet::new();
+        let mut calls = Vec::new();
+        let mut replay = false;
         for event in rows {
             match event {
-                SessionEvent::AssistantToolCalls { calls, .. } => {
-                    for call in calls.into_iter().filter(|c| c.name == "exec") {
+                SessionEvent::LlmRequest { step, .. } => {
+                    replay = replay || step.as_deref() == Some("replay");
+                }
+                SessionEvent::AssistantToolCalls { calls: made, .. } => {
+                    for call in made.into_iter().filter(|c| c.name == "exec") {
                         let command = serde_json::from_str::<serde_json::Value>(&call.arguments)
                             .ok()
                             .and_then(|a| wirken_agent::tool::extract_exec_command(&a).ok());
@@ -88,25 +161,74 @@ impl ExecutedCommands {
                 SessionEvent::ToolResult {
                     call_id,
                     tool_name,
+                    output,
+                    success,
                     sandbox,
                     ..
                 } if tool_name == "exec" => {
-                    let command = asked.get_mut(&call_id).and_then(|q| q.pop_front());
-                    if let (Some(command), Some(_)) = (command, sandbox) {
-                        ran.insert(words(&command));
+                    if let Some(command) = asked.get_mut(&call_id).and_then(|q| q.pop_front()) {
+                        calls.push(Call {
+                            words: words(&command),
+                            ran: sandbox.is_some(),
+                            output,
+                            exit_zero: success,
+                            replay,
+                        });
                     }
                 }
                 _ => {}
             }
         }
-        Self(ran)
+        Self(calls)
     }
 
-    /// Whether `command` is one of them: the same words in the same
+    /// Whether `command` is one that ran: the same words in the same
     /// order, however each was quoted, and with or without a leading
     /// `cd <dir> &&`.
     pub fn ran(&self, command: &str) -> bool {
-        self.0.contains(&words(command))
+        let words = words(command);
+        self.0.iter().any(|c| c.ran && c.words == words)
+    }
+
+    /// What `command` showed in `phase`, from its recorded results.
+    pub fn shown(&self, command: &str, phase: Phase) -> Shown {
+        let words = words(command);
+        let made: Vec<&Call> = self
+            .0
+            .iter()
+            .filter(|c| c.words == words && c.replay == (phase == Phase::Replay))
+            .collect();
+        let ran: Vec<&Call> = made.iter().copied().filter(|c| c.ran).collect();
+        let Some(first) = ran.first() else {
+            return Shown::NotRun {
+                why: if made.is_empty() {
+                    "no `exec` call of the command is on the chain for this step".to_string()
+                } else {
+                    "every `exec` call of the command was refused".to_string()
+                },
+            };
+        };
+        let output = first.output.clone();
+        if ran.iter().any(|c| c.exit_zero != first.exit_zero) {
+            return Shown::Inconclusive {
+                why: "its runs exited differently".to_string(),
+                output,
+            };
+        }
+        if !super::lyrik_fix_arms::has_marker(&output) {
+            return Shown::Inconclusive {
+                why: format!(
+                    "no {} line in its output: the harness did not reach its assertion",
+                    super::lyrik_fix_arms::REACHED
+                ),
+                output,
+            };
+        }
+        if first.exit_zero {
+            Shown::NotReproduced { output }
+        } else {
+            Shown::Reproduced { output }
+        }
     }
 }
 

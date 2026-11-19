@@ -172,7 +172,7 @@ fn refused(o: &Observed) -> bool {
 /// stderr after stdout behind a `[stderr] ` prefix; that part is not
 /// read, because an interpreter's error can echo the harness's own
 /// source, marker included, for a harness that ran nothing.
-fn has_marker(output: &str) -> bool {
+pub(super) fn has_marker(output: &str) -> bool {
     output
         .lines()
         .take_while(|l| !l.starts_with("[stderr] "))

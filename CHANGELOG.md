@@ -76,6 +76,18 @@ tagged.
 
 ### Fixed
 
+- What a Lyrik reproduction and its replay showed is read from the run's
+  chain: the result recorded for the walk's own `exec` of the record's
+  command and for the replay's. `outcome`, `agreement`, the rule 8 rejection,
+  a finding's evidence state and `status` on `lyrik.replay.completed` rest on
+  those results. A command with no `exec` call that ran is `not_run`
+  (`blocked` for a replay), and one with no marker line is `inconclusive`.
+  What a walk or a replay wrote in its record is carried as `claimed` and
+  decides nothing. These were taken from the records, so a walk that wrote
+  `reproduced` and a replay that wrote the same agreed with nothing run
+  (`outcomes_come_from_the_recorded_runs_and_not_from_the_records`,
+  `crates/cli/src/commands/lyrik_replay.rs`;
+  `crates/cli/tests/lyrik_replay_status.rs`).
 - The sandbox probe of a per-walk Lyrik run covers the tools a walk reaches
   for, not only the ones the run offers: `rg`, `grep`, `find`, `jq` and
   `sha256sum` on every run, and others a selected walk's text names. A walk is

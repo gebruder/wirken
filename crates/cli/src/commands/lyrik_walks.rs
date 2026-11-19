@@ -1011,9 +1011,17 @@ fn reproduction_section(walk_name: &str) -> String {
          quoted.\n\
          - `outcome`: `reproduced` or `not_reproduced`.\n\
          - `code_revision`: the revision the dispatch prompt names.\n\n\
+         The runner does not take `observed` or `outcome` from the record. It reads \
+         what the command showed from the result recorded for your own `exec` of it: the \
+         marker and a non-zero exit is `reproduced`, the marker and a zero exit is \
+         `not_reproduced`, no marker is `inconclusive`, and a command you did not run, or \
+         ran with other words than the record gives, is `not_run`. What you wrote is \
+         carried beside it as your claim. So run the command, exactly as the record \
+         gives it, before you write the record.\n\n\
          After this walk returns, the runner starts a separate agent for each record. It \
-         sees the record and nothing else of this walk, runs the same command, and writes \
-         what it observed beside yours. A replay that observes the other outcome is a \
+         sees the record and nothing else of this walk and runs the same command; what \
+         its run showed is read from the result recorded for it, the same way. A replay \
+         whose run shows the other outcome is a \
          rule 8 rejection of the finding the record names, applied by the runner; a \
          replay that could not run the command is recorded and is not a disagreement. \
          Write the record so that a reader with only the record can run it.\n\n\

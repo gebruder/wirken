@@ -1,7 +1,7 @@
-//! `lyrik.replay.completed` says what the replay found, not that its
-//! turn finished: `not_reproduced` or `blocked` as the replay recorded
-//! it, `static_confirmed` for a recorded `reproduced` with no trace of
-//! cited code running, and `no_record` when it recorded nothing.
+//! `lyrik.replay.completed` says what the replay's run showed, read
+//! off the chain, and not what the replay wrote about it: a replay
+//! whose command is not on the chain is `blocked`, whatever its record
+//! says, and the record is carried as its claim.
 //!
 //! Driven through the binary with a scripted model: one walk writes
 //! one reproduction record, and the replay of it writes its own.
@@ -108,37 +108,41 @@ fn completed(target: &Path) -> serde_json::Value {
         .clone()
 }
 
+/// A replay's status is what the chain recorded its run of the
+/// command showing. Here no replay ran anything: whatever each wrote
+/// in its record, the command is not on the chain, so the status is
+/// `blocked` and the record is carried as the replay's claim.
 #[test]
-fn a_replays_completion_row_carries_the_outcome_it_recorded() {
-    // A replay that recorded `reproduced` with no trace of cited code
-    // running behind it is `static_confirmed`: here nothing ran at all.
-    for (outcome, status) in [
-        ("reproduced", "static_confirmed"),
-        ("not_reproduced", "not_reproduced"),
-        ("blocked", "blocked"),
-    ] {
+fn a_replays_word_is_not_its_status() {
+    for claimed in ["reproduced", "not_reproduced", "blocked"] {
         let row = replay_completed(Some(serde_json::json!({
             "command_run": "sh harness/h.sh",
-            "observed": "sh: 1: python3: not found",
-            "outcome": outcome,
+            "observed": "LYRIK_REACHED; exit status 1",
+            "outcome": claimed,
         })));
-        assert_eq!(row["status"], status, "{row}");
-        assert_eq!(row["observed"], "sh: 1: python3: not found", "{row}");
+        assert_eq!(row["status"], "blocked", "{claimed}: {row}");
+        assert_eq!(row["claimed"]["outcome"], claimed, "{row}");
+        assert_eq!(
+            row["claimed"]["observed"], "LYRIK_REACHED; exit status 1",
+            "{row}"
+        );
+        // Nothing ran, so there is no recorded output to show.
+        assert!(row["observed"].is_null(), "{row}");
+        assert!(
+            row["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("no `exec` call of the command")),
+            "{row}"
+        );
         assert_eq!(row["file"], "repro-001.json", "{row}");
         assert_eq!(row["walk"], "sink-walk", "{row}");
     }
 }
 
-/// A replay whose turn finished without a record did not reproduce
-/// anything, and its row does not say it succeeded.
+/// A replay that wrote nothing is the same: nothing ran.
 #[test]
-fn a_replay_that_recorded_nothing_is_not_a_success() {
+fn a_replay_that_recorded_nothing_ran_nothing() {
     let row = replay_completed(None);
-    assert_eq!(row["status"], "no_record", "{row}");
-    assert!(
-        row["reason"]
-            .as_str()
-            .is_some_and(|r| r.contains("replay-001.json")),
-        "{row}"
-    );
+    assert_eq!(row["status"], "blocked", "{row}");
+    assert!(row["claimed"].is_null(), "{row}");
 }

@@ -1618,7 +1618,9 @@ change them:
   record whose `check` names a command also carries `check_status`.
 - `reproductions`, a top-level array, one entry per reproduction record a
   walk wrote, with the fresh-context replay beside it when one ran: `walk`,
-  `file`, the record's fields, `replay`, `agreement`, and for a reproduction
+  `file`, the record's `stable_id`, `command`, `harness`, `expected` and
+  `code_revision`, `outcome` and `observed` as the run's chain recorded them,
+  what the walk wrote for those under `claimed`, `replay`, `agreement`, and for a reproduction
   that was agreed or disagreed `evidence` (`observed` or `static_confirmed`)
   with the runner's traced run as `execution`. Each finding carries `evidence`
   too: `observed`, `static_confirmed` or `reasoned`. See
