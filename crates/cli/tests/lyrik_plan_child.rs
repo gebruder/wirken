@@ -631,33 +631,33 @@ fn a_plan_runs_cost_is_an_estimate_at_api_rates_by_walk_and_model() {
         ]
     );
 
-    // Each walk's completed row: the steps' sum, the child's final
-    // count priced at the same rates, which is the corrected figure,
-    // and the child's own cost figure with how far it is from ours.
+    // Each walk's completed row: the estimate and what it rests on,
+    // here the steps with each cache write at the lifetime the child
+    // reported, and the child's own figure beside it with how far the
+    // two are apart.
     for completed in audit_rows(&r.target, "lyrik.walk.completed") {
         let walk = completed["walk"].as_str().unwrap();
         let cost = &completed["estimated_cost"];
         let steps = if walk == "sink-walk" { small } else { large };
         assert_eq!(cost["billed"], false, "{cost}");
         assert_eq!(cost["steps_estimated_usd_micros"], steps, "{cost}");
-        let corrected = cost["corrected_usd_micros"].as_u64().unwrap();
-        assert_eq!(cost["summary_estimated_usd_micros"], corrected, "{cost}");
-        // The stub's final count differs from its steps', as a real
-        // child's does where a step's output count was a placeholder.
-        assert_ne!(corrected, steps, "{cost}");
+        assert_eq!(cost["estimate_usd_micros"], steps, "{cost}");
         assert_eq!(
-            cost["correction_usd_micros"].as_i64().unwrap(),
-            corrected as i64 - steps as i64,
+            cost["estimate_basis"], "steps_at_reported_write_lifetimes",
             "{cost}"
         );
+        assert_eq!(cost["steps_without_write_lifetime"], 0, "{cost}");
         assert_eq!(cost["child_reported_usd_micros"], 12_300, "{cost}");
         assert_eq!(
-            cost["child_reported_less_corrected_usd_micros"]
+            cost["child_reported_less_steps_usd_micros"]
                 .as_i64()
                 .unwrap(),
-            12_300 - corrected as i64,
+            12_300 - steps as i64,
             "{cost}"
         );
+        for gone in ["corrected_usd_micros", "correction_usd_micros"] {
+            assert!(cost.get(gone).is_none(), "{gone}: {cost}");
+        }
         let in_summary = findings["walk_summary"]
             .as_array()
             .unwrap()
@@ -666,14 +666,44 @@ fn a_plan_runs_cost_is_an_estimate_at_api_rates_by_walk_and_model() {
             .unwrap();
         assert_eq!(&in_summary["estimated_cost"], cost, "{in_summary}");
     }
-    let corrected_total = estimate["corrected_total_usd_micros"].as_u64().unwrap();
-    let walks_corrected: u64 = estimate["walks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|w| w["corrected_usd_micros"].as_u64().unwrap())
-        .sum();
-    assert_eq!(corrected_total, walks_corrected, "{estimate}");
+    assert_eq!(
+        estimate["total_with_walk_estimates_usd_micros"],
+        small + large,
+        "{estimate}"
+    );
+    assert!(
+        r.report.contains(
+            "estimated, from its steps with each cache write at the lifetime the child reported; \
+             $0.0123 by the child's own figure"
+        ),
+        "{}",
+        r.report
+    );
+
+    // A child that does not say how it wrote to the cache: Wirken's
+    // pricing of those writes is a floor, so the estimate to go by is
+    // the child's own figure, and the record says so.
+    let unsaid = run_pinned(
+        PRICED_LARGE,
+        PRICED_SMALL,
+        serde_json::json!({"calls": [["list_files", {}]], "no_write_lifetime": true}),
+        serde_json::json!({"run_ceiling_usd": 5.0}),
+    );
+    assert!(unsaid.ok, "{}", unsaid.report);
+    for completed in audit_rows(&unsaid.target, "lyrik.walk.completed") {
+        let cost = &completed["estimated_cost"];
+        assert_eq!(cost["estimate_basis"], "child_reported_cost", "{cost}");
+        assert_eq!(cost["estimate_usd_micros"], 12_300, "{cost}");
+        assert_eq!(cost["steps_without_write_lifetime"], 2, "{cost}");
+    }
+    assert!(
+        unsaid.report.contains(
+            "$0.0123 estimated, the child's own figure, because a step did not say how its \
+             cache write was written"
+        ),
+        "{}",
+        unsaid.report
+    );
 }
 
 /// The cost ceiling stops a plan run on its estimate, and says the

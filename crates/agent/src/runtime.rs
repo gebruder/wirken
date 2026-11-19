@@ -574,7 +574,7 @@ pub(crate) fn leak_refusal(credential: &str) -> String {
 /// that own the `Vec` afterwards, and taking it is deliberate and
 /// visible rather than something a dispatch does by accident.
 mod plan_child;
-pub use plan_child::{PLAN_CHILD_BASE_URL, PlanChild, PlanChildCost, REPORTED_BY};
+pub use plan_child::{EstimateBasis, PLAN_CHILD_BASE_URL, PlanChild, PlanChildCost, REPORTED_BY};
 
 mod turn_tools {
     use super::*;

@@ -2525,10 +2525,7 @@ async fn dispatch_via_agent_runtime(
         .filter_map(|o| Some((o.walk_name.as_str(), o.child_cost.as_ref()?)))
         .collect();
     let estimate = pin.on_plan().then(|| {
-        let corrected: u64 = walk_costs
-            .iter()
-            .map(|(_, c)| c.corrected_usd_micros())
-            .sum();
+        let by_walk: u64 = walk_costs.iter().map(|(_, c)| c.estimate().0).sum();
         let from_steps: u64 = walk_costs
             .iter()
             .map(|(_, c)| c.steps_estimated_usd_micros)
@@ -2539,10 +2536,12 @@ async fn dispatch_via_agent_runtime(
             "total_usd_micros": spend.estimated_usd_micros,
             "unestimated_calls": spend.unpriced_calls,
             "by_step_and_model": estimate_lines,
-            // The walks' corrected figures in place of their steps',
-            // the rest of the run (replays, the fix step) as estimated.
-            "corrected_total_usd_micros": (!walk_costs.is_empty())
-                .then(|| spend.estimated_usd_micros.saturating_sub(from_steps) + corrected),
+            // The same total with each walk at its own estimate, which
+            // is the child's figure where a step did not say how its
+            // cache write was written. The rest of the run (replays,
+            // the fix step) is as the rows have it.
+            "total_with_walk_estimates_usd_micros": (!walk_costs.is_empty())
+                .then(|| spend.estimated_usd_micros.saturating_sub(from_steps) + by_walk),
             "walks": walk_costs
                 .iter()
                 .map(|(walk, cost)| {
@@ -2604,15 +2603,31 @@ async fn dispatch_via_agent_runtime(
         println!("{line}");
     }
     for (walk, cost) in &walk_costs {
-        println!(
-            "  walk {walk}: ${:.4} estimated, corrected against the child's final count \
-             (${:.4} from its steps{})",
-            cost.corrected_usd_micros() as f64 / 1e6,
-            cost.steps_estimated_usd_micros as f64 / 1e6,
-            match cost.child_reported_usd_micros {
-                Some(r) => format!(", ${:.4} by the child's own figure", r as f64 / 1e6),
-                None => String::new(),
+        use wirken_agent::runtime::EstimateBasis;
+        let (estimate, basis) = cost.estimate();
+        let rests_on = match basis {
+            EstimateBasis::StepsAtReportedWriteLifetimes => {
+                "from its steps with each cache write at the lifetime the child reported"
             }
+            EstimateBasis::ChildReportedCost => {
+                "the child's own figure, because a step did not say how its cache write was \
+                 written"
+            }
+            EstimateBasis::StepsWithUnsaidWritesAtFiveMinutes => {
+                "from its steps with unsaid cache writes at five minutes, a floor"
+            }
+        };
+        let other = match (basis, cost.child_reported_usd_micros) {
+            (EstimateBasis::ChildReportedCost, _) => format!(
+                "; ${:.4} from its steps",
+                cost.steps_estimated_usd_micros as f64 / 1e6
+            ),
+            (_, Some(r)) => format!("; ${:.4} by the child's own figure", r as f64 / 1e6),
+            (_, None) => String::new(),
+        };
+        println!(
+            "  walk {walk}: ${:.4} estimated, {rests_on}{other}",
+            estimate as f64 / 1e6
         );
     }
     if let Ok(text) = std::fs::read_to_string(expected_findings)
@@ -4458,32 +4473,29 @@ pub(super) enum WalkStatus {
     },
 }
 
-/// A walk's estimate on the child route, as its completed row and its
-/// `walk_summary` record carry it. Every figure is an estimate at the
-/// pricing table's API rates; nothing was billed. `corrected` is the
-/// one to go by: the child's final count of each turn, priced, in
-/// place of the sum over the steps as they were reported, whose output
-/// counts can be placeholders. `child_reported` is the child's own
-/// cost figure, and the two differences say how far apart they are.
+/// A walk's cost and model time on the child route, as its completed
+/// row and its `walk_summary` record carry them. Nothing was billed.
+/// `estimate_usd_micros` is the figure to go by and `estimate_basis`
+/// says what it rests on: Wirken's pricing of the steps where every
+/// step said how its cache write was written, the child's own figure
+/// where one did not. Both figures are given, with their difference.
 fn child_cost_record(cost: &wirken_agent::runtime::PlanChildCost) -> serde_json::Value {
-    let corrected = cost.corrected_usd_micros();
+    let (estimate, basis) = cost.estimate();
     serde_json::json!({
         "billed": false,
+        "estimate_usd_micros": estimate,
+        "estimate_basis": basis,
         "steps_estimated_usd_micros": cost.steps_estimated_usd_micros,
-        "summary_estimated_usd_micros": cost.summary_estimated_usd_micros,
-        "corrected_usd_micros": corrected,
-        "correction_usd_micros": cost.correction_usd_micros(),
         "child_reported_usd_micros": cost.child_reported_usd_micros,
-        "child_reported_less_corrected_usd_micros": cost
+        "child_reported_less_steps_usd_micros": cost
             .child_reported_usd_micros
-            .map(|r| r as i64 - corrected as i64),
+            .map(|r| r as i64 - cost.steps_estimated_usd_micros as i64),
         "model_millis": cost.model_millis,
         "child_reported_api_millis": cost.child_reported_api_millis,
         "steps": cost.steps,
         "steps_unpriced": cost.steps_unpriced,
         "steps_without_write_lifetime": cost.steps_without_write_lifetime,
         "turns": cost.turns,
-        "turns_summarized": cost.turns_summarized,
     })
 }
 

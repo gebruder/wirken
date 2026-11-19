@@ -216,19 +216,18 @@ pub struct ModelUsage {
     pub reported_cost_usd_micros: Option<u64>,
 }
 
-/// What an agent's turns on this route came to, as estimates at the
-/// pricing table's API rates. Nothing here was billed.
+/// What an agent's turns on this route came to. Nothing here was
+/// billed: the cost figures are estimates at API rates.
 ///
-/// There are two estimates. One is the sum over the steps as they
-/// were reported, which is what the rows carry. The other prices the
-/// usage summary the child gives when a turn ends, which is the
-/// child's final count: where a step's output count was a placeholder,
-/// the summary has the real one. The second corrects the first.
+/// There are two cost figures and they are kept apart. One is Wirken's:
+/// each step's tokens priced from the pricing table, its cache writes
+/// at the lifetime the child wrote them at. The other is the child's
+/// own figure for the turn, which Wirken cannot check. [`Self::estimate`]
+/// says which one a reader should go by and why.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct PlanChildCost {
-    /// Turns begun, and those that ended with a usage summary.
+    /// Turns begun.
     pub turns: u32,
-    pub turns_summarized: u32,
     /// Steps reported, and those whose model has no price entry.
     pub steps: u32,
     pub steps_unpriced: u32,
@@ -238,9 +237,6 @@ pub struct PlanChildCost {
     pub steps_without_write_lifetime: u32,
     /// The steps' estimates, summed.
     pub steps_estimated_usd_micros: u64,
-    /// The usage summaries priced at the same rates, summed. `None`
-    /// when no turn gave one or one names a model with no price entry.
-    pub summary_estimated_usd_micros: Option<u64>,
     /// The child's own cost figures, summed. `None` when it gave none.
     pub child_reported_usd_micros: Option<u64>,
     /// Model time as the steps' rows have it, summed: for each call,
@@ -252,19 +248,38 @@ pub struct PlanChildCost {
     pub child_reported_api_millis: Option<u64>,
 }
 
-impl PlanChildCost {
-    /// The estimate to go by: the priced summaries when every turn
-    /// gave one, the steps' sum otherwise.
-    pub fn corrected_usd_micros(&self) -> u64 {
-        match self.summary_estimated_usd_micros {
-            Some(summary) if self.turns_summarized == self.turns => summary,
-            _ => self.steps_estimated_usd_micros,
-        }
-    }
+/// What a [`PlanChildCost`] estimate rests on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimateBasis {
+    /// Wirken's pricing of every step, each cache write at the
+    /// lifetime the child reported for it.
+    StepsAtReportedWriteLifetimes,
+    /// The child's own cost figure: some step did not say how its
+    /// cache write was written, so Wirken's pricing of it is a floor.
+    ChildReportedCost,
+    /// Wirken's pricing with the unsaid cache writes at five minutes:
+    /// a floor, used because the child gave no figure of its own.
+    StepsWithUnsaidWritesAtFiveMinutes,
+}
 
-    /// The corrected estimate less the steps' sum.
-    pub fn correction_usd_micros(&self) -> i64 {
-        self.corrected_usd_micros() as i64 - self.steps_estimated_usd_micros as i64
+impl PlanChildCost {
+    /// The estimate to go by, and what it rests on.
+    pub fn estimate(&self) -> (u64, EstimateBasis) {
+        match (
+            self.steps_without_write_lifetime,
+            self.child_reported_usd_micros,
+        ) {
+            (0, _) => (
+                self.steps_estimated_usd_micros,
+                EstimateBasis::StepsAtReportedWriteLifetimes,
+            ),
+            (_, Some(child)) => (child, EstimateBasis::ChildReportedCost),
+            (_, None) => (
+                self.steps_estimated_usd_micros,
+                EstimateBasis::StepsWithUnsaidWritesAtFiveMinutes,
+            ),
+        }
     }
 }
 
@@ -927,21 +942,6 @@ impl Agent {
         )
     }
 
-    /// What `tokens` cost at the table's rates for this agent's pinned
-    /// model, for a count that does not say how its cache writes were
-    /// written: the child's usage summary.
-    fn child_estimate(&self, input: u64, output: u64, written: u64, read: u64) -> Option<u64> {
-        let n = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
-        super::estimate_at_api_rates(
-            &self.llm.config().provider,
-            &self.llm.config().model,
-            n(input),
-            n(output),
-            n(written),
-            n(read),
-        )
-    }
-
     fn reported_row(
         &self,
         step: &Step,
@@ -1321,29 +1321,6 @@ impl Agent {
                 stderr_tail()
             )));
         };
-        // The child's own count of the turn, priced at the same rates,
-        // and its own cost figure.
-        if !outcome.usage.is_empty() {
-            let priced: Option<u64> = outcome
-                .usage
-                .iter()
-                .map(|u| {
-                    self.child_estimate(
-                        u.input_tokens,
-                        u.output_tokens,
-                        u.cache_creation_input_tokens,
-                        u.cache_read_input_tokens,
-                    )
-                })
-                .sum();
-            let cost = &mut self.plan_child_cost;
-            cost.summary_estimated_usd_micros = match (cost.turns_summarized, priced) {
-                (0, p) => p,
-                (_, Some(p)) => cost.summary_estimated_usd_micros.map(|s| s + p),
-                (_, None) => None,
-            };
-            cost.turns_summarized += 1;
-        }
         if let Some(millis) = outcome.reported_api_millis {
             let cost = &mut self.plan_child_cost;
             cost.child_reported_api_millis =
