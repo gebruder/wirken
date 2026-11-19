@@ -12,6 +12,21 @@ tagged.
 
 ### Added
 
+- A Lyrik run can use a plan sign-in. A run pin with `"auth": "plan"` on the
+  `openai` provider takes its bearer from the sign-in's vault entry
+  (`credential`, default `openai-plan`) and asks for no API key; per-walk
+  entries change the model only. Its `llm_request` and `llm_response` rows
+  carry step, model and tokens with null cost
+  (`crates/cli/tests/lyrik_plan_sign_in.rs`;
+  [docs/lyrik.md](docs/lyrik.md#cost-guard)).
+
+- `run_ceiling_model_seconds` and `run_ceiling_model_calls` in `lyrik.json`:
+  ceilings on a Lyrik run's model time and model calls, which hold where no
+  cost is recorded. A run on a plan sign-in does not start without one of
+  them. The sign-off banner, the run summary and `cost` in `findings.json`
+  show each ceiling set, which one stopped the run, and that a plan run's
+  cost is not recorded ([docs/lyrik.md](docs/lyrik.md#cost-guard)).
+
 - A Lyrik walk can run on its own model. An entry in `.lyrik/config.json`
   keyed by a walk's name under `phases` (for example `phases.sink-walk`)
   overrides the `model` and `max_tokens` for that walk; the provider, base

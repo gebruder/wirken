@@ -69,6 +69,16 @@ pub struct OperatorSettings {
     /// run's recorded cost reaches it the run stops. Absent, or zero or
     /// less, there is no ceiling.
     pub run_ceiling_usd: Option<f64>,
+    /// The most model time a Lyrik run may take, in seconds: its model
+    /// calls' durations as the chain records them, summed, so calls
+    /// that overlap each count in full. When it is reached the run
+    /// stops. It does not depend on a price, so it holds for a run on
+    /// a plan sign-in. Absent or zero, there is no such ceiling.
+    pub run_ceiling_model_seconds: Option<u64>,
+    /// The most model calls a Lyrik run may make. When it is reached
+    /// the run stops. It holds for a run on a plan sign-in. Absent or
+    /// zero, there is no such ceiling.
+    pub run_ceiling_model_calls: Option<u64>,
     /// Tool rounds a walk's turn gets: the model calls it may make
     /// before it is stopped. Absent or zero,
     /// [`wirken_agent::runtime::MAX_TOOL_ROUNDS`]. A target's
@@ -88,6 +98,15 @@ impl OperatorSettings {
     /// The ceiling on a run's recorded cost, when the operator set one.
     pub fn run_ceiling_usd(&self) -> Option<f64> {
         self.run_ceiling_usd.filter(|c| *c > 0.0)
+    }
+
+    /// Every ceiling the operator set for a run.
+    pub fn run_bounds(&self) -> super::lyrik_cost::Bounds {
+        super::lyrik_cost::Bounds {
+            usd: self.run_ceiling_usd(),
+            model_seconds: self.run_ceiling_model_seconds.filter(|s| *s > 0),
+            model_calls: self.run_ceiling_model_calls.filter(|n| *n > 0),
+        }
     }
 
     /// Times a walk's request that failed in transport is sent again:

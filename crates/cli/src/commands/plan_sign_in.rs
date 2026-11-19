@@ -361,13 +361,19 @@ fn write_new_owner_only(path: &Path, contents: &[u8]) -> Result<()> {
 /// which is not an endpoint, and a file that names a real one is refused
 /// rather than half-honored.
 pub fn provider_auth(provider_json: &serde_json::Value) -> Result<ProviderAuth> {
+    auth_of(provider_json, "provider.json")
+}
+
+/// [`provider_auth`] for any object shaped like `provider.json`, with
+/// `what` naming it in an error. A Lyrik run's pin is one.
+pub fn auth_of(provider_json: &serde_json::Value, what: &str) -> Result<ProviderAuth> {
     let auth = ProviderAuth::parse(provider_json.get("auth").and_then(|v| v.as_str()))
-        .map_err(|e| anyhow!("provider.json: {e}"))?;
+        .map_err(|e| anyhow!("{what}: {e}"))?;
     if auth.is_plan() {
         let provider = provider_json.get("provider").and_then(|v| v.as_str());
         if provider != Some(plan_auth::PROVIDER) {
             anyhow::bail!(
-                "provider.json: auth 'plan' applies to provider 'openai' only, not '{}'",
+                "{what}: auth 'plan' applies to provider 'openai' only, not '{}'",
                 provider.unwrap_or("")
             );
         }
@@ -375,7 +381,7 @@ pub fn provider_auth(provider_json: &serde_json::Value) -> Result<ProviderAuth> 
             && url != plan_auth::PLAN_BASE_URL
         {
             anyhow::bail!(
-                "provider.json: base_url '{url}' does not apply in plan mode, whose endpoint is \
+                "{what}: base_url '{url}' does not apply in plan mode, whose endpoint is \
                  fixed; set it to '{}'",
                 plan_auth::PLAN_BASE_URL
             );

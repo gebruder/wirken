@@ -80,14 +80,19 @@ pub struct ProbeRecord<'a> {
 /// classification verdict (network failure, malformed response,
 /// non-4xx provider error) propagate as `Err`. With `record`, the
 /// request and its response or failure are appended to the chain as
-/// a `tool_call_probe` call.
+/// a `tool_call_probe` call. `plan` is the token source of a run on a
+/// plan sign-in, which has no `api_key`.
 pub async fn probe_tool_calling(
     llm_config: &LlmConfig,
     api_key: Option<&str>,
+    plan: Option<&std::sync::Arc<wirken_agent::plan_auth::PlanTokenSource>>,
     record: Option<&ProbeRecord<'_>>,
 ) -> Result<ProbeOutcome> {
-    let client = LlmClient::new(llm_config.clone())
+    let mut client = LlmClient::new(llm_config.clone())
         .map_err(|e| anyhow::anyhow!("preflight: build llm client: {e}"))?;
+    if let Some(source) = plan {
+        client.set_plan_token_source(source.clone());
+    }
     let messages = vec![Message {
         role: Role::User,
         content: format!(

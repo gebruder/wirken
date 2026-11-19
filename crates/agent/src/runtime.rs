@@ -2595,6 +2595,12 @@ impl Agent {
         self.subagent_depth
     }
 
+    /// Point this agent's plan-mode calls at a loopback stub.
+    #[cfg(test)]
+    pub(crate) fn set_plan_endpoints_for_test(&mut self, endpoints: crate::plan_auth::Endpoints) {
+        self.llm.set_plan_endpoints_for_test(endpoints);
+    }
+
     /// Test-only accessor returning the [`LlmConfig`] this agent
     /// was woken with. Lets a test prove the factory picked the
     /// right config for the session's channel.

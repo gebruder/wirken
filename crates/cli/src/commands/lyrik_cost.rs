@@ -1,9 +1,16 @@
 //! What a Lyrik run costs while it runs: a check that the prompt cache
-//! is being used, and the operator's ceiling on a run's spend.
+//! is being used, and the operator's ceilings on a run.
 //!
 //! Both read the run's own `llm_response` rows from the session log,
 //! so they see what the audit chain sees: the tokens the provider
-//! reported and the cost the price table gave each call.
+//! reported, the cost the price table gave each call, and how long the
+//! call took.
+//!
+//! A run has three ceilings, each the operator's and each optional:
+//! recorded cost, model time and model calls. Recorded cost holds only
+//! where calls are priced. A run on a plan sign-in records no cost, so
+//! it does not start without one of the other two
+//! ([`refuse_unbounded_plan_run`]).
 
 use wirken_audit::{OwnSession, SessionEvent, SessionHandle, SessionLog};
 
@@ -14,8 +21,11 @@ pub struct CallUsage {
     pub input_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
-    /// `None` when the model has no price entry.
+    /// `None` when the model has no price entry, or the call ran on a
+    /// plan sign-in.
     pub cost_micros: Option<u64>,
+    /// How long the call took, as its row has it.
+    pub latency_ms: u64,
 }
 
 /// The run's model calls since `mark`, in order.
@@ -34,12 +44,14 @@ pub fn calls_since(
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
                 total_cost_usd_micros,
+                latency_ms,
                 ..
             } => Some(CallUsage {
                 input_tokens: u64::from(input_tokens),
                 cache_read_tokens: u64::from(cache_read_input_tokens),
                 cache_write_tokens: u64::from(cache_creation_input_tokens),
                 cost_micros: total_cost_usd_micros,
+                latency_ms,
             }),
             _ => None,
         })
@@ -124,9 +136,12 @@ pub fn cache_check(provider: &str, model: &str, calls: &[CallUsage]) -> Option<C
 pub struct Spend {
     pub usd_micros: u64,
     pub calls: usize,
-    /// Calls that recorded no cost because the model has no price
-    /// entry. They are not in `usd_micros`.
+    /// Calls that recorded no cost: the model has no price entry, or
+    /// the run is on a plan sign-in. They are not in `usd_micros`.
     pub unpriced_calls: usize,
+    /// The calls' durations, summed. Calls that overlap each count in
+    /// full, so this is model time and not the run's wall-clock time.
+    pub model_millis: u64,
 }
 
 pub fn spend(calls: &[CallUsage]) -> Spend {
@@ -134,7 +149,92 @@ pub fn spend(calls: &[CallUsage]) -> Spend {
         usd_micros: calls.iter().filter_map(|c| c.cost_micros).sum(),
         calls: calls.len(),
         unpriced_calls: calls.iter().filter(|c| c.cost_micros.is_none()).count(),
+        model_millis: calls.iter().map(|c| c.latency_ms).sum(),
     }
+}
+
+/// The operator's ceilings for a run. An unset one is never reached.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct Bounds {
+    /// USD of recorded cost.
+    pub usd: Option<f64>,
+    /// Seconds of model time: the calls' durations, summed.
+    pub model_seconds: Option<u64>,
+    /// Model calls answered.
+    pub model_calls: Option<u64>,
+}
+
+impl Bounds {
+    /// Whether a ceiling is set that holds for calls with no recorded
+    /// cost.
+    pub fn holds_without_cost(&self) -> bool {
+        self.model_seconds.is_some() || self.model_calls.is_some()
+    }
+}
+
+/// The ceiling a run reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reached {
+    Usd,
+    ModelSeconds,
+    ModelCalls,
+}
+
+/// The first of the operator's ceilings `spend` has reached, if any.
+/// The check runs between calls, so the calls in flight when a ceiling
+/// is crossed complete.
+pub fn reached(spend: &Spend, bounds: &Bounds) -> Option<Reached> {
+    if ceiling_reached(spend, bounds.usd) {
+        return Some(Reached::Usd);
+    }
+    if bounds
+        .model_seconds
+        .is_some_and(|s| spend.model_millis >= s.saturating_mul(1000))
+    {
+        return Some(Reached::ModelSeconds);
+    }
+    if bounds.model_calls.is_some_and(|n| spend.calls as u64 >= n) {
+        return Some(Reached::ModelCalls);
+    }
+    None
+}
+
+/// The line the run prints when it reaches a ceiling.
+pub fn reached_line(reached: Reached, spend: &Spend, bounds: &Bounds) -> String {
+    let what = match reached {
+        Reached::Usd => format!(
+            "cost ceiling of ${:.2} (${:.2} recorded over {} model calls)",
+            bounds.usd.unwrap_or_default(),
+            spend.usd_micros as f64 / 1e6,
+            spend.calls
+        ),
+        Reached::ModelSeconds => format!(
+            "model-time ceiling of {} second(s) ({} recorded over {} model calls)",
+            bounds.model_seconds.unwrap_or_default(),
+            spend.model_millis / 1000,
+            spend.calls
+        ),
+        Reached::ModelCalls => format!(
+            "model-call ceiling of {} ({} model calls recorded)",
+            bounds.model_calls.unwrap_or_default(),
+            spend.calls
+        ),
+    };
+    format!("the run reached its {what}; stopping, staged findings are kept")
+}
+
+/// Why a run on a plan sign-in may not start, when it may not. A plan
+/// call records no cost, so `run_ceiling_usd` never stops one; the run
+/// needs a ceiling that does not depend on a price.
+pub fn refuse_unbounded_plan_run(bounds: &Bounds, settings: &std::path::Path) -> Option<String> {
+    if bounds.holds_without_cost() {
+        return None;
+    }
+    Some(format!(
+        "this run is pinned to a plan sign-in, whose calls record no cost, so `run_ceiling_usd`          cannot stop it. Set `run_ceiling_model_seconds` or `run_ceiling_model_calls` in {} and          run it again",
+        settings.display()
+    ))
 }
 
 /// Whether `spend` has reached the operator's ceiling for a run. No
@@ -146,63 +246,119 @@ pub fn ceiling_reached(spend: &Spend, ceiling_usd: Option<f64>) -> bool {
     }
 }
 
-/// The sign-off banner's cost lines: the ceiling or that none is set,
-/// and, when the run's model has no price entry, that cost is not
-/// recorded and a ceiling cannot hold.
+/// The sign-off banner's cost lines: each ceiling that is set, or that
+/// none is, and, when the run's calls record no cost (a model with no
+/// price entry, or `plan`, the plan sign-in the run is on), that they do
+/// not and that a cost ceiling cannot hold.
 pub fn banner_lines(
     provider: &str,
     model: &str,
-    ceiling_usd: Option<f64>,
+    plan: Option<&str>,
+    bounds: &Bounds,
 ) -> Vec<(String, String)> {
-    let priced = wirken_audit::pricing::is_priced(provider, model);
-    let ceiling = match ceiling_usd {
+    let priced = plan.is_none() && wirken_audit::pricing::is_priced(provider, model);
+    let why_unpriced = match plan {
+        Some(entry) => format!("the plan sign-in '{entry}' records no cost"),
+        None => format!("{provider} {model} has no price entry"),
+    };
+    let ceiling = match bounds.usd {
         Some(c) if c > 0.0 && priced => {
             format!("the run stops at ${c:.2} of recorded cost (`run_ceiling_usd` in lyrik.json)")
         }
         Some(c) if c > 0.0 => {
-            format!("${c:.2} is set but cannot be enforced: {provider} {model} has no price entry")
+            format!("${c:.2} is set but cannot be enforced: {why_unpriced}")
+        }
+        _ if plan.is_some() => {
+            "no cost ceiling applies: the run is held by the ceilings below".to_string()
         }
         _ => "none set: this run has no cost limit (`run_ceiling_usd` in lyrik.json sets one)"
             .to_string(),
     };
     let mut lines = vec![("ceiling".to_string(), ceiling)];
+    if let Some(s) = bounds.model_seconds {
+        lines.push((
+            "time".to_string(),
+            format!(
+                "the run stops at {s} second(s) of model time (`run_ceiling_model_seconds` in \
+                 lyrik.json)"
+            ),
+        ));
+    }
+    if let Some(n) = bounds.model_calls {
+        lines.push((
+            "calls".to_string(),
+            format!("the run stops at {n} model call(s) (`run_ceiling_model_calls` in lyrik.json)"),
+        ));
+    }
     if !priced {
         lines.push((
             "pricing".to_string(),
-            format!("{provider} {model} has no price entry: this run's cost is not recorded"),
+            format!("{why_unpriced}: this run's cost is not recorded"),
         ));
     }
     lines
 }
 
-/// The run summary's cost lines.
+/// The run summary's cost lines. `plan` is the plan sign-in the run
+/// was on, when it was on one.
 pub fn summary_lines(
     spend: &Spend,
-    ceiling_usd: Option<f64>,
-    stopped_at_ceiling: bool,
+    bounds: &Bounds,
+    stopped_at: Option<Reached>,
+    plan: Option<&str>,
     warning: Option<&CacheWarning>,
 ) -> Vec<String> {
+    const STOPPED: &str =
+        "walks were ended, staged findings were kept, and no replay or fix step ran after it";
     let mut lines = Vec::new();
-    let unpriced = if spend.unpriced_calls > 0 {
-        format!(
-            ", {} of them with no price entry and not counted",
-            spend.unpriced_calls
-        )
-    } else {
-        String::new()
-    };
-    lines.push(format!(
-        "cost: ${:.2} recorded over {} model call(s){unpriced}",
-        spend.usd_micros as f64 / 1e6,
-        spend.calls
-    ));
-    match (ceiling_usd.filter(|c| *c > 0.0), stopped_at_ceiling) {
-        (Some(c), true) => lines.push(format!(
-            "stopped at the cost ceiling of ${c:.2}: walks were ended, staged findings were kept, \
-             and no replay or fix step ran after it"
+    match plan {
+        Some(entry) => lines.push(format!(
+            "cost: not recorded, the run was on the plan sign-in '{entry}': {} model call(s), {} \
+             second(s) of model time",
+            spend.calls,
+            spend.model_millis / 1000
         )),
-        (Some(c), false) => lines.push(format!("cost ceiling ${c:.2}: not reached")),
-        (None, _) => {}
+        None => {
+            let unpriced = if spend.unpriced_calls > 0 {
+                format!(
+                    ", {} of them with no price entry and not counted",
+                    spend.unpriced_calls
+                )
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "cost: ${:.2} recorded over {} model call(s){unpriced}",
+                spend.usd_micros as f64 / 1e6,
+                spend.calls
+            ));
+        }
+    }
+    if let Some(c) = bounds.usd.filter(|c| *c > 0.0) {
+        lines.push(if stopped_at == Some(Reached::Usd) {
+            format!("stopped at the cost ceiling of ${c:.2}: {STOPPED}")
+        } else if plan.is_some() {
+            format!("cost ceiling ${c:.2}: not applied, cost is not recorded")
+        } else {
+            format!("cost ceiling ${c:.2}: not reached")
+        });
+    }
+    if let Some(s) = bounds.model_seconds {
+        lines.push(if stopped_at == Some(Reached::ModelSeconds) {
+            format!("stopped at the model-time ceiling of {s} second(s): {STOPPED}")
+        } else {
+            format!(
+                "model-time ceiling {s} second(s): not reached ({} recorded)",
+                spend.model_millis / 1000
+            )
+        });
+    }
+    if let Some(n) = bounds.model_calls {
+        lines.push(if stopped_at == Some(Reached::ModelCalls) {
+            format!("stopped at the model-call ceiling of {n}: {STOPPED}")
+        } else {
+            format!("model-call ceiling {n}: not reached ({} made)", spend.calls)
+        });
     }
     if let Some(w) = warning {
         lines.push(w.line());
@@ -220,6 +376,14 @@ mod tests {
             cache_read_tokens: read,
             cache_write_tokens: write,
             cost_micros: cost,
+            latency_ms: 0,
+        }
+    }
+
+    fn usd(ceiling: Option<f64>) -> Bounds {
+        Bounds {
+            usd: ceiling,
+            ..Bounds::default()
         }
     }
 
@@ -301,7 +465,8 @@ mod tests {
             Spend {
                 usd_micros: 1_050_000,
                 calls: 3,
-                unpriced_calls: 1
+                unpriced_calls: 1,
+                model_millis: 0,
             }
         );
         assert!(ceiling_reached(&s, Some(1.0)));
@@ -311,7 +476,7 @@ mod tests {
         assert!(!ceiling_reached(&s, Some(0.0)));
         assert!(!ceiling_reached(&spend(&calls[..1]), Some(1.0)));
 
-        let lines = summary_lines(&s, Some(1.0), true, None);
+        let lines = summary_lines(&s, &usd(Some(1.0)), Some(Reached::Usd), None, None);
         assert_eq!(
             lines[0],
             "cost: $1.05 recorded over 3 model call(s), 1 of them with no price entry and not counted"
@@ -323,17 +488,17 @@ mod tests {
         );
         assert!(lines[1].contains("staged findings were kept"));
         assert_eq!(
-            summary_lines(&s, Some(5.0), false, None)[1],
+            summary_lines(&s, &usd(Some(5.0)), None, None, None)[1],
             "cost ceiling $5.00: not reached"
         );
-        assert_eq!(summary_lines(&s, None, false, None).len(), 1);
+        assert_eq!(summary_lines(&s, &usd(None), None, None, None).len(), 1);
     }
 
     /// The banner says what the ceiling is or that there is none, and
     /// says so before the run when the model has no price entry.
     #[test]
     fn the_banner_shows_the_ceiling_and_a_missing_price_entry() {
-        let set = banner_lines("anthropic", "claude-mythos-5-2", Some(25.0));
+        let set = banner_lines("anthropic", "claude-mythos-5-2", None, &usd(Some(25.0)));
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].0, "ceiling");
         assert!(
@@ -344,7 +509,7 @@ mod tests {
             set[0].1
         );
 
-        let none = banner_lines("anthropic", "claude-mythos-5-2", None);
+        let none = banner_lines("anthropic", "claude-mythos-5-2", None, &usd(None));
         assert!(
             none[0]
                 .1
@@ -353,7 +518,7 @@ mod tests {
             none[0].1
         );
 
-        let unpriced = banner_lines("anthropic", "no-such-model", Some(25.0));
+        let unpriced = banner_lines("anthropic", "no-such-model", None, &usd(Some(25.0)));
         assert_eq!(unpriced.len(), 2);
         assert!(
             unpriced[0].1.contains("cannot be enforced"),
@@ -365,6 +530,160 @@ mod tests {
             unpriced[1].1,
             "anthropic no-such-model has no price entry: this run's cost is not recorded"
         );
-        assert_eq!(banner_lines("anthropic", "no-such-model", None).len(), 2);
+        assert_eq!(
+            banner_lines("anthropic", "no-such-model", None, &usd(None)).len(),
+            2
+        );
+    }
+
+    fn timed(latency_ms: u64) -> CallUsage {
+        CallUsage {
+            latency_ms,
+            ..CallUsage::default()
+        }
+    }
+
+    /// The two ceilings that need no price: model time is the calls'
+    /// durations summed, model calls their count. Calls with no cost,
+    /// as a plan sign-in's are, reach both and never the cost ceiling.
+    #[test]
+    fn model_time_and_model_calls_are_reached_without_a_recorded_cost() {
+        let calls = [timed(40_000), timed(15_000), timed(5_500)];
+        let s = spend(&calls);
+        assert_eq!((s.usd_micros, s.unpriced_calls, s.calls), (0, 3, 3));
+        assert_eq!(s.model_millis, 60_500);
+
+        let only_usd = usd(Some(0.01));
+        assert!(!only_usd.holds_without_cost());
+        assert_eq!(reached(&s, &only_usd), None);
+
+        let seconds = |n| Bounds {
+            model_seconds: Some(n),
+            ..Bounds::default()
+        };
+        assert!(seconds(60).holds_without_cost());
+        assert_eq!(reached(&s, &seconds(60)), Some(Reached::ModelSeconds));
+        assert_eq!(reached(&s, &seconds(61)), None);
+        assert_eq!(reached(&spend(&calls[..2]), &seconds(60)), None);
+
+        let count = |n| Bounds {
+            model_calls: Some(n),
+            ..Bounds::default()
+        };
+        assert!(count(3).holds_without_cost());
+        assert_eq!(reached(&s, &count(3)), Some(Reached::ModelCalls));
+        assert_eq!(reached(&s, &count(4)), None);
+
+        assert_eq!(
+            reached_line(Reached::ModelSeconds, &s, &seconds(60)),
+            "the run reached its model-time ceiling of 60 second(s) (60 recorded over 3 model \
+             calls); stopping, staged findings are kept"
+        );
+        assert_eq!(
+            reached_line(Reached::ModelCalls, &s, &count(3)),
+            "the run reached its model-call ceiling of 3 (3 model calls recorded); stopping, \
+             staged findings are kept"
+        );
+    }
+
+    /// A run on a plan sign-in starts only with a ceiling that holds
+    /// for calls with no cost. `run_ceiling_usd` is not one.
+    #[test]
+    fn a_plan_run_needs_a_ceiling_that_holds_without_a_price() {
+        let path = std::path::Path::new("/d/lyrik.json");
+        for unbounded in [Bounds::default(), usd(Some(20.0))] {
+            let reason = refuse_unbounded_plan_run(&unbounded, path).expect("refused");
+            assert!(reason.contains("`run_ceiling_model_seconds`"), "{reason}");
+            assert!(reason.contains("`run_ceiling_model_calls`"), "{reason}");
+            assert!(reason.contains("/d/lyrik.json"), "{reason}");
+        }
+        for bounded in [
+            Bounds {
+                model_seconds: Some(1),
+                ..Bounds::default()
+            },
+            Bounds {
+                model_calls: Some(1),
+                ..usd(Some(20.0))
+            },
+        ] {
+            assert_eq!(refuse_unbounded_plan_run(&bounded, path), None);
+        }
+    }
+
+    /// On a plan sign-in the banner shows the ceilings that hold and
+    /// says cost is not recorded, whatever the price table has for the
+    /// model; the summary does the same with what the run used.
+    #[test]
+    fn a_plan_run_shows_its_ceilings_and_that_cost_is_not_recorded() {
+        let bounds = Bounds {
+            usd: Some(20.0),
+            model_seconds: Some(3600),
+            model_calls: Some(400),
+        };
+        let banner = banner_lines("openai", "gpt-6.2-astra", Some("openai-plan"), &bounds);
+        assert_eq!(
+            banner,
+            [
+                (
+                    "ceiling".to_string(),
+                    "$20.00 is set but cannot be enforced: the plan sign-in 'openai-plan' \
+                     records no cost"
+                        .to_string()
+                ),
+                (
+                    "time".to_string(),
+                    "the run stops at 3600 second(s) of model time (`run_ceiling_model_seconds` \
+                     in lyrik.json)"
+                        .to_string()
+                ),
+                (
+                    "calls".to_string(),
+                    "the run stops at 400 model call(s) (`run_ceiling_model_calls` in lyrik.json)"
+                        .to_string()
+                ),
+                (
+                    "pricing".to_string(),
+                    "the plan sign-in 'openai-plan' records no cost: this run's cost is not \
+                     recorded"
+                        .to_string()
+                ),
+            ]
+        );
+        let no_usd = Bounds {
+            usd: None,
+            ..bounds
+        };
+        assert_eq!(
+            banner_lines("openai", "gpt-6.2-astra", Some("openai-plan"), &no_usd)[0].1,
+            "no cost ceiling applies: the run is held by the ceilings below"
+        );
+
+        let s = spend(&[timed(30_000), timed(45_000)]);
+        assert_eq!(
+            summary_lines(&s, &bounds, None, Some("openai-plan"), None),
+            [
+                "cost: not recorded, the run was on the plan sign-in 'openai-plan': 2 model \
+                 call(s), 75 second(s) of model time",
+                "cost ceiling $20.00: not applied, cost is not recorded",
+                "model-time ceiling 3600 second(s): not reached (75 recorded)",
+                "model-call ceiling 400: not reached (2 made)",
+            ]
+        );
+        let stopped = summary_lines(
+            &s,
+            &no_usd,
+            Some(Reached::ModelCalls),
+            Some("openai-plan"),
+            None,
+        );
+        assert!(
+            stopped[2].starts_with("stopped at the model-call ceiling of 400: walks were ended"),
+            "{stopped:?}"
+        );
+        assert_eq!(
+            stopped[1],
+            "model-time ceiling 3600 second(s): not reached (75 recorded)"
+        );
     }
 }

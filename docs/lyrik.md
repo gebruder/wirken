@@ -180,9 +180,9 @@ committed; run state lives under `.lyrik/state/`.
 
 | Lives at | What |
 |---|---|
-| Wirken vault | provider API keys |
+| Wirken vault | provider API keys, and a plan sign-in when the pin names one |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `walk_tool_rounds`, `fix_tool_rounds`, `walk_continuations`, `transport_retries` and `run_ceiling_usd` |
+| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `walk_tool_rounds`, `fix_tool_rounds`, `walk_continuations`, `transport_retries`, `run_ceiling_usd`, `run_ceiling_model_seconds` and `run_ceiling_model_calls` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
@@ -213,8 +213,8 @@ resolves the run pin from `phases.framing`, else `phases.score`, else
 it. A per-walk run may give a walk its own model: an entry keyed by the walk's
 name (for example `phases.sink-walk`) overrides the `model` (and `max_tokens`)
 for that walk only. The provider, base URL and credential stay the run's, so a
-per-walk entry that names a different `provider` is refused; a walk with no
-entry of its own uses the run pin. Each distinct model is tool-call-probed
+per-walk entry that names a different `provider` or a different `auth` is
+refused; a walk with no entry of its own uses the run pin. Each distinct model is tool-call-probed
 before the run, and a walk's model is on its `lyrik.walk.started` row. When a
 walk has its own model, the sign-off summary carries a `models` line with the
 model of each selected walk. Other
@@ -443,7 +443,7 @@ canonical. Findings without a file and line pass through unchanged, so a
 malformed input does not collapse against everything else under a default key.
 
 Exit `0` when at least one walk completed, was stopped at the tool round
-limit or was ended at the run's cost ceiling; non-zero when every selected
+limit or was ended at one of the run's ceilings; non-zero when every selected
 walk failed transiently. A refused call does not fail a walk or the run: the
 refusal is on the chain, the model is told the step was not executed, and the
 walk carries on. Each walk's `lyrik.walk.completed` row lists what it skipped
@@ -776,6 +776,12 @@ with the repository or ignored; delete it to start over.
 
 ## Cost guard
 
+A run has three ceilings, each set in the data directory's `lyrik.json` and
+each optional: recorded cost (`run_ceiling_usd`), model time
+(`run_ceiling_model_seconds`) and model calls (`run_ceiling_model_calls`). A
+target's `.lyrik/config.json` sets none of them. The run stops at the first
+one it reaches.
+
 **A ceiling on a run's cost.** `run_ceiling_usd` in the data directory's
 `lyrik.json` is the most a run may spend, in USD of recorded cost. There is no
 ceiling unless the operator sets one. A target's `.lyrik/config.json` does not
@@ -808,6 +814,57 @@ ceiling:
   ceiling  none set: this run has no cost limit (`run_ceiling_usd` in lyrik.json sets one)
 ```
 
+**Ceilings on model time and model calls.** `run_ceiling_model_seconds` is the
+most model time a run may take: the `latency_ms` of its `llm_response` rows,
+summed, so calls that overlap in concurrent walks each count in full.
+`run_ceiling_model_calls` is the most model calls it may make, the preflight
+probe included. Neither depends on a price, so both hold for a model with no
+price entry and for a plan sign-in. They are checked with the cost ceiling,
+every two seconds, and a run stopped at one ends as a run stopped at the cost
+ceiling does. Zero is read as unset.
+
+```json
+{ "run_ceiling_model_seconds": 7200, "run_ceiling_model_calls": 400 }
+```
+
+The banner, the stop and the summary name each one that is set (from the
+tests in `crates/cli/src/commands/lyrik_cost.rs`, not a run):
+
+```
+  time     the run stops at 3600 second(s) of model time (`run_ceiling_model_seconds` in lyrik.json)
+  calls    the run stops at 400 model call(s) (`run_ceiling_model_calls` in lyrik.json)
+wirken lyrik: the run reached its model-call ceiling of 3 (3 model calls recorded); stopping, staged findings are kept
+model-time ceiling 3600 second(s): not reached (75 recorded)
+```
+
+**A run on a plan sign-in.** A pin with `"auth": "plan"` runs on the
+operator's plan at the `openai` provider in place of an API key (see
+[Plan sign-in](credentials.md#plan-sign-in-openai)):
+
+```json
+"phases": { "framing": { "provider": "openai", "auth": "plan", "model": "<slug>" } }
+```
+
+`credential` names the vault entry `wirken credentials authorize` wrote,
+`openai-plan` when absent. The pin takes no `base_url`. The run asks for no
+`openai-api-key`; every walk, replay and fix agent and the probe use the one
+sign-in, and a per-walk entry changes the model only. The `llm_request` and
+`llm_response` rows carry the step, the model and the token counts as on any
+run, with the entry as `credential_id` and null cost fields.
+
+Plan calls record no cost, so `run_ceiling_usd` cannot stop such a run. It
+does not start unless `run_ceiling_model_seconds` or `run_ceiling_model_calls`
+is set, and is refused before the sign-off and before the vault is opened.
+The banner and the summary say that cost is not recorded (from the test
+`a_plan_run_shows_its_ceilings_and_that_cost_is_not_recorded`, not a run):
+
+```
+  ceiling  $20.00 is set but cannot be enforced: the plan sign-in 'openai-plan' records no cost
+  pricing  the plan sign-in 'openai-plan' records no cost: this run's cost is not recorded
+cost: not recorded, the run was on the plan sign-in 'openai-plan': 2 model call(s), 75 second(s) of model time
+cost ceiling $20.00: not applied, cost is not recorded
+```
+
 **A model with no price entry.** Cost comes from the price table
 (`crates/audit/src/pricing.toml`). When the run's model is not in it, no cost
 is recorded and a ceiling cannot hold. The banner says so before the run
@@ -830,8 +887,9 @@ line in the run summary. The estimate is the uncached tokens priced at the
 difference between the model's input and cache-read rates.
 
 Every run ends with its cost, and `findings.json` carries it under `cost`:
-the recorded spend, the number of calls and how many had no price, the ceiling
-and whether it stopped the run, and the cache warning if there was one.
+the recorded spend, the number of calls, how many had no price and the model
+time they took, each ceiling and which one stopped the run, the plan sign-in
+when the run was on one, and the cache warning if there was one.
 
 ## Defender fix step
 
@@ -1598,13 +1656,16 @@ change them:
   `findings_staged`, `truncations`, `kept_at_truncation`, `continuations`,
   `claims_registered`, `registered_as_distinct`, `refused_at_registration`,
   `refused_at_aggregation`, `completed`, `incomplete_at_tool_rounds` for a
-  walk stopped at the tool round limit, and `stopped_at_cost_ceiling`.
+  walk stopped at the tool round limit, and `stopped_at_cost_ceiling` with
+  `ceiling_reached` for a walk stopped at any of the run's ceilings.
 - `carried` on a finding the run carried from the ledger (`from_run`, `record`,
   `evidence`, `commit`), and a top-level `carried` with the `count` and the
   keys; the funnel's `merged.carried` is the same count. See
   [The ledger](#settled-findings-are-carried-into-a-runs-output).
 - `cost`, a top-level object: `spend` (`usd_micros`, `calls`,
-  `unpriced_calls`), `ceiling_usd`, `stopped_at_ceiling`, `priced` and
+  `unpriced_calls`, `model_millis`), `ceiling_usd`, `ceiling_model_seconds`,
+  `ceiling_model_calls`, `stopped_at_ceiling`, `ceiling_reached` (`usd`,
+  `model_seconds`, `model_calls` or null), `priced`, `plan_sign_in` and
   `cache_warning`. See [Cost guard](#cost-guard).
 - `claims_refused`, a top-level array present when a claim was refused at
   registration: `walk`, `file`, `key`, `decision`, `record` and

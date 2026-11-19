@@ -494,3 +494,112 @@ fn a_plan_call_is_never_priced() {
     assert_eq!(attribution.total_cost_usd_micros, None);
     assert_eq!(attribution.input_cost_usd_micros, None);
 }
+
+/// A plan agent working one step of a run, as a Lyrik walk does: its
+/// call is on the chain as an `llm_request` and an `llm_response` that
+/// carry the step, the model and the tokens the route reported, stamped
+/// with the sign-in's entry, and no cost.
+#[tokio::test]
+async fn a_plan_agents_call_rows_carry_step_model_and_tokens_and_no_cost() {
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    let stub = route(|_, _| Reply::sse(TEXT_STREAM)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = CredentialStore::open_with_key(
+        &dir.path().join("vault.db"),
+        VaultSecret::new("0".repeat(64)),
+    )
+    .unwrap();
+    crate::plan_auth::store_plan(&store, "plan", &plan_entry(now() + 3600)).unwrap();
+    let source = PlanTokenSource::open_at(
+        Endpoints::stub(&stub.base),
+        store,
+        dir.path(),
+        "plan",
+        Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+    )
+    .unwrap();
+
+    let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+    let mut agent = crate::runtime::Agent::new(
+        "run".into(),
+        dir.path().join("workspace"),
+        LlmConfig::plan("gpt-test"),
+        None,
+        None,
+        log.clone(),
+        crate::tests::test_permissions(),
+    )
+    .unwrap();
+    agent.set_plan_endpoints_for_test(Endpoints::stub(&stub.base));
+    agent.set_plan_token_source(source);
+    agent.set_call_step("sink-walk");
+    agent
+        .process_message("hi", "msg-1".into())
+        .await
+        .expect("the turn completes");
+
+    let rows: Vec<SessionEvent> = log
+        .get_since(&log.handle_for(SessionId::new("run".to_string())), 0)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.event)
+        .collect();
+    let requests: Vec<_> = rows
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::LlmRequest {
+                provider,
+                model,
+                credential_id,
+                step,
+                ..
+            } => Some((
+                provider.as_str(),
+                model.as_str(),
+                credential_id.as_deref(),
+                step.as_deref(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        [("openai", "gpt-test", Some("plan"), Some("sink-walk"))]
+    );
+    let responses: Vec<_> = rows
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::LlmResponse {
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                input_cost_usd_micros,
+                output_cost_usd_micros,
+                total_cost_usd_micros,
+                credential_id,
+                step,
+                ..
+            } => Some((
+                (*input_tokens, *cache_read_input_tokens, *output_tokens),
+                (
+                    *input_cost_usd_micros,
+                    *output_cost_usd_micros,
+                    *total_cost_usd_micros,
+                ),
+                credential_id.as_deref(),
+                step.as_deref(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        responses,
+        [(
+            (12, 4, 5),
+            (None, None, None),
+            Some("plan"),
+            Some("sink-walk")
+        )]
+    );
+}

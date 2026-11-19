@@ -428,6 +428,9 @@ pub async fn run(
         );
     } else {
         let pin = resolve_phase_pin(&config)?;
+        // Before the operator is asked: a run that would be refused is
+        // not put to them.
+        refuse_unbounded_plan_run(&pin, &super::config().data_dir)?;
         let walks_dir = resolve_walks_dir(&config, &super::config().data_dir)?;
         let walks = parse_walks_config(&config, &walks_dir)
             .context("parse walks config")?
@@ -456,15 +459,17 @@ pub async fn run(
             ),
             sandbox_for_summary.non_default_limits(),
         );
-        // The cost lines: the operator's ceiling for a run, or that
-        // there is none, and a model the price table does not have.
+        // The cost lines: the operator's ceilings for a run, or that
+        // there is none, and a run whose cost is not recorded: a model
+        // the price table does not have, or a plan sign-in.
         let summary = with_cost_lines(
             &summary,
             &super::lyrik_cost::banner_lines(
                 &pin.provider,
                 &pin.model,
-                super::lyrik_walks::load_operator_settings(&super::config().data_dir)?
-                    .run_ceiling_usd(),
+                pin.plan_entry.as_deref(),
+                &super::lyrik_walks::load_operator_settings(&super::config().data_dir)?
+                    .run_bounds(),
             ),
         );
         let shown = summary.clone();
@@ -974,10 +979,11 @@ fn with_cost_lines(summary: &str, lines: &[(String, String)]) -> String {
 
 /// Watch a run's cost while it runs. Every two seconds: after the third
 /// model call, check once whether the conversation is being sent
-/// uncached and say so; and when the recorded cost reaches the
-/// operator's ceiling, say so, set `hit` and end the run agent's
-/// turns. While `hit` is set it keeps ending turns, so work started
-/// after the ceiling does not run on. Ends when `done` is set.
+/// uncached and say so; and when the run reaches one of the operator's
+/// ceilings, say so, set `hit`, record which in `stopped_at` and end
+/// the run agent's turns. While `hit` is set it keeps ending turns, so
+/// work started after the ceiling does not run on. Ends when `done` is
+/// set.
 #[allow(clippy::too_many_arguments)]
 fn start_cost_watch(
     log: Arc<dyn wirken_audit::SessionLog>,
@@ -985,8 +991,9 @@ fn start_cost_watch(
     mark: Option<u64>,
     provider: String,
     model: String,
-    ceiling_usd: Option<f64>,
+    bounds: super::lyrik_cost::Bounds,
     hit: Arc<std::sync::atomic::AtomicBool>,
+    stopped_at: Arc<Mutex<Option<super::lyrik_cost::Reached>>>,
     warning: Arc<Mutex<Option<super::lyrik_cost::CacheWarning>>>,
     done: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
@@ -1011,14 +1018,12 @@ fn start_cost_watch(
                 }
             }
             let spend = super::lyrik_cost::spend(&calls);
-            if super::lyrik_cost::ceiling_reached(&spend, ceiling_usd) {
+            if let Some(reached) = super::lyrik_cost::reached(&spend, &bounds) {
                 if !hit.swap(true, Ordering::AcqRel) {
+                    *stopped_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(reached);
                     eprintln!(
-                        "wirken lyrik: the run reached its cost ceiling of ${:.2} (${:.2} recorded \
-                         over {} model calls); stopping, staged findings are kept",
-                        ceiling_usd.unwrap_or_default(),
-                        spend.usd_micros as f64 / 1e6,
-                        spend.calls
+                        "wirken lyrik: {}",
+                        super::lyrik_cost::reached_line(reached, &spend, &bounds)
                     );
                 }
                 wirken_agent::stop::cancel_turns(&agent_id);
@@ -1423,6 +1428,8 @@ async fn dispatch_via_agent_runtime(
     // tool calls produces a worthless audit, so fail-closed here
     // beats wasting a run.
     let pin = resolve_phase_pin(config)?;
+    // Here too, for a run that was not put to the operator.
+    refuse_unbounded_plan_run(&pin, &super::config().data_dir)?;
     let llm_config = pin_llm_config(&pin);
     // Per-walk model overrides, resolved before the probe so each
     // distinct model is probed. Empty for the one-call slice.
@@ -1433,11 +1440,43 @@ async fn dispatch_via_agent_runtime(
 
     let cfg = super::config();
 
-    // Slot name the api_key was resolved from. Stamped on every
+    // Every stored secret, for the plan token source, the probe's
+    // failure row and the run's agents.
+    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
+        probe_keychain(&cfg.data_dir, || {
+            super::cached_vault_passphrase().unwrap_or_default()
+        })
+    }));
+    super::learn_key_files(&leak_matcher, &cfg.data_dir);
+
+    // Slot name the credential was resolved from. Stamped on every
     // `LlmRequest` / `LlmResponse` for SIEM correlation. `None` for
     // ollama (no vault lookup).
     let mut api_key_credential: Option<String> = None;
-    let api_key = if pin.provider != "ollama" {
+    // A run on a plan sign-in has no API key and asks for none: its
+    // calls take their bearer from the sign-in's entry, one source for
+    // every agent of the run so a rotating token is refreshed once.
+    let plan_source: PlanSource = match &pin.plan_entry {
+        Some(entry) => {
+            let pp = super::cached_vault_passphrase()?;
+            let keychain = probe_keychain(&cfg.data_dir, move || pp);
+            let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                .context("open credential store")?;
+            let source = wirken_agent::plan_auth::PlanTokenSource::open(
+                store,
+                &cfg.data_dir,
+                entry,
+                leak_matcher.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            api_key_credential = Some(entry.clone());
+            Some(source)
+        }
+        None => None,
+    };
+    let api_key = if plan_source.is_some() {
+        None
+    } else if pin.provider != "ollama" {
         let pp = super::cached_vault_passphrase()?;
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
@@ -1485,9 +1524,10 @@ async fn dispatch_via_agent_runtime(
         signoff_on_chain(&*session_log, &run_handle)?
     };
     // The cost guard, for the whole of the run's model work.
-    let run_ceiling_usd =
-        super::lyrik_walks::load_operator_settings(&cfg.data_dir)?.run_ceiling_usd();
+    let run_bounds = super::lyrik_walks::load_operator_settings(&cfg.data_dir)?.run_bounds();
     let ceiling_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ceiling_reached: Arc<Mutex<Option<super::lyrik_cost::Reached>>> =
+        Arc::new(Mutex::new(None));
     let cache_warning: Arc<Mutex<Option<super::lyrik_cost::CacheWarning>>> =
         Arc::new(Mutex::new(None));
     let cost_watch_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1497,20 +1537,12 @@ async fn dispatch_via_agent_runtime(
         chain_mark,
         pin.provider.clone(),
         pin.model.clone(),
-        run_ceiling_usd,
+        run_bounds,
         ceiling_hit.clone(),
+        ceiling_reached.clone(),
         cache_warning.clone(),
         cost_watch_done.clone(),
     );
-    // Every stored secret, for the probe's failure row and the run's
-    // agents.
-    let leak_matcher = Arc::new(super::seed_leak_matcher(&cfg.vault_db_path(), || {
-        probe_keychain(&cfg.data_dir, || {
-            super::cached_vault_passphrase().unwrap_or_default()
-        })
-    }));
-    super::learn_key_files(&leak_matcher, &cfg.data_dir);
-
     // Preflight tool-call probe. Mirrors the dispatch path the real
     // run uses (LlmClient::complete) with one tool defined and a
     // prompt asking the model to call it. Fail-closed: a model that
@@ -1526,6 +1558,7 @@ async fn dispatch_via_agent_runtime(
     match super::lyrik_preflight::probe_tool_calling(
         &llm_config,
         api_key.as_deref(),
+        plan_source.as_ref(),
         Some(&probe_record),
     )
     .await
@@ -1580,6 +1613,7 @@ async fn dispatch_via_agent_runtime(
         match super::lyrik_preflight::probe_tool_calling(
             walk_cfg,
             api_key.as_deref(),
+            plan_source.as_ref(),
             Some(&probe_record),
         )
         .await
@@ -1726,6 +1760,7 @@ async fn dispatch_via_agent_runtime(
         super::load_sandbox_config(&cfg.data_dir)?,
         perms_arc.clone(),
     )?;
+    attach_plan(&mut agent, &plan_source);
 
     // Named before any call is gated: an agent that has not named
     // itself gets no persisted grants. The run's agent id is also its
@@ -1999,6 +2034,7 @@ async fn dispatch_via_agent_runtime(
                 walk_configs.clone(),
                 api_key.clone(),
                 api_key_credential.clone(),
+                plan_source.clone(),
                 session_log.clone(),
                 super::load_sandbox_config(&cfg.data_dir)?,
                 perms_arc.clone(),
@@ -2055,6 +2091,7 @@ async fn dispatch_via_agent_runtime(
                     llm_config.clone(),
                     api_key.clone(),
                     api_key_credential.clone(),
+                    plan_source.clone(),
                     session_log.clone(),
                     super::load_sandbox_config(&cfg.data_dir)?,
                     perms_arc.clone(),
@@ -2236,7 +2273,11 @@ async fn dispatch_via_agent_runtime(
                 entry["incomplete_at_tool_rounds"] = serde_json::json!(tool_rounds);
             }
             if matches!(o.status, WalkStatus::StoppedAtCeiling) {
+                // The key is older than the ceilings that are not on
+                // cost; `ceiling_reached` says which one it was.
                 entry["stopped_at_cost_ceiling"] = serde_json::json!(true);
+                entry["ceiling_reached"] =
+                    serde_json::json!(*ceiling_reached.lock().unwrap_or_else(|e| e.into_inner()));
             }
             entry
         })
@@ -2392,6 +2433,7 @@ async fn dispatch_via_agent_runtime(
             llm_config.clone(),
             api_key.clone(),
             api_key_credential.clone(),
+            plan_source.clone(),
             session_log.clone(),
             super::load_sandbox_config(&cfg.data_dir)?,
             perms_arc.clone(),
@@ -2432,27 +2474,42 @@ async fn dispatch_via_agent_runtime(
         .clone()
         .or_else(|| super::lyrik_cost::cache_check(&pin.provider, &pin.model, &calls));
     let stopped_at_ceiling = ceiling_hit.load(std::sync::atomic::Ordering::Acquire);
+    let stopped_at = *ceiling_reached.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(w) = &warning {
         audit.emit("lyrik.cost.cache_warning", serde_json::to_value(w)?)?;
     }
     if stopped_at_ceiling {
         audit.emit(
             "lyrik.cost.ceiling_reached",
-            serde_json::json!({ "ceiling_usd": run_ceiling_usd, "spend": spend }),
+            serde_json::json!({
+                "ceiling_usd": run_bounds.usd,
+                "ceiling_model_seconds": run_bounds.model_seconds,
+                "ceiling_model_calls": run_bounds.model_calls,
+                "reached": stopped_at,
+                "spend": spend,
+            }),
         )?;
     }
+    // A run on a plan sign-in records no cost, whatever the price
+    // table has for the model at the API.
     let cost = serde_json::json!({
         "spend": spend,
-        "ceiling_usd": run_ceiling_usd,
+        "ceiling_usd": run_bounds.usd,
+        "ceiling_model_seconds": run_bounds.model_seconds,
+        "ceiling_model_calls": run_bounds.model_calls,
         "stopped_at_ceiling": stopped_at_ceiling,
-        "priced": wirken_audit::pricing::is_priced(&pin.provider, &pin.model),
+        "ceiling_reached": stopped_at,
+        "priced": pin.plan_entry.is_none()
+            && wirken_audit::pricing::is_priced(&pin.provider, &pin.model),
+        "plan_sign_in": pin.plan_entry,
         "cache_warning": warning,
     });
     audit.emit("lyrik.cost.summary", cost.clone())?;
     for line in super::lyrik_cost::summary_lines(
         &spend,
-        run_ceiling_usd,
-        stopped_at_ceiling,
+        &run_bounds,
+        stopped_at,
+        pin.plan_entry.as_deref(),
         warning.as_ref(),
     ) {
         println!("{line}");
@@ -3061,6 +3118,7 @@ struct FixAgentCtx {
     llm_config: LlmConfig,
     api_key: Option<String>,
     api_key_credential: Option<String>,
+    plan_source: PlanSource,
     session_log: Arc<dyn wirken_audit::SessionLog>,
     sandbox: wirken_agent::sandbox::SandboxConfig,
     permissions: Arc<Mutex<PermissionStore>>,
@@ -3101,6 +3159,7 @@ fn fix_agent(ctx: &FixAgentCtx, asker: &str) -> std::result::Result<Agent, Strin
         ctx.permissions.clone(),
     )
     .map_err(|e| format!("agent_construct: {e}"))?;
+    attach_plan(&mut agent, &ctx.plan_source);
     agent.set_agent_id(ctx.agent_id.clone());
     agent.set_leak_matcher(ctx.leak_matcher.clone());
     agent.set_max_tool_rounds(ctx.max_rounds);
@@ -3275,6 +3334,7 @@ async fn dispatch_fixes(
     llm_config: LlmConfig,
     api_key: Option<String>,
     api_key_credential: Option<String>,
+    plan_source: PlanSource,
     session_log: Arc<dyn wirken_audit::SessionLog>,
     sandbox: wirken_agent::sandbox::SandboxConfig,
     permissions: Arc<Mutex<PermissionStore>>,
@@ -3384,6 +3444,7 @@ async fn dispatch_fixes(
         llm_config: llm_config.clone(),
         api_key,
         api_key_credential,
+        plan_source,
         session_log: session_log.clone(),
         sandbox,
         permissions,
@@ -4017,6 +4078,7 @@ async fn dispatch_replays(
     llm_config: LlmConfig,
     api_key: Option<String>,
     api_key_credential: Option<String>,
+    plan_source: PlanSource,
     session_log: Arc<dyn wirken_audit::SessionLog>,
     sandbox: wirken_agent::sandbox::SandboxConfig,
     permissions: Arc<Mutex<PermissionStore>>,
@@ -4090,6 +4152,7 @@ async fn dispatch_replays(
         let llm_config_t = llm_config.clone();
         let api_key_t = api_key.clone();
         let api_key_credential_t = api_key_credential.clone();
+        let plan_source_t = plan_source.clone();
         let session_log_t = session_log.clone();
         // A replay runs in the envelope of the walk whose record it
         // replays, with that walk's `replays/` the one directory it
@@ -4126,6 +4189,7 @@ async fn dispatch_replays(
                     return (walk, file, Err(format!("agent_construct: {e}")), Vec::new());
                 }
             };
+            attach_plan(&mut agent, &plan_source_t);
             agent.set_agent_id(agent_id_t);
             agent.set_call_step(REPLAY_STEP);
             agent.set_leak_matcher(leak_t);
@@ -4280,8 +4344,8 @@ pub(super) enum WalkStatus {
         tool_rounds: usize,
         reason: String,
     },
-    /// The run reached its cost ceiling and the walk was ended. What
-    /// it staged is kept.
+    /// The run reached one of its ceilings and the walk was ended.
+    /// What it staged is kept.
     StoppedAtCeiling,
     TransientFailure {
         reason: String,
@@ -4344,7 +4408,14 @@ fn walk_summary_lines(summary: &[serde_json::Value]) -> Vec<String> {
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
             {
-                line.push_str(", stopped at the run's cost ceiling, staged findings kept");
+                let ceiling = match w.get("ceiling_reached").and_then(|v| v.as_str()) {
+                    Some("model_seconds") => "model-time ceiling",
+                    Some("model_calls") => "model-call ceiling",
+                    _ => "cost ceiling",
+                };
+                line.push_str(&format!(
+                    ", stopped at the run's {ceiling}, staged findings kept"
+                ));
             } else if w.get("completed").and_then(serde_json::Value::as_bool) == Some(false) {
                 line.push_str(", did not complete");
             }
@@ -4357,12 +4428,12 @@ fn walk_summary_lines(summary: &[serde_json::Value]) -> Vec<String> {
 struct AgentWalkSession<'a> {
     agent: &'a mut Agent,
     walk_name: &'a str,
-    /// Set when the run reached its cost ceiling.
+    /// Set when the run reached one of its ceilings.
     ceiling_hit: &'a std::sync::atomic::AtomicBool,
 }
 
-/// Why a walk ended when the run reached its cost ceiling.
-const STOPPED_AT_CEILING: &str = "the run reached its cost ceiling";
+/// Why a walk ended when the run reached one of its ceilings.
+const STOPPED_AT_CEILING: &str = "the run reached its ceiling";
 /// The envelope as the sign-off summary states it. The sign-off is
 /// what approves an `exec` inside it, so this is the text signed.
 const ENVELOPE_LINE: &str = "each exec runs in the sandbox with the target read-only, the \
@@ -4463,6 +4534,7 @@ async fn dispatch_walks_concurrent(
     walk_configs: std::collections::HashMap<String, LlmConfig>,
     api_key: Option<String>,
     api_key_credential: Option<String>,
+    plan_source: PlanSource,
     session_log: Arc<dyn wirken_audit::SessionLog>,
     sandbox: wirken_agent::sandbox::SandboxConfig,
     permissions: Arc<Mutex<PermissionStore>>,
@@ -4571,6 +4643,7 @@ async fn dispatch_walks_concurrent(
         let run_id_t = run_id.clone();
         let api_key_t = api_key.clone();
         let api_key_credential_t = api_key_credential.clone();
+        let plan_source_t = plan_source.clone();
         let session_log_t = session_log.clone();
         // The walk's envelope: its `exec` sees the target read-only,
         // its own staging directory read-write and no other walk's,
@@ -4617,6 +4690,7 @@ async fn dispatch_walks_concurrent(
                     );
                 }
             };
+            attach_plan(&mut local_agent, &plan_source_t);
             // Named before any call is gated, like the run agent
             // above: an agent that has not named itself gets no
             // persisted grants.
@@ -6051,6 +6125,20 @@ struct PhasePin {
     /// reply that carries a whole file in one tool call, as the fix
     /// step's patch does, is cut off at the limit.
     max_tokens: Option<u32>,
+    /// The vault entry of the plan sign-in the run is on, when the pin
+    /// says `"auth": "plan"`. Then there is no API key: every model
+    /// call takes its bearer from this entry.
+    plan_entry: Option<String>,
+}
+
+/// The token source of a run on a plan sign-in; `None` on a key.
+type PlanSource = Option<Arc<wirken_agent::plan_auth::PlanTokenSource>>;
+
+/// Put an agent of a run on the run's plan sign-in, when it has one.
+fn attach_plan(agent: &mut Agent, plan_source: &PlanSource) {
+    if let Some(source) = plan_source {
+        agent.set_plan_token_source(source.clone());
+    }
 }
 
 /// Per-walk model override. A walk may pin its own model under
@@ -6059,7 +6147,7 @@ struct PhasePin {
 /// the `model` string (and an optional `max_tokens`) is taken from the
 /// per-walk entry. A per-walk entry that names a different `provider`
 /// is rejected, because changing the provider would need its own
-/// credential. Every selected walk gets an entry: the override where
+/// credential, and so is one whose `auth` is not the run's. Every selected walk gets an entry: the override where
 /// one is set, otherwise the run's `base` config.
 fn walk_llm_configs(
     config: &serde_json::Value,
@@ -6078,6 +6166,15 @@ fn walk_llm_configs(
                     "phases.{w} sets provider `{prov}`, but a per-walk override may change \
                      only the model, not the provider (the run's provider is `{}`)",
                     base.provider
+                );
+            }
+            if let Some(auth) = entry.get("auth").and_then(|v| v.as_str())
+                && auth != base.auth.as_str()
+            {
+                anyhow::bail!(
+                    "phases.{w} sets auth `{auth}`, but a per-walk override may change only \
+                     the model (the run's auth is `{}`)",
+                    base.auth.as_str()
                 );
             }
             if let Some(model) = entry.get("model").and_then(|v| v.as_str()) {
@@ -6100,7 +6197,10 @@ fn walk_llm_configs(
 /// The run pin as the model config every call uses unless a walk has
 /// its own.
 fn pin_llm_config(pin: &PhasePin) -> LlmConfig {
-    let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
+    let mut llm_config = match pin.plan_entry {
+        Some(_) => LlmConfig::plan(&pin.model),
+        None => LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model),
+    };
     if let Some(cw) = pin.context_window {
         llm_config.context_window = cw as usize;
     }
@@ -6149,12 +6249,24 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("phase pin missing `model`"))?
         .to_string();
-    let base_url = pin_obj
-        .get("base_url")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| provider_default_base_url(&provider).map(String::from))
-        .ok_or_else(|| anyhow::anyhow!("phase pin for provider `{provider}` missing `base_url`"))?;
+    // `"auth": "plan"` puts the run on a plan sign-in, as it does an
+    // agent in `provider.json`: one provider, a fixed endpoint, and a
+    // vault entry in place of an API key.
+    let plan_entry = super::plan_sign_in::auth_of(pin_obj, "phase pin")?
+        .is_plan()
+        .then(|| super::plan_sign_in::provider_plan_entry(pin_obj));
+    let base_url = if plan_entry.is_some() {
+        wirken_agent::plan_auth::API_BASE.to_string()
+    } else {
+        pin_obj
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| provider_default_base_url(&provider).map(String::from))
+            .ok_or_else(|| {
+                anyhow::anyhow!("phase pin for provider `{provider}` missing `base_url`")
+            })?
+    };
     let context_window = pin_obj
         .get("context_window")
         .and_then(|v| v.as_u64())
@@ -6170,7 +6282,23 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
         base_url,
         context_window,
         max_tokens,
+        plan_entry,
     })
+}
+
+/// Refuse a run on a plan sign-in that no ceiling would stop.
+fn refuse_unbounded_plan_run(pin: &PhasePin, data_dir: &Path) -> Result<()> {
+    if pin.plan_entry.is_none() {
+        return Ok(());
+    }
+    let bounds = super::lyrik_walks::load_operator_settings(data_dir)?.run_bounds();
+    match super::lyrik_cost::refuse_unbounded_plan_run(
+        &bounds,
+        &super::lyrik_walks::operator_settings_path(data_dir),
+    ) {
+        Some(reason) => anyhow::bail!("{reason}"),
+        None => Ok(()),
+    }
 }
 
 /// Default `base_url` per provider, used when `phases.<phase>.base_url`
@@ -6479,6 +6607,153 @@ mod tests {
         let got = super::walk_llm_configs(&plain, &walks, &base).unwrap();
         assert!(got.values().all(|c| c.model == "model-a"));
         assert_eq!(got.len(), 2);
+    }
+
+    /// `"auth": "plan"` on the run pin puts the run on the plan path:
+    /// the plan config and endpoint, the sign-in's vault entry, and no
+    /// API key. It is the `openai` provider's alone, with no endpoint
+    /// of its own.
+    #[test]
+    fn a_plan_pin_builds_the_plan_config_and_names_its_sign_in() {
+        use wirken_agent::plan_auth;
+        let pin_of = |pin: serde_json::Value| {
+            super::resolve_phase_pin(&serde_json::json!({ "phases": { "framing": pin } }))
+        };
+
+        let pin = pin_of(serde_json::json!({
+            "provider": "openai", "auth": "plan", "model": "gpt-plan", "max_tokens": 9000
+        }))
+        .unwrap();
+        assert_eq!(pin.plan_entry.as_deref(), Some("openai-plan"));
+        assert_eq!(pin.base_url, plan_auth::API_BASE);
+        let config = super::pin_llm_config(&pin);
+        assert!(config.auth.is_plan());
+        assert_eq!(
+            (config.provider.as_str(), config.model.as_str()),
+            ("openai", "gpt-plan")
+        );
+        assert_eq!(config.base_url, plan_auth::API_BASE);
+        assert_eq!(config.max_tokens, 9000);
+
+        let named = pin_of(serde_json::json!({
+            "provider": "openai", "auth": "plan", "credential": "work-plan", "model": "m",
+            "base_url": plan_auth::PLAN_BASE_URL
+        }))
+        .unwrap();
+        assert_eq!(named.plan_entry.as_deref(), Some("work-plan"));
+
+        // A pin without `auth`, or with `key`, is a key pin as before.
+        for auth in [None, Some("key")] {
+            let mut obj = serde_json::json!({ "provider": "openai", "model": "m" });
+            if let Some(a) = auth {
+                obj["auth"] = a.into();
+            }
+            let pin = pin_of(obj).unwrap();
+            assert_eq!(pin.plan_entry, None);
+            assert!(super::pin_llm_config(&pin).auth.is_key());
+        }
+
+        let other = pin_of(serde_json::json!({
+            "provider": "anthropic", "auth": "plan", "model": "m"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            other.contains("phase pin: auth 'plan' applies to provider 'openai' only"),
+            "{other}"
+        );
+        assert!(
+            pin_of(serde_json::json!({
+                "provider": "openai", "auth": "plan", "model": "m",
+                "base_url": "https://elsewhere.example/v1"
+            }))
+            .is_err()
+        );
+        assert!(
+            pin_of(serde_json::json!({ "provider": "openai", "auth": "token", "model": "m" }))
+                .is_err()
+        );
+    }
+
+    /// A per-walk model override on a plan run changes the model and
+    /// nothing else: the walk stays on the plan. An entry that names
+    /// another provider or another auth is refused.
+    #[test]
+    fn per_walk_models_stay_on_the_plan() {
+        let walks = vec!["sink-walk".to_string(), "doc-walk".to_string()];
+        let cfg = |sink: serde_json::Value| {
+            serde_json::json!({ "phases": {
+                "framing": { "provider": "openai", "auth": "plan", "model": "gpt-big" },
+                "sink-walk": sink,
+            }})
+        };
+        let config = cfg(serde_json::json!({ "model": "gpt-small", "max_tokens": 2000 }));
+        let base = super::pin_llm_config(&super::resolve_phase_pin(&config).unwrap());
+        let per_walk = super::walk_llm_configs(&config, &walks, &base).unwrap();
+        let sink = &per_walk["sink-walk"];
+        assert!(sink.auth.is_plan());
+        assert_eq!(
+            (sink.model.as_str(), sink.max_tokens, sink.base_url.as_str()),
+            ("gpt-small", 2000, wirken_agent::plan_auth::API_BASE)
+        );
+        let doc = &per_walk["doc-walk"];
+        assert!(doc.auth.is_plan());
+        assert_eq!(doc.model, "gpt-big");
+        assert_eq!(
+            super::overridden_walk_models(&walks, &per_walk, &base),
+            [
+                ("sink-walk".to_string(), "gpt-small".to_string()),
+                ("doc-walk".to_string(), "gpt-big".to_string()),
+            ]
+        );
+
+        // The same provider and the same auth, restated, are accepted.
+        let restated = cfg(serde_json::json!({
+            "provider": "openai", "auth": "plan", "model": "gpt-small"
+        }));
+        assert!(super::walk_llm_configs(&restated, &walks, &base).is_ok());
+
+        let other_auth = cfg(serde_json::json!({ "auth": "key", "model": "gpt-small" }));
+        let err = super::walk_llm_configs(&other_auth, &walks, &base)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("phases.sink-walk sets auth `key`"), "{err}");
+        let other_provider = cfg(serde_json::json!({ "provider": "anthropic", "model": "m" }));
+        assert!(super::walk_llm_configs(&other_provider, &walks, &base).is_err());
+    }
+
+    /// A plan run starts only when the operator's `lyrik.json` sets a
+    /// ceiling that holds without a price. A key run needs none.
+    #[test]
+    fn a_plan_run_is_refused_until_lyrik_json_sets_a_ceiling_that_holds() {
+        let data = tempfile::tempdir().unwrap();
+        let pin = |auth: &str| {
+            super::resolve_phase_pin(&serde_json::json!({ "phases": { "framing": {
+                "provider": "openai", "auth": auth, "model": "m"
+            }}}))
+            .unwrap()
+        };
+        let settings = data.path().join("lyrik.json");
+
+        let err = super::refuse_unbounded_plan_run(&pin("plan"), data.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`run_ceiling_model_calls`"), "{err}");
+        assert!(err.contains(&settings.display().to_string()), "{err}");
+        assert!(super::refuse_unbounded_plan_run(&pin("key"), data.path()).is_ok());
+
+        std::fs::write(&settings, r#"{ "run_ceiling_usd": 20.0 }"#).unwrap();
+        assert!(super::refuse_unbounded_plan_run(&pin("plan"), data.path()).is_err());
+        std::fs::write(&settings, r#"{ "run_ceiling_model_calls": 0 }"#).unwrap();
+        assert!(super::refuse_unbounded_plan_run(&pin("plan"), data.path()).is_err());
+
+        for held in [
+            r#"{ "run_ceiling_model_seconds": 3600 }"#,
+            r#"{ "run_ceiling_usd": 20.0, "run_ceiling_model_calls": 400 }"#,
+        ] {
+            std::fs::write(&settings, held).unwrap();
+            assert!(super::refuse_unbounded_plan_run(&pin("plan"), data.path()).is_ok());
+        }
     }
 
     #[test]
@@ -7295,6 +7570,7 @@ mod tests {
             base_url: "http://localhost:8080/v1".into(),
             context_window: None,
             max_tokens: None,
+            plan_entry: None,
         };
         let walks = vec!["sink-walk".to_string(), "chain-walk".to_string()];
         let summary = super::signoff_summary(
@@ -7359,6 +7635,7 @@ mod tests {
             base_url: "http://localhost:11434/v1".into(),
             context_window: None,
             max_tokens: None,
+            plan_entry: None,
         };
         let walks = vec!["sink-walk".to_string()];
         let summary = |limits| {
@@ -7449,6 +7726,7 @@ mod tests {
             base_url: "http://localhost:11434/v1".into(),
             context_window: None,
             max_tokens: None,
+            plan_entry: None,
         };
         let walks = vec!["sink-walk".to_string()];
         let summary = super::signoff_summary(
@@ -9003,7 +9281,15 @@ mod tests {
         let summary = "Lyrik 1.0.1 run r1 on /t\n  walks    sink-walk\n  Nothing leaves this host but calls to the model.";
         let with = super::with_cost_lines(
             summary,
-            &super::super::lyrik_cost::banner_lines("openai", "gpt-6.2-astra", Some(20.0)),
+            &super::super::lyrik_cost::banner_lines(
+                "openai",
+                "gpt-6.2-astra",
+                None,
+                &super::super::lyrik_cost::Bounds {
+                    usd: Some(20.0),
+                    ..Default::default()
+                },
+            ),
         );
         let lines: Vec<&str> = with.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -9018,7 +9304,12 @@ mod tests {
 
         let none = super::with_cost_lines(
             summary,
-            &super::super::lyrik_cost::banner_lines("anthropic", "no-such-model", None),
+            &super::super::lyrik_cost::banner_lines(
+                "anthropic",
+                "no-such-model",
+                None,
+                &Default::default(),
+            ),
         );
         let lines: Vec<&str> = none.lines().collect();
         assert!(
@@ -9063,6 +9354,44 @@ mod tests {
                  tool rounds, staged findings kept",
             ]
         );
+    }
+
+    /// A walk ended at a ceiling names the ceiling the run reached. A
+    /// record without `ceiling_reached` is one written when cost was
+    /// the only ceiling.
+    #[test]
+    fn a_walk_stopped_at_a_ceiling_names_the_ceiling() {
+        let walk = |reached: Option<&str>| {
+            let mut w = serde_json::json!({
+                "walk": "sink-walk", "staged": 0, "completed": false,
+                "stopped_at_cost_ceiling": true,
+            });
+            if let Some(r) = reached {
+                w["ceiling_reached"] = r.into();
+            }
+            super::walk_summary_lines(&[w]).remove(0)
+        };
+        for (reached, said) in [
+            (
+                None,
+                "stopped at the run's cost ceiling, staged findings kept",
+            ),
+            (
+                Some("usd"),
+                "stopped at the run's cost ceiling, staged findings kept",
+            ),
+            (
+                Some("model_seconds"),
+                "stopped at the run's model-time ceiling, staged findings kept",
+            ),
+            (
+                Some("model_calls"),
+                "stopped at the run's model-call ceiling, staged findings kept",
+            ),
+        ] {
+            let line = walk(reached);
+            assert!(line.ends_with(said), "{line}");
+        }
     }
 
     /// Every `findings.json` a run can write carries Lyrik's own
