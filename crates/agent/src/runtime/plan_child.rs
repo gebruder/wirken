@@ -500,7 +500,24 @@ impl Stream {
                 foreign.join(", ")
             ));
         }
-        for server in opening.servers.iter().flatten() {
+        // Whether the child reached this run's tool server, and has no
+        // other, is known only from what it lists. A message that does
+        // not say is refused, not passed.
+        let Some(servers) = &opening.servers else {
+            return Some(
+                "the child process's opening message does not list its tool servers \
+                 (`mcp_servers` is missing), so whether it reached Wirken's, and only \
+                 Wirken's, is not known; the run is refused"
+                    .to_string(),
+            );
+        };
+        if !servers.iter().any(|server| server.name == SERVER) {
+            return Some(format!(
+                "the child process's opening message does not list Wirken's tool server \
+                 (`{SERVER}`); the run is refused"
+            ));
+        }
+        for server in servers {
             if server.name != SERVER {
                 return Some(format!(
                     "the child process has a tool server that is not Wirken's ({}); the run is \
@@ -1283,10 +1300,20 @@ impl Agent {
                     }
                 }
                 Some(request) = calls.recv() => {
+                    // The id ties the call to the reply that made it.
+                    // One without it is not given an id of Wirken's
+                    // making: the turn ends, and says why.
+                    let Some(call_id) = request.id else {
+                        return Err(AgentError::Tool(format!(
+                            "the child process called `{}` without the id of the tool use \
+                             that made the call (its `_meta` has no key ending in \
+                             `toolUseId`), so the call cannot be tied to a reply on the chain; \
+                             the turn is ended and the call was not run",
+                            request.name
+                        )));
+                    };
                     let call = ToolCallRequest {
-                        id: request
-                            .id
-                            .unwrap_or_else(|| format!("call-{}", uuid::Uuid::new_v4())),
+                        id: call_id,
                         name: request.name,
                         arguments: request.arguments.to_string(),
                     };
@@ -1549,6 +1576,17 @@ mod tests {
         let mut other_model: Value = serde_json::from_str(&opening(&[])).unwrap();
         other_model["model"] = "another-model".into();
         assert!(opened(&other_model.to_string()).refused.is_some());
+
+        // An opening that does not list its tool servers, or lists
+        // none that is Wirken's, is refused and says which.
+        let mut silent: Value = serde_json::from_str(&opening(&[])).unwrap();
+        silent.as_object_mut().unwrap().remove("mcp_servers");
+        let err = opened(&silent.to_string()).refused.unwrap();
+        assert!(err.contains("`mcp_servers` is missing"), "{err}");
+        let mut none: Value = serde_json::from_str(&opening(&[])).unwrap();
+        none["mcp_servers"] = json!([]);
+        let err = opened(&none.to_string()).refused.unwrap();
+        assert!(err.contains("does not list Wirken's tool server"), "{err}");
 
         // After a refused opening nothing else is read as a turn.
         let mut s = Stream::new(PIN);

@@ -16,6 +16,8 @@ set by the scenario file named in STUB_CHILD_SCENARIO, a JSON object:
   streamless    report steps from messages only, with no stream events
   think         seconds the model takes to answer each call
   no_write_lifetime  leave out the lifetime of each step's cache write
+  no_servers    leave the tool server list out of the opening message
+  no_tool_id    call tools without the id of the tool use
 
 Every start is appended to STUB_CHILD_LOG as one JSON line: the
 arguments, the working directory, the variables it was handed, the
@@ -90,10 +92,13 @@ def main():
     pin = flag("--model")
     model = scenario.get("model", pin)
     prefix = "mcp__%s__" % server_name
-    emit({"type": "system", "subtype": "init",
-          "tools": [prefix + t for t in listed] + scenario.get("tools", []),
-          "mcp_servers": [{"name": server_name, "status": "connected"}],
-          "model": pin, "apiKeySource": scenario.get("key_source", "none")})
+    opening = {"type": "system", "subtype": "init",
+               "tools": [prefix + t for t in listed] + scenario.get("tools", []),
+               "mcp_servers": [{"name": server_name, "status": "connected"}],
+               "model": pin, "apiKeySource": scenario.get("key_source", "none")}
+    if scenario.get("no_servers"):
+        del opening["mcp_servers"]
+    emit(opening)
 
     think = scenario.get("think", 0)
 
@@ -137,8 +142,10 @@ def main():
              {"type": "tool_use", "id": tool_id, "name": prefix + tool,
               "input": arguments}],
             "tool_use", 20 + n,
-            lambda: rpc("tools/call", {"name": tool, "arguments": arguments,
-                                       "_meta": {"stub/toolUseId": tool_id}}))
+            lambda: rpc("tools/call", dict(
+                {"name": tool, "arguments": arguments},
+                **({} if scenario.get("no_tool_id")
+                   else {"_meta": {"stub/toolUseId": tool_id}}))))
         record["answers"].append(answer.get("result", answer))
         emit({"type": "user", "message": {"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": tool_id}]}})

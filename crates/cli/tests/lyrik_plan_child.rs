@@ -839,3 +839,52 @@ fn a_cache_write_is_estimated_at_the_lifetime_the_child_used() {
     );
     assert!(unsaid["reported"].get("cache_write").is_none(), "{unsaid}");
 }
+
+/// What the checks on a child rest on has to be there. An opening
+/// message that does not list its tool servers is refused, not taken
+/// as having none but this run's; a tool call that does not carry the
+/// id of the tool use that made it is not run. Each says which field
+/// was missing.
+#[test]
+fn a_missing_field_fails_the_check_it_feeds_and_says_so() {
+    let silent = run(
+        serde_json::json!({"no_servers": true, "calls": [["list_files", {}]]}),
+        bounded(),
+    );
+    assert!(!silent.ok, "{}", silent.report);
+    assert!(
+        silent.report.contains(
+            "does not list its tool servers (`mcp_servers` is missing), so whether it reached \
+             Wirken's, and only Wirken's, is not known; the run is refused"
+        ),
+        "{}",
+        silent.report
+    );
+    assert_eq!(chain(&silent.data, "llm_response").len(), 0);
+    for row in chain(&silent.data, "child_opened") {
+        assert!(row.get("servers").is_none(), "{row}");
+        assert!(
+            row["refused"]
+                .as_str()
+                .unwrap()
+                .contains("`mcp_servers` is missing"),
+            "{row}"
+        );
+    }
+
+    let unnamed = run(
+        serde_json::json!({"no_tool_id": true, "calls": [["list_files", {}]]}),
+        bounded(),
+    );
+    assert!(!unnamed.ok, "{}", unnamed.report);
+    assert!(
+        unnamed.report.contains(
+            "called `list_files` without the id of the tool use that made the call (its \
+             `_meta` has no key ending in `toolUseId`)"
+        ),
+        "{}",
+        unnamed.report
+    );
+    assert_eq!(chain(&unnamed.data, "assistant_tool_calls").len(), 0);
+    assert_eq!(chain(&unnamed.data, "tool_result").len(), 0);
+}
