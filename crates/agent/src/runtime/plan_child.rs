@@ -965,6 +965,10 @@ impl Agent {
 
         while outcome.is_none() {
             tokio::select! {
+                // What the child has said is read before a tool call it
+                // made is served: a step by another model is seen, and
+                // ends the turn, before that step's call runs.
+                biased;
                 line = lines.next_line() => {
                     let Ok(Some(line)) = line else { break };
                     let reported = stream.line(&line).map_err(AgentError::Tool)?;
