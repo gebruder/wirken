@@ -4145,7 +4145,9 @@ async fn trace_reproduction(
     }
     let harness_dir = format!("{staging}/harness");
     let Some(script) = super::lyrik_trace::traceable_script(command, &harness_dir) else {
-        return untraced("the command is not `python3` and one harness path");
+        return untraced(
+            "the command is not `python3`, with or without `-I`, and one harness path",
+        );
     };
     if sandbox.mode == wirken_agent::sandbox::SandboxMode::Off {
         return untraced("the sandbox is off");

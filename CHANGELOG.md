@@ -59,6 +59,11 @@ tagged.
 
 ### Changed
 
+- The Lyrik tracer follows a reproduction whose command is `python3 -I
+  <harness>`, and traces it with `-I`. It was left untraced, which held the
+  finding at `static_confirmed`
+  ([docs/lyrik-brocards.md](docs/lyrik-brocards.md#execution-evidence)).
+
 - `lyrik.walk.completed` and a fix step agent's record say `turn_ended` where
   they said `success`: the walk's or agent's turn ended with a reply, inside
   the round limit and with no error. The row said `success` for a walk that

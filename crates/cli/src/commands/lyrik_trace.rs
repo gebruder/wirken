@@ -148,27 +148,49 @@ impl Execution {
     }
 }
 
-/// The harness script of a command the tracer can follow: exactly
-/// `python3` and one path to a `.py` file under `harness_dir`, a
-/// directory relative to the target's root. `None` for anything else.
-pub fn traceable_script(command: &str, harness_dir: &str) -> Option<String> {
-    let mut words = command.split_whitespace();
-    let (interpreter, script, rest) = (words.next()?, words.next()?, words.next());
+/// A harness command the tracer can follow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Traceable {
+    /// The harness script, relative to the target's root.
+    pub script: String,
+    /// The command ran the interpreter isolated (`-I`), so the traced
+    /// run does too.
+    pub isolated: bool,
+}
+
+/// The harness script of a command the tracer can follow: `python3`,
+/// optionally `-I`, and one path to a `.py` file under `harness_dir`,
+/// a directory relative to the target's root. `None` for anything
+/// else, any other interpreter flag included.
+pub fn traceable_script(command: &str, harness_dir: &str) -> Option<Traceable> {
+    let mut words = command.split_whitespace().peekable();
+    if words.next()? != "python3" {
+        return None;
+    }
+    let isolated = words.next_if_eq(&"-I").is_some();
+    let (script, rest) = (words.next()?, words.next());
     let plain = !script.contains(['\'', '"', '$', '`', '\\', ';', '&', '|', '<', '>'])
         && Path::new(script)
             .components()
             .all(|c| matches!(c, std::path::Component::Normal(_)));
-    (interpreter == "python3"
-        && rest.is_none()
+    (rest.is_none()
         && plain
         && script.ends_with(".py")
         && Path::new(script).starts_with(harness_dir))
-    .then(|| script.to_string())
+    .then(|| Traceable {
+        script: script.to_string(),
+        isolated,
+    })
 }
 
-/// The command that runs `script` under the tracer.
-pub fn tracer_command(nonce: &str, cited_file: &str, cited_line: u64, script: &str) -> String {
-    format!("python3 -c '{TRACER}' {nonce} '{cited_file}' {cited_line} '{script}'")
+/// The command that runs `script` under the tracer, the interpreter
+/// isolated when the reproduction's own command ran it so.
+pub fn tracer_command(nonce: &str, cited_file: &str, cited_line: u64, run: &Traceable) -> String {
+    format!(
+        "python3 {}-c '{TRACER}' {nonce} '{cited_file}' {cited_line} '{}'",
+        if run.isolated { "-I " } else { "" },
+        run.script
+    )
 }
 
 /// Read the tracer's line out of a traced run's output.
@@ -345,9 +367,30 @@ mod tests {
     fn only_a_plain_python3_harness_command_is_traced() {
         let dir = ".lyrik/state/runs/r1/staging/sink-walk/harness";
         let script = format!("{dir}/h.py");
+        let plain = traceable_script(&format!("python3 {script}"), dir).unwrap();
         assert_eq!(
-            traceable_script(&format!("python3 {script}"), dir),
-            Some(script.clone())
+            plain,
+            Traceable {
+                script: script.clone(),
+                isolated: false
+            }
+        );
+        assert!(tracer_command("n", "a.py", 3, &plain).starts_with("python3 -c '"));
+        // The isolated interpreter is the same harness, and the traced
+        // run is isolated too.
+        let isolated = traceable_script(&format!("python3 -I {script}"), dir).unwrap();
+        assert_eq!(
+            isolated,
+            Traceable {
+                script: script.clone(),
+                isolated: true
+            }
+        );
+        let command = tracer_command("n", "a.py", 3, &isolated);
+        assert!(command.starts_with("python3 -I -c '"), "{command}");
+        assert!(
+            command.ends_with(&format!(" n 'a.py' 3 '{script}'")),
+            "{command}"
         );
         for other in [
             format!("sh {dir}/h.sh"),
@@ -357,6 +400,10 @@ mod tests {
             format!("python3 {dir}/../../chain-walk/harness/h.py"),
             "python3 agent.py".to_string(),
             format!("python3 '{script}'"),
+            format!("python3 -I -I {script}"),
+            format!("python3 -u {script}"),
+            format!("python3 -I {script} --flag"),
+            "python3 -I".to_string(),
         ] {
             assert_eq!(traceable_script(&other, dir), None, "{other}");
         }
