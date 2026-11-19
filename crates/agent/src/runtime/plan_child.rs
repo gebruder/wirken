@@ -81,6 +81,21 @@ const STDERR_TAIL: usize = 2000;
 /// How much of an earlier turn's message a later turn's prompt carries.
 const EARLIER_MESSAGE_CHARS: usize = 4000;
 
+/// The directory the child starts in, under its own. The name is what
+/// the child shows the model as its working directory.
+const CHILD_CWD: &str = "not-the-workspace";
+
+/// What the system prompt handed to a child ends with. The child tells
+/// the model the directory it was started in, which is an empty one of
+/// its own; without this the model takes that for where the files are
+/// and spends calls on it.
+pub const WHERE_THE_FILES_ARE: &str = "## Where the files are\n\n\
+The files you are asked about are in the workspace your tools act on. Give every tool a path \
+relative to the workspace root, such as `src/main.rs`. `exec` runs its command at the workspace \
+root. The directory this process was started in, and any working directory shown to you, is an \
+empty scratch directory outside the workspace: your tools cannot read it and nothing you need \
+is in it. Never use its path.";
+
 fn tool_prefix() -> String {
     format!("mcp__{SERVER}__")
 }
@@ -1038,8 +1053,11 @@ impl Agent {
         let dir = ChildDir::create()?;
         let io = |what: &str, e: std::io::Error| AgentError::Tool(format!("{what}: {e}"));
         let system_prompt_file = dir.0.join("system-prompt.txt");
-        std::fs::write(&system_prompt_file, &system_prompt)
-            .map_err(|e| io("write the child's system prompt", e))?;
+        std::fs::write(
+            &system_prompt_file,
+            format!("{system_prompt}\n\n{WHERE_THE_FILES_ARE}\n"),
+        )
+        .map_err(|e| io("write the child's system prompt", e))?;
         let socket = dir.0.join("tools.sock");
         let listener = tokio::net::UnixListener::bind(&socket)
             .map_err(|e| io("open the tool server's socket", e))?;
@@ -1059,7 +1077,7 @@ impl Agent {
             .to_string(),
         )
         .map_err(|e| io("write the tool server's configuration", e))?;
-        let cwd = dir.0.join("cwd");
+        let cwd = dir.0.join(CHILD_CWD);
         std::fs::create_dir(&cwd).map_err(|e| io("create the child's working directory", e))?;
 
         let (calls_tx, mut calls) = mpsc::channel::<ToolRequest>(16);

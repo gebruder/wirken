@@ -200,6 +200,18 @@ fn a_walk_runs_as_a_child_whose_tool_calls_pass_the_gate() {
         let cwd = Path::new(child["cwd"].as_str().unwrap());
         assert!(!cwd.starts_with(&r.target), "{}", cwd.display());
         assert!(!cwd.join(agent_settings_dir()).exists());
+        // The model is told the child's directory is not where the
+        // files are, by the directory's name and in the system prompt.
+        assert!(cwd.ends_with("not-the-workspace"), "{}", cwd.display());
+        let system_prompt = child["system_prompt"].as_str().unwrap();
+        assert!(
+            system_prompt.contains("is an empty scratch directory outside the workspace"),
+            "{system_prompt}"
+        );
+        assert!(
+            system_prompt.contains("Give every tool a path relative to the workspace root"),
+            "{system_prompt}"
+        );
 
         let env: Vec<&str> = child["env"]
             .as_array()
