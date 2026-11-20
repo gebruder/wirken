@@ -12,9 +12,14 @@ found, reported, proposed, designed.
 
 - 3.4.1: found that Anthropic's Opus 4.5 and Opus 4.7 were priced at $15
   input and $75 output per million tokens where the list price is $5 and $25.
+- 3.4.1: reported that the current Anthropic, OpenAI and Gemini models had
+  no row in the pricing table (#313).
+- 3.4.1: reported that Opus 5.5 reads its cache at 0.05 times input, not
+  0.1 times (#313).
 
 ## Tanmay Maka (@maka-tanmay)
 
+- Unreleased: proposed plan sign-in, which a Lyrik run can now use.
 - 3.0.0: found that a turn hitting a ChatGPT plan's usage limit did not reply
   with the limit notice and the Manage usage link.
 - 2.5.0: designed the light Markdown rendering of `wirken chat` replies
@@ -23,6 +28,9 @@ found, reported, proposed, designed.
 - 2.5.0: designed `wirken sessions verify --with-children` (#302).
 - 2.5.0: found that a message naming a skill that is not loaded got the
   internal-error apology instead of the loaded skills.
+- 2.5.0: found that a `plan_sign_in` kind or a `(plan)` model label pushed
+  the columns of `wirken credentials list` and `wirken agents list` out of
+  line.
 - 2.5.0: found, with the reproduction on a 2.4.0 chain, that
   `wirken sessions verify` reported a `messages_hash` divergence on every
   `wirken ask` after the first.
@@ -46,6 +54,11 @@ found, reported, proposed, designed.
 
 - 1.28.0: reported that approval-button payloads were not checked against a
   length budget.
+
+## Karl M. Davis (@karlmdavis)
+
+- 1.16.0: proposed provenance tracking for untrusted content (#37), which
+  the read-conditioned sandbox egress verdicts are a slice of.
 
 ## Adding a line
 

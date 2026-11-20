@@ -18,7 +18,8 @@ tagged.
   entries change the model only. Its `llm_request` and `llm_response` rows
   carry step, model and tokens with null cost
   (`crates/cli/tests/lyrik_plan_sign_in.rs`;
-  [docs/lyrik.md](docs/lyrik.md#cost-guard)).
+  [docs/lyrik.md](docs/lyrik.md#cost-guard)). Plan sign-in was proposed by
+  Tanmay Maka (@maka-tanmay).
 
 - `estimated_cost_usd_micros` on the `llm_response` row of a plan call whose
   model the pricing table has: what the call's tokens would have cost at API
@@ -360,7 +361,8 @@ carried findings, the per-walk run summary and its `walk_summary`,
 - The pricing table lists the current Anthropic, OpenAI and Gemini models
   (`crates/audit/src/pricing.toml`). A model absent from it recorded no
   cost. Anthropic's 4.5 models are listed under their dated ids as well as
-  their aliases.
+  their aliases. The missing rows were reported by Matthew Busel
+  (@Mattbusel) in #313.
 - A pricing row can carry a price that starts on a date. The Gemini models
   with an announced increase are priced at the new rate from that date.
 - A pricing row can set its cache read rate, and a second tier for a model
@@ -369,7 +371,8 @@ carried findings, the per-walk run summary and its `walk_summary`,
   2.5 Pro and 3.1 Pro pay the higher input and output prices on a call
   whose whole input is over the threshold
   (`a_long_prompt_pays_the_second_tier`, `crates/audit/src/pricing.rs`;
-  [docs/cost-monitoring.md](docs/cost-monitoring.md)).
+  [docs/cost-monitoring.md](docs/cost-monitoring.md)). The Opus 5.5 cache
+  read rate was reported by Matthew Busel (@Mattbusel) in #313.
 
 ### Deferred
 
@@ -1468,7 +1471,8 @@ Revisited when both move to p256/p384 0.14.
   traces the fetch, the verification and the install.
 - `wirken credentials list` and `wirken agents list` size the KIND and MODEL
   columns to their longest value. A `plan_sign_in` kind or a `(plan)` model
-  label used to push the columns after it out of line.
+  label used to push the columns after it out of line. Found by Tanmay Maka
+  (@maka-tanmay).
 - A message to an agent that names a skill which is not loaded now gets the
   loaded skills back as its reply. It used to get the generic internal-error
   apology, and the error was logged as a failure. Found by Tanmay Maka
@@ -3795,7 +3799,8 @@ with an existing `permissions.db`.
   dimension for read tools: workspace files, this channel's memory,
   another channel's memory, and the zirkel corpus. Only the corpus
   leaves egress unrestricted, being content the gateway itself fetched
-  from the public network.
+  from the public network. Provenance tracking for untrusted content
+  was proposed by Karl M. Davis (@karlmdavis) in #37.
 
   A confidentiality axis, not a trust axis. The variants are unordered:
   no lattice, no max-level reduction, and the only question asked of
