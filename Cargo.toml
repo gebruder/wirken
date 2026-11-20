@@ -49,7 +49,7 @@ tokio = { version = "1.52", features = ["full"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 
 # SQLite
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 
 # Zip reading for imported data-export archives. Narrowed deliberately:
 # the default feature set enables aes-crypto, bzip2, deflate64, lzma,
@@ -84,7 +84,7 @@ security-framework = "3.7"
 secret-service = "5.1"
 
 # IPC
-capnp = "0.27"
+capnp = "0.28"
 
 # Sandbox
 bollard = "0.21"
@@ -139,7 +139,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 tempfile = "3"
 
 # Time
-jiff = "0.2"
+jiff = "1.0"
 cron = "0.17"
 
 # Error handling
