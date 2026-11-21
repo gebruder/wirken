@@ -17,6 +17,12 @@
 # turn red with no change to the tree: an advisory published since the
 # last green run fails it against the lockfile already on main.
 #
+# The workspace is also checked for Windows, so a Unix-only API that
+# reaches a Windows build fails here and not in the Windows Smoke
+# workflow after the push. That step needs the x86_64-pc-windows-gnu
+# target and the MinGW C compiler, and fails naming whichever is
+# missing; it is never skipped.
+#
 # Not run here: Fuzz, Miri, MSRV and the Windows-target clippy, which
 # need toolchains this script does not install. CI runs them.
 set -uo pipefail
@@ -59,6 +65,24 @@ same_as_ci() {
 		echo "cargo-deny $have is installed and CI pins $pinned"
 		return 1
 	}
+}
+
+# The workspace compiled for Windows, warnings refused, as the Windows
+# Smoke workflow's "Check workspace" step compiles it. That step runs
+# on a Windows host for the MSVC target; this one cross-checks for the
+# GNU target, which sees the same `cfg(windows)` and `cfg(unix)` code.
+# No --all-targets, as there: test code is not compiled for Windows.
+WINDOWS_TARGET=x86_64-pc-windows-gnu
+windows_check() {
+	rustup target list --installed 2>/dev/null | grep -qxF "$WINDOWS_TARGET" || {
+		echo "the $WINDOWS_TARGET target is not installed: rustup target add $WINDOWS_TARGET"
+		return 1
+	}
+	command -v x86_64-w64-mingw32-gcc >/dev/null || {
+		echo "x86_64-w64-mingw32-gcc is not installed: apt-get install gcc-mingw-w64-x86-64"
+		return 1
+	}
+	RUSTFLAGS="-D warnings" cargo check --workspace --target "$WINDOWS_TARGET"
 }
 
 # Documentation: a Markdown file at the root or under docs/ that no
@@ -121,6 +145,7 @@ else
 	step clippy cargo clippy --workspace --all-targets -- -D warnings
 	step unsafe cargo clippy --workspace --all-targets -- -D clippy::undocumented_unsafe_blocks
 	step test cargo test --workspace
+	step windows windows_check
 fi
 step lints python3 -W error::ResourceWarning scripts/source_lints.py
 step names scripts/check-names.sh

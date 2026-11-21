@@ -8,11 +8,13 @@ MSRV is set by CI's `clippy::incompatible_msrv` lint, not by authorial claim. If
 
 A commit is one logical concern. A push carries the commits of one round of work, and `scripts/gate.sh` runs once per push, on the tip, covering every commit in it. When it fails, the commit at fault is found and fixed and the gate runs again before anything is pushed. After the push every workflow is checked once; nothing waits on a workflow between commits.
 
-`scripts/gate.sh` runs the checks CI runs on a push that a workstation can run: the `cargo deny` check, `cargo fmt --check`, both clippy passes, `cargo test --workspace`, the source lints, the names check, the commit-msg hook tests and the script tests. Every step runs and prints its own exit status and the log it wrote; the gate exits non-zero if any step did.
+`scripts/gate.sh` runs the checks CI runs on a push that a workstation can run: the `cargo deny` check, `cargo fmt --check`, both clippy passes, `cargo test --workspace`, a check of the workspace for Windows, the source lints, the names check, the commit-msg hook tests and the script tests. Every step runs and prints its own exit status and the log it wrote; the gate exits non-zero if any step did.
 
 The `cargo deny` step is the Deny job's command, word for word, and the gate fails if `.github/workflows/ci.yml` no longer runs that command or pins a different cargo-deny from the one installed. It runs first because it is the step that can fail with no change to the tree: an advisory published since the last green run fails it against the lockfile already on main, and it should fail here before it fails in CI.
 
 Where every commit in the push, and the working tree, touches documentation only, the gate skips the `cargo` steps and runs the source lints, the names check, the hook tests and the script tests. Documentation is a Markdown file at the root or under `docs/` that no crate takes in with `include_str!`. Any other file in the range runs every step. The gate's first line says which it ran and why, and its last line how long it took.
+
+The Windows step is `cargo check --workspace --target x86_64-pc-windows-gnu` with warnings refused: what the Windows Smoke workflow's "Check workspace" step compiles on a Windows host, cross-checked here, so a Unix-only API that reaches a Windows build fails before the push. It needs the target (`rustup target add x86_64-pc-windows-gnu`) and the MinGW C compiler (`apt-get install gcc-mingw-w64-x86-64`), and fails naming whichever is missing; it is not skipped.
 
 Fuzz, Miri, MSRV and the Windows-target clippy are not run by the gate. CI runs them.
 
