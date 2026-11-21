@@ -2077,6 +2077,70 @@ read rest"#;
         );
     }
 
+    /// Set to `1` where a test that needs `runsc` must run: CI's gVisor
+    /// job, which installs it. The exec sandbox's tests read the same
+    /// variable.
+    const REQUIRE_RUNSC_ENV: &str = "WIRKEN_TEST_REQUIRE_RUNSC";
+
+    /// A daemon with `runsc` registered and the image pulled, or
+    /// `None` with a `skipping:` line. With [`REQUIRE_RUNSC_ENV`] set
+    /// to `1`, a host that cannot run the test fails it.
+    async fn gvisor_docker() -> Option<Docker> {
+        let missing = match docker().await {
+            None => "Docker is not available or debian:bookworm-slim is not pulled on this host",
+            Some(docker) => match RuntimeFacts::probe(&docker).await {
+                Ok(facts) if facts.runsc => return Some(docker),
+                _ => "runsc is not registered as a Docker runtime on this host",
+            },
+        };
+        assert!(
+            std::env::var(REQUIRE_RUNSC_ENV).as_deref() != Ok("1"),
+            "{REQUIRE_RUNSC_ENV}=1 and {missing}"
+        );
+        eprintln!("skipping: {missing}");
+        None
+    }
+
+    /// Under mode `gvisor` a server's container is started by `runsc`
+    /// and runs on its kernel, not the host's: the kernel log the
+    /// server reads is the one runsc starts with. JSON-RPC still goes
+    /// over the attached stdin and stdout.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
+    #[tokio::test]
+    async fn a_gvisor_server_starts_on_the_runsc_kernel() {
+        let Some(docker) = gvisor_docker().await else {
+            return;
+        };
+        let data = tempfile::tempdir().unwrap();
+        let mut host = host(&docker, data.path());
+        host.runtime = Some("runsc".into());
+        host.facts = RuntimeFacts::probe(&docker).await.ok();
+        let plan = plan(
+            &host,
+            r#"read line; printf '{"jsonrpc":"2.0","id":1,"result":{"kernel":"%s"}}\n' "$(dmesg 2>&1 | head -1 | tr -d '"\\')"; read rest"#,
+        );
+        assert_eq!(plan.runtime.as_deref(), Some("runsc"));
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &HashMap::new(), None)
+            .await
+            .unwrap();
+        let id = transport.container_id().unwrap().to_string();
+
+        let response = transport.request("ping", None).await.unwrap();
+        let kernel = response.result.unwrap()["kernel"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(kernel.contains("Starting gVisor"), "{kernel}");
+
+        let inspected = docker.inspect_container(&id, None).await.unwrap();
+        let host_config = inspected.host_config.unwrap();
+        assert_eq!(host_config.runtime.as_deref(), Some("runsc"));
+        assert_eq!(host_config.network_mode.as_deref(), Some("none"));
+
+        transport.shutdown().await;
+        assert!(!exists(&docker, &id).await, "container outlived shutdown");
+    }
+
     /// A started server leaves nothing in the daemon's log: its
     /// container names the `none` driver, and the runtime has no
     /// output to give for it, while the same output reached the proxy

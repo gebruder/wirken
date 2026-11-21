@@ -157,6 +157,13 @@ jobs:
           grep -q 'a_gvisor_exec_runs_on_the_runsc_kernel \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
           grep -q 'a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
           ! grep -q '^skipping:' "$RUNNER_TEMP/gvisor.log"
+      - name: MCP server container that starts under runsc
+        env:
+          WIRKEN_TEST_REQUIRE_RUNSC: "1"
+        run: |
+          cargo test -p wirken-mcp-proxy gvisor -- --nocapture 2>&1 | tee "$RUNNER_TEMP/gvisor-mcp.log"
+          grep -q 'a_gvisor_server_starts_on_the_runsc_kernel \.\.\. ok' "$RUNNER_TEMP/gvisor-mcp.log"
+          ! grep -q '^skipping:' "$RUNNER_TEMP/gvisor-mcp.log"
 
   corpus:
     name: Hostile corpus
