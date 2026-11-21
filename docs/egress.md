@@ -41,15 +41,29 @@ from `Agent::execute_tool` in `crates/agent/src/runtime.rs`):
 
 - **Method.** `GET`, `HEAD`, `POST` only.
 - **`tools.allow`** must contain `http_request`.
-- **`http.post_paths`** must contain the exact host and path for a POST,
-  query string ignored. Some REST APIs expose search as a POST; this is the
-  only write-shaped verb the tool permits, and only to a pre-declared
-  endpoint.
+- **`http.post_paths`** must contain the exact host, port and path for a
+  POST, query string ignored. Some REST APIs expose search as a POST; this
+  is the only write-shaped verb the tool permits, and only to a pre-declared
+  endpoint. A declared POST path is matched by host, port and path alone, so
+  an endpoint that multiplexes operations in the request body (GraphQL,
+  JSON-RPC, a batch API) is write-capable once declared, whatever the method
+  rule says: declare one only for a credential whose own scopes are
+  read-only.
 - **`credentials.allow`** must contain any vault slot named in the call. The
   model names a slot by string and never supplies a secret value.
 
 A request that clears all four still goes out through `EgressClient`, so the
 host allowset above applies on top.
+
+The port is part of each of these matches, and it is 443 where an entry
+names none. A host in `egress.domains`, an `http.post_paths` entry and a
+credential's `--host` each admit that host on port 443 only. Another port
+needs an entry that names it: `api.example.com:8443` in `egress.domains`,
+`https://api.example.com:8443/search` in `http.post_paths`, `--host
+api.example.com:8443` on the credential. Such an entry admits that port and
+not 443. Under `egress.domains: ["*"]` any host is reached on any port. This
+rule is `http_request`'s; `web_search`, `generate_image` and the Zirkel
+fetch go to fixed endpoints and are matched by host.
 
 A host in `egress.domains` is read-only for `http_request`: GET and HEAD
 reach it, POST reaches only an endpoint listed in `http.post_paths`, and
@@ -109,7 +123,8 @@ wirken credentials grant records-api --host api.records.example.org
 
 The binding is sealed into the credential's encryption
 ([credentials.md](credentials.md#where-a-credential-may-go)). The resolver
-checks the request host against it (exact, case-insensitive) before
+checks the request host and port against it (exact, case-insensitive, port
+443 unless the binding names another) before
 returning the secret, so a
 request to any other host is refused and the secret is never injected,
 whatever the skill's `egress.domains` allows. A credential with no `--host`

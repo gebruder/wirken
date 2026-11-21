@@ -37,7 +37,7 @@ credential somewhere new.
 
 | Destination | Checked where | Allowed by |
 |---|---|---|
-| A host `http_request` sends to | the request's host | `--host api.example.com` |
+| A host `http_request` sends to | the request's host and port: 443, or the port the entry names | `--host api.example.com`, `--host api.example.com:8443` |
 | An MCP server | the server's name and the digest of its signed `mcp.json` entry | `--mcp-server linear` |
 | A model provider | the provider and the origin of its base URL | `--provider openai --base-url https://api.openai.com/v1` |
 | A channel adapter | the adapter id | `--adapter slack` |

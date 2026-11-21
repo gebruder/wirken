@@ -750,12 +750,14 @@ impl LlmClient {
     /// translation; the request shape is already what the enclave
     /// serves on `/v1/chat/completions`.
     ///
-    /// Failure modes that drop the cached client and force re-
-    /// attestation on the next call: `Error::is_attestation()`,
-    /// `Error::CertificateMismatch`, and `Error::Tls(_)`. Other
-    /// failures (network, configuration, API errors) leave the
-    /// cached client intact and surface to the caller for the
-    /// existing retry layers (lyrik, send-loop) to handle.
+    /// One failure drops the cached client and forces re-attestation
+    /// on the next call: a chat request that fails at the connection
+    /// ([`is_pinned_tls_failure`]), which a rotated certificate and an
+    /// unreachable network both produce. A failed verification never
+    /// cached a client. Every other failure (an HTTP error, a response
+    /// that does not parse) leaves the cached client in place and
+    /// surfaces to the caller for the existing retry layers (lyrik,
+    /// send-loop) to handle.
     async fn complete_tinfoil(
         &self,
         messages: &[Message],

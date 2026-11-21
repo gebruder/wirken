@@ -409,6 +409,11 @@ What each control leaves outside it, stated once. Other pages link here.
   `env` are plaintext in its environment. Secrets delivered to a contained
   server through `secrets_in_env` are readable by anyone with the Docker
   socket.
+- A contained server holds its `vault:` values live. Its egress allowlist is
+  by host and a CONNECT tunnel is not inspected, so the server can
+  write a value to any resource on an allowed host. Leak detection on its
+  tool output is exact-match: an encoded or split value passes
+  ([mcp.md](mcp.md#what-containment-does-not-cover)).
 
 ### Skills
 

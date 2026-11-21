@@ -498,7 +498,7 @@ in again. See [credentials.md](credentials.md#plan-sign-in-openai).
 Every verb takes the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` when set
 and prompts only when it is not, so `add` and `rotate` complete with no
 terminal, except `grant` and `revoke`, which take it at a terminal only.
-DESTINATIONS are `--host HOST`, `--mcp-server NAME`, `--provider P --base-url
+DESTINATIONS are `--host HOST` (port 443) or `--host HOST:PORT`, `--mcp-server NAME`, `--provider P --base-url
 URL`, `--adapter ID` and `--plan`; `--host`, `--mcp-server` and `--adapter`
 repeat. See
 [credentials.md](credentials.md#where-a-credential-may-go). Scopes and

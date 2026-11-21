@@ -122,7 +122,7 @@ Two providers run the model inside a hardware TEE. Both are configured through
 `wirken setup` picks **Tinfoil**, stores the key under `tinfoil-api-key`, and
 writes `provider: "tinfoil"`. Dispatch goes through the `tinfoil-rs` SDK,
 pinned in `crates/agent/Cargo.toml`, which constructs its client on the first
-chat call and performs three checks:
+chat call and performs four checks:
 
 1. **Hardware attestation.** AMD SEV-SNP report fetched from the enclave,
    ECDSA P-384 signature verified, VCEK to ASK to ARK chain validated, enclave
@@ -133,14 +133,21 @@ chat call and performs three checks:
    measurement extracted from the signed in-toto statement.
 3. **Measurement comparison.** Enclave measurement against source measurement.
    A mismatch is a hard verification failure.
+4. **TLS binding.** The SDK connects to the enclave and compares the public
+   key of the certificate it is served with the TLS key fingerprint in the
+   attestation document. A mismatch is a hard verification failure.
 
-The SDK then extracts the enclave's TLS public key from the attestation
-document, computes the SPKI fingerprint, and pins a client to that exact
-certificate. All chat traffic flows through it, so a MITM with a compromised
-CA cannot intercept; if the certificate rotates, the next request surfaces a
-connect-level error and wirken re-attests. The verified client is cached for
-the process lifetime and dropped on the attestation-or-TLS failure path, which
-re-attests on the next call.
+The SDK then pins a client to that key fingerprint. All chat traffic flows
+through it, so a MITM with a compromised CA cannot intercept. A failed check
+fails the model call, and nothing is cached.
+
+The verified client is cached for the life of the process and the enclave is
+not attested again while it is. It is dropped in one case: a chat request
+that fails at the connection, before any HTTP exchange, which is what a
+rotated certificate looks like to the pinned client and also what an
+unreachable network looks like. That request fails, and the next one runs all
+four checks again. An HTTP error from the enclave, or a failure after the
+connection is up, leaves the cached client in place.
 
 The enclave attested is one the key may be sent to. The SDK's discovery
 endpoint lists routers; one is attested and used only when the key's vault

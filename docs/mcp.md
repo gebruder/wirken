@@ -178,6 +178,7 @@ The boundaries are stated in [threat-model.md](threat-model.md#mcp-servers) and 
 - **Writable mounts.** Files a server writes there are owned by the operator's uid on the host.
 - **Env-delivered secrets.** A variable in `secrets_in_env` is readable through `docker inspect` by anyone who can reach the Docker socket.
 - **The image.** The signature covers the entry, not the image's contents; a digest-pinned `image` fixes them.
+- **The server's own credentials.** A contained server holds its `vault:` values live, as a file or an environment variable, for as long as it runs. The egress allowlist is by host: the proxy does not see inside a CONNECT tunnel, so the server can write a value to any resource on a host it is allowed, a public one included. Leak detection on tool output matches the exact bytes of a stored secret; a value the server returns encoded, or split across two results, reaches the model. What bounds a server that misuses its credential is the scope of the token it was given, the hosts listed for it, and a digest-pinned image.
 
 ### `"sandbox": "off"`
 
