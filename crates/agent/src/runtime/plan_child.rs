@@ -38,6 +38,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use wirken_audit::{ReportedCall, SessionEvent, TrustLevel};
+use wirken_ipc::{BoxStream, Listener};
 
 use super::{
     Agent, InboundContext, InterceptorOutcome, PermissionDenialContext, ProcessResult,
@@ -54,10 +55,13 @@ use crate::tool::ToolDef;
 pub struct PlanChild {
     /// The operator's installed agent binary.
     pub binary: PathBuf,
-    /// A command that joins its standard input and output to a Unix
-    /// socket: the program, then its arguments. The socket's path is
-    /// appended as the last argument. The child starts it as its one
-    /// tool server.
+    /// A command that joins its standard input and output to the tool
+    /// server's socket: the program, then its arguments. The socket's
+    /// path is appended as the last argument. The child starts it as
+    /// its one tool server. The socket is the workspace's local
+    /// transport, [`wirken_ipc::bind`] and [`wirken_ipc::connect`]: a
+    /// Unix socket at that path, or on Windows the named pipe the path
+    /// maps to.
     pub bridge: Vec<String>,
 }
 
@@ -750,16 +754,34 @@ fn tool_list(defs: &[ToolDef]) -> Value {
     json!({ "tools": tools })
 }
 
+/// Whether the connection comes from the account this process runs
+/// as. A Unix socket is reached only through the child's owner-only
+/// directory. A named pipe has no directory in front of it, so the
+/// client's account is read from the pipe and compared.
+fn from_this_account(stream: &BoxStream) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(
+            (stream.peer_principal(), wirken_ipc::current_principal()),
+            (Ok(peer), Ok(this)) if peer == this
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = stream;
+        true
+    }
+}
+
+/// The half of a connection the answers are written to.
+type Answers = Arc<tokio::sync::Mutex<tokio::io::WriteHalf<BoxStream>>>;
+
 /// Answer one tool server connection: the protocol's opening exchange
 /// and tool list here, each tool call handed to the turn.
-async fn serve_connection(
-    stream: tokio::net::UnixStream,
-    tools: Arc<Value>,
-    calls: mpsc::Sender<ToolRequest>,
-) {
-    let (read, write) = stream.into_split();
-    let write = Arc::new(tokio::sync::Mutex::new(write));
-    let send = |write: Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>, line: String| async move {
+async fn serve_connection(stream: BoxStream, tools: Arc<Value>, calls: mpsc::Sender<ToolRequest>) {
+    let (read, write) = tokio::io::split(stream);
+    let write: Answers = Arc::new(tokio::sync::Mutex::new(write));
+    let send = |write: Answers, line: String| async move {
         let mut w = write.lock().await;
         let _ = w.write_all(line.as_bytes()).await;
         let _ = w.write_all(b"\n").await;
@@ -844,14 +866,31 @@ async fn serve_connection(
     }
 }
 
+/// Accept the tool server's connections until the turn ends, each
+/// answered on a task of its own.
+async fn serve(
+    mut listener: Box<dyn Listener>,
+    tools: Arc<Value>,
+    calls: mpsc::Sender<ToolRequest>,
+) {
+    while let Ok(stream) = listener.accept().await {
+        if from_this_account(&stream) {
+            tokio::spawn(serve_connection(stream, tools.clone(), calls.clone()));
+        }
+    }
+}
+
 /// The child's own directory: where it starts, and where the files and
 /// the socket it is given live. Owner-only, removed when the turn
-/// ends.
+/// ends. On Windows the socket is a named pipe named from its path
+/// here, and the directory holds the files alone.
 struct ChildDir(PathBuf);
 
 impl ChildDir {
     fn create() -> Result<Self, AgentError> {
         let path = std::env::temp_dir().join(format!("wirken-child-{}", uuid::Uuid::new_v4()));
+        // Only the Unix build sets a mode on it.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -1128,8 +1167,8 @@ impl Agent {
         )
         .map_err(|e| io("write the child's system prompt", e))?;
         let socket = dir.0.join("tools.sock");
-        let listener = tokio::net::UnixListener::bind(&socket)
-            .map_err(|e| io("open the tool server's socket", e))?;
+        let listener = wirken_ipc::bind(&socket)
+            .map_err(|e| AgentError::Tool(format!("open the tool server's socket: {e}")))?;
         let Some((bridge, bridge_args)) = child.bridge.split_first() else {
             return Err(AgentError::Tool(
                 "the child route has no bridge command".to_string(),
@@ -1151,11 +1190,7 @@ impl Agent {
 
         let (calls_tx, mut calls) = mpsc::channel::<ToolRequest>(16);
         let tools = Arc::new(tool_list(&tool_defs));
-        let server = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(serve_connection(stream, tools.clone(), calls_tx.clone()));
-            }
-        });
+        let server = tokio::spawn(serve(listener, tools, calls_tx));
         // Ends the server with the turn, however the turn ends.
         struct AbortOnDrop(tokio::task::JoinHandle<()>);
         impl Drop for AbortOnDrop {
@@ -1418,6 +1453,60 @@ mod tests {
     use super::*;
 
     const PIN: &str = "pinned-model-4-5";
+
+    /// The tool server is reached over the workspace's local transport,
+    /// the one that is a named pipe on Windows: a client connected with
+    /// `wirken_ipc::connect` gets the opening exchange and the tool
+    /// list, and a call it makes reaches the turn and is answered with
+    /// what the turn replied. Nothing here names a Unix socket.
+    #[tokio::test]
+    async fn the_tool_server_answers_over_the_workspace_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tools.sock");
+        let listener = wirken_ipc::bind(&socket).unwrap();
+        let tools = Arc::new(json!({"tools": [{"name": "read_file"}]}));
+        let (calls_tx, mut calls) = mpsc::channel::<ToolRequest>(4);
+        let server = tokio::spawn(serve(listener, tools, calls_tx));
+
+        let stream = wirken_ipc::connect(&socket).await.unwrap();
+        let (read, mut write) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read).lines();
+        let mut ask = async |msg: Value| -> Value {
+            write
+                .write_all(format!("{msg}\n").as_bytes())
+                .await
+                .unwrap();
+            write.flush().await.unwrap();
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap()
+        };
+
+        let opened = ask(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"}}))
+        .await;
+        assert_eq!(opened["result"]["serverInfo"]["name"], SERVER);
+        let listed = ask(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
+        assert_eq!(listed["result"]["tools"][0]["name"], "read_file");
+
+        let turn = tokio::spawn(async move {
+            let request = calls.recv().await.unwrap();
+            assert_eq!(request.name, "read_file");
+            assert_eq!(request.id.as_deref(), Some("toolu_1"));
+            assert_eq!(request.arguments["path"], "notes.txt");
+            request
+                .reply
+                .send(("the notes".to_string(), false))
+                .unwrap();
+        });
+        let called = ask(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {"path": "notes.txt"},
+                "_meta": {"stub/toolUseId": "toolu_1"}}}))
+        .await;
+        turn.await.unwrap();
+        assert_eq!(called["id"], 3);
+        assert_eq!(called["result"]["content"][0]["text"], "the notes");
+        assert_eq!(called["result"]["isError"], false);
+        server.abort();
+    }
 
     /// A later turn's prompt carries the conversation's first message
     /// whole, however long, and cuts only the messages after it. A

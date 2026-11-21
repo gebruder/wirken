@@ -6633,40 +6633,56 @@ async fn plan_child_version(child: &wirken_agent::runtime::PlanChild) -> Result<
     Ok(one_line(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
-/// Join standard input and output to the Unix socket at `socket`: what
-/// a child process starts as its tool server, which is the run's own.
-pub fn tool_bridge(socket: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        let stream = std::os::unix::net::UnixStream::connect(socket)
-            .with_context(|| format!("connect to {}", socket.display()))?;
-        let mut to_socket = stream.try_clone().context("clone the socket")?;
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin().lock();
-            let mut buf = [0u8; 8192];
-            while let Ok(n) = stdin.read(&mut buf) {
-                if n == 0 || to_socket.write_all(&buf[..n]).is_err() {
-                    break;
-                }
-            }
-            let _ = to_socket.shutdown(std::net::Shutdown::Both);
-        });
-        let mut from_socket = stream;
-        let mut stdout = std::io::stdout().lock();
+/// Join standard input and output to the tool server's socket at
+/// `socket`: what a child process starts as its tool server, which is
+/// the run's own. The socket is reached through [`wirken_ipc::connect`],
+/// a Unix socket or on Windows the named pipe `socket` maps to. The
+/// bridge ends when either side closes.
+pub async fn tool_bridge(socket: &Path) -> Result<()> {
+    use std::io::Read;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = wirken_ipc::connect(socket)
+        .await
+        .with_context(|| format!("connect to {}", socket.display()))?;
+    let (mut from_socket, mut to_socket) = tokio::io::split(stream);
+
+    // Standard input is read on a thread of its own: a read blocked
+    // there is not waited for when the socket closes first.
+    let (sent, mut typed) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
         let mut buf = [0u8; 8192];
-        while let Ok(n) = from_socket.read(&mut buf) {
-            if n == 0 || stdout.write_all(&buf[..n]).is_err() || stdout.flush().is_err() {
+        while let Ok(n) = stdin.read(&mut buf) {
+            if n == 0 || sent.blocking_send(buf[..n].to_vec()).is_err() {
                 break;
             }
         }
-        Ok(())
+    });
+    let to_the_socket = async {
+        while let Some(bytes) = typed.recv().await {
+            if to_socket.write_all(&bytes).await.is_err() || to_socket.flush().await.is_err() {
+                break;
+            }
+        }
+    };
+    let from_the_socket = async {
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = from_socket.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            let mut stdout = std::io::stdout().lock();
+            if stdout.write_all(&buf[..n]).is_err() || stdout.flush().is_err() {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        () = to_the_socket => {}
+        () = from_the_socket => {}
     }
-    #[cfg(not(unix))]
-    {
-        let _ = socket;
-        anyhow::bail!("the tool bridge needs Unix sockets")
-    }
+    Ok(())
 }
 
 /// Refuse a run on a plan that no ceiling would stop. `config` is the

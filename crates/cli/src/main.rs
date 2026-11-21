@@ -2267,7 +2267,7 @@ async fn main() -> Result<()> {
                 commands::lyrik::report(&format, findings.as_deref(), run.as_deref(), &output).await
             }
             LyrikCommands::Validate { path } => commands::lyrik_validate::run(&path),
-            LyrikCommands::ToolBridge { socket } => commands::lyrik::tool_bridge(&socket),
+            LyrikCommands::ToolBridge { socket } => commands::lyrik::tool_bridge(&socket).await,
         },
     }
 }
