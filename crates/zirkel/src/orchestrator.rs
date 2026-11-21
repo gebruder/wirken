@@ -295,12 +295,7 @@ pub fn keyed_source_hosts(
             .sources
             .iter()
             .filter(|s| s.method == *method)
-            .filter_map(|s| {
-                url::Url::parse(&s.endpoint)
-                    .ok()?
-                    .host_str()
-                    .map(str::to_ascii_lowercase)
-            })
+            .filter_map(|s| wirken_agent::egress::host_name(&url::Url::parse(&s.endpoint).ok()?))
             .collect();
         out.insert((*name).to_string(), hosts);
     }

@@ -341,21 +341,22 @@ impl ValueSource {
 /// Normalize an operator-supplied `--host` into the form
 /// `CredentialMetadata::permits_host` matches against.
 ///
-/// Injection reaches `permits_host` with `Url::host_str`, which is
-/// lowercase ASCII: a binding typed in unicode (`café.example`) has to
-/// be stored punycoded (`xn--caf-dma.example`) or it never matches its
-/// own request host and the credential is silently unusable. Feeding
-/// the operator's input through the same parser the request side uses
+/// Injection reaches `permits_host` with
+/// [`wirken_agent::egress::host_name`]: the request URL's host,
+/// lowercase ASCII, on port 443, or `host:port` for another port. A
+/// binding typed in unicode (`café.example`) has to be stored
+/// punycoded (`xn--caf-dma.example`) or it never matches its own
+/// request host and the credential is silently unusable. Feeding the
+/// operator's input through the same function the request side uses
 /// is what stops the two from drifting apart again.
 ///
-/// Input carrying anything more than a bare host is rejected rather
-/// than rewritten. `Url` is happy to read `https://api.example.com` as
-/// the host `https`, and `api.example.com:8443` as `api.example.com`
-/// with the port discarded; both yield a binding the operator did not
-/// type, and the second is wider than the one they did. A credential
-/// host binding is not a place to guess at intent, so anything
-/// ambiguous is an error the operator can see rather than a silent
-/// rewrite they cannot.
+/// A bare host binds that host on port 443; `host:port` binds another
+/// port, and `host:443` is stored as the bare host. Input carrying
+/// anything more is rejected rather than rewritten. `Url` is happy to
+/// read `https://api.example.com` as the host `https`, which yields a
+/// binding the operator did not type. A credential host binding is not
+/// a place to guess at intent, so anything ambiguous is an error the
+/// operator can see rather than a silent rewrite they cannot.
 pub(crate) fn normalize_host(raw: &str) -> Result<String> {
     if raw.trim().is_empty() {
         return Err(anyhow!("invalid --host: empty"));
@@ -375,12 +376,6 @@ pub(crate) fn normalize_host(raw: &str) -> Result<String> {
 
     // Each of these means the parser took something the operator typed
     // and put it somewhere other than the host.
-    if url.port().is_some() {
-        return Err(anyhow!(
-            "invalid --host '{raw}': a port is not part of the binding; \
-             bindings match the host across every port"
-        ));
-    }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(anyhow!(
             "invalid --host '{raw}': credentials in the host are not accepted; \
@@ -393,9 +388,9 @@ pub(crate) fn normalize_host(raw: &str) -> Result<String> {
         ));
     }
 
-    url.host_str()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("invalid --host '{raw}': no host"))
+    // A bare host is that host on port 443; `host:port` names another
+    // port. Stored as `http_request` asks for it.
+    wirken_agent::egress::host_name(&url).ok_or_else(|| anyhow!("invalid --host '{raw}': no host"))
 }
 
 pub async fn add(
@@ -648,24 +643,40 @@ mod tests {
     fn normalize_host_matches_the_request_side_host() {
         // The invariant the whole normalization exists for: whatever
         // `--host` is stored as has to equal what `http_request` hands
-        // `permits_host`, which is `Url::host_str` on the request URL.
+        // `permits_host`, which is `host_name` of the request URL.
         for (typed, requested) in [
             ("café.example", "https://café.example/v1/things"),
             ("Example.COM", "https://example.com/"),
             ("XN--CAF-DMA.example", "https://xn--caf-dma.example/"),
             ("api.example.com", "https://api.example.com/x?y=1"),
+            ("api.example.com:443", "https://api.example.com/x"),
+            ("API.example.com:8443", "https://api.example.com:8443/x"),
         ] {
-            let request_host = Url::parse(requested)
-                .unwrap()
-                .host_str()
-                .unwrap()
-                .to_string();
+            let request_host =
+                wirken_agent::egress::host_name(&Url::parse(requested).unwrap()).unwrap();
             assert_eq!(
                 normalize_host(typed).unwrap(),
                 request_host,
                 "stored binding for {typed} must match the request host"
             );
         }
+    }
+
+    /// A bare host is port 443 and no other: it does not equal what a
+    /// request to another port of the same host asks for.
+    #[test]
+    fn a_bare_host_binding_is_not_the_host_on_another_port() {
+        let bare = normalize_host("api.example.com").unwrap();
+        let other = Url::parse("https://api.example.com:8443/x").unwrap();
+        assert_eq!(bare, "api.example.com");
+        assert_eq!(
+            wirken_agent::egress::host_name(&other).unwrap(),
+            "api.example.com:8443"
+        );
+        assert_eq!(
+            normalize_host("api.example.com:8443").unwrap(),
+            "api.example.com:8443"
+        );
     }
 
     #[test]
@@ -680,8 +691,6 @@ mod tests {
         // would silently store a binding other than the one typed.
         for raw in [
             "https://api.example.com", // parses to the host `https`
-            "api.example.com:8443",    // port dropped, binding widened
-            "[::1]:8443",
             "example.com/admin",
             "user:pw@example.com",
             "example.com?a=b",

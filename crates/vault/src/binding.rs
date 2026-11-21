@@ -44,7 +44,7 @@ fn version() -> u32 {
 /// One place a credential's value can go.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Destination {
-    /// `http_request` to this host.
+    /// `http_request` to this host on port 443, or to `host:port`.
     Host(String),
     McpServer(McpServerGrant),
     Provider(ProviderGrant),

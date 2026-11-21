@@ -133,6 +133,27 @@ fn host_of(url: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(|s| s.to_string()))
 }
 
+/// The name a URL's destination is matched under where the port is
+/// part of the match: `http.post_paths`, the allow-set as
+/// `http_request` consults it, and a credential's host binding. The
+/// lowercased host for port 443, `host:port` for any other, so a bare
+/// host in a list names that host on 443 and nothing else.
+pub fn host_name(url: &url::Url) -> Option<String> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    // Test-only seam, as `address_permitted` has: unit tests drive the
+    // request path against a loopback listener on a port of its own,
+    // listed and bound as `localhost`. Not compiled into the shipped
+    // binary.
+    #[cfg(test)]
+    if url.scheme() == "http" && host == "localhost" {
+        return Some(host);
+    }
+    Some(match url.port_or_known_default() {
+        Some(443) | None => host,
+        Some(port) => format!("{host}:{port}"),
+    })
+}
+
 fn host_matches(host: &str, pattern: &str) -> bool {
     if pattern == host {
         return true;
@@ -438,8 +459,11 @@ impl EgressClient {
         self.check_egress_declared(url).is_ok()
     }
 
+    /// The check `http_request` makes: [`Self::check_egress`] with the
+    /// port part of the match, and a refusal where no allow-set is
+    /// declared.
     fn check_egress_declared(&self, url: &str) -> Result<(), EgressDenied> {
-        self.check_egress(url)?;
+        self.check_egress_as(url, true)?;
         let unrestricted = self
             .enforcement
             .read()
@@ -455,10 +479,28 @@ impl EgressClient {
     }
 
     fn check_egress(&self, url: &str) -> Result<(), EgressDenied> {
+        self.check_egress_as(url, false)
+    }
+
+    /// The host check. With `port_aware` the allow-set is asked for
+    /// the URL's [`host_name`], so a listed host admits port 443 and
+    /// another port needs a `host:port` entry; without it, for the
+    /// built-in tools that go to fixed endpoints, for the bare host. A
+    /// phase deny names a host and refuses it on every port.
+    fn check_egress_as(&self, url: &str, port_aware: bool) -> Result<(), EgressDenied> {
         let host = host_of(url).ok_or_else(|| EgressDenied {
             host: format!("<unparseable url: {url}>"),
             reason: EgressDenyReason::Profile,
         })?;
+        let name = if port_aware {
+            url::Url::parse(url)
+                .ok()
+                .as_ref()
+                .and_then(host_name)
+                .unwrap_or_else(|| host.clone())
+        } else {
+            host.clone()
+        };
         // Overlay deny first. A phase-installed deny entry
         // short-circuits even when the base enforcement would have
         // allowed the host, and surfaces a `Phase` reason so the
@@ -485,11 +527,11 @@ impl EgressClient {
             host: host.clone(),
             reason: EgressDenyReason::Profile,
         })?;
-        if guard.allows(&host) {
+        if guard.allows(&name) {
             Ok(())
         } else {
             Err(EgressDenied {
-                host,
+                host: name,
                 reason: EgressDenyReason::Profile,
             })
         }
@@ -609,6 +651,62 @@ mod tests {
         assert!(e.allows("foo.example.com"));
         assert!(!e.allows("example.com"));
         assert!(!e.allows("api.other.com"));
+    }
+
+    /// A bare host is that host on 443, `host:port` another port; the
+    /// host is lowercased either way.
+    #[test]
+    fn a_host_name_carries_any_port_but_443() {
+        let name = |url: &str| host_name(&url::Url::parse(url).unwrap()).unwrap();
+        assert_eq!(name("https://API.example.com/x"), "api.example.com");
+        assert_eq!(name("https://api.example.com:443/x"), "api.example.com");
+        assert_eq!(
+            name("https://api.example.com:8443/x"),
+            "api.example.com:8443"
+        );
+        assert_eq!(name("http://api.example.com/x"), "api.example.com:80");
+    }
+
+    /// For `http_request` a listed host admits port 443 only; another
+    /// port needs its own `host:port` entry, which admits that port
+    /// and not 443. The built-in tools' check is by host, as before.
+    #[test]
+    fn http_request_reaches_a_listed_host_on_its_listed_port_only() {
+        let c = EgressClient::new();
+        c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
+            "api.example.com".to_string(),
+            "admin.example.com:8443".to_string(),
+        ])));
+        assert!(c.request_would_pass("https://api.example.com/v1"));
+        assert!(c.request_would_pass("https://api.example.com:443/v1"));
+        let denied = c
+            .check_egress_declared("https://api.example.com:8443/v1")
+            .unwrap_err();
+        assert_eq!(denied.host, "api.example.com:8443");
+        assert_eq!(denied.reason, EgressDenyReason::Profile);
+
+        assert!(c.request_would_pass("https://admin.example.com:8443/v1"));
+        assert!(!c.request_would_pass("https://admin.example.com/v1"));
+        assert!(!c.request_would_pass("https://admin.example.com:9443/v1"));
+
+        assert!(c.check_egress("https://api.example.com:8443/v1").is_ok());
+    }
+
+    /// A phase deny names a host and refuses it on every port.
+    #[test]
+    fn a_phase_deny_refuses_a_host_on_every_port() {
+        let c = EgressClient::new();
+        c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
+            "admin.example.com:8443".to_string(),
+        ])));
+        c.set_phase_overlay_deny(PhaseEgressDeny {
+            phase_name: "review".into(),
+            hosts: BTreeSet::from(["admin.example.com".to_string()]),
+        });
+        let denied = c
+            .check_egress_declared("https://admin.example.com:8443/v1")
+            .unwrap_err();
+        assert!(matches!(denied.reason, EgressDenyReason::Phase { .. }));
     }
 
     #[tokio::test]

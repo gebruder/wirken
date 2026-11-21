@@ -393,6 +393,40 @@ async fn model_supplied_authorization_is_refused_not_silently_won() {
 
 // ---- 9. POST carve-out ---------------------------------------------------
 
+/// The port is part of a declared POST endpoint: 443 where the entry
+/// names none, and an entry naming another port admits that port only.
+#[test]
+fn a_declared_post_path_is_matched_with_its_port() {
+    let post = |url: &str| serde_json::json!({"method": "POST", "url": url, "body": "{}"});
+    let refused = |perms: &PhasedEffective, url: &str| {
+        http_tool::gate(perms, &post(url).to_string()).map(|r| r.axis)
+    };
+
+    let default_port = perms_with_post_path("https://api.example.com/search");
+    assert_eq!(
+        refused(&default_port, "https://api.example.com/search"),
+        None
+    );
+    assert_eq!(
+        refused(&default_port, "https://API.example.com:443/search?q=1"),
+        None
+    );
+    assert_eq!(
+        refused(&default_port, "https://api.example.com:8443/search"),
+        Some("http_post_path")
+    );
+
+    let other_port = perms_with_post_path("https://api.example.com:8443/search");
+    assert_eq!(
+        refused(&other_port, "https://api.example.com:8443/search"),
+        None
+    );
+    assert_eq!(
+        refused(&other_port, "https://api.example.com/search"),
+        Some("http_post_path")
+    );
+}
+
 #[tokio::test]
 async fn post_only_to_declared_search_path() {
     let (base, _rx) = serve_once(build_response("200 OK", &[], "results")).await;

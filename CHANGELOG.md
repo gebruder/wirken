@@ -60,6 +60,16 @@ tagged.
 
 ### Changed
 
+- For `http_request` the port is part of every destination match. A host in
+  `egress.domains`, an `http.post_paths` entry and a credential's `--host`
+  each name port 443; another port is reached, posted to or handed a
+  credential only where an entry names it as `host:port`
+  (`wirken credentials grant NAME --host api.example.com:8443`). A listed
+  host on another port was matched before. A skill or credential that relies
+  on a non-443 port needs the port added to its entry
+  (`http_request_reaches_a_listed_host_on_its_listed_port_only`,
+  `crates/agent/src/egress.rs`; [docs/egress.md](docs/egress.md#the-http_request-gate)).
+
 - A Tinfoil key is sent only to an origin its vault entry allows. A router
   the SDK's discovery lists is attested and used only when the key is granted
   to it (`wirken credentials grant tinfoil-api-key --provider tinfoil

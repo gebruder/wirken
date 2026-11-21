@@ -194,7 +194,10 @@ pub async fn execute(
                     .into(),
             )
         })?;
-        match r.resolve(name, url.host_str().unwrap_or_default()) {
+        // The binding is asked for the host on the port the request
+        // goes to: a bound host is that host on 443.
+        let destination = crate::egress::host_name(&url).unwrap_or_default();
+        match r.resolve(name, &destination) {
             Ok(secret) => {
                 builder = builder.header(
                     reqwest::header::AUTHORIZATION,

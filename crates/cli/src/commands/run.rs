@@ -8462,6 +8462,52 @@ mod resolver_tests {
             Some("api-token")
         );
     }
+
+    /// A credential bound to a host is bound to it on port 443. A
+    /// request to another port of that host asks for `host:port`,
+    /// which the binding does not name, and gets no secret.
+    #[test]
+    fn a_credential_bound_to_a_host_is_refused_on_another_port() {
+        use wirken_agent::http_tool::CredentialError;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &tmp.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        store
+            .store_with_hosts(
+                "api-token",
+                "",
+                &VaultSecret::new("api-token-value-01".into()),
+                None,
+                None,
+                &[
+                    "api.example.com".to_string(),
+                    "admin.example.com:8443".to_string(),
+                ],
+            )
+            .unwrap();
+        let resolver = VaultCredentialResolver {
+            store: std::sync::Mutex::new(store),
+            leak: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+        };
+        let asked = |url: &str| {
+            let name = wirken_agent::egress::host_name(&url::Url::parse(url).unwrap()).unwrap();
+            resolver.resolve("api-token", &name).map(|_| ())
+        };
+        assert!(asked("https://api.example.com/v1").is_ok());
+        assert!(matches!(
+            asked("https://api.example.com:8443/v1"),
+            Err(CredentialError::HostNotPermitted { .. })
+        ));
+        assert!(asked("https://admin.example.com:8443/v1").is_ok());
+        assert!(matches!(
+            asked("https://admin.example.com/v1"),
+            Err(CredentialError::HostNotPermitted { .. })
+        ));
+    }
 }
 
 #[cfg(test)]

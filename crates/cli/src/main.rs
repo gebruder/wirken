@@ -1084,7 +1084,7 @@ enum CredentialCommands {
         /// stripped. Mutually exclusive with --stdin.
         #[arg(long, conflicts_with = "stdin")]
         value_file: Option<std::path::PathBuf>,
-        /// Host `http_request` may send it to (repeatable)
+        /// Host `http_request` may send it to: `host` for port 443, or `host:port` (repeatable)
         #[arg(long = "host")]
         host: Vec<String>,
         /// MCP server it may be handed to, pinned to the server's signed
@@ -1179,7 +1179,7 @@ enum CredentialCommands {
     Grant {
         /// Credential name
         name: String,
-        /// Host `http_request` may send it to (repeatable)
+        /// Host `http_request` may send it to: `host` for port 443, or `host:port` (repeatable)
         #[arg(long = "host")]
         host: Vec<String>,
         /// MCP server it may be handed to, pinned to the server's signed
@@ -1204,7 +1204,7 @@ enum CredentialCommands {
     Revoke {
         /// Credential name
         name: String,
-        /// Host `http_request` may send it to (repeatable)
+        /// Host `http_request` may send it to: `host` for port 443, or `host:port` (repeatable)
         #[arg(long = "host")]
         host: Vec<String>,
         /// MCP server it may be handed to, pinned to the server's signed

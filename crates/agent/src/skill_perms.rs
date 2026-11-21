@@ -132,16 +132,16 @@ pub struct CredentialsPolicy {
 
 /// Resolved `http_request` HTTP policy. `post_paths` is the set of
 /// absolute `https://` endpoints POST may target, stored as declared
-/// and matched host+path (query ignored) at the gate.
+/// and matched host, port and path (query ignored) at the gate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HttpPolicy {
     pub post_paths: BTreeSet<String>,
 }
 
 impl HttpPolicy {
-    /// True if `url`'s host+path (query and fragment ignored) matches a
-    /// declared POST endpoint. Case-folds the host; the path compares
-    /// byte-exact.
+    /// True if `url`'s host, port and path (query and fragment ignored)
+    /// match a declared POST endpoint. Case-folds the host; the port is
+    /// 443 where the URL names none; the path compares byte-exact.
     pub fn allows_post(&self, url: &url::Url) -> bool {
         let Some(target) = normalize_host_path(url) else {
             return false;
@@ -156,12 +156,14 @@ impl HttpPolicy {
     }
 }
 
-/// `scheme://host/path` with the host lowercased and query/fragment
-/// dropped, or `None` if the URL has no host. Scheme is retained so a
-/// declared `https://` entry never matches an `http://` request.
+/// `scheme://host:port/path` with the host lowercased, the port the
+/// URL's own or its scheme's default, and query/fragment dropped, or
+/// `None` if the URL has no host. Scheme is retained so a declared
+/// `https://` entry never matches an `http://` request.
 fn normalize_host_path(url: &url::Url) -> Option<String> {
     let host = url.host_str()?.to_ascii_lowercase();
-    Some(format!("{}://{}{}", url.scheme(), host, url.path()))
+    let port = url.port_or_known_default()?;
+    Some(format!("{}://{host}:{port}{}", url.scheme(), url.path()))
 }
 
 /// On-disk YAML shape under the `permissions:` key.
