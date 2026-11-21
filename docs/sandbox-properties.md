@@ -152,6 +152,7 @@ belongs to the egress sidecar container, not to the exec sandbox:
 | `cap_add` | `[]` | `lib.rs:165` - no capabilities re-added. |
 | `security_opt` | `no-new-privileges:true` | `lib.rs:166-169` - `setuid`/`setgid` binaries cannot elevate. |
 | `readonly_rootfs` | `true` | `lib.rs:170` - container `/` is read-only. |
+| `log_config` | `none` | `no_daemon_log`, `crates/sandbox/src/lib.rs` - the runtime keeps no log of the container's stdout or stderr; the output is read over an attach made before the start. The egress sidecar is created the same way. |
 | `tmpfs` | `/tmp` mounted at 64MB, mode `1777` | `lib.rs:149-150, 171` - the only writable filesystem outside `/workspace`. |
 | `network_mode` | `none` (configurable) | `sandbox.rs:888-893, 903` - default is `--network none`, loopback only; outbound DNS/HTTP fail. A channel configured for sandbox egress joins a policed internal network instead; see below. |
 | `dns` | unset, or `127.0.0.1` on the egress path | `sandbox.rs:896-899, 904` - pinned to an address with no resolver behind it when an egress network is in use, so names are resolved by the proxy rather than in the container. |

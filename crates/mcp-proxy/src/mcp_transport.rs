@@ -184,12 +184,12 @@ impl StdioTransport {
         use bollard::container::LogOutput;
         use bollard::query_parameters::{AttachContainerOptions, CreateContainerOptions};
 
-        let mut handle = ContainerHandle {
-            docker: docker.clone(),
-            id: String::new(),
-            secrets_dir: plan.secrets_dir.clone(),
+        let mut handle = ContainerHandle::new(
+            docker.clone(),
+            String::new(),
+            plan.secrets_dir.clone(),
             route,
-        };
+        );
         let prepared = (|| {
             if let Some(dir) = &plan.scratch_dir {
                 create_private_dir(dir)
@@ -234,6 +234,7 @@ impl StdioTransport {
                     stream: true,
                     stdin: true,
                     stdout: true,
+                    stderr: true,
                     ..Default::default()
                 }),
             )
@@ -253,15 +254,34 @@ impl StdioTransport {
             )));
         }
 
-        // Only stdout carries JSON-RPC. Stderr is not attached.
-        let stdout = attached.output.filter_map(|item| async move {
-            match item {
-                Ok(LogOutput::StdOut { message }) | Ok(LogOutput::Console { message }) => {
-                    Some(Ok(message))
+        // Only stdout carries JSON-RPC. Stderr is kept as a tail for
+        // the operator log, since the daemon keeps no log of this
+        // container. One task reads the attach for the container's
+        // whole life, so a server writing to stderr never waits on a
+        // request being in flight.
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let tail = handle.stderr.clone();
+        let mut output = attached.output;
+        handle.reader = Some(tokio::spawn(async move {
+            while let Some(item) = output.next().await {
+                let forwarded = match item {
+                    Ok(LogOutput::StdOut { message }) | Ok(LogOutput::Console { message }) => {
+                        tx.send(Ok(message)).await
+                    }
+                    Ok(LogOutput::StdErr { message }) => {
+                        tail.push(&message);
+                        Ok(())
+                    }
+                    Ok(_) => Ok(()),
+                    Err(e) => tx.send(Err(std::io::Error::other(e))).await,
+                };
+                if forwarded.is_err() {
+                    break;
                 }
-                Ok(_) => None,
-                Err(e) => Some(Err(std::io::Error::other(e))),
             }
+        }));
+        let stdout = futures_util::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
         });
         Ok(Self {
             process: StdioProcess::Container(handle),
@@ -386,7 +406,7 @@ impl StdioTransport {
     /// The last lines a contained server wrote to stderr; `None` for a
     /// host child, whose stderr goes where the proxy's does.
     pub async fn stderr_tail(&mut self) -> Option<String> {
-        match &self.process {
+        match &mut self.process {
             StdioProcess::Host(_) => None,
             StdioProcess::Container(handle) => handle.stderr_tail().await,
         }

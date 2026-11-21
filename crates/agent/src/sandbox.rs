@@ -16,7 +16,7 @@ use bollard::container::LogOutput;
 use bollard::models::ContainerCreateBody;
 use bollard::models::HostConfig;
 use bollard::query_parameters::{
-    CreateContainerOptions, ListContainersOptions, ListNetworksOptions, LogsOptions,
+    AttachContainerOptions, CreateContainerOptions, ListContainersOptions, ListNetworksOptions,
     RemoveContainerOptions, WaitContainerOptions,
 };
 use futures_util::StreamExt;
@@ -221,6 +221,28 @@ fn find_executable(name: &str) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// How long an exited container's attach is given to deliver the rest
+/// of its output and close.
+const OUTPUT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A task aborted when this is dropped, unless [`Self::finish`] took
+/// its result first.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> AbortOnDrop<T> {
+    /// The task's result, or `None` when it does not end within
+    /// `within` or did not run to its end.
+    async fn finish(mut self, within: std::time::Duration) -> Option<T> {
+        tokio::time::timeout(within, &mut self.0).await.ok()?.ok()
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// What an `exec` may touch of the workspace, for a caller that
@@ -734,6 +756,44 @@ impl DockerSandbox {
             limits: self.config.non_default_limits(),
         };
 
+        // Attached before the start, so nothing the command prints is
+        // missed. The daemon keeps no log of this container
+        // (`wirken_sandbox::no_daemon_log`); the attach is the only
+        // place its output goes.
+        let attached = self
+            .client
+            .attach_container(
+                &container.id,
+                Some(AttachContainerOptions {
+                    stream: true,
+                    stdout: true,
+                    stderr: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| AgentError::Sandbox(format!("attach to container: {e}")))?;
+        let mut output = attached.output;
+        let reader = tokio::spawn(async move {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            while let Some(chunk) = output.next().await {
+                match chunk {
+                    Ok(LogOutput::StdOut { message }) => {
+                        stdout.push_str(&String::from_utf8_lossy(&message));
+                    }
+                    Ok(LogOutput::StdErr { message }) => {
+                        stderr.push_str(&String::from_utf8_lossy(&message));
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            (stdout, stderr)
+        });
+        // Ends the attach on every path that does not read it out.
+        let reader = AbortOnDrop(reader);
+
         self.client
             .start_container(&container.id, None)
             .await
@@ -779,30 +839,12 @@ impl DockerSandbox {
             }
         };
 
-        // Collect logs
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-
-        let mut log_stream = self.client.logs(
-            &container.id,
-            Some(LogsOptions {
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
-        );
-
-        while let Some(log) = log_stream.next().await {
-            match log {
-                Ok(LogOutput::StdOut { message }) => {
-                    stdout.push_str(&String::from_utf8_lossy(&message));
-                }
-                Ok(LogOutput::StdErr { message }) => {
-                    stderr.push_str(&String::from_utf8_lossy(&message));
-                }
-                _ => {}
-            }
-        }
+        // The attach closes when the container has exited and its
+        // output has been sent. An attach that does not close is an
+        // error: the command ran and what it printed cannot be told.
+        let (stdout, stderr) = reader.finish(OUTPUT_DRAIN_TIMEOUT).await.ok_or_else(|| {
+            AgentError::Sandbox("read container output: attach did not end".into())
+        })?;
 
         Ok(ToolResult {
             output: exec_output(&stdout, &stderr),

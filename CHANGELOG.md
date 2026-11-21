@@ -60,6 +60,13 @@ tagged.
 
 ### Changed
 
+- `exec` containers, MCP server containers and egress sidecars run with the
+  `none` log driver, so the container runtime keeps no copy of their stdout
+  or stderr. Their output is read over an attach made before the start; an
+  MCP server's stderr tail in the gateway log comes from there
+  (`a_started_server_has_no_daemon_side_log`,
+  `crates/mcp-proxy/src/container.rs`; [docs/mcp.md](docs/mcp.md#restarts)).
+
 - A Lyrik finding merged from several walks takes the strongest evidence any
   of them earned. Its reproductions are looked up under each member's own
   `stable_id` (`merged_from`), and `evidence_source` names the walk and the

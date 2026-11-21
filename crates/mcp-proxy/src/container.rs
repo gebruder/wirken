@@ -840,6 +840,38 @@ pub async fn start_route(
     Err("the egress broker needs a Unix socket, which this host does not have".into())
 }
 
+/// The end of what a server wrote to stderr, kept in memory by the
+/// task reading its attach: the daemon keeps no log to read it from.
+#[derive(Clone, Default)]
+pub struct StderrTail(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl StderrTail {
+    /// The most kept: enough for [`STDERR_TAIL_LINES`] lines of
+    /// [`STDERR_TAIL_BYTES`] between them, with room for the newlines.
+    const KEEP: usize = 2 * STDERR_TAIL_BYTES;
+
+    /// Add `chunk`, dropping the oldest bytes past [`Self::KEEP`].
+    pub fn push(&self, chunk: &[u8]) {
+        let mut kept = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        kept.extend_from_slice(chunk);
+        let over = kept.len().saturating_sub(Self::KEEP);
+        kept.drain(..over);
+    }
+
+    /// The last [`STDERR_TAIL_LINES`] lines, as [`printable_tail`]
+    /// gives them.
+    fn read(&self) -> Option<String> {
+        let kept = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let text = String::from_utf8_lossy(&kept);
+        let text = text.trim_end();
+        let start = text
+            .rmatch_indices('\n')
+            .nth(STDERR_TAIL_LINES - 1)
+            .map_or(0, |(at, _)| at + 1);
+        printable_tail(&text.as_bytes()[start..])
+    }
+}
+
 /// A running server container.
 pub struct ContainerHandle {
     pub docker: Docker,
@@ -848,29 +880,43 @@ pub struct ContainerHandle {
     pub secrets_dir: Option<PathBuf>,
     /// Its route out, torn down after it.
     pub route: Option<ServerRoute>,
+    /// What it wrote to stderr, as far as the attach has delivered it.
+    pub stderr: StderrTail,
+    /// The task reading its attach, ended with it.
+    pub reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ContainerHandle {
-    /// The last lines the server wrote to stderr, for the operator log
-    /// when it failed or exited. Read before the container is removed,
-    /// since the runtime keeps them only until then. `None` when it
-    /// wrote nothing or the runtime could not be asked.
-    pub async fn stderr_tail(&self) -> Option<String> {
-        use futures_util::StreamExt;
-        let mut logs = self.docker.logs(
-            &self.id,
-            Some(bollard::query_parameters::LogsOptions {
-                stdout: false,
-                stderr: true,
-                tail: STDERR_TAIL_LINES.to_string(),
-                ..Default::default()
-            }),
-        );
-        let mut raw = Vec::new();
-        while let Some(Ok(chunk)) = logs.next().await {
-            raw.extend_from_slice(&chunk.into_bytes());
+    /// A handle on container `id`, or on one not created yet when `id`
+    /// is empty.
+    pub fn new(
+        docker: Docker,
+        id: String,
+        secrets_dir: Option<PathBuf>,
+        route: Option<ServerRoute>,
+    ) -> Self {
+        Self {
+            docker,
+            id,
+            secrets_dir,
+            route,
+            stderr: StderrTail::default(),
+            reader: None,
         }
-        printable_tail(&raw)
+    }
+
+    /// The last lines the server wrote to stderr, for the operator log
+    /// when it failed or exited. A server that exited has closed its
+    /// attach, and the task reading it is waited for so the last of
+    /// its output is in; one still running is given a moment. `None`
+    /// when it wrote nothing.
+    pub async fn stderr_tail(&mut self) -> Option<String> {
+        if let Some(reader) = self.reader.as_mut()
+            && !reader.is_finished()
+        {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), reader).await;
+        }
+        self.stderr.read()
     }
 
     /// Stop the container, giving the server two seconds, and remove it.
@@ -923,6 +969,19 @@ impl ContainerHandle {
         if let Some(route) = self.route.take() {
             route.teardown(&self.docker).await;
         }
+        if let Some(reader) = self.reader.take() {
+            reader.abort();
+        }
+    }
+}
+
+/// A handle dropped without [`ContainerHandle::remove`] still ends its
+/// attach, which closes the server's stdin.
+impl Drop for ContainerHandle {
+    fn drop(&mut self) {
+        if let Some(reader) = &self.reader {
+            reader.abort();
+        }
     }
 }
 
@@ -960,14 +1019,9 @@ pub async fn sweep(docker: &Docker, host: &SandboxHost) -> usize {
     };
     let mut removed = 0;
     for id in containers.into_iter().filter_map(|c| c.id) {
-        ContainerHandle {
-            docker: docker.clone(),
-            id,
-            secrets_dir: None,
-            route: None,
-        }
-        .remove()
-        .await;
+        ContainerHandle::new(docker.clone(), id, None, None)
+            .remove()
+            .await;
         removed += 1;
     }
     // Networks after containers: one with a container still attached
@@ -1076,6 +1130,10 @@ mod tests {
         assert_eq!(host_config.runtime.as_deref(), Some("runsc"));
         assert_eq!(host_config.cap_drop, Some(vec!["ALL".to_string()]));
         assert_eq!(host_config.readonly_rootfs, Some(true));
+        assert_eq!(
+            host_config.log_config,
+            Some(wirken_sandbox::no_daemon_log())
+        );
         // The exec seccomp profile is named, so a server is refused a
         // namespace or a mount by it and not by the daemon's default.
         assert_eq!(
@@ -1600,6 +1658,27 @@ mod tests {
     }
 
     #[test]
+    fn a_stderr_tail_keeps_the_last_lines_within_its_bound() {
+        let tail = StderrTail::default();
+        assert_eq!(tail.read(), None);
+        for n in 0..50 {
+            tail.push(format!("line {n}\n").as_bytes());
+        }
+        let read = tail.read().unwrap();
+        let lines: Vec<&str> = read.lines().collect();
+        assert_eq!(lines.len(), STDERR_TAIL_LINES);
+        assert_eq!(lines.first(), Some(&"line 30"));
+        assert_eq!(lines.last(), Some(&"line 49"));
+
+        // Whatever is written, what is held stays bounded.
+        for _ in 0..100 {
+            tail.push(&[b'x'; 1000]);
+        }
+        assert_eq!(tail.0.lock().unwrap().len(), StderrTail::KEEP);
+        assert!(tail.read().unwrap().len() <= STDERR_TAIL_BYTES);
+    }
+
+    #[test]
     fn instance_ids_are_stable_and_differ_by_data_dir() {
         let a = instance_id(Path::new("/srv/wirken-a"));
         assert_eq!(a, instance_id(Path::new("/srv/wirken-a")));
@@ -1998,8 +2077,69 @@ read rest"#;
         );
     }
 
+    /// A started server leaves nothing in the daemon's log: its
+    /// container names the `none` driver, and the runtime has no
+    /// output to give for it, while the same output reached the proxy
+    /// over the attach.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
+    #[tokio::test]
+    async fn a_started_server_has_no_daemon_side_log() {
+        use futures_util::StreamExt;
+
+        let Some(docker) = docker().await else {
+            return;
+        };
+        let data = tempfile::tempdir().unwrap();
+        let host = host(&docker, data.path());
+        let plan = plan(
+            &host,
+            r#"echo 'arguments-on-stderr' >&2; read line; printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"secret":"result-on-stdout"}}'; read rest"#,
+        );
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &HashMap::new(), None)
+            .await
+            .unwrap();
+        let id = transport.container_id().unwrap().to_string();
+        let response = transport.request("ping", None).await.unwrap();
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({ "secret": "result-on-stdout" }))
+        );
+        assert_eq!(
+            transport.stderr_tail().await.as_deref(),
+            Some("arguments-on-stderr")
+        );
+
+        let inspected = docker.inspect_container(&id, None).await.unwrap();
+        let log = inspected.host_config.unwrap().log_config.unwrap();
+        assert_eq!(log.typ.as_deref(), Some("none"));
+        assert!(
+            inspected.log_path.as_deref().unwrap_or_default().is_empty(),
+            "the daemon keeps a log file: {:?}",
+            inspected.log_path
+        );
+        let mut logs = docker.logs(
+            &id,
+            Some(bollard::query_parameters::LogsOptions {
+                stdout: true,
+                stderr: true,
+                ..Default::default()
+            }),
+        );
+        let mut kept = Vec::new();
+        while let Some(Ok(chunk)) = logs.next().await {
+            kept.extend_from_slice(&chunk.into_bytes());
+        }
+        assert!(
+            kept.is_empty(),
+            "the daemon kept output: {}",
+            String::from_utf8_lossy(&kept)
+        );
+
+        transport.shutdown().await;
+    }
+
     /// What a server wrote to stderr can still be read after its
-    /// container has exited, until the container is removed.
+    /// container has exited, from what the attach delivered.
     #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
     #[tokio::test]
     async fn a_servers_stderr_is_read_after_it_exits() {

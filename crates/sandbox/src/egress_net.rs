@@ -18,7 +18,7 @@ use std::time::Duration;
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest};
 use bollard::query_parameters::{
-    CreateContainerOptions, InspectContainerOptions, LogsOptions, RemoveContainerOptions,
+    AttachContainerOptions, CreateContainerOptions, InspectContainerOptions, RemoveContainerOptions,
 };
 use futures_util::StreamExt;
 
@@ -252,18 +252,26 @@ pub async fn provision(
         return Err(format!("attach sidecar to egress network: {e}"));
     }
 
+    // Attached before the start, so what a sidecar that never reports
+    // ready printed can be quoted: the daemon keeps no log to read it
+    // from afterwards.
+    let output = SidecarOutput::attach(docker, &created.id).await;
+
     if let Err(e) = docker.start_container(&created.id, None).await {
         cleanup(Some(created.id)).await;
         return Err(format!("start egress sidecar: {e}"));
     }
 
     if let Err(e) = broker.await_sidecar(SIDECAR_READY_TIMEOUT).await {
-        let logs = container_logs(docker, &created.id).await;
+        let logs = output.finish().await;
         cleanup(Some(created.id)).await;
         return Err(format!(
             "egress sidecar never became ready: {e}. Sidecar output: {logs}"
         ));
     }
+    // A ready sidecar's output is not kept anywhere: the attach is
+    // dropped and the daemon logs nothing.
+    drop(output);
 
     let sidecar_ip = match container_ip(docker, &created.id, &internal_network).await {
         Some(ip) => ip,
@@ -329,6 +337,7 @@ fn sidecar_body(
                     .collect(),
             ),
             readonly_rootfs: Some(true),
+            log_config: Some(crate::no_daemon_log()),
             ..Default::default()
         }),
         ..Default::default()
@@ -367,25 +376,66 @@ async fn container_ip(docker: &Docker, id: &str, network: &str) -> Option<IpAddr
         .and_then(|ip| ip.parse().ok())
 }
 
-/// Best-effort log capture, used to explain a sidecar that never
-/// reported ready.
-async fn container_logs(docker: &Docker, id: &str) -> String {
-    let mut out = String::new();
-    let mut stream = docker.logs(
-        id,
-        Some(LogsOptions {
-            stdout: true,
-            stderr: true,
-            ..Default::default()
-        }),
-    );
-    while let Some(Ok(chunk)) = stream.next().await {
-        out.push_str(&chunk.to_string());
-        if out.len() > 2_000 {
-            break;
+/// The most of a sidecar's output quoted in an error.
+const SIDECAR_OUTPUT_BYTES: usize = 2_000;
+
+/// What a starting sidecar prints, read over an attach and used only
+/// to explain one that never reported ready. Best-effort: a sidecar
+/// that could not be attached to is explained without its output.
+/// Dropping it ends the attach.
+struct SidecarOutput {
+    text: Arc<std::sync::Mutex<String>>,
+    reader: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SidecarOutput {
+    async fn attach(docker: &Docker, id: &str) -> Self {
+        let text = Arc::new(std::sync::Mutex::new(String::new()));
+        let attached = docker
+            .attach_container(
+                id,
+                Some(AttachContainerOptions {
+                    stream: true,
+                    stdout: true,
+                    stderr: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+        let reader = attached.ok().map(|attached| {
+            let text = text.clone();
+            let mut stream = attached.output;
+            tokio::spawn(async move {
+                // Read to the end even once enough is kept, so the
+                // sidecar never waits on a reader that stopped.
+                while let Some(Ok(chunk)) = stream.next().await {
+                    let mut kept = text.lock().unwrap_or_else(|e| e.into_inner());
+                    if kept.len() < SIDECAR_OUTPUT_BYTES {
+                        kept.push_str(&chunk.to_string());
+                    }
+                }
+            })
+        });
+        Self { text, reader }
+    }
+
+    /// What was printed. A sidecar that exited has closed the attach;
+    /// one still running is given a moment to be read.
+    async fn finish(mut self) -> String {
+        if let Some(reader) = self.reader.as_mut() {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), reader).await;
+        }
+        let kept = self.text.lock().unwrap_or_else(|e| e.into_inner());
+        kept.trim().to_string()
+    }
+}
+
+impl Drop for SidecarOutput {
+    fn drop(&mut self) {
+        if let Some(reader) = &self.reader {
+            reader.abort();
         }
     }
-    out.trim().to_string()
 }
 
 #[cfg(test)]
@@ -425,6 +475,7 @@ mod tests {
         assert_eq!(host.network_mode.as_deref(), Some("wirken-mcp-egress-abc"));
         assert_eq!(host.cap_drop, Some(vec!["ALL".to_string()]));
         assert_eq!(host.readonly_rootfs, Some(true));
+        assert_eq!(host.log_config, Some(crate::no_daemon_log()));
         assert_eq!(host.memory, Some(MEMORY_LIMIT));
         assert_eq!(host.pids_limit, Some(PIDS_LIMIT));
         assert_eq!(

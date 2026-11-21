@@ -5372,6 +5372,65 @@ fn host_config_is_readonly_rootfs_with_tmpfs_tmp() {
     );
 }
 
+/// The daemon keeps no log of what an `exec` printed.
+#[test]
+fn host_config_names_the_none_log_driver() {
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
+
+    let hc = build_host_config(
+        &SandboxConfig::default(),
+        "/host/workspace",
+        EgressDecision::Unset,
+    );
+    assert_eq!(hc.log_config, Some(wirken_sandbox::no_daemon_log()));
+}
+
+/// An `exec`'s output is read over the attach, with the daemon keeping
+/// no log: both streams come back, and a command that prints more than
+/// a pipe holds is read to its end, not left waiting on a reader.
+#[tokio::test]
+async fn an_exec_returns_both_streams_with_no_daemon_log() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime};
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let sandbox = DockerSandbox::new(SandboxConfig {
+        mode: SandboxMode::ExecOnly,
+        ..Default::default()
+    })
+    .expect("sandbox");
+
+    let both = sandbox
+        .exec(
+            "echo to-stdout; echo to-stderr >&2; exit 3",
+            tmp.path(),
+            None,
+        )
+        .await
+        .expect("exec");
+    assert!(!both.success, "exit 3 is a failure");
+    assert_eq!(both.output, "to-stdout\n\n[stderr] to-stderr\n");
+
+    let long = sandbox
+        .exec(
+            "head -c 300000 /dev/zero | tr '\\0' 'o'; echo done >&2",
+            tmp.path(),
+            None,
+        )
+        .await
+        .expect("exec");
+    assert!(long.success, "{}", long.output);
+    assert!(long.output.starts_with(&"o".repeat(32_000)));
+    assert!(long.output.ends_with("... (truncated)"));
+}
+
 #[test]
 fn host_config_without_egress_network_has_no_networking() {
     use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};

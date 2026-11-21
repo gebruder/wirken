@@ -341,6 +341,8 @@ pub struct HostSettings {
 /// * `readonly_rootfs`: make the container's `/` read-only. Bind
 ///   mounts keep the mode the caller gave them, and a tmpfs at `/tmp`
 ///   gives the process somewhere to scratch.
+/// * [`no_daemon_log`]: the daemon keeps none of the container's
+///   output.
 pub fn hardened_host_config(settings: HostSettings) -> HostConfig {
     let mut tmpfs_mounts = HashMap::new();
     tmpfs_mounts.insert("/tmp".to_string(), "size=64m,mode=1777".to_string());
@@ -354,7 +356,7 @@ pub fn hardened_host_config(settings: HostSettings) -> HostConfig {
         pids_limit: Some(settings.pids),
         nano_cpus: settings.nano_cpus,
         // With auto_remove=true a container is torn down the moment it
-        // exits, which races any later read of its logs or exit code.
+        // exits, which races any later read of its exit code.
         // Callers remove containers explicitly instead.
         auto_remove: Some(false),
         runtime: settings.runtime,
@@ -367,7 +369,24 @@ pub fn hardened_host_config(settings: HostSettings) -> HostConfig {
         ),
         readonly_rootfs: Some(true),
         tmpfs: Some(tmpfs_mounts),
+        log_config: Some(no_daemon_log()),
         ..Default::default()
+    }
+}
+
+/// The log driver every container Wirken starts runs with: `none`.
+///
+/// The runtime's default driver writes a container's stdout and stderr
+/// to a file of the daemon's and keeps it until the container is
+/// removed. For an MCP server that is its whole JSON-RPC stream, every
+/// tool argument and result; for an `exec`, the command's output. With
+/// `none` the daemon keeps nothing and `logs` has nothing to return, so
+/// a caller that wants a container's output attaches to it before it
+/// starts.
+pub fn no_daemon_log() -> bollard::models::HostConfigLogConfig {
+    bollard::models::HostConfigLogConfig {
+        typ: Some("none".to_string()),
+        config: None,
     }
 }
 
@@ -505,6 +524,14 @@ mod tests {
             Some("size=64m,mode=1777")
         );
         assert_eq!(host.auto_remove, Some(false));
+    }
+
+    /// The daemon keeps no log of a sandbox container's output.
+    #[test]
+    fn the_floor_names_the_none_log_driver() {
+        let log = hardened_host_config(settings()).log_config.unwrap();
+        assert_eq!(log.typ.as_deref(), Some("none"));
+        assert_eq!(log.config, None);
     }
 
     #[test]
