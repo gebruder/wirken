@@ -142,6 +142,16 @@ connect-level error and wirken re-attests. The verified client is cached for
 the process lifetime and dropped on the attestation-or-TLS failure path, which
 re-attests on the next call.
 
+The enclave attested is one the key may be sent to. The SDK's discovery
+endpoint lists routers; one is attested and used only when the key's vault
+entry allows its origin (`wirken credentials grant tinfoil-api-key --provider
+tinfoil --base-url https://<router>`). A listed router the entry does not
+allow is not attested and gets no key, and `wirken run` records one
+`credential_destination_refused` row for it. The enclave at the configured
+`base_url`, `inference.tinfoil.sh`, which `wirken setup` grants, is tried
+last. The SDK is handed no key; Wirken puts it on the request to the attested
+host.
+
 Chat traffic uses the same OpenAI-compatible build and parse path as other
 providers, with the pinned client substituted. Tool calling works. Streaming
 and the SDK's `chat_relaxed` escape hatch for vendor extensions are not wired.

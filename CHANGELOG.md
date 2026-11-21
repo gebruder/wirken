@@ -60,6 +60,16 @@ tagged.
 
 ### Changed
 
+- A Tinfoil key is sent only to an origin its vault entry allows. A router
+  the SDK's discovery lists is attested and used only when the key is granted
+  to it (`wirken credentials grant tinfoil-api-key --provider tinfoil
+  --base-url https://<router>`); otherwise it gets no key, a
+  `credential_destination_refused` row names it, and the enclave at the
+  configured `base_url` is attested and used. The SDK itself is handed no key
+  (`a_discovered_origin_the_key_is_not_bound_to_is_refused_with_a_row`,
+  `crates/cli/src/commands/run.rs`;
+  [docs/configuration.md](docs/configuration.md#tinfoil)).
+
 - `exec` containers, MCP server containers and egress sidecars run with the
   `none` log driver, so the container runtime keeps no copy of their stdout
   or stderr. Their output is read over an attach made before the start; an

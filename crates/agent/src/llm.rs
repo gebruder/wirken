@@ -54,6 +54,13 @@ pub trait ProviderKeySource: Send + Sync + std::fmt::Debug {
     fn credential(&self) -> &str;
     /// The key now, or why there is none.
     fn key(&self) -> Result<String, String>;
+    /// Whether the key may be sent to `origin` (`scheme://host`), an
+    /// origin other than the configured base URL's that a provider's
+    /// own discovery named. A source that says no records the refusal.
+    /// The default allows none.
+    fn permits_origin(&self, _origin: &str) -> bool {
+        false
+    }
 }
 
 /// The context window assumed for every model on a plan. No figure is
@@ -179,9 +186,9 @@ impl LlmConfig {
     /// AMD SEV-SNP attestation + Sigstore code provenance check
     /// against the published enclave repo, and chat traffic flows
     /// over a TLS connection pinned to the attested certificate.
-    /// `base_url` is vestigial here: the SDK's discovery endpoint
-    /// picks the host at construction time and the value is unused
-    /// by the tinfoil dispatch path.
+    /// `base_url` names the enclave the key is sent to when no router
+    /// the SDK's discovery lists is allowed the key; see
+    /// [`tinfoil_hosts`].
     pub fn tinfoil(model: &str) -> Self {
         Self {
             provider: "tinfoil".into(),
@@ -444,7 +451,7 @@ pub struct LlmClient {
     transport_retries_made: std::sync::atomic::AtomicU32,
     /// Lazy-initialized tinfoil SDK client. Construction performs
     /// AMD SEV-SNP attestation + Sigstore verification + TLS pinning
-    /// against the discovered enclave; the result is cached for the
+    /// against an enclave the key may be sent to; the result is cached for the
     /// process lifetime. Reset to `None` by `complete_tinfoil` when
     /// an attestation or TLS-pinning error surfaces, so the next
     /// call re-attests rather than retrying against a stale pinned
@@ -455,6 +462,9 @@ pub struct LlmClient {
     /// The stored secrets a request to the model may not carry. Empty
     /// until the agent attaches one.
     leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
+    /// Asked whether the model key may go to an origin other than the
+    /// configured base URL's. With none, it goes to no other.
+    key_source: Option<Arc<dyn ProviderKeySource>>,
     /// The bearer for every call in plan mode, asked for per call. In
     /// plan mode a call without one is refused before anything is sent.
     plan_source: Option<Arc<crate::plan_auth::PlanTokenSource>>,
@@ -500,10 +510,17 @@ impl LlmClient {
             transport_retries_made: std::sync::atomic::AtomicU32::new(0),
             tinfoil: tokio::sync::Mutex::new(None),
             leak_matcher: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+            key_source: None,
             plan_source: None,
             plan_endpoints: crate::plan_auth::Endpoints::pinned(),
             plan_unavailable_backoff: crate::llm_responses::UNAVAILABLE_BACKOFF.to_vec(),
         })
+    }
+
+    /// Ask `source` before the model key is sent to an origin other
+    /// than the configured base URL's.
+    pub fn set_key_source(&mut self, source: Arc<dyn ProviderKeySource>) {
+        self.key_source = Some(source);
     }
 
     /// Take the bearer for every plan-mode call from `source`.
@@ -750,7 +767,7 @@ impl LlmClient {
                 "tinfoil provider requires an API key; none was passed to complete()".into(),
             )
         })?;
-        let client = self.tinfoil_client(api_key).await?;
+        let client = self.tinfoil_client().await?;
 
         let messages_json: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
         let body = build_openai_request_body(&self.config, messages_json, tools);
@@ -804,25 +821,53 @@ impl LlmClient {
     /// async verification call so two concurrent `complete()` calls
     /// share the same attestation rather than triggering two parallel
     /// SEV-SNP + Sigstore round trips.
-    async fn tinfoil_client(&self, api_key: &str) -> Result<Arc<tinfoil::Client>, AgentError> {
+    ///
+    /// The enclave is one the key may be sent to ([`tinfoil_hosts`]):
+    /// a router the SDK's discovery lists is attested only when the
+    /// key source allows its origin, and the host of the configured
+    /// base URL, which the key was read for, is tried last. The SDK is
+    /// handed no key; [`Self::complete_tinfoil`] puts it on the request
+    /// it builds for the attested host.
+    async fn tinfoil_client(&self) -> Result<Arc<tinfoil::Client>, AgentError> {
         let mut guard = self.tinfoil.lock().await;
         if let Some(client) = guard.as_ref() {
             return Ok(client.clone());
         }
-        let client = tinfoil::Client::new_default_with_api_key(api_key)
+        let configured = tinfoil_configured_host(&self.config.base_url)?;
+        // A discovery that cannot be reached names no router, as in
+        // the SDK, and the configured host is attested.
+        let discovered = tinfoil::discovery::fetch_routers()
             .await
-            .map_err(|e| {
-                if e.is_attestation() {
-                    AgentError::Llm(format!("tinfoil attestation failed: {e}"))
-                } else if e.is_configuration() {
-                    AgentError::Llm(format!("tinfoil misconfigured: {e}"))
-                } else {
-                    AgentError::Http(format!("tinfoil verification: {e}"))
+            .unwrap_or_default();
+        let hosts = tinfoil_hosts(&discovered, &configured, |origin| {
+            self.key_source
+                .as_ref()
+                .is_some_and(|source| source.permits_origin(origin))
+        });
+        let mut failure = None;
+        for host in hosts {
+            match tinfoil::Client::new(&host, tinfoil::constants::DEFAULT_REPO, "").await {
+                Ok(client) => {
+                    let arc = Arc::new(client);
+                    *guard = Some(arc.clone());
+                    return Ok(arc);
                 }
-            })?;
-        let arc = Arc::new(client);
-        *guard = Some(arc.clone());
-        Ok(arc)
+                Err(e) => {
+                    tracing::warn!(enclave = %host, error = %e, "tinfoil enclave not verified");
+                    failure = Some(e);
+                }
+            }
+        }
+        Err(match failure {
+            Some(e) if e.is_attestation() => {
+                AgentError::Llm(format!("tinfoil attestation failed: {e}"))
+            }
+            Some(e) if e.is_configuration() => {
+                AgentError::Llm(format!("tinfoil misconfigured: {e}"))
+            }
+            Some(e) => AgentError::Http(format!("tinfoil verification: {e}")),
+            None => AgentError::Llm("tinfoil misconfigured: no enclave host".into()),
+        })
     }
 
     /// Drop the cached tinfoil client. The next `complete_tinfoil`
@@ -1389,6 +1434,47 @@ impl LlmClient {
     pub(crate) fn http_client(&self) -> &reqwest::Client {
         &self.http
     }
+}
+
+/// The enclave host a tinfoil config's `base_url` names: an `https`
+/// URL on the default port, since the SDK attests and pins port 443.
+fn tinfoil_configured_host(base_url: &str) -> Result<String, AgentError> {
+    url::Url::parse(base_url)
+        .ok()
+        .filter(|u| u.scheme() == "https" && u.port().is_none())
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .ok_or_else(|| {
+            AgentError::Llm(format!(
+                "tinfoil misconfigured: base_url {base_url:?} is not an https URL on port 443"
+            ))
+        })
+}
+
+/// The enclave hosts a tinfoil key may be sent to, in the order they
+/// are attested: each router `discovered` lists whose origin
+/// `permits` allows, then `configured`, the host of the base URL the
+/// key was read for. A listed router that is not allowed is never
+/// attested and never sent the key. `permits` is asked once for each
+/// distinct router other than the configured host.
+fn tinfoil_hosts(
+    discovered: &[String],
+    configured: &str,
+    permits: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    let mut asked: Vec<String> = Vec::new();
+    for router in discovered {
+        let host = router.trim().to_ascii_lowercase();
+        if host.is_empty() || host == configured || asked.contains(&host) {
+            continue;
+        }
+        if permits(&format!("https://{host}")) {
+            hosts.push(host.clone());
+        }
+        asked.push(host);
+    }
+    hosts.push(configured.to_string());
+    hosts
 }
 
 /// True when a `reqwest::Error` indicates the connection was rejected
@@ -2069,6 +2155,64 @@ pub(crate) fn plain_http_to_loopback(url: &str) -> bool {
     reqwest::Url::parse(url).is_ok_and(|u| {
         u.scheme() == "http" && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
     })
+}
+
+#[cfg(test)]
+mod tinfoil_host_tests {
+    use super::{tinfoil_configured_host, tinfoil_hosts};
+    use std::cell::RefCell;
+
+    const CONFIGURED: &str = "inference.tinfoil.sh";
+
+    fn discovered() -> Vec<String> {
+        vec![
+            "router-0.tinfoil.sh".to_string(),
+            "inference.tinfoil.sh".to_string(),
+            "Router-0.tinfoil.sh".to_string(),
+        ]
+    }
+
+    /// A discovered router at an origin the key is not allowed is not
+    /// among the hosts attested and sent the key; the configured host
+    /// is. The router is asked about once, by its origin.
+    #[test]
+    fn a_discovered_router_the_key_may_not_go_to_is_left_out() {
+        let asked = RefCell::new(Vec::new());
+        let hosts = tinfoil_hosts(&discovered(), CONFIGURED, |origin| {
+            asked.borrow_mut().push(origin.to_string());
+            false
+        });
+        assert_eq!(hosts, [CONFIGURED]);
+        assert_eq!(*asked.borrow(), ["https://router-0.tinfoil.sh"]);
+    }
+
+    /// An allowed router is tried first, the configured host last.
+    #[test]
+    fn an_allowed_discovered_router_comes_before_the_configured_host() {
+        let hosts = tinfoil_hosts(&discovered(), CONFIGURED, |_| true);
+        assert_eq!(hosts, ["router-0.tinfoil.sh", CONFIGURED]);
+    }
+
+    /// With no discovery answer the configured host is the only one.
+    #[test]
+    fn no_discovery_leaves_the_configured_host() {
+        assert_eq!(tinfoil_hosts(&[], CONFIGURED, |_| true), [CONFIGURED]);
+    }
+
+    #[test]
+    fn the_configured_host_is_an_https_host_on_the_default_port() {
+        assert_eq!(
+            tinfoil_configured_host("https://Inference.tinfoil.sh/v1").unwrap(),
+            CONFIGURED
+        );
+        for url in [
+            "http://inference.tinfoil.sh/v1",
+            "https://inference.tinfoil.sh:8443/v1",
+            "inference.tinfoil.sh",
+        ] {
+            assert!(tinfoil_configured_host(url).is_err(), "{url}");
+        }
+    }
 }
 
 #[cfg(test)]

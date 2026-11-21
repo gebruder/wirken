@@ -2500,6 +2500,7 @@ impl Agent {
         self.api_key = None;
         self.api_key_credential = Some(source.credential().to_string());
         self.tools.set_api_key_source(source.clone());
+        self.llm.set_key_source(source.clone());
         self.api_key_source = Some(source);
     }
 

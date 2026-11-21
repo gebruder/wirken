@@ -114,6 +114,30 @@ struct VaultProviderKey {
     name: String,
     destination: wirken_vault::Destination,
     leak: Arc<wirken_gateway::leak::LeakMatcher>,
+    /// Where a refused origin is recorded.
+    log: Option<Arc<dyn wirken_audit::SessionLog>>,
+    /// The origins already refused and recorded, so one a provider's
+    /// discovery keeps naming is one row, not one per agent session.
+    refused: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl VaultProviderKey {
+    fn new(
+        store: Arc<std::sync::Mutex<CredentialStore>>,
+        name: String,
+        destination: wirken_vault::Destination,
+        leak: Arc<wirken_gateway::leak::LeakMatcher>,
+        log: Option<Arc<dyn wirken_audit::SessionLog>>,
+    ) -> Self {
+        Self {
+            store,
+            name,
+            destination,
+            leak,
+            log,
+            refused: std::sync::Mutex::default(),
+        }
+    }
 }
 
 impl std::fmt::Debug for VaultProviderKey {
@@ -148,6 +172,39 @@ impl wirken_agent::llm::ProviderKeySource for VaultProviderKey {
             )),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// The entry's binding, authenticated by the decryption, is asked
+    /// for this provider at `origin`. A refusal is logged with the
+    /// grant that would allow it and recorded, once per origin.
+    fn permits_origin(&self, origin: &str) -> bool {
+        let wirken_vault::Destination::Provider(configured) = &self.destination else {
+            return false;
+        };
+        let destination = wirken_vault::Destination::Provider(wirken_vault::ProviderGrant {
+            provider: configured.provider.clone(),
+            origin: origin.to_string(),
+        });
+        let permitted = self.store.lock().is_ok_and(|store| {
+            store
+                .peek(&self.name)
+                .is_ok_and(|(_, meta)| meta.binding.permits(&destination))
+        });
+        if !permitted
+            && self
+                .refused
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(origin.to_string())
+        {
+            super::destinations::refused(
+                self.log.as_deref(),
+                &self.name,
+                &destination,
+                &format!("{} router discovery", configured.provider),
+            );
+        }
+        permitted
     }
 }
 
@@ -1626,12 +1683,13 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     factory.attach_provider_key(
                         &agent_id,
                         channel.as_deref(),
-                        Arc::new(VaultProviderKey {
-                            store: store.clone(),
+                        Arc::new(VaultProviderKey::new(
+                            store.clone(),
                             name,
                             destination,
-                            leak: leak_matcher.clone(),
-                        }),
+                            leak_matcher.clone(),
+                            Some(session_log.clone()),
+                        )),
                     );
                 }
             }
@@ -8403,6 +8461,105 @@ mod resolver_tests {
             leak.find("x rotated-api-token-02").as_deref(),
             Some("api-token")
         );
+    }
+}
+
+#[cfg(test)]
+mod provider_origin_tests {
+    use super::VaultProviderKey;
+    use std::sync::Arc;
+    use wirken_agent::llm::ProviderKeySource;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog};
+    use wirken_vault::{
+        Binding, CredentialKind, CredentialStore, Destination, ProviderGrant, VaultSecret,
+    };
+
+    fn tinfoil_at(origin: &str) -> Destination {
+        Destination::Provider(ProviderGrant {
+            provider: "tinfoil".into(),
+            origin: origin.into(),
+        })
+    }
+
+    /// A router the provider's discovery names, at an origin other than
+    /// the configured one, is allowed the key only when the entry's
+    /// binding names it. A refusal is one row, however often the
+    /// router is named, and the configured origin is still served.
+    #[test]
+    fn a_discovered_origin_the_key_is_not_bound_to_is_refused_with_a_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &tmp.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        let configured = tinfoil_at("https://inference.tinfoil.sh");
+        let mut binding = Binding::default();
+        binding.grant(configured.clone());
+        store
+            .store_bound(
+                "tinfoil-api-key",
+                "tinfoil",
+                &VaultSecret::new("tk-0123456789abcdef".into()),
+                None,
+                None,
+                &binding,
+                CredentialKind::Secret,
+            )
+            .unwrap();
+        let log =
+            Arc::new(wirken_audit::SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let key = VaultProviderKey::new(
+            Arc::new(std::sync::Mutex::new(store)),
+            "tinfoil-api-key".into(),
+            configured,
+            Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+            Some(log.clone() as Arc<dyn SessionLog>),
+        );
+
+        assert!(!key.permits_origin("https://router-0.tinfoil.sh"));
+        assert!(!key.permits_origin("https://router-0.tinfoil.sh"));
+        assert_eq!(key.key().as_deref(), Ok("tk-0123456789abcdef"));
+
+        let refused = |log: &wirken_audit::SqliteSessionLog| -> Vec<(String, String, String)> {
+            let handle = log.handle_for(SessionId::new(
+                wirken_audit::CREDENTIALS_SESSION.to_string(),
+            ));
+            log.get_since(&handle, 0)
+                .unwrap()
+                .into_iter()
+                .filter_map(|r| match r.event {
+                    SessionEvent::CredentialDestinationRefused {
+                        credential,
+                        destination,
+                        named_by,
+                        ..
+                    } => Some((credential, destination, named_by)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            refused(&log),
+            vec![(
+                "tinfoil-api-key".to_string(),
+                "tinfoil at https://router-0.tinfoil.sh".to_string(),
+                "tinfoil router discovery".to_string(),
+            )]
+        );
+
+        // Granted, the router is allowed and nothing more is recorded.
+        key.store
+            .lock()
+            .unwrap()
+            .update_binding_exclusive("tinfoil-api-key", std::time::Duration::from_secs(1), |b| {
+                let mut b = b.clone();
+                b.grant(tinfoil_at("https://router-0.tinfoil.sh"));
+                Some(b)
+            })
+            .unwrap();
+        assert!(key.permits_origin("https://router-0.tinfoil.sh"));
+        assert_eq!(refused(&log).len(), 1);
     }
 }
 
