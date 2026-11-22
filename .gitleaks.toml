@@ -70,6 +70,12 @@ regexes = [
   # beside them.
   '''at-1234567890''',
   '''rt-0987654321''',
+
+  # Credential of the throwaway S3-compatible server the archive CI
+  # job starts on the runner's loopback (commit 77a4ca8). It opened
+  # nothing outside that job. The job now makes its own at run time;
+  # the value is still present in history.
+  '''wirken-ci-secret-0123456789''',
 ]
 
 # Non-canonical ottenheimer.app identities. davi@ottenheimer.app is

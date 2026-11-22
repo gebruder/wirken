@@ -182,8 +182,6 @@ jobs:
       # An S3-compatible server with Object Lock, pinned by digest.
       S3_IMAGE: rustfs/rustfs@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
       WIRKEN_TEST_S3_ENDPOINT: http://127.0.0.1:19000
-      WIRKEN_TEST_S3_ACCESS_KEY: wirken-ci
-      WIRKEN_TEST_S3_SECRET_KEY: wirken-ci-secret-0123456789
       # A test that finds no server fails here.
       WIRKEN_TEST_REQUIRE_S3: "1"
     steps:
@@ -193,6 +191,13 @@ jobs:
         run: sudo apt-get install -y capnproto
       - name: Start the S3-compatible server
         run: |
+          # Credentials of this run's server only, made here.
+          WIRKEN_TEST_S3_ACCESS_KEY=wirken-ci
+          WIRKEN_TEST_S3_SECRET_KEY=$(openssl rand -hex 20)
+          {
+            echo "WIRKEN_TEST_S3_ACCESS_KEY=$WIRKEN_TEST_S3_ACCESS_KEY"
+            echo "WIRKEN_TEST_S3_SECRET_KEY=$WIRKEN_TEST_S3_SECRET_KEY"
+          } >> "$GITHUB_ENV"
           docker run -d --name s3 -p 127.0.0.1:19000:9000 \
             -e RUSTFS_ACCESS_KEY="$WIRKEN_TEST_S3_ACCESS_KEY" \
             -e RUSTFS_SECRET_KEY="$WIRKEN_TEST_S3_SECRET_KEY" \
