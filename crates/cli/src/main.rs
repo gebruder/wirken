@@ -472,6 +472,13 @@ enum AuditCommands {
     },
 }
 
+/// A format `sessions export` writes.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ExportFormat {
+    /// Agent Trajectory Interchange Format, version 1.8.
+    Atif,
+}
+
 #[derive(Subcommand)]
 enum SessionCommands {
     /// List active sessions
@@ -516,6 +523,23 @@ enum SessionCommands {
         /// and with an archive in proxy.json, each archived body is
         /// fetched, decrypted and compared with the hash on its row,
         /// and a mismatch exits 7.
+        #[arg(long)]
+        skip_archive: bool,
+    },
+    /// Write a session as a trajectory file, for a tool that reads
+    /// one. Nothing is sent anywhere.
+    Export {
+        /// Session id, as `sessions list` or a proxy lane
+        /// (`proxy-<token id>`) gives it.
+        id: String,
+        /// The format to write.
+        #[arg(long, value_enum)]
+        format: ExportFormat,
+        /// Write to this file instead of stdout.
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+        /// For a proxy session: do not read archived bodies. Each call
+        /// is then a step with its metrics and no message.
         #[arg(long)]
         skip_archive: bool,
     },
@@ -1966,6 +1990,12 @@ async fn main() -> Result<()> {
                 commands::session::verify(&id, strict, with_parent, with_children, skip_archive)
                     .await
             }
+            SessionCommands::Export {
+                id,
+                format: ExportFormat::Atif,
+                output,
+                skip_archive,
+            } => commands::session::export(&id, output.as_deref(), skip_archive).await,
         },
         Commands::Permissions(cmd) => match cmd {
             PermissionCommands::List { agent } => commands::permission::list(&agent).await,

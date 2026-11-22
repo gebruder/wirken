@@ -3,6 +3,7 @@
 #![cfg_attr(not(test), deny(clippy::string_slice))]
 
 pub mod alarm_log;
+pub mod atif;
 mod error;
 mod event;
 pub mod hex;

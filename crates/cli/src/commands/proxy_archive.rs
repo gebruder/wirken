@@ -1013,6 +1013,62 @@ impl Archive {
     }
 }
 
+impl Archive {
+    /// Every body `rows` say was archived, by its hash, as far as it
+    /// can be read here: decrypted and equal to the hash, made
+    /// unreadable, or not available.
+    pub async fn bodies(
+        &self,
+        rows: &[wirken_audit::StoredSessionEvent],
+    ) -> std::collections::HashMap<String, wirken_audit::atif::Body> {
+        use wirken_audit::atif::Body;
+        let mut out = std::collections::HashMap::new();
+        for body in named(rows) {
+            let read = match self.get(body.kind, &body.sha256).await {
+                Ok(Fetched::Body(plain)) if hex(&Sha256::digest(&plain)) == body.sha256 => {
+                    Body::Plain(plain)
+                }
+                Ok(Fetched::Redacted) => Body::Redacted,
+                Ok(Fetched::Body(_)) | Ok(Fetched::NoKey) => Body::Unavailable,
+                Err(e) => {
+                    tracing::warn!(
+                        "archive: {} {} could not be read: {e}",
+                        body.kind.as_str(),
+                        body.sha256
+                    );
+                    Body::Unavailable
+                }
+            };
+            out.insert(body.sha256, read);
+        }
+        out
+    }
+}
+
+/// The bodies of a proxy session, read from the archive when one is
+/// configured and `skip` is not set. Empty otherwise.
+pub async fn session_bodies(
+    rows: &[wirken_audit::StoredSessionEvent],
+    skip: bool,
+) -> anyhow::Result<std::collections::HashMap<String, wirken_audit::atif::Body>> {
+    use anyhow::Context as _;
+    let cfg = super::config();
+    let archive_config = wirken_gateway::proxy::ProxyConfig::load(&cfg.data_dir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .and_then(|c| c.archive);
+    let Some(archive_config) = archive_config.filter(|_| !skip && !named(rows).is_empty()) else {
+        return Ok(Default::default());
+    };
+    let passphrase = super::cached_vault_passphrase()?;
+    let keychain = wirken_vault::probe_keychain(&cfg.data_dir, move || passphrase);
+    let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    let archive = Archive::open(&archive_config, &vault, &cfg.data_dir)
+        .map_err(|e| anyhow::anyhow!("archive: {e}"))?;
+    drop(vault);
+    Ok(archive.bodies(rows).await)
+}
+
 /// Whether `session_id` is a lane the proxy writes.
 pub fn is_proxy_session(session_id: &str) -> bool {
     !session_id.contains('/')

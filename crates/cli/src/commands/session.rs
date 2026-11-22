@@ -322,6 +322,109 @@ fn subagent_agent_id(
         })
 }
 
+/// The session-log id for what an operator typed: the composite id
+/// itself, or the one the hex store id from `wirken sessions list`
+/// stands for.
+fn composite_session_id(cfg: &wirken_gateway::config::GatewayConfig, session_id: &str) -> String {
+    use wirken_gateway::agent_config::AgentConfigStore;
+    if session_id.contains('/') {
+        session_id.to_string()
+    } else {
+        match wirken_gateway::session::SessionStore::open(
+            &cfg.sessions_db_path(),
+            cfg.session_expiry_secs,
+        )
+        .ok()
+        .and_then(|s| s.get(session_id).ok())
+        {
+            Some(sess) => {
+                let agent_id = match AgentConfigStore::open(&cfg.agent_config_db_path()) {
+                    Ok(agent_store) => agent_store
+                        .list()
+                        .ok()
+                        .and_then(|agents| {
+                            agents
+                                .into_iter()
+                                .find(|a| a.channels.iter().any(|c| c == &sess.channel))
+                                .map(|a| a.id)
+                        })
+                        .unwrap_or_else(|| "default".into()),
+                    Err(_) => "default".into(),
+                };
+                format!("{}/{}/{}", agent_id, sess.channel, sess.conversation_id)
+            }
+            None => session_id.to_string(),
+        }
+    }
+}
+
+/// `wirken sessions export --format atif`: write one session as an
+/// ATIF trajectory, to `output` or to stdout.
+///
+/// The document is built from the rows the chain holds now, so a row
+/// a redaction rewrote is exported as rewritten. A proxied session's
+/// messages are read from its archived bodies when an archive is
+/// configured; a body that was made unreadable, or that cannot be
+/// read, is left out. The document is checked against the format
+/// before anything is written, and one that fails is not written.
+pub async fn export(
+    session_id: &str,
+    output: Option<&std::path::Path>,
+    skip_archive: bool,
+) -> Result<()> {
+    use wirken_audit::SessionLog as _;
+    let cfg = config();
+    let session_id_owned = if super::proxy_archive::is_proxy_session(session_id) {
+        session_id.to_string()
+    } else {
+        composite_session_id(&cfg, session_id)
+    };
+    let session_id = session_id_owned.as_str();
+    let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+        .context("Failed to open session log")?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
+    let rows = log
+        .get_since(&handle, 0)
+        .context("session log query failed")?;
+    if rows.is_empty() {
+        eprintln!("  No events for session '{session_id}'.");
+        std::process::exit(4);
+    }
+    let bodies = super::proxy_archive::session_bodies(&rows, skip_archive).await?;
+    let document = wirken_audit::atif::export(
+        session_id,
+        &rows,
+        &bodies,
+        &wirken_audit::atif::Producer {
+            name: "wirken",
+            version: env!("CARGO_PKG_VERSION"),
+        },
+    );
+    let errors = wirken_audit::atif::validate(&document);
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "the export is not a valid {} trajectory and was not written:\n  {}",
+            wirken_audit::atif::SCHEMA_VERSION,
+            errors.join("\n  ")
+        );
+    }
+    let text = serde_json::to_string_pretty(&document)?;
+    match output {
+        Some(path) => {
+            std::fs::write(path, format!("{text}\n"))
+                .with_context(|| format!("write {}", path.display()))?;
+            eprintln!(
+                "  Wrote {} steps of session '{session_id}' to {} ({}).",
+                document["steps"].as_array().map_or(0, Vec::len),
+                path.display(),
+                wirken_audit::atif::SCHEMA_VERSION
+            );
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
 pub async fn verify(
     session_id: &str,
     strict: bool,
@@ -353,35 +456,7 @@ pub async fn verify(
     // into the composite via SessionStore lookup lets operators copy
     // from either column of the list output. For composite input
     // (contains `/`) we pass through unchanged.
-    let session_id_owned = if session_id.contains('/') {
-        session_id.to_string()
-    } else {
-        match wirken_gateway::session::SessionStore::open(
-            &cfg.sessions_db_path(),
-            cfg.session_expiry_secs,
-        )
-        .ok()
-        .and_then(|s| s.get(session_id).ok())
-        {
-            Some(sess) => {
-                let agent_id = match AgentConfigStore::open(&cfg.agent_config_db_path()) {
-                    Ok(agent_store) => agent_store
-                        .list()
-                        .ok()
-                        .and_then(|agents| {
-                            agents
-                                .into_iter()
-                                .find(|a| a.channels.iter().any(|c| c == &sess.channel))
-                                .map(|a| a.id)
-                        })
-                        .unwrap_or_else(|| "default".into()),
-                    Err(_) => "default".into(),
-                };
-                format!("{}/{}/{}", agent_id, sess.channel, sess.conversation_id)
-            }
-            None => session_id.to_string(),
-        }
-    };
+    let session_id_owned = composite_session_id(&cfg, session_id);
     let session_id = session_id_owned.as_str();
 
     // Parse agent_id from session_id. The format is
