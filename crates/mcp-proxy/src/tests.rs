@@ -472,6 +472,86 @@ mod http_transport_test {
         (url, handle)
     }
 
+    /// A server that answers every request with `status` and a
+    /// `Location` of `location`, and counts the requests it got.
+    async fn spawn_answering(
+        status: &'static str,
+        location: Option<String>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/rpc", listener.local_addr().unwrap());
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = got.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                kept.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let location = location
+                    .as_ref()
+                    .map(|l| format!("Location: {l}\r\n"))
+                    .unwrap_or_default();
+                let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\n{location}Content-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        (url, got)
+    }
+
+    /// A server that answers with a redirect fails the call, for every
+    /// redirect status, a request and a notification alike. Nothing is
+    /// sent to where the redirect points, and the error names that
+    /// target without its query, so the operator can sign the real URL.
+    #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
+    #[tokio::test]
+    async fn http_transport_follows_no_redirect_and_names_the_target() {
+        for status in [
+            "301 Moved Permanently",
+            "302 Found",
+            "307 Temporary Redirect",
+            "308 Permanent Redirect",
+        ] {
+            let (elsewhere, followed) = spawn_answering("200 OK", None).await;
+            let target = format!("{elsewhere}?token=in-the-query");
+            let (url, asked) = spawn_answering(status, Some(target)).await;
+            let mut transport = HttpTransport::new(url, Box::new(NoAuth)).unwrap();
+
+            let err = transport
+                .request(
+                    "tools/call",
+                    Some(serde_json::json!({"arguments": "the body"})),
+                )
+                .await
+                .expect_err("a redirect answered the call")
+                .to_string();
+            assert!(err.contains(&elsewhere), "{status}: {err}");
+            assert!(!err.contains("in-the-query"), "{status}: {err}");
+            assert!(err.contains("follows no redirect"), "{status}: {err}");
+
+            let err = transport
+                .notify("notifications/initialized", None)
+                .await
+                .expect_err("a redirect answered the notification")
+                .to_string();
+            assert!(err.contains(&elsewhere), "{status}: {err}");
+
+            assert_eq!(asked.lock().unwrap().len(), 2, "{status}");
+            let followed = followed.lock().unwrap().clone();
+            assert!(followed.is_empty(), "{status}: followed with {followed:?}");
+        }
+    }
+
     #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
     #[tokio::test]
     async fn http_transport_no_auth_round_trip() {

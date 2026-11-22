@@ -493,8 +493,12 @@ impl HttpTransport {
                 "MCP HTTP endpoint must use HTTPS (got {url}); only localhost may use http://"
             )));
         }
+        // No redirect is followed. The signed entry names this URL,
+        // and a redirect would send the call's body to an origin the
+        // entry does not name.
         let client = reqwest::Client::builder()
             .https_only(!is_localhost)
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| ProxyError::Mcp(format!("HTTP client: {e}")))?;
@@ -533,6 +537,9 @@ impl HttpTransport {
             .map_err(|e| ProxyError::Mcp(format!("MCP HTTP {method}: {e}")))?;
 
         let status = resp.status();
+        if let Some(redirected) = redirect_refusal(method, status, resp.headers()) {
+            return Err(redirected);
+        }
         if credential_refused(status, resp.headers()) {
             let body = resp.text().await.unwrap_or_default();
             let after = match self.auth.refused().await {
@@ -578,17 +585,57 @@ impl HttpTransport {
         if let Some(header) = self.auth.authorization_header().await? {
             req = req.header(reqwest::header::AUTHORIZATION, header);
         }
-        let _ = req
+        let resp = req
             .send()
             .await
             .map_err(|e| ProxyError::Mcp(format!("MCP HTTP notify {method}: {e}")))?;
-        Ok(())
+        match redirect_refusal(method, resp.status(), resp.headers()) {
+            Some(redirected) => Err(redirected),
+            None => Ok(()),
+        }
     }
 
     /// HTTP transports have no persistent connection; shutdown is a no-op.
     pub async fn shutdown(&mut self) -> Option<ContainerExit> {
         None
     }
+}
+
+/// The error for a response that is a redirect. It names the target,
+/// without its query or any credentials in it, so the operator can
+/// put the server's real URL in the entry and sign that.
+fn redirect_refusal(
+    method: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<ProxyError> {
+    if !status.is_redirection() {
+        return None;
+    }
+    let target = headers
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|location| match reqwest::Url::parse(location) {
+            Ok(mut url) => {
+                url.set_query(None);
+                url.set_fragment(None);
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                url.to_string()
+            }
+            // A relative target: its path, without the query.
+            Err(_) => location
+                .split(['?', '#'])
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .unwrap_or_else(|| "no location".to_string());
+    Some(ProxyError::Mcp(format!(
+        "MCP HTTP {method} returned {status}, a redirect to {target}. The proxy follows no \
+         redirect: the call goes only to the URL the entry names. If {target} is the \
+         server's URL, set it in mcp.json and sign the entry again"
+    )))
 }
 
 /// Whether a response says the server refused the request's

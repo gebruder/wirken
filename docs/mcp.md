@@ -336,7 +336,7 @@ All of them are on the default typed-SIEM forwarded set; consumers can pivot on 
 ## Supported transports
 
 - **stdio**: start the server in its container (or, with `"sandbox": "off"`, as a host process) and communicate via stdin/stdout. Default for local MCP servers.
-- **HTTP**: connect to a remote MCP server over HTTPS. Plain `http://` is accepted for `localhost`, `127.0.0.1` and `[::1]` only; any other `http://` URL is refused (`HttpTransport::new`, `crates/mcp-proxy/src/mcp_transport.rs`). Supports three auth modes:
+- **HTTP**: connect to a remote MCP server over HTTPS. Plain `http://` is accepted for `localhost`, `127.0.0.1` and `[::1]` only; any other `http://` URL is refused (`HttpTransport::new`, `crates/mcp-proxy/src/mcp_transport.rs`). No redirect is followed: a call goes only to the URL the entry names, which the signature covers. A server that answers with a redirect fails the call, and the error names the target without its query. If that is the server's URL, set it in the entry and sign it again. Supports three auth modes:
   - `NoAuth`: no authentication header.
   - `BearerAuth`: static bearer token from the vault.
   - `OAuth2Auth`: authorization code flow with PKCE via the `oauth2` crate. Token refresh is automatic. Bootstrap an OAuth credential with `wirken mcp authorize <server>`; see [`credentials.md`](credentials.md) for the interactive scope picker and the inspection / rescoping commands.

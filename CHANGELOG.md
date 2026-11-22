@@ -86,6 +86,13 @@ tagged.
   `crates/vault/src/binding.rs`;
   [docs/credentials.md](docs/credentials.md#where-a-credential-may-go)).
 
+- An HTTP MCP server's calls follow no redirect. A call goes only to the URL
+  its entry names, and a redirect answer fails it with the target named. An
+  entry whose URL redirects needs the server's real URL and a new signature
+  (`http_transport_follows_no_redirect_and_names_the_target`,
+  `crates/mcp-proxy/src/tests.rs`;
+  [docs/mcp.md](docs/mcp.md#supported-transports)).
+
 - No model provider request follows a redirect. A redirect answer fails the
   call, and the key, a Bedrock session token and the conversation go to the
   configured origin only (`an_anthropic_key_is_not_sent_where_a_redirect_points`
