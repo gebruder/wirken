@@ -159,6 +159,11 @@ allow is not attested and gets no key, and `wirken run` records one
 last. The SDK is handed no key; Wirken puts it on the request to the attested
 host.
 
+A model listing carries the key too, so `wirken setup` and `wirken agents set
+--model list` ask for it through the same attested, pinned client, at the
+configured `base_url` only. If the enclave cannot be attested the listing
+says why and the model id is typed.
+
 Chat traffic uses the same OpenAI-compatible build and parse path as other
 providers, with the pinned client substituted. Tool calling works. Streaming
 and the SDK's `chat_relaxed` escape hatch for vendor extensions are not wired.

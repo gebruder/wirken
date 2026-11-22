@@ -93,6 +93,13 @@ tagged.
   `crates/mcp-proxy/src/tests.rs`;
   [docs/mcp.md](docs/mcp.md#supported-transports)).
 
+- A Tinfoil model listing goes through the attested, pinned client chat
+  calls use, so the key is sent only after the enclave at the configured
+  `base_url` is verified. The listing shows every model the enclave serves
+  (`a_listing_sends_no_key_to_an_endpoint_that_is_not_attested`,
+  `crates/agent/src/llm.rs`;
+  [docs/configuration.md](docs/configuration.md#tinfoil)).
+
 - No model provider request follows a redirect. A redirect answer fails the
   call, and the key, a Bedrock session token and the conversation go to the
   configured origin only (`an_anthropic_key_is_not_sent_where_a_redirect_points`

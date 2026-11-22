@@ -877,6 +877,33 @@ impl LlmClient {
         })
     }
 
+    /// The models the Tinfoil enclave at this client's `base_url`
+    /// lists for `api_key`. The enclave is attested and the connection
+    /// pinned exactly as for a chat call ([`Self::tinfoil_client`]),
+    /// and the key goes on the request to the attested host only: a
+    /// listing sends the key, so it gets the checks a chat call gets.
+    pub async fn tinfoil_models(&self, api_key: &str) -> Result<Vec<String>, AgentError> {
+        let client = self.tinfoil_client().await?;
+        let pinned = client
+            .http_client()
+            .map_err(|e| AgentError::Llm(format!("tinfoil pinned client unavailable: {e}")))?;
+        let url = format!("{}/v1/models", client.secure_client().base_url());
+        let response = pinned
+            .get(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .send()
+            .await
+            .map_err(|e| AgentError::Http(e.without_url().to_string()))?;
+        if !response.status().is_success() {
+            return Err(AgentError::Llm(format!("HTTP {}", response.status())));
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+        Ok(listed_model_ids(&body))
+    }
+
     /// Drop the cached tinfoil client. The next `complete_tinfoil`
     /// call will re-run verification and rebuild the pinned transport.
     /// Called when a pinned-TLS failure surfaces from the chat path,
@@ -1441,6 +1468,23 @@ impl LlmClient {
     pub(crate) fn http_client(&self) -> &reqwest::Client {
         &self.http
     }
+}
+
+/// The ids in an OpenAI-compatible model listing, sorted, each once.
+fn listed_model_ids(body: &serde_json::Value) -> Vec<String> {
+    let mut ids: Vec<String> = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// The enclave host a tinfoil config's `base_url` names: an `https`
@@ -2204,6 +2248,43 @@ mod tinfoil_host_tests {
     #[test]
     fn no_discovery_leaves_the_configured_host() {
         assert_eq!(tinfoil_hosts(&[], CONFIGURED, |_| true), [CONFIGURED]);
+    }
+
+    #[test]
+    fn a_listing_gives_each_model_id_once_in_order() {
+        let body = serde_json::json!({"data": [
+            {"id": "qwen"}, {"id": "deepseek"}, {"object": "model"}, {"id": "qwen"}
+        ]});
+        assert_eq!(super::listed_model_ids(&body), ["deepseek", "qwen"]);
+        assert!(super::listed_model_ids(&serde_json::json!({})).is_empty());
+    }
+
+    /// A model listing is refused for an endpoint that cannot be
+    /// attested, before anything is sent: the key is not put on a
+    /// request to a host no attestation covers.
+    #[tokio::test]
+    async fn a_listing_sends_no_key_to_an_endpoint_that_is_not_attested() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = got.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                kept.lock().unwrap().push(buf[..n].to_vec());
+            }
+        });
+        let client =
+            super::LlmClient::new(super::LlmConfig::from_provider("tinfoil", &base, "m")).unwrap();
+        let err = client
+            .tinfoil_models("tk-listing-key-0123456789")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tinfoil misconfigured"), "{err}");
+        assert!(got.lock().unwrap().is_empty());
     }
 
     #[test]

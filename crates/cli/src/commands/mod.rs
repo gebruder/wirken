@@ -696,6 +696,22 @@ fn listing_client(base_url: &str, timeout_s: u64) -> Option<reqwest::Client> {
         .ok()
 }
 
+/// List the models the Tinfoil enclave at `base_url` serves. The
+/// listing carries the key, so it goes through the client chat calls
+/// use: the enclave is attested and the connection pinned to it before
+/// the key is sent. Lists nothing, and says why, when that fails.
+pub async fn list_tinfoil_models(base_url: &str, api_key: &str) -> Vec<String> {
+    let config = wirken_agent::llm::LlmConfig::from_provider("tinfoil", base_url, "");
+    let listed = match wirken_agent::llm::LlmClient::new(config) {
+        Ok(client) => client.tinfoil_models(api_key).await,
+        Err(e) => Err(e),
+    };
+    listed.unwrap_or_else(|e| {
+        println!("  Models could not be listed: {e}");
+        Vec::new()
+    })
+}
+
 /// List models available from the Anthropic API at `base_url`.
 pub async fn list_anthropic_models(base_url: &str, api_key: &str) -> Vec<String> {
     let Some(client) = listing_client(base_url, 5) else {

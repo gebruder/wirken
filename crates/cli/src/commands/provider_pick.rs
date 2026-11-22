@@ -86,7 +86,8 @@ pub struct ChosenKey {
 /// nothing and the id is typed.
 pub async fn list_models(provider: &str, base_url: &str, api_key: &str) -> Vec<String> {
     match provider {
-        "openai" | "tinfoil" => super::list_openai_models(base_url, api_key).await,
+        "openai" => super::list_openai_models(base_url, api_key).await,
+        "tinfoil" => super::list_tinfoil_models(base_url, api_key).await,
         "anthropic" => super::list_anthropic_models(base_url, api_key).await,
         "gemini" => super::list_gemini_models(base_url, api_key).await,
         "ollama" => super::list_ollama_models(base_url).await,
@@ -285,7 +286,7 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
                 "  API key: ",
             )?;
             let models =
-                super::list_openai_models("https://inference.tinfoil.sh/v1", &key.secret).await;
+                super::list_tinfoil_models("https://inference.tinfoil.sh/v1", &key.secret).await;
             let model = super::pick_model(models)?;
             choice(
                 "tinfoil",

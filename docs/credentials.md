@@ -50,7 +50,7 @@ a control character in its host part for instance, has no origin, and no key
 is sent for it. A host outside ASCII is written in its `xn--` form. No
 provider request follows a redirect, and neither does a model listing, which
 `wirken setup` and `wirken agents set --model list` send to the same base URL
-with the same key. Setup offers a stored key only for an endpoint its entry
+with the same key; for Tinfoil, to the attested enclave there. Setup offers a stored key only for an endpoint its entry
 allows.
 
 ```bash
