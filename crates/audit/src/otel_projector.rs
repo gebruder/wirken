@@ -581,6 +581,12 @@ impl OtelProjector {
             // attach it to.
             SessionEvent::McpCredentialInjected { .. } => Vec::new(),
             SessionEvent::McpInjectRefused { .. } => Vec::new(),
+            // A client's own inference through the proxy; no agent
+            // run to attach a span to.
+            SessionEvent::ProxyRequest { .. } => Vec::new(),
+            SessionEvent::ProxyResponse { .. } => Vec::new(),
+            SessionEvent::ProxyRefused { .. } => Vec::new(),
+            SessionEvent::ProxyArchiveRedacted { .. } => Vec::new(),
             SessionEvent::McpCredentialRefreshDiscarded { .. } => Vec::new(),
             SessionEvent::CredentialDestinationRefused { .. }
             | SessionEvent::CredentialDestinationGranted { .. }

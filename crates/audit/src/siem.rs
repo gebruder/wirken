@@ -604,6 +604,12 @@ fn extract_decider(event: &crate::session_log::SessionEvent) -> Option<String> {
     }
 }
 
+/// How a proxy token is named as the principal of a row: by its id,
+/// which is not the token.
+fn proxy_token_actor(token_id: &str) -> String {
+    format!("proxy-token:{token_id}")
+}
+
 /// Pull adapter_id / sender_id / agent_id out of any variant that
 /// carries them. Returns `(adapter_id, sender_id, agent_id)`.
 ///
@@ -942,6 +948,17 @@ fn extract_identity_for_sentinel(
         | SessionEvent::McpServerRestartAbandoned { agent_id, .. }
         | SessionEvent::McpCredentialInjected { agent_id, .. }
         | SessionEvent::McpInjectRefused { agent_id, .. } => (None, None, Some(agent_id.clone())),
+        // The principal behind a proxied call is the token it came
+        // with. There is no adapter and no agent.
+        SessionEvent::ProxyRequest { token_id, .. }
+        | SessionEvent::ProxyResponse { token_id, .. } => {
+            (None, Some(proxy_token_actor(token_id)), None)
+        }
+        SessionEvent::ProxyRefused { token_id, .. } => {
+            (None, token_id.as_deref().map(proxy_token_actor), None)
+        }
+        // A body hash and an operator; none of the three.
+        SessionEvent::ProxyArchiveRedacted { .. } => (None, None, None),
         // A credential name; none of the three.
         SessionEvent::McpCredentialRefetched { .. } => (None, None, None),
         SessionEvent::McpCredentialRefreshDiscarded { .. } => (None, None, None),
@@ -1365,6 +1382,42 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             "mcp_inject_refused server={server_name} host={host} method={method} path={path} \
              reason={}",
             reason.as_str()
+        ),
+        SessionEvent::ProxyRequest {
+            token_id,
+            upstream,
+            provider,
+            model,
+            shape,
+            stream,
+            ..
+        } => format!(
+            "proxy_request token={token_id} upstream={upstream} provider={provider} \
+             model={model} shape={} stream={stream}",
+            shape.as_str()
+        ),
+        SessionEvent::ProxyResponse {
+            token_id,
+            status,
+            latency_ms,
+            complete,
+            ..
+        } => format!(
+            "proxy_response token={token_id} status={status} latency_ms={latency_ms} \
+             complete={complete}"
+        ),
+        SessionEvent::ProxyRefused {
+            token_id, reason, ..
+        } => format!(
+            "proxy_refused token={} reason={}",
+            token_id.as_deref().unwrap_or("none"),
+            reason.as_str()
+        ),
+        SessionEvent::ProxyArchiveRedacted {
+            sha256, operator, ..
+        } => format!(
+            "proxy_archive_redacted sha256={} operator={operator}",
+            sha256.0
         ),
         SessionEvent::McpCredentialRefreshDiscarded { credential, reason } => {
             format!("mcp_credential_refresh_discarded credential={credential} reason={reason}")
@@ -2731,6 +2784,66 @@ mod identity_tests {
                 None,
                 None,
                 Some("worker"),
+            ),
+            (
+                SessionEvent::ProxyRequest {
+                    request_id: "r1".into(),
+                    token_id: "tok1".into(),
+                    token_name: "laptop".into(),
+                    upstream: "local".into(),
+                    provider: "ollama".into(),
+                    model: "m".into(),
+                    shape: crate::ProxyShape::OpenaiChat,
+                    stream: false,
+                    request_sha256: crate::HashHex("00".repeat(32)),
+                    request_bytes: 2,
+                    credential_id: None,
+                    archived: false,
+                },
+                None,
+                Some("proxy-token:tok1"),
+                None,
+            ),
+            (
+                SessionEvent::ProxyResponse {
+                    request_id: "r1".into(),
+                    token_id: "tok1".into(),
+                    status: 200,
+                    latency_ms: 1,
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    total_cost_usd_micros: None,
+                    response_sha256: crate::HashHex("00".repeat(32)),
+                    response_bytes: 2,
+                    complete: true,
+                    archived: false,
+                },
+                None,
+                Some("proxy-token:tok1"),
+                None,
+            ),
+            (
+                SessionEvent::ProxyRefused {
+                    token_id: None,
+                    shape: None,
+                    model: None,
+                    reason: crate::ProxyRefusal::UnknownToken,
+                },
+                None,
+                None,
+                None,
+            ),
+            (
+                SessionEvent::ProxyArchiveRedacted {
+                    sha256: crate::HashHex("00".repeat(32)),
+                    operator: "uid:1000 (op)".into(),
+                    reason: "request".into(),
+                },
+                None,
+                None,
+                None,
             ),
             (
                 SessionEvent::SandboxEgressUnsupported {

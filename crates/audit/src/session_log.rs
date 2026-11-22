@@ -2331,6 +2331,83 @@ pub enum SessionEvent {
         path: String,
         reason: McpInjectRefusal,
     },
+    /// A client's request arrived on the proxy listener, passed every
+    /// check, and is about to be forwarded to `provider`. Written
+    /// before the request is sent, on the token's own lane. `token_id`
+    /// names the token, never its value. `request_sha256` is the hash
+    /// of the request body exactly as the client sent it, which is
+    /// what is forwarded.
+    ProxyRequest {
+        request_id: String,
+        token_id: String,
+        token_name: String,
+        /// The upstream's name in `proxy.json`.
+        upstream: String,
+        provider: String,
+        model: String,
+        shape: ProxyShape,
+        stream: bool,
+        request_sha256: HashHex,
+        request_bytes: u64,
+        /// The vault entry the provider key was read from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_id: Option<String>,
+        /// The body was written to the archive under its hash.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        archived: bool,
+    },
+    /// The answer to a [`SessionEvent::ProxyRequest`], after its last
+    /// byte went to the client. `response_sha256` is the hash of the
+    /// response body exactly as the provider sent it and the client
+    /// received it; for a stream, of every byte in order. Token counts
+    /// are the provider's own, absent where its answer carried none.
+    ProxyResponse {
+        request_id: String,
+        token_id: String,
+        /// The provider's HTTP status.
+        status: u16,
+        latency_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_cost_usd_micros: Option<u64>,
+        response_sha256: HashHex,
+        response_bytes: u64,
+        /// False when the exchange ended before the provider's answer
+        /// did: the client went away or the connection broke. The
+        /// hash and count then cover what was exchanged.
+        complete: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        archived: bool,
+    },
+    /// A request on the proxy listener was refused and nothing was
+    /// forwarded. `token_id` is absent when no known token came with
+    /// it; such rows are on the `gateway-proxy` lane.
+    ProxyRefused {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape: Option<ProxyShape>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        reason: ProxyRefusal,
+    },
+    /// The key an archived body was encrypted under was destroyed. The
+    /// object stays in the bucket for its retention period and can no
+    /// longer be read. `sha256` is the body's hash, as on the
+    /// [`SessionEvent::ProxyRequest`] or [`SessionEvent::ProxyResponse`]
+    /// row that names it. On the `gateway-proxy` lane.
+    ProxyArchiveRedacted {
+        sha256: HashHex,
+        operator: String,
+        reason: String,
+    },
     /// A stdio MCP server started on the host, outside any container,
     /// because its entry says `"sandbox": "off"`. Written at every
     /// start, on the `gateway-mcp` sentinel session.
@@ -2857,6 +2934,85 @@ impl McpInjectRefusal {
             Self::CredentialInResponse => "credential_in_response",
             Self::RecordFailed => "record_failed",
         }
+    }
+}
+
+/// The request shape a proxied call arrived in, which is the shape it
+/// is forwarded in.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyShape {
+    /// `POST /v1/chat/completions`.
+    OpenaiChat,
+    /// `POST /v1/messages`.
+    AnthropicMessages,
+}
+
+impl ProxyShape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiChat => "openai_chat",
+            Self::AnthropicMessages => "anthropic_messages",
+        }
+    }
+}
+
+/// Why the proxy listener refused a request. A closed set.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyRefusal {
+    /// No token, or one this gateway never issued.
+    UnknownToken,
+    /// A token that was revoked.
+    RevokedToken,
+    /// Not a JSON body with a model, or over the size limit.
+    Malformed,
+    /// None of the token's upstreams speaks the request's shape.
+    ShapeNotSpoken,
+    /// The model is not one the token allows.
+    ModelNotAllowed,
+    /// The token's spend ceiling for the window is reached, or its
+    /// ledger could not be read.
+    BudgetExceeded,
+    /// The body carries a stored secret.
+    LeakRefused,
+    /// The provider key may not be sent to the upstream, or is gone.
+    CredentialRefused,
+    /// The request row could not be written, so nothing was sent.
+    RecordFailed,
+    /// The body could not be written to the archive, so nothing was
+    /// sent.
+    ArchiveFailed,
+}
+
+impl ProxyRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownToken => "unknown_token",
+            Self::RevokedToken => "revoked_token",
+            Self::Malformed => "malformed",
+            Self::ShapeNotSpoken => "shape_not_spoken",
+            Self::ModelNotAllowed => "model_not_allowed",
+            Self::BudgetExceeded => "budget_exceeded",
+            Self::LeakRefused => "leak_refused",
+            Self::CredentialRefused => "credential_refused",
+            Self::RecordFailed => "record_failed",
+            Self::ArchiveFailed => "archive_failed",
+        }
+    }
+}
+
+/// The lane for proxy rows that belong to no one token: refusals of
+/// requests that carried no known token, and archive redactions. A
+/// token's own calls are on its lane, [`proxy_session`].
+pub const PROXY_SESSION: &str = "gateway-proxy";
+
+/// The lane a token's proxied calls are recorded on: `proxy-<id>`, or
+/// `proxy-<id>-<label>` for the session label a client sent.
+pub fn proxy_session(token_id: &str, label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("proxy-{token_id}-{label}"),
+        None => format!("proxy-{token_id}"),
     }
 }
 

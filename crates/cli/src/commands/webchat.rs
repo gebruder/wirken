@@ -4657,6 +4657,12 @@ pub fn session_events(
             // gateway's own lane, not a conversation's.
             SessionEvent::McpCredentialInjected { .. } => None,
             SessionEvent::McpInjectRefused { .. } => None,
+            // Calls another client made through the proxy listener;
+            // not part of a webchat conversation.
+            SessionEvent::ProxyRequest { .. } => None,
+            SessionEvent::ProxyResponse { .. } => None,
+            SessionEvent::ProxyRefused { .. } => None,
+            SessionEvent::ProxyArchiveRedacted { .. } => None,
             SessionEvent::McpCredentialRefreshDiscarded { .. } => None,
             // What the session has read, for the http_request gate; the
             // tool calls that read it are on the page already.

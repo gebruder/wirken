@@ -3876,6 +3876,46 @@ fn every_session_event() -> Vec<SessionEvent> {
             path: String::new(),
             reason: crate::session_log::McpInjectRefusal::UnmappedPath,
         },
+        SessionEvent::ProxyRequest {
+            request_id: String::new(),
+            token_id: String::new(),
+            token_name: String::new(),
+            upstream: String::new(),
+            provider: String::new(),
+            model: String::new(),
+            shape: crate::session_log::ProxyShape::OpenaiChat,
+            stream: false,
+            request_sha256: HashHex(String::new()),
+            request_bytes: 0,
+            credential_id: None,
+            archived: false,
+        },
+        SessionEvent::ProxyResponse {
+            request_id: String::new(),
+            token_id: String::new(),
+            status: 0,
+            latency_ms: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            total_cost_usd_micros: None,
+            response_sha256: HashHex(String::new()),
+            response_bytes: 0,
+            complete: false,
+            archived: false,
+        },
+        SessionEvent::ProxyRefused {
+            token_id: None,
+            shape: None,
+            model: None,
+            reason: crate::session_log::ProxyRefusal::UnknownToken,
+        },
+        SessionEvent::ProxyArchiveRedacted {
+            sha256: HashHex(String::new()),
+            operator: String::new(),
+            reason: String::new(),
+        },
         SessionEvent::LeakRefused {
             credential: String::new(),
             surface: crate::session_log::LeakSurface::ToolOutput,
@@ -4134,6 +4174,10 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::McpCredentialRefetched { .. } => "McpCredentialRefetched",
         SessionEvent::McpCredentialInjected { .. } => "McpCredentialInjected",
         SessionEvent::McpInjectRefused { .. } => "McpInjectRefused",
+        SessionEvent::ProxyRequest { .. } => "ProxyRequest",
+        SessionEvent::ProxyResponse { .. } => "ProxyResponse",
+        SessionEvent::ProxyRefused { .. } => "ProxyRefused",
+        SessionEvent::ProxyArchiveRedacted { .. } => "ProxyArchiveRedacted",
         SessionEvent::LeakRefused { .. } => "LeakRefused",
         SessionEvent::LlmRequestFailed { .. } => "LlmRequestFailed",
         SessionEvent::McpEntryVerified { .. } => "McpEntryVerified",
@@ -4141,7 +4185,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 95;
+const SESSION_EVENT_VARIANTS: usize = 99;
 
 /// The list covers the enum.
 #[test]

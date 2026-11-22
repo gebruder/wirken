@@ -78,6 +78,10 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   being given up on.
 /// - `McpCredentialRefetched`: the gateway giving the MCP proxy a
 ///   credential's current vault value after a server refused it.
+/// - `ProxyRequest`, `ProxyResponse`, `ProxyRefused`,
+///   `ProxyArchiveRedacted`: each call a client made through the proxy
+///   listener, forwarded or refused, and an archived body made
+///   unreadable. Hashes and counts, never a body.
 /// - `McpCredentialInjected`, `McpInjectRefused`: each request on a
 ///   contained server's injected route, made with the credential or
 ///   refused.
@@ -157,6 +161,11 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::McpCredentialRefetched { .. } => true,
         SessionEvent::McpCredentialInjected { .. } => true,
         SessionEvent::McpInjectRefused { .. } => true,
+        // Inference a client outside Wirken made through it.
+        SessionEvent::ProxyRequest { .. } => true,
+        SessionEvent::ProxyResponse { .. } => true,
+        SessionEvent::ProxyRefused { .. } => true,
+        SessionEvent::ProxyArchiveRedacted { .. } => true,
         // A refresh that lost to a removal or a new sign-in.
         SessionEvent::McpCredentialRefreshDiscarded { .. } => true,
         // Where credentials may go, and where they went.
@@ -374,6 +383,10 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::McpCredentialRefetched { .. } => "mcp_credential_refetched",
         SessionEvent::McpCredentialInjected { .. } => "mcp_credential_injected",
         SessionEvent::McpInjectRefused { .. } => "mcp_inject_refused",
+        SessionEvent::ProxyRequest { .. } => "proxy_request",
+        SessionEvent::ProxyResponse { .. } => "proxy_response",
+        SessionEvent::ProxyRefused { .. } => "proxy_refused",
+        SessionEvent::ProxyArchiveRedacted { .. } => "proxy_archive_redacted",
         SessionEvent::McpCredentialRefreshDiscarded { .. } => "mcp_credential_refresh_discarded",
         SessionEvent::CredentialDestinationRefused { .. } => "credential_destination_refused",
         SessionEvent::CredentialDestinationGranted { .. } => "credential_destination_granted",
