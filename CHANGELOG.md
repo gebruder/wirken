@@ -10,6 +10,28 @@ tagged.
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-11-22
+
+### Operator notes
+
+Three changes can need operator action.
+
+- `http_request` matches the port. A host in a skill's `egress.domains`, an
+  `http.post_paths` entry and a credential's `--host` each mean port 443. A
+  skill or credential that relies on another port needs it added to its
+  entry as `host:port` (`wirken credentials grant NAME --host
+  api.example.com:8443`).
+- A provider base URL whose host is not ASCII needs its `xn--` form.
+- An HTTP MCP server's calls follow no redirect. An entry whose URL redirects
+  needs the server's real URL and a new signature (`wirken mcp sign`).
+
+The inference proxy is off unless the data directory has a `proxy.json`.
+
+### Security
+
+- url 2.5.8 to 2.5.9, for RUSTSEC-2026-0592 (GHSA-hrj5-67jp-wqp9): a stack
+  overflow in `Url::origin()` on a URL nested in many `blob:` prefixes.
+
 ### Added
 
 - Inference proxy. With a `proxy.json` in the data directory, `wirken run`
@@ -349,6 +371,17 @@ tagged.
   `Z`). Since 3.4.0 it was written by the time library's own serializer,
   which drops trailing zeros, and compiled only because another dependency
   switched that serializer on.
+
+### Deferred
+
+- Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
+  serenity 0.12.5 in the Discord adapter, stay open as in 3.4.1. The fix for
+  all three is serenity on rustls 0.23, held until the migrated adapter
+  passes a live Discord round-trip.
+- #317 (sixteen Cargo updates) is deferred whole. It carries the major bumps
+  jiff 1.0.1 and shlex 2.0.1, the 0.x minors rusqlite 0.43.0, capnp and
+  capnpc 0.28.1, and slack-morphism 2.34.0, which take a soak cycle or a
+  live round-trip, and its checks do not pass.
 
 ## [3.4.1] - 2026-11-18
 
