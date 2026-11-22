@@ -487,15 +487,20 @@ impl LlmClient {
             )));
         }
 
+        // No redirect is followed, for any provider. The key was read
+        // for the origin of `base_url`, and a redirect would send the
+        // request on to an origin nothing checked: the client drops
+        // `Authorization` across hosts but not `x-api-key`,
+        // `x-goog-api-key` or a signed request's session token, and it
+        // sends the conversation along with a 307 or 308.
         let mut builder = reqwest::Client::builder()
             .https_only(!is_localhost)
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(300));
         if config.auth.is_plan() {
             // The plan route's bearer is the operator's plan; it goes to
-            // the pinned endpoint and nowhere a redirect points.
-            builder = builder
-                .https_only(true)
-                .redirect(reqwest::redirect::Policy::none());
+            // the pinned endpoint only.
+            builder = builder.https_only(true);
         }
         let http = builder
             .build()
@@ -2245,5 +2250,140 @@ mod plain_http_tests {
         ] {
             assert!(!accepted(url), "{url}");
         }
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::{LlmClient, LlmConfig};
+    use crate::conversation::{Message, Role};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A loopback server that keeps the head of each request and
+    /// answers every one with `reply`.
+    async fn server(reply: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let heads = Arc::new(Mutex::new(Vec::new()));
+        let kept = heads.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let (kept, reply) = (kept.clone(), reply.clone());
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    kept.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf).to_ascii_lowercase());
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (base, heads)
+    }
+
+    /// A provider endpoint that answers 307 to `elsewhere`, a second
+    /// server that would take whatever followed it.
+    async fn redirecting() -> (String, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>) {
+        let (elsewhere, followed) = server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\
+             Connection: close\r\n\r\n{}"
+                .to_string(),
+        )
+        .await;
+        let (base, asked) = server(format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {elsewhere}/taken\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        ))
+        .await;
+        (base, asked, followed)
+    }
+
+    fn hello() -> Vec<Message> {
+        vec![Message {
+            role: Role::User,
+            content: "hello".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }]
+    }
+
+    const KEY: &str = "sk-redirect-test-key-0123456789";
+
+    /// The provider answered with a redirect: the call fails, the key
+    /// went to the configured origin under `header`, and nothing was
+    /// sent to where the redirect pointed.
+    async fn assert_not_followed(config: LlmConfig, key: &str, header: &str, streamed: bool) {
+        let (base, asked, followed) = redirecting().await;
+        let config = LlmConfig {
+            base_url: format!("{base}/v1"),
+            ..config
+        };
+        let provider = config.provider.clone();
+        let client = LlmClient::new(config).unwrap();
+        let result = if streamed {
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            client.complete_stream(&hello(), &[], Some(key), tx).await
+        } else {
+            client.complete(&hello(), &[], Some(key)).await
+        };
+        assert!(result.is_err(), "{provider}: a redirect was answered");
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "{provider}: {asked:?}");
+        assert!(asked[0].contains(header), "{provider}: {}", asked[0]);
+        let followed = followed.lock().unwrap().clone();
+        assert!(
+            followed.is_empty(),
+            "{provider}: the redirect target was sent {followed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_key_is_not_sent_where_a_redirect_points() {
+        let config = LlmConfig::anthropic("m");
+        assert_not_followed(config.clone(), KEY, "x-api-key: sk-redirect", false).await;
+        assert_not_followed(config, KEY, "x-api-key: sk-redirect", true).await;
+    }
+
+    #[tokio::test]
+    async fn a_gemini_key_is_not_sent_where_a_redirect_points() {
+        let config = LlmConfig::gemini("m");
+        assert_not_followed(config, KEY, "x-goog-api-key: sk-redirect", false).await;
+    }
+
+    #[tokio::test]
+    async fn an_openai_compatible_key_is_not_sent_where_a_redirect_points() {
+        for provider in ["openai", "custom", "hetzner"] {
+            let config = LlmConfig::from_provider(provider, "http://127.0.0.1:9/v1", "m");
+            let header = "authorization: bearer sk-redirect";
+            assert_not_followed(config.clone(), KEY, header, false).await;
+            assert_not_followed(config, KEY, header, true).await;
+        }
+    }
+
+    /// A signed Bedrock request carries its session token in a header
+    /// of its own, which is not sent on either.
+    #[tokio::test]
+    async fn a_bedrock_session_token_is_not_sent_where_a_redirect_points() {
+        let config = LlmConfig::bedrock("m", "us-east-1");
+        assert_not_followed(
+            config,
+            "AKIAEXAMPLE:secretkey0123456789:session-token-0123456789",
+            "x-amz-security-token: session-token-0123456789",
+            false,
+        )
+        .await;
     }
 }
