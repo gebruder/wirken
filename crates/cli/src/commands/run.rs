@@ -208,6 +208,62 @@ impl wirken_agent::llm::ProviderKeySource for VaultProviderKey {
     }
 }
 
+/// What the proxy listener works with: a client for each upstream in
+/// `proxy.json`, each with the source its key is read from per call.
+fn proxy_state(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    proxy_config: &wirken_gateway::proxy::ProxyConfig,
+    vault: Option<Arc<std::sync::Mutex<CredentialStore>>>,
+    session_log: Arc<dyn wirken_audit::SessionLog>,
+    leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
+) -> Result<Arc<super::proxy_server::ProxyState>> {
+    use super::proxy_server::{ProxyState, UpstreamClient};
+    let mut upstreams = std::collections::BTreeMap::new();
+    for (name, upstream) in &proxy_config.upstreams {
+        let key: Option<Arc<dyn wirken_agent::llm::ProviderKeySource>> =
+            match (&upstream.credential, &vault) {
+                (Some(credential), Some(store)) => Some(Arc::new(VaultProviderKey::new(
+                    store.clone(),
+                    credential.clone(),
+                    super::destinations::provider(&upstream.provider, &upstream.base_url),
+                    leak_matcher.clone(),
+                    Some(session_log.clone()),
+                ))),
+                _ => None,
+            };
+        if let Some(Err(why)) = key.as_ref().map(|k| k.key()) {
+            tracing::warn!(
+                upstream = %name,
+                "proxy: the key for this upstream is not usable, and calls to it are refused \
+                 until it is: {why}"
+            );
+        }
+        let client = UpstreamClient::new(upstream.clone(), key, leak_matcher.clone())
+            .with_context(|| format!("proxy.json: upstream {name}"))?;
+        upstreams.insert(name.clone(), client);
+    }
+    let budget = match wirken_gateway::budget::BudgetStore::open(&cfg.budget_db_path()) {
+        Ok(store) => Some(Arc::new(std::sync::Mutex::new(store))),
+        Err(e) => {
+            tracing::warn!(
+                "proxy: the spend ledger could not be opened, and tokens with a spend ceiling \
+                 are refused: {e}"
+            );
+            None
+        }
+    };
+    Ok(Arc::new(ProxyState {
+        max_body_bytes: proxy_config.max_body_bytes,
+        upstreams,
+        tokens: super::proxy::open_store(&cfg.data_dir)?,
+        log: session_log,
+        budget,
+        leak: leak_matcher,
+        archive: None,
+        last_unknown_row: std::sync::Mutex::new(None),
+    }))
+}
+
 /// Every model key a static config names by vault entry: (agent id,
 /// channel override, entry, the provider it is sent to). A plan agent
 /// has none.
@@ -2077,6 +2133,58 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     ));
     let webchat_pending = pending_approval_queue.clone();
     let webchat_registry = sse_approval_registry.clone();
+
+    // --- Inference proxy ---
+    //
+    // On when the data directory has a proxy.json. Each upstream's key
+    // is read from the vault per call, under the destination check an
+    // agent's key gets.
+    let proxy_handle = match wirken_gateway::proxy::ProxyConfig::load(&cfg.data_dir)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+    {
+        Some(proxy_config) => {
+            let vault = if proxy_config
+                .upstreams
+                .values()
+                .any(|u| u.credential.is_some())
+                || proxy_config.archive.is_some()
+            {
+                let keychain = probe_keychain(&cfg.data_dir, || {
+                    prompt_vault_passphrase(&mut vault_passphrase)
+                });
+                Some(Arc::new(std::sync::Mutex::new(
+                    CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                        .context("Failed to open credential store for the proxy")?,
+                )))
+            } else {
+                None
+            };
+            let state = proxy_state(
+                &cfg,
+                &proxy_config,
+                vault,
+                session_log.clone(),
+                leak_matcher.clone(),
+            )?;
+            let addr = proxy_config
+                .bind_addr()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let listener = super::proxy_server::bind(addr)
+                .await
+                .with_context(|| format!("Failed to bind the proxy listener at {addr}"))?;
+            println!(
+                "  Proxy: http://{addr} ({} upstream{})",
+                proxy_config.upstreams.len(),
+                if proxy_config.upstreams.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            );
+            Some(tokio::spawn(super::proxy_server::serve(listener, state)))
+        }
+        None => None,
+    };
     // Every task an accept loop spawns for one connection is tracked
     // here, so shutdown can stop it before sealing the session chains.
     let connection_tasks = super::connection_tasks::ConnectionTasks::new(audit.clone());
@@ -2723,6 +2831,9 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     #[cfg(unix)]
     permissions_handle.abort();
     webchat_handle.abort();
+    if let Some(handle) = &proxy_handle {
+        handle.abort();
+    }
     scheduler_handle.abort();
 
     // With the accept loops stopped no new connection task starts.

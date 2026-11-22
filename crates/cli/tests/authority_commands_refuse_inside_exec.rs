@@ -8,6 +8,16 @@ use common::wirken;
 /// Every authority-changing invocation, with arguments it would accept.
 const INVOCATIONS: &[(&str, &str, &[&str])] = &[
     (
+        "proxy",
+        "token issue",
+        &["proxy", "token", "issue", "laptop", "--upstream", "local"],
+    ),
+    (
+        "proxy",
+        "token revoke",
+        &["proxy", "token", "revoke", "laptop"],
+    ),
+    (
         "permissions",
         "approve",
         &[

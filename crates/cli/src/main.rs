@@ -129,6 +129,12 @@ enum Commands {
     #[command(subcommand)]
     Hooks(HookCommands),
 
+    /// Manage the inference proxy: the tokens its clients
+    /// authenticate with. Issuing and revoking refuse inside a Wirken
+    /// `exec`.
+    #[command(subcommand)]
+    Proxy(ProxyCommands),
+
     /// Manage the channel approver allowlist and each adapter's
     /// approval chat. Changes apply without a restart. Refuses inside
     /// a Wirken `exec`.
@@ -1373,6 +1379,48 @@ enum SenderCommands {
 }
 
 #[derive(Subcommand)]
+enum ProxyCommands {
+    /// Manage client tokens
+    #[command(subcommand)]
+    Token(ProxyTokenCommands),
+}
+
+#[derive(Subcommand)]
+enum ProxyTokenCommands {
+    /// Issue a token for a client of the proxy. The token is printed
+    /// once and stored only as a digest. Run at a terminal.
+    Issue {
+        /// A name for the token (letters, digits, - and _).
+        name: String,
+        /// An upstream from proxy.json the token may reach. Repeat for
+        /// more; they are tried in the order given.
+        #[arg(long = "upstream", required = true)]
+        upstreams: Vec<String>,
+        /// A model the token may ask for. Repeat for more. Without it
+        /// the token may ask for any model.
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// Spend ceiling over the window, in US dollars. Calls for a
+        /// model with no price are refused under it.
+        #[arg(long)]
+        ceiling_usd: Option<f64>,
+        /// Call ceiling over the window.
+        #[arg(long)]
+        ceiling_calls: Option<u64>,
+        /// The window the ceilings apply over: hour, day or week.
+        #[arg(long, default_value = "day")]
+        window: String,
+    },
+    /// Revoke a token by its id or name. Run at a terminal.
+    Revoke {
+        /// The token's id or name.
+        token: String,
+    },
+    /// List tokens: id, name and what each allows. Never a token.
+    List,
+}
+
+#[derive(Subcommand)]
 enum HookCommands {
     /// Register an external hook process by its Ed25519 public key.
     /// The hook process must run independently and connect to
@@ -1519,6 +1567,14 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
                 SkillCommands::Search { .. }
                 | SkillCommands::List
                 | SkillCommands::Verify { .. } => return None,
+            },
+        ),
+        Commands::Proxy(ProxyCommands::Token(cmd)) => (
+            "proxy",
+            match cmd {
+                ProxyTokenCommands::Issue { .. } => "token issue",
+                ProxyTokenCommands::Revoke { .. } => "token revoke",
+                ProxyTokenCommands::List => return None,
             },
         ),
         Commands::Mcp(cmd) => (
@@ -2065,6 +2121,25 @@ async fn main() -> Result<()> {
             SenderCommands::Refused { channel, limit } => {
                 commands::senders::refused(channel.as_deref(), limit)
             }
+        },
+        Commands::Proxy(ProxyCommands::Token(cmd)) => match cmd {
+            ProxyTokenCommands::Issue {
+                name,
+                upstreams,
+                models,
+                ceiling_usd,
+                ceiling_calls,
+                window,
+            } => commands::proxy::token_issue(
+                &name,
+                &upstreams,
+                &models,
+                ceiling_usd,
+                ceiling_calls,
+                &window,
+            ),
+            ProxyTokenCommands::Revoke { token } => commands::proxy::token_revoke(&token),
+            ProxyTokenCommands::List => commands::proxy::token_list(),
         },
         Commands::Hooks(cmd) => match cmd {
             HookCommands::Register {
