@@ -77,6 +77,29 @@ tagged.
 
 ### Changed
 
+- A provider's key is checked against the host the HTTP client connects to.
+  A base URL that reads as one host and is sent to another, such as
+  `https://a.example\@b.example/v1`, has no origin, and no key is sent for
+  it. A provider destination with an empty origin is allowed by no binding. A
+  base URL whose host is not ASCII needs its `xn--` form
+  (`the_origin_is_never_a_host_other_than_the_one_the_request_goes_to`,
+  `crates/vault/src/binding.rs`;
+  [docs/credentials.md](docs/credentials.md#where-a-credential-may-go)).
+
+- No model provider request follows a redirect. A redirect answer fails the
+  call, and the key, a Bedrock session token and the conversation go to the
+  configured origin only (`an_anthropic_key_is_not_sent_where_a_redirect_points`
+  and the three tests beside it, `crates/agent/src/llm.rs`).
+
+- A model listing is sent to the provider's configured base URL, over HTTPS
+  or to loopback, and follows no redirect. `wirken agents set --model list`
+  sent an Anthropic or Gemini key to that provider's public endpoint whatever
+  the agent's base URL was. `wirken setup` offers a stored key only where its
+  entry allows the endpoint being set up
+  (`a_listing_asks_the_configured_endpoint`, `crates/cli/src/commands/mod.rs`;
+  `a_key_stored_for_another_origin_is_not_offered`,
+  `crates/cli/src/commands/provider_pick.rs`).
+
 - For `http_request` the port is part of every destination match. A host in
   `egress.domains`, an `http.post_paths` entry and a credential's `--host`
   each name port 443; another port is reached, posted to or handed a

@@ -43,6 +43,16 @@ credential somewhere new.
 | A channel adapter | the adapter id | `--adapter slack` |
 | A plan sign-in | the plan endpoints | `--plan` |
 
+A provider's key goes to the origin of its base URL and nowhere else. The
+origin is the host the HTTP client connects to for that URL: a base URL the
+client would read differently from how it is written, one with a backslash or
+a control character in its host part for instance, has no origin, and no key
+is sent for it. A host outside ASCII is written in its `xn--` form. No
+provider request follows a redirect, and neither does a model listing, which
+`wirken setup` and `wirken agents set --model list` send to the same base URL
+with the same key. Setup offers a stored key only for an endpoint its entry
+allows.
+
 ```bash
 wirken credentials grant <NAME> --host api.linear.app
 wirken credentials grant <NAME> --mcp-server linear
