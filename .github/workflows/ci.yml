@@ -157,12 +157,22 @@ jobs:
           grep -q 'a_gvisor_exec_runs_on_the_runsc_kernel \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
           grep -q 'a_gvisor_exec_makes_a_user_namespace_and_mounts_in_it \.\.\. ok' "$RUNNER_TEMP/gvisor.log"
           ! grep -q '^skipping:' "$RUNNER_TEMP/gvisor.log"
-      - name: MCP server container that starts under runsc
+      # The egress sidecar and the loopback relay run this binary inside
+      # the server's image, so it is linked statically.
+      - name: Build the static binary the sidecar and the relay run
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build -p wirken-cli --bin wirken \
+            --target x86_64-unknown-linux-gnu --target-dir target/static
+      - name: MCP server containers that start under runsc
         env:
           WIRKEN_TEST_REQUIRE_RUNSC: "1"
         run: |
+          export WIRKEN_SIDECAR_BINARY="$PWD/target/static/x86_64-unknown-linux-gnu/debug/wirken"
           cargo test -p wirken-mcp-proxy gvisor -- --nocapture 2>&1 | tee "$RUNNER_TEMP/gvisor-mcp.log"
           grep -q 'a_gvisor_server_starts_on_the_runsc_kernel \.\.\. ok' "$RUNNER_TEMP/gvisor-mcp.log"
+          grep -q 'a_gvisor_injected_server_holds_a_placeholder_and_its_request_carries_the_credential \.\.\. ok' "$RUNNER_TEMP/gvisor-mcp.log"
           ! grep -q '^skipping:' "$RUNNER_TEMP/gvisor-mcp.log"
 
   corpus:
