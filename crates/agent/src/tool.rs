@@ -569,6 +569,14 @@ impl ToolRegistry {
         )
     }
 
+    /// The sandbox egress context the last turn installed.
+    #[cfg(all(test, unix))]
+    pub(crate) fn sandbox_egress_for_test(
+        &self,
+    ) -> Option<crate::sandbox_egress::SandboxEgressContext> {
+        self.sandbox_egress.read().ok().and_then(|g| g.clone())
+    }
+
     pub fn set_sandbox_egress(&self, ctx: crate::sandbox_egress::SandboxEgressContext) {
         if let Ok(mut g) = self.sandbox_egress.write() {
             *g = Some(ctx);

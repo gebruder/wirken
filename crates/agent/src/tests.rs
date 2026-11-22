@@ -15708,6 +15708,95 @@ mod http_request_after_a_restricting_read {
         assert!(exemptions(&r.events).is_empty());
     }
 
+    /// The exemption is `http_request`'s. The sandbox egress context of
+    /// an exempted agent still carries `exec_output`, and under `open`
+    /// refuses on it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_exemption_does_not_reach_sandbox_egress() {
+        use wirken_sandbox::egress::{EgressDecider, RequestKind, RequestSeen};
+
+        let (base_url, server) = stub(vec![serde_json::json!({
+            "role": "assistant", "content": "Done."
+        })])
+        .await;
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let lane = log.handle_for(SessionId::new("reader".to_string()));
+        log.append(
+            &lane,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::ReadSensitivityObserved {
+                sensitivity: "exec_output".into(),
+                tool: "exec".into(),
+            },
+        )
+        .unwrap();
+        let mut agent = crate::runtime::Agent::from_session_log(
+            "reader".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            Default::default(),
+            crate::runtime::ToolGate::Store(crate::tests::test_permissions()),
+        )
+        .unwrap();
+        agent.set_exempt_exec_mcp_output(true);
+        agent.set_channel_egress(
+            [(
+                "webchat".to_string(),
+                wirken_gateway::agent_config::ChannelEgress {
+                    mode: "open".into(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+        );
+        agent
+            .process_inbound(
+                "hello",
+                "msg-1".into(),
+                crate::runtime::InboundContext {
+                    channel: Some("webchat".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("the turn ends with a reply");
+        server.await.unwrap();
+
+        let ctx = agent.sandbox_egress_for_test().expect("installed");
+        let verdict = ctx
+            .decide(
+                "example.com",
+                443,
+                RequestKind::Connect,
+                RequestSeen {
+                    method: "CONNECT",
+                    path: "",
+                },
+            )
+            .await;
+        assert!(!verdict.allowed, "{verdict:?}");
+        assert_eq!(
+            verdict.reason,
+            Some(wirken_audit::SandboxEgressDenyReason::SensitivityRefused)
+        );
+        assert_eq!(verdict.basis, vec!["exec_output".to_string()]);
+    }
+
     /// A session woken after a restart, or after it left the session
     /// cache, has read what it read before: one turn reads a file, and
     /// the next turn, in a fresh agent replayed from the chain, is

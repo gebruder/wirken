@@ -1611,6 +1611,14 @@ impl Agent {
         Ok(())
     }
 
+    /// The sandbox egress context the last turn installed.
+    #[cfg(all(test, unix))]
+    pub(crate) fn sandbox_egress_for_test(
+        &self,
+    ) -> Option<crate::sandbox_egress::SandboxEgressContext> {
+        self.tools.sandbox_egress_for_test()
+    }
+
     /// Install this agent's per-channel sandbox egress config.
     /// Called by the factory at wake time from `AgentStaticConfig`.
     pub fn set_channel_egress(
