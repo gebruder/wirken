@@ -3395,22 +3395,26 @@ fn mcp_proxy_handoff(
     >,
 ) {
     use wirken_mcp_proxy::credentials::{
-        GATEWAY_TOKEN_ENTRY, SERVERS_ENTRY, ServerPin, without_refresh_token,
+        GATEWAY_TOKEN_ENTRY, PLACEHOLDERS_ENTRY, SERVERS_ENTRY, ServerPin, without_refresh_token,
     };
     let mut entries = std::collections::BTreeMap::new();
+    let mut placeholders = std::collections::BTreeMap::new();
     let mut pins: std::collections::BTreeMap<String, std::collections::BTreeSet<ServerPin>> =
         std::collections::BTreeMap::new();
     match vault.map(|v| v.lock()) {
         Some(Ok(store)) => {
             for name in &wanted.names {
-                if name == GATEWAY_TOKEN_ENTRY || name == SERVERS_ENTRY {
+                if name == GATEWAY_TOKEN_ENTRY
+                    || name == SERVERS_ENTRY
+                    || name == PLACEHOLDERS_ENTRY
+                {
                     tracing::warn!("vault credential '{name}' is not handed to the MCP proxy");
                     continue;
                 }
                 // The binding authenticated by the decryption decides,
                 // per server entry that reads the name.
-                let binding = match store.peek(name) {
-                    Ok((_, meta)) => meta.binding,
+                let (binding, kind) = match store.peek(name) {
+                    Ok((_, meta)) => (meta.binding, meta.kind),
                     Err(wirken_vault::VaultError::NotFound(_)) => continue,
                     Err(e) => {
                         tracing::warn!(
@@ -3427,8 +3431,13 @@ fn mcp_proxy_handoff(
                         server,
                         digest.as_deref().unwrap_or("unsigned"),
                     );
+                    // An injected credential is sent as one header
+                    // value, which only a plain secret is.
+                    let injectable = !wanted.injected.contains(&(name.clone(), server.clone()))
+                        || (kind == wirken_vault::CredentialKind::Secret
+                            && !wanted.oauth.contains(name));
                     match digest {
-                        Some(entry) if binding.permits(&destination) => {
+                        Some(entry) if injectable && binding.permits(&destination) => {
                             allowed.insert(ServerPin {
                                 server: server.clone(),
                                 entry: entry.clone(),
@@ -3454,6 +3463,23 @@ fn mcp_proxy_handoff(
                             secret.expose().to_string()
                         };
                         entries.insert(name.clone(), VaultSecret::new(value));
+                        // The stand-in a contained server holds for an
+                        // injected credential. Minted here so the leak
+                        // matcher knows it: a tool result or a message
+                        // that carries it is refused, naming it.
+                        if allowed.iter().any(|pin| {
+                            wanted
+                                .injected
+                                .contains(&(name.clone(), pin.server.clone()))
+                        }) {
+                            let placeholder = wirken_mcp_proxy::inject::new_placeholder();
+                            leak.learn(
+                                &placeholder_name(name),
+                                &placeholder,
+                                wirken_vault::CredentialKind::Secret,
+                            );
+                            placeholders.insert(name.clone(), placeholder);
+                        }
                         if let Some(log) = log {
                             for pin in &allowed {
                                 super::destinations::handed_out(
@@ -3484,7 +3510,19 @@ fn mcp_proxy_handoff(
         SERVERS_ENTRY.to_string(),
         VaultSecret::new(serde_json::to_string(&pins).unwrap_or_default()),
     );
+    if !placeholders.is_empty() {
+        entries.insert(
+            PLACEHOLDERS_ENTRY.to_string(),
+            VaultSecret::new(serde_json::to_string(&placeholders).unwrap_or_default()),
+        );
+    }
     (Handoff::from_entries(entries), pins)
+}
+
+/// What a `leak_refused` row calls the placeholder a contained MCP
+/// server holds for the injected credential `name`.
+fn placeholder_name(name: &str) -> String {
+    format!("{name} (placeholder)")
 }
 
 /// How long the MCP proxy gets to stop its servers at shutdown.
@@ -8667,6 +8705,7 @@ mod proxy_handoff_tests {
             names: BTreeSet::from(["linear-token".to_string()]),
             oauth: BTreeSet::new(),
             uses: uses(&[("linear-token", "linear", Some("sha256:aa"))]),
+            injected: BTreeSet::new(),
         };
         let leak = wirken_gateway::leak::LeakMatcher::new();
         let _ = mcp_proxy_handoff(
@@ -8680,6 +8719,102 @@ mod proxy_handoff_tests {
             leak.find("a lin-api-token-0001 b").as_deref(),
             Some("linear-token")
         );
+    }
+
+    /// A credential an entry's `inject` block binds is handed over with
+    /// a placeholder the leak matcher has learned, under a name that
+    /// says it is one. A credential no entry injects gets none.
+    #[test]
+    fn an_injected_credential_is_handed_over_with_a_placeholder_leak_detection_knows() {
+        use wirken_mcp_proxy::credentials::PLACEHOLDERS_ENTRY;
+        let (_tmp, store) = store();
+        put(
+            &store,
+            "github-token",
+            "ghp_realvalue0123456789",
+            &bound_to("github", "sha256:aa"),
+        );
+        put(
+            &store,
+            "linear-token",
+            "lin-api-token-0001",
+            &bound_to("linear", "sha256:bb"),
+        );
+        let wanted = ConfiguredCredentials {
+            names: BTreeSet::from(["github-token".to_string(), "linear-token".to_string()]),
+            oauth: BTreeSet::new(),
+            uses: uses(&[
+                ("github-token", "github", Some("sha256:aa")),
+                ("linear-token", "linear", Some("sha256:bb")),
+            ]),
+            injected: BTreeSet::from([("github-token".to_string(), "github".to_string())]),
+        };
+        let leak = wirken_gateway::leak::LeakMatcher::new();
+        let (handoff, _) = mcp_proxy_handoff(
+            Some(&std::sync::Mutex::new(store)),
+            &wanted,
+            "t",
+            &leak,
+            None,
+        );
+        let entries = handoff.into_entries();
+        let placeholders: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(entries[PLACEHOLDERS_ENTRY].expose()).unwrap();
+        assert_eq!(
+            placeholders.keys().collect::<Vec<_>>(),
+            ["github-token"],
+            "{placeholders:?}"
+        );
+        let placeholder = &placeholders["github-token"];
+        assert_ne!(placeholder, "ghp_realvalue0123456789");
+        assert_eq!(
+            leak.find(&format!("token is {placeholder}")).as_deref(),
+            Some("github-token (placeholder)")
+        );
+        assert_eq!(entries["github-token"].expose(), "ghp_realvalue0123456789");
+    }
+
+    /// An entry cannot inject a credential that is not one plain
+    /// secret: it is not handed over for that entry, with a row, and
+    /// no placeholder is made.
+    #[test]
+    fn an_oauth_credential_is_not_handed_to_an_entry_that_would_inject_it() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog};
+        use wirken_mcp_proxy::credentials::PLACEHOLDERS_ENTRY;
+        let (tmp, store) = store();
+        put(
+            &store,
+            "notion-oauth",
+            "{}",
+            &bound_to("notion", "sha256:nn"),
+        );
+        let wanted = ConfiguredCredentials {
+            names: BTreeSet::from(["notion-oauth".to_string()]),
+            oauth: BTreeSet::from(["notion-oauth".to_string()]),
+            uses: uses(&[("notion-oauth", "notion", Some("sha256:nn"))]),
+            injected: BTreeSet::from([("notion-oauth".to_string(), "notion".to_string())]),
+        };
+        let log = wirken_audit::SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap();
+        let leak = wirken_gateway::leak::LeakMatcher::new();
+        let (handoff, pins) = mcp_proxy_handoff(
+            Some(&std::sync::Mutex::new(store)),
+            &wanted,
+            "t",
+            &leak,
+            Some(&log),
+        );
+        let entries = handoff.into_entries();
+        assert!(!entries.contains_key("notion-oauth"));
+        assert!(!entries.contains_key(PLACEHOLDERS_ENTRY));
+        assert!(pins.is_empty());
+        let handle = log.handle_for(SessionId::new(
+            wirken_audit::CREDENTIALS_SESSION.to_string(),
+        ));
+        assert!(log.get_since(&handle, 0).unwrap().iter().any(|r| matches!(
+            &r.event,
+            SessionEvent::CredentialDestinationRefused { credential, .. }
+                if credential == "notion-oauth"
+        )));
     }
 
     /// The proxy gets the names its configs reference and nothing else,
@@ -8716,6 +8851,7 @@ mod proxy_handoff_tests {
         )
         .unwrap();
         let wanted = ConfiguredCredentials {
+            injected: BTreeSet::new(),
             names: BTreeSet::from([
                 "linear-token".to_string(),
                 "notion-oauth".to_string(),
@@ -8801,6 +8937,7 @@ mod proxy_handoff_tests {
             &bound_to("linear", "sha256:aa"),
         );
         let wanted = ConfiguredCredentials {
+            injected: BTreeSet::new(),
             names: BTreeSet::from(["linear-token".to_string(), "other-token".to_string()]),
             oauth: BTreeSet::new(),
             uses: uses(&[

@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use wirken_mcp_proxy::credentials::{
-    GATEWAY_SOCKET_ENV, GATEWAY_TOKEN_ENTRY, GatewayLink, ProxyCredentials, SERVERS_ENTRY,
+    GATEWAY_SOCKET_ENV, GATEWAY_TOKEN_ENTRY, GatewayLink, PLACEHOLDERS_ENTRY, ProxyCredentials,
+    SERVERS_ENTRY,
 };
 use zeroize::Zeroizing;
 
@@ -41,7 +42,13 @@ pub async fn run() -> Result<()> {
         .remove(SERVERS_ENTRY)
         .and_then(|p| serde_json::from_str(p.expose()).ok())
         .unwrap_or_default();
-    let credentials = ProxyCredentials::new(entries.into_iter().collect(), gateway).with_pins(pins);
+    let placeholders = entries
+        .remove(PLACEHOLDERS_ENTRY)
+        .and_then(|p| serde_json::from_str(p.expose()).ok())
+        .unwrap_or_default();
+    let credentials = ProxyCredentials::new(entries.into_iter().collect(), gateway)
+        .with_pins(pins)
+        .with_placeholders(placeholders);
     wirken_mcp_proxy::run(credentials)
         .await
         .context("MCP proxy exited with error")

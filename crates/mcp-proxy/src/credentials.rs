@@ -36,6 +36,12 @@ pub const GATEWAY_TOKEN_ENTRY: &str = "wirken:mcp-refresh-token";
 /// credential may be resolved for: `{name: [{server, entry}]}`.
 pub const SERVERS_ENTRY: &str = "wirken:mcp-servers";
 
+/// The hand-off entry holding, as JSON, the placeholder a contained
+/// server gets in place of each injected credential:
+/// `{name: placeholder}`. The gateway mints them, so its leak matcher
+/// knows each one.
+pub const PLACEHOLDERS_ENTRY: &str = "wirken:mcp-placeholders";
+
 /// An MCP server entry: its name and [`crate::mcp_signing::entry_digest`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ServerPin {
@@ -96,6 +102,8 @@ pub struct ProxyCredentials {
     /// every entry. The gateway narrows a credential's set when its
     /// destinations change.
     pins: Mutex<Option<HashMap<String, BTreeSet<ServerPin>>>>,
+    /// The placeholder for each injected credential, by vault name.
+    placeholders: HashMap<String, String>,
 }
 
 /// Shared by every auth provider and the stdio start path.
@@ -107,7 +115,20 @@ impl ProxyCredentials {
             values: Mutex::new(values),
             gateway,
             pins: Mutex::new(None),
+            placeholders: HashMap::new(),
         }
+    }
+
+    /// Give contained servers these placeholders in place of the
+    /// injected credentials they name.
+    pub fn with_placeholders(mut self, placeholders: HashMap<String, String>) -> Self {
+        self.placeholders = placeholders;
+        self
+    }
+
+    /// The placeholder the gateway minted for `name`, if it did.
+    pub fn placeholder(&self, name: &str) -> Option<String> {
+        self.placeholders.get(name).cloned()
     }
 
     /// Resolve each credential only for the entries in `pins`.
@@ -533,5 +554,20 @@ mod pin_tests {
             none.get_for(&pin("linear", "sha256:aa"), "linear-token")
                 .is_none()
         );
+    }
+
+    /// A placeholder the gateway minted is found by the credential's
+    /// vault name; a credential it minted none for has none.
+    #[test]
+    fn a_minted_placeholder_is_found_by_its_credential() {
+        let credentials = ProxyCredentials::none().with_placeholders(HashMap::from([(
+            "github-token".to_string(),
+            "wirken-placeholder-abc".to_string(),
+        )]));
+        assert_eq!(
+            credentials.placeholder("github-token").as_deref(),
+            Some("wirken-placeholder-abc")
+        );
+        assert_eq!(credentials.placeholder("linear-token"), None);
     }
 }

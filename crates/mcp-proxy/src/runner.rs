@@ -365,6 +365,9 @@ pub struct ConfiguredCredentials {
     /// Each server entry that reads a name: `(name, server, digest)`,
     /// the digest present only for an entry whose signature verifies.
     pub uses: BTreeSet<(String, String, Option<String>)>,
+    /// Each name a server entry's `inject` block binds: `(name,
+    /// server)`. The server gets a placeholder for it.
+    pub injected: BTreeSet<(String, String)>,
 }
 
 /// What the gateway must hand the proxy for `data_dir`: every name the
@@ -379,6 +382,9 @@ pub fn configured_credentials(data_dir: &Path) -> ConfiguredCredentials {
             let digest = crate::mcp_signing::verified_entry_digest(server_name, server);
             for name in crate::mcp_registry::server_vault_names(server) {
                 out.uses.insert((name, server_name.clone(), digest.clone()));
+            }
+            if let Some(name) = crate::mcp_registry::injected_vault_name(server) {
+                out.injected.insert((name, server_name.clone()));
             }
         }
         for server in config.servers.values() {

@@ -811,7 +811,13 @@ pub(crate) async fn start_stdio(
                     audit: audit.cloned(),
                     upstream,
                 });
-            Some((route, crate::inject::new_placeholder()))
+            // The gateway's, which its leak matcher knows. A proxy
+            // started without one makes its own.
+            let placeholder = entry
+                .credentials
+                .placeholder(&inject.credential)
+                .unwrap_or_else(crate::inject::new_placeholder);
+            Some((route, placeholder))
         }
         None => None,
     };
@@ -1001,6 +1007,25 @@ pub fn server_vault_names(server: &McpServerConfig) -> std::collections::BTreeSe
     names
 }
 
+/// The vault name `server`'s `inject` block binds, if it has one that
+/// names a `vault:` value.
+pub fn injected_vault_name(server: &McpServerConfig) -> Option<String> {
+    let McpServerConfig::Stdio {
+        env,
+        sandbox: Some(sandbox),
+        ..
+    } = server
+    else {
+        return None;
+    };
+    let StdioSandbox::Container(block) = sandbox.as_ref() else {
+        return None;
+    };
+    env.get(&block.inject.as_ref()?.credential_env)?
+        .strip_prefix("vault:")
+        .map(str::to_string)
+}
+
 /// Strip the optional `vault:` prefix from a credential reference.
 /// `"vault:linear-token"` → `"linear-token"`. Bare names without
 /// the prefix pass through unchanged for forward compatibility.
@@ -1014,6 +1039,33 @@ mod scope_tests {
 
     fn config(json: &str) -> McpConfig {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// The name an entry injects is the vault name its `inject` block's
+    /// variable references. An entry with no block, one run on the
+    /// host, and a block naming a plain variable inject none.
+    #[test]
+    fn the_injected_name_is_the_vault_value_the_block_binds() {
+        let config = config(
+            r#"{"servers":{
+              "github":{"command":"/server/github-mcp-server","args":["stdio"],
+                "env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"vault:github-token","LOG":"info"},
+                "sandbox":{"image":"img","inject":{"credential_env":"GITHUB_PERSONAL_ACCESS_TOKEN",
+                  "host":"api.github.com","header":"Authorization","scheme":"Bearer",
+                  "base_url_env":"GITHUB_HOST","paths":[{"from":"/api/v3/","to":"/"}]}}},
+              "plainvar":{"command":"x","env":{"LOG":"info"},
+                "sandbox":{"image":"img","inject":{"credential_env":"LOG",
+                  "host":"api.github.com","header":"Authorization",
+                  "base_url_env":"B","paths":[{"from":"/","to":"/"}]}}},
+              "noblock":{"command":"x","env":{"T":"vault:t"},"sandbox":{"image":"img"}},
+              "onhost":{"command":"x","env":{"T":"vault:t"},"sandbox":"off"}
+            }}"#,
+        );
+        let injected = |name: &str| injected_vault_name(&config.servers[name]);
+        assert_eq!(injected("github").as_deref(), Some("github-token"));
+        assert_eq!(injected("plainvar"), None);
+        assert_eq!(injected("noblock"), None);
+        assert_eq!(injected("onhost"), None);
     }
 
     #[test]
