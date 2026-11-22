@@ -23,6 +23,7 @@ pub mod org;
 pub mod outbound_dispatcher;
 pub mod pending_approvals;
 pub mod permissions;
+pub mod proxy;
 pub mod rate_limit;
 pub mod release_keys;
 pub mod router;
