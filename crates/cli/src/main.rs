@@ -1417,6 +1417,13 @@ enum ProxyCommands {
     /// Manage the write-once archive of bodies
     #[command(subcommand)]
     Archive(ProxyArchiveCommands),
+    /// List proxy sessions: one conversation each, with its token,
+    /// start, calls and model.
+    Sessions {
+        /// A token's id or name, to list its sessions only.
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1425,9 +1432,14 @@ enum ProxyArchiveCommands {
     /// object stays locked in the bucket. This cannot be undone. Run
     /// at a terminal.
     Redact {
-        /// The body's SHA-256, as on its proxy_request or
+        /// One body's SHA-256, as on its proxy_request or
         /// proxy_response row.
-        sha256: String,
+        #[arg(required_unless_present = "session", conflicts_with = "session")]
+        sha256: Option<String>,
+        /// Every archived body of this proxy session, as `wirken proxy
+        /// sessions` lists it.
+        #[arg(long)]
+        session: Option<String>,
         /// Why, for the row.
         #[arg(long)]
         reason: String,
@@ -2205,8 +2217,12 @@ async fn main() -> Result<()> {
         },
         Commands::Proxy(ProxyCommands::Archive(ProxyArchiveCommands::Redact {
             sha256,
+            session,
             reason,
-        })) => commands::proxy::archive_redact(&sha256, &reason),
+        })) => commands::proxy::archive_redact(sha256.as_deref(), session.as_deref(), &reason),
+        Commands::Proxy(ProxyCommands::Sessions { token }) => {
+            commands::proxy::sessions(token.as_deref())
+        }
         Commands::Hooks(cmd) => match cmd {
             HookCommands::Register {
                 hook_id,

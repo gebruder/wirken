@@ -962,6 +962,18 @@ fn named(rows: &[wirken_audit::StoredSessionEvent]) -> Vec<Named> {
         .collect()
 }
 
+/// The hash of every body `rows` say was archived, each once, in the
+/// order the rows name them.
+pub fn archived_hashes(rows: &[wirken_audit::StoredSessionEvent]) -> Vec<String> {
+    let mut hashes: Vec<String> = Vec::new();
+    for body in named(rows) {
+        if !hashes.contains(&body.sha256) {
+            hashes.push(body.sha256);
+        }
+    }
+    hashes
+}
+
 /// Whether a lock's end, as the bucket gives it, is still ahead.
 fn still_locked(retain_until: &str) -> bool {
     retain_until

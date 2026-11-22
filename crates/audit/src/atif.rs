@@ -570,6 +570,23 @@ fn anthropic_assistant(content: &Value) -> Turn {
     }
 }
 
+/// A message as it is compared between requests: without the
+/// `cache_control` markers a client moves from turn to turn, which
+/// change an earlier message's bytes and nothing it says.
+fn comparable(message: &Value) -> Value {
+    match message {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .filter(|(key, _)| key.as_str() != "cache_control")
+                .map(|(key, value)| (key.clone(), comparable(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(comparable).collect()),
+        other => other.clone(),
+    }
+}
+
 /// The messages of a request body, the system prompt first: the raw
 /// values, for telling what an earlier request already carried.
 fn request_messages(shape: ProxyShape, body: &Value) -> Vec<Value> {
@@ -581,6 +598,31 @@ fn request_messages(shape: ProxyShape, body: &Value) -> Vec<Value> {
         messages.extend(list.iter().cloned());
     }
     messages
+}
+
+/// One hash for each prefix of a request's `messages`: the first names
+/// the conversation so far after one message, the last after all of
+/// them. A request continues an earlier one exactly when the earlier
+/// request's last hash is among this request's hashes, which is how
+/// the proxy tells one conversation from another on a token that
+/// carries several. A system prompt outside `messages` is not part of
+/// it. Empty for a body with no messages.
+pub fn conversation_chain(body: &Value) -> Vec<String> {
+    use sha2::{Digest, Sha256};
+    let mut state: Vec<u8> = b"wirken-proxy-conversation/v1".to_vec();
+    body["messages"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|message| {
+            let mut hasher = Sha256::new();
+            hasher.update(&state);
+            hasher.update(comparable(message).to_string().as_bytes());
+            state = hasher.finalize().to_vec();
+            state.iter().map(|b| format!("{b:02x}")).collect()
+        })
+        .collect()
 }
 
 /// The assistant turn a response body holds, whether it is one JSON
@@ -743,7 +785,10 @@ fn export_proxied(
                 // adds starts after the messages the last request had
                 // and the answer to it.
                 let repeats = messages.len() >= carried.len()
-                    && messages.iter().zip(&carried).all(|(a, b)| a == b);
+                    && messages
+                        .iter()
+                        .zip(&carried)
+                        .all(|(a, b)| comparable(a) == comparable(b));
                 let skip = if repeats && !carried.is_empty() {
                     let reply = usize::from(
                         answered
@@ -1840,5 +1885,30 @@ mod tests {
             let doc: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
             assert_eq!(validate(&doc), Vec::<String>::new(), "{path}");
         }
+    }
+
+    /// A request that extends an earlier one carries the earlier
+    /// request's last hash among its own; an unrelated one does not. A
+    /// cache marker moved onto an earlier message changes nothing.
+    #[test]
+    fn a_conversation_chain_tells_a_continuation_from_another_conversation() {
+        let first = json!({"messages":[{"role":"user","content":"hello"}]});
+        let second = json!({"system":"changed","messages":[
+            {"role":"user","content":"hello"},
+            {"role":"assistant","content":"hi"},
+            {"role":"user","content":"more"}]});
+        let marked = json!({"messages":[
+            {"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]});
+        let unmarked = json!({"messages":[
+            {"role":"user","content":[{"type":"text","text":"hello"}]}]});
+        let other = json!({"messages":[{"role":"user","content":"something else"}]});
+
+        let (a, b) = (conversation_chain(&first), conversation_chain(&second));
+        assert_eq!((a.len(), b.len()), (1, 3));
+        assert_eq!(a[0], b[0]);
+        assert!(b.contains(a.last().unwrap()));
+        assert!(!conversation_chain(&other).contains(a.last().unwrap()));
+        assert_eq!(conversation_chain(&marked), conversation_chain(&unmarked));
+        assert!(conversation_chain(&json!({"model":"m"})).is_empty());
     }
 }

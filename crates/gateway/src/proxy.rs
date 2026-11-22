@@ -38,6 +38,10 @@ pub const DEFAULT_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 /// unless configured.
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 
+/// How long the proxy remembers where a conversation stood, to
+/// recognise the request that continues it: thirty days.
+pub const CONVERSATION_MEMORY_SECS: i64 = 30 * 86_400;
+
 /// What every token starts with.
 pub const TOKEN_PREFIX: &str = "wkp_";
 
@@ -356,6 +360,13 @@ impl ProxyTokenStore {
                  created_at TEXT NOT NULL,
                  revoked_at TEXT
              );
+             CREATE TABLE IF NOT EXISTS proxy_conversations (
+                 token_id TEXT NOT NULL,
+                 tail TEXT NOT NULL,
+                 conversation TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 PRIMARY KEY (token_id, tail)
+             );
              CREATE TABLE IF NOT EXISTS proxy_token_calls (
                  token_id TEXT NOT NULL,
                  window_start INTEGER NOT NULL,
@@ -496,6 +507,46 @@ impl ProxyTokenStore {
         } else {
             TokenCheck::Valid(token)
         })
+    }
+
+    /// The conversation a request belongs to, by the hash of each
+    /// prefix of its messages (`chain`, shortest first). A request
+    /// that extends one this token made before, at any point of it,
+    /// continues that conversation; any other starts a new one. The
+    /// request's own last hash is remembered for the requests after
+    /// it. What is kept is hashes, for [`CONVERSATION_MEMORY_SECS`].
+    pub fn conversation(&self, token_id: &str, chain: &[String]) -> Result<String, GatewayError> {
+        let now = crate::budget::now_unix_secs();
+        let conn = self.conn();
+        let mut found: Option<String> = None;
+        // The longest prefix an earlier request ended on.
+        for tail in chain.iter().rev() {
+            found = conn
+                .query_row(
+                    "SELECT conversation FROM proxy_conversations
+                     WHERE token_id = ?1 AND tail = ?2",
+                    params![token_id, tail],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if found.is_some() {
+                break;
+            }
+        }
+        let conversation = found.unwrap_or_else(|| format!("c{}", random_hex(6)));
+        if let Some(tail) = chain.last() {
+            conn.execute(
+                "INSERT INTO proxy_conversations (token_id, tail, conversation, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(token_id, tail) DO UPDATE SET updated_at = ?4",
+                params![token_id, tail, conversation, now],
+            )?;
+        }
+        conn.execute(
+            "DELETE FROM proxy_conversations WHERE updated_at < ?1",
+            params![now - CONVERSATION_MEMORY_SECS],
+        )?;
+        Ok(conversation)
     }
 
     /// How many calls the token has made in the window starting at
@@ -662,6 +713,54 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    /// A request that extends an earlier one of the same token is the
+    /// same conversation, at whichever point it picks up. An unrelated
+    /// one, one with no messages, and the same messages under another
+    /// token are each their own.
+    #[test]
+    fn a_request_that_extends_an_earlier_one_continues_its_conversation() {
+        let (_tmp, store) = store();
+        let chain = |tails: &[&str]| tails.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        let first = store.conversation("tok", &chain(&["h1"])).unwrap();
+        assert!(first.starts_with('c') && first.len() == 13, "{first}");
+        // The next turn: the first request's messages, then more.
+        let second = store
+            .conversation("tok", &chain(&["h1", "h2", "h3"]))
+            .unwrap();
+        assert_eq!(second, first);
+        let third = store
+            .conversation("tok", &chain(&["h1", "h2", "h3", "h4", "h5"]))
+            .unwrap();
+        assert_eq!(third, first);
+        // A second branch from the first turn is the same conversation.
+        assert_eq!(
+            store.conversation("tok", &chain(&["h1", "x2"])).unwrap(),
+            first
+        );
+
+        let unrelated = store.conversation("tok", &chain(&["g1", "g2"])).unwrap();
+        assert_ne!(unrelated, first);
+        assert_eq!(
+            store
+                .conversation("tok", &chain(&["g1", "g2", "g3"]))
+                .unwrap(),
+            unrelated
+        );
+        // A request that only shares a start with one, without
+        // reaching where any request ended, is not a continuation.
+        assert_ne!(
+            store.conversation("tok", &chain(&["g1"])).unwrap(),
+            unrelated
+        );
+
+        assert_ne!(store.conversation("other", &chain(&["h1"])).unwrap(), first);
+        let (empty_a, empty_b) = (
+            store.conversation("tok", &[]).unwrap(),
+            store.conversation("tok", &[]).unwrap(),
+        );
+        assert_ne!(empty_a, empty_b);
     }
 
     #[test]

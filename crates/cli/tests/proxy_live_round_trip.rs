@@ -356,6 +356,20 @@ async fn real_clients_go_through_the_proxy_and_the_archive_matches_the_chain() {
 
     // The chain: each call a request row and a response row with the
     // hash of the body as exchanged, both archived.
+    // The first call had no session label: its conversation has a
+    // lane of its own, named by the proxy. Refusals are on the token's.
+    let token_lane = lane.clone();
+    let lane = {
+        let log = wirken_audit::SqliteSessionLog::open(&data.join("audit.db")).unwrap();
+        let prefix = format!("{token_lane}-c");
+        log.list_session_ids()
+            .unwrap()
+            .into_iter()
+            .find(|id| id.starts_with(&prefix) && id.len() == prefix.len() + 12)
+            .expect("the conversation's lane")
+    };
+    let anthropic_lane = format!("{token_lane}-anthropic-shape");
+    let agent_lane = format!("{token_lane}-agent-cli");
     let chat_rows = rows(data, &lane);
     let (request_sha, response_sha) = chat_rows
         .iter()
@@ -418,7 +432,7 @@ async fn real_clients_go_through_the_proxy_and_the_archive_matches_the_chain() {
         "the response as the client received it"
     );
     assert!(
-        chat_rows.iter().any(|e| matches!(
+        rows(data, &token_lane).iter().any(|e| matches!(
             e,
             SessionEvent::ProxyRefused {
                 reason: wirken_audit::ProxyRefusal::ModelNotAllowed,
@@ -438,7 +452,6 @@ async fn real_clients_go_through_the_proxy_and_the_archive_matches_the_chain() {
                 }
             ))
     );
-    let anthropic_lane = format!("{lane}-anthropic-shape");
     assert!(rows(data, &anthropic_lane).iter().any(|e| matches!(
         e,
         SessionEvent::ProxyRequest {
@@ -530,7 +543,6 @@ async fn real_clients_go_through_the_proxy_and_the_archive_matches_the_chain() {
     );
     assert_eq!(anthropic["steps"][0]["message"], "Name one prime number.");
     if agent_cli.is_some() {
-        let agent_lane = format!("{lane}-agent-cli");
         let made = rows(data, &agent_lane);
         eprintln!("agent cli rows: {}", made.len());
         if !made.is_empty() {

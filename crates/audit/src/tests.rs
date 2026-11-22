@@ -3915,6 +3915,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             sha256: HashHex(String::new()),
             operator: String::new(),
             reason: String::new(),
+            session: None,
         },
         SessionEvent::LeakRefused {
             credential: String::new(),

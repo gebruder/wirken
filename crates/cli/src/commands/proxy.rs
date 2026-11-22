@@ -171,60 +171,172 @@ pub fn token_revoke(id_or_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Destroy the key of the archived body with this hash in `data_dir`,
-/// then record it. The object stays in the bucket for its retention
-/// period and can no longer be read. Returns how many keys were
-/// destroyed.
+/// Destroy the key of each archived body in `hashes` in `data_dir`,
+/// then record each. The objects stay in the bucket for their
+/// retention period and can no longer be read. `session` is the proxy
+/// session the bodies are redacted as, when they are redacted
+/// together. Returns how many keys were destroyed.
 pub(crate) fn redact_recorded(
     data_dir: &std::path::Path,
-    sha256: &str,
+    hashes: &[String],
     reason: &str,
+    session: Option<&str>,
 ) -> Result<usize> {
     use wirken_audit::SessionLog as _;
-    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("{sha256:?} is not a SHA-256 hash: 64 hex characters, as on the row");
-    }
-    let sha256 = sha256.to_ascii_lowercase();
     let keys = super::proxy_archive::KeyStore::open(
         &data_dir.join(super::proxy_archive::ARCHIVE_KEYS_FILE),
     )
     .map_err(|e| anyhow::anyhow!("the archive key store: {e}"))?;
-    // The key first, the row after: the row says what was done.
-    let destroyed = keys
-        .destroy(&sha256)
-        .map_err(|e| anyhow::anyhow!("the key was not destroyed: {e}"))?;
     let log = super::open_signed_session_log(&config())?;
     let handle = log.handle_for(wirken_audit::SessionId::new(
         wirken_audit::PROXY_SESSION.to_string(),
     ));
-    log.append(
-        &handle,
-        wirken_audit::TrustLevel::User,
-        wirken_audit::SessionEvent::ProxyArchiveRedacted {
-            sha256: wirken_audit::HashHex(sha256),
-            operator: super::local_operator(),
-            reason: reason.to_string(),
-        },
-    )
-    .context("the key is destroyed, but its row could not be written")?;
+    let mut destroyed = 0;
+    for sha256 in hashes {
+        if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("{sha256:?} is not a SHA-256 hash: 64 hex characters, as on the row");
+        }
+        let sha256 = sha256.to_ascii_lowercase();
+        // The key first, the row after: the row says what was done.
+        destroyed += keys
+            .destroy(&sha256)
+            .map_err(|e| anyhow::anyhow!("the key of {sha256} was not destroyed: {e}"))?;
+        log.append(
+            &handle,
+            wirken_audit::TrustLevel::User,
+            wirken_audit::SessionEvent::ProxyArchiveRedacted {
+                sha256: wirken_audit::HashHex(sha256.clone()),
+                operator: super::local_operator(),
+                reason: reason.to_string(),
+                session: session.map(str::to_string),
+            },
+        )
+        .with_context(|| {
+            format!("the key of {sha256} is destroyed, but its row could not be written")
+        })?;
+    }
     super::seal_operator_lane(&log, wirken_audit::PROXY_SESSION);
     Ok(destroyed)
 }
 
-pub fn archive_redact(sha256: &str, reason: &str) -> Result<()> {
+/// The hash of every archived body of the proxy session `lane`.
+fn session_hashes(lane: &str) -> Result<Vec<String>> {
+    use wirken_audit::SessionLog as _;
+    if !super::proxy_archive::is_proxy_session(lane) {
+        bail!("{lane:?} is not a proxy session; `wirken proxy sessions` lists them");
+    }
+    let log = wirken_audit::SqliteSessionLog::open(&config().audit_db_path())
+        .context("Failed to open session log")?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(lane.to_string()));
+    let rows = log
+        .get_since(&handle, 0)
+        .context("session log query failed")?;
+    if rows.is_empty() {
+        bail!("no events for session '{lane}'");
+    }
+    Ok(super::proxy_archive::archived_hashes(&rows))
+}
+
+pub fn archive_redact(sha256: Option<&str>, session: Option<&str>, reason: &str) -> Result<()> {
     require_terminal("archive redact")?;
-    let destroyed = redact_recorded(&config().data_dir, sha256, reason)?;
-    if destroyed == 0 {
+    let data_dir = config().data_dir;
+    match (sha256, session) {
+        (Some(sha256), None) => {
+            let destroyed = redact_recorded(&data_dir, &[sha256.to_string()], reason, None)?;
+            if destroyed == 0 {
+                println!(
+                    "  No key was held for {sha256}. It is marked: a body with this hash is \
+                     not archived readable from here on."
+                );
+            } else {
+                println!(
+                    "  Destroyed {destroyed} key{} for {sha256}. The object stays in the bucket \
+                     until its retention ends and can no longer be read.",
+                    if destroyed == 1 { "" } else { "s" }
+                );
+            }
+        }
+        (None, Some(lane)) => {
+            let hashes = session_hashes(lane)?;
+            if hashes.is_empty() {
+                println!("  Session {lane} has no archived bodies.");
+                return Ok(());
+            }
+            let destroyed = redact_recorded(&data_dir, &hashes, reason, Some(lane))?;
+            println!(
+                "  Session {lane}: {} archived bodies, {destroyed} key{} destroyed. The objects \
+                 stay in the bucket until their retention ends and can no longer be read.",
+                hashes.len(),
+                if destroyed == 1 { "" } else { "s" }
+            );
+        }
+        _ => bail!("give one body's SHA-256, or --session with a proxy session"),
+    }
+    Ok(())
+}
+
+/// List the proxy sessions: one line for each conversation, with its
+/// token, when it started, its calls and its model. `token` is an id
+/// or a name to list one token's sessions.
+pub fn sessions(token: Option<&str>) -> Result<()> {
+    use wirken_audit::{SessionEvent, SessionLog as _};
+    use wirken_time::TimestampExt as _;
+    let cfg = config();
+    let tokens = open_store(&cfg.data_dir)?
+        .list()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let wanted = match token {
+        Some(t) => Some(
+            tokens
+                .iter()
+                .find(|k| k.id == t || k.name == t)
+                .map(|k| k.id.clone())
+                .ok_or_else(|| anyhow::anyhow!("no token has the id or name {t}"))?,
+        ),
+        None => None,
+    };
+    let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+        .context("Failed to open session log")?;
+    let mut listed = 0;
+    for lane in log.list_session_ids().context("session log query failed")? {
+        // `proxy-<token id>-<label>`: a conversation's lane.
+        let Some((token_id, _)) = lane
+            .strip_prefix("proxy-")
+            .and_then(|rest| rest.split_once('-'))
+        else {
+            continue;
+        };
+        if wanted.as_deref().is_some_and(|w| w != token_id) {
+            continue;
+        }
+        let handle = log.handle_for(wirken_audit::SessionId::new(lane.clone()));
+        let rows = log
+            .get_since(&handle, 0)
+            .context("session log query failed")?;
+        let calls: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::ProxyRequest { model, .. } => Some(model.as_str()),
+                _ => None,
+            })
+            .collect();
+        let (Some(first), Some(model)) = (rows.first(), calls.first()) else {
+            continue;
+        };
+        let name = tokens
+            .iter()
+            .find(|k| k.id == token_id)
+            .map_or("?", |k| k.name.as_str());
         println!(
-            "  No key was held for {sha256}. It is marked: a body with this hash is not \
-             archived readable from here on."
+            "  {lane}  {name}  {}  {} call{}  {model}",
+            first.ts.to_rfc3339_z(),
+            calls.len(),
+            if calls.len() == 1 { "" } else { "s" }
         );
-    } else {
-        println!(
-            "  Destroyed {destroyed} key{} for {sha256}. The object stays in the bucket until \
-             its retention ends and can no longer be read.",
-            if destroyed == 1 { "" } else { "s" }
-        );
+        listed += 1;
+    }
+    if listed == 0 {
+        println!("  No proxy sessions.");
     }
     Ok(())
 }

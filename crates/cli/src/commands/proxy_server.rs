@@ -594,8 +594,11 @@ impl ProxyState {
             .headers()
             .get(SESSION_HEADER)
             .and_then(|v| v.to_str().ok())
-            .filter(|label| is_name(label));
-        let session = proxy_session(&token.id, label);
+            .filter(|label| is_name(label))
+            .map(str::to_string);
+        // Refusals belong to no conversation: they go on the token's
+        // own lane.
+        let session = proxy_session(&token.id, None);
         let headers: Vec<(String, String)> = req
             .headers()
             .iter()
@@ -724,6 +727,31 @@ impl ProxyState {
             None => None,
         };
 
+        // The conversation the call belongs to, which is the lane it is
+        // recorded on. A label the client sent names it. Without one
+        // it is the conversation this request continues, by its
+        // messages, or a new one.
+        let lane = match &label {
+            Some(label) => proxy_session(&token.id, Some(label)),
+            None => {
+                let chain = parsed
+                    .as_ref()
+                    .map(wirken_audit::atif::conversation_chain)
+                    .unwrap_or_default();
+                match self.tokens.conversation(&token.id, &chain) {
+                    Ok(conversation) => proxy_session(&token.id, Some(&conversation)),
+                    Err(e) => {
+                        tracing::error!(
+                            token = %token.id,
+                            "proxy: the conversation could not be looked up, so the call is \
+                             recorded on the token's own lane: {e}"
+                        );
+                        session.clone()
+                    }
+                }
+            }
+        };
+
         let request_sha256 = sha256_hex(&body);
         let mut archived = false;
         if let Some(archive) = &self.archive {
@@ -745,7 +773,7 @@ impl ProxyState {
         // The row first: nothing is forwarded that the chain does not
         // show.
         if let Err(e) = self.record(
-            &session,
+            &lane,
             SessionEvent::ProxyRequest {
                 request_id: request_id.clone(),
                 token_id: token.id.clone(),
@@ -778,7 +806,7 @@ impl ProxyState {
 
         let mut exchange = Exchange {
             state: self.clone(),
-            session,
+            session: lane,
             request_id,
             token,
             provider,
@@ -1139,6 +1167,33 @@ mod tests {
                 .collect()
         }
 
+        /// The lanes of the token's conversations, in the order each
+        /// was opened.
+        fn lanes(&self, token: &ProxyToken) -> Vec<String> {
+            let prefix = format!("{}-", proxy_session(&token.id, None));
+            let mut lanes: Vec<(i64, String)> = self
+                .log
+                .list_session_ids()
+                .unwrap()
+                .into_iter()
+                .filter(|id| id.starts_with(&prefix))
+                .map(|id| {
+                    let handle = self.log.handle_for(SessionId::new(id.clone()));
+                    let first = self.log.get_since(&handle, 0).unwrap()[0].id;
+                    (first, id)
+                })
+                .collect();
+            lanes.sort();
+            lanes.into_iter().map(|(_, id)| id).collect()
+        }
+
+        /// The forwarded calls of the token's only conversation.
+        fn calls(&self, token: &ProxyToken) -> Vec<SessionEvent> {
+            let lanes = self.lanes(token);
+            assert_eq!(lanes.len(), 1, "{lanes:?}");
+            self.rows(&lanes[0])
+        }
+
         fn refusals(&self, session: &str) -> Vec<ProxyRefusal> {
             self.rows(session)
                 .into_iter()
@@ -1202,7 +1257,7 @@ mod tests {
         );
         assert!(!got[0].contains(&value), "the client's token was forwarded");
 
-        let rows = rig.rows(&proxy_session(&token.id, None));
+        let rows = rig.calls(&token);
         let [
             SessionEvent::ProxyRequest {
                 request_id,
@@ -1336,6 +1391,63 @@ mod tests {
         assert!(complete);
     }
 
+    /// One token, no session label, three calls: a conversation, an
+    /// unrelated one, and the next turn of the first. The first and
+    /// third share a lane and the second has its own, so each lane is
+    /// one conversation. A refusal is on neither.
+    #[tokio::test]
+    async fn each_conversation_of_a_token_is_its_own_lane() {
+        let (upstream, _) = provider(json_reply("{\"choices\":[]}")).await;
+        let rig = rig(vec![("local", "custom", upstream, None)]).await;
+        let (token, value) = rig.issue_with(TokenGrant {
+            name: "laptop".into(),
+            upstreams: vec!["local".into()],
+            models: vec!["m".into()],
+            ..Default::default()
+        });
+        let other = r#"{"model":"m","messages":[{"role":"user","content":"another topic"}]}"#;
+        // The cache marker a client moves onto an earlier message does
+        // not make it another conversation.
+        let turn_two = r#"{"model":"m","messages":[
+            {"role":"user","content":[{"type":"text","text":"first topic","cache_control":{"type":"ephemeral"}}]},
+            {"role":"assistant","content":"an answer"},
+            {"role":"user","content":"and then?"}]}"#;
+        let turn_one_blocks = r#"{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"first topic"}]}]}"#;
+        for body in [turn_one_blocks, other, turn_two] {
+            assert_eq!(rig.post(CHAT, &value, body).await.status(), 200);
+        }
+        assert_eq!(
+            rig.post(CHAT, &value, r#"{"model":"not-allowed","messages":[]}"#)
+                .await
+                .status(),
+            403
+        );
+
+        let lanes = rig.lanes(&token);
+        assert_eq!(lanes.len(), 2, "{lanes:?}");
+        let hashes = |lane: &str| -> Vec<String> {
+            rig.rows(lane)
+                .into_iter()
+                .filter_map(|e| match e {
+                    SessionEvent::ProxyRequest { request_sha256, .. } => Some(request_sha256.0),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            hashes(&lanes[0]),
+            [
+                sha256_hex(turn_one_blocks.as_bytes()),
+                sha256_hex(turn_two.as_bytes())
+            ]
+        );
+        assert_eq!(hashes(&lanes[1]), [sha256_hex(other.as_bytes())]);
+        assert_eq!(
+            rig.refusals(&proxy_session(&token.id, None)),
+            [ProxyRefusal::ModelNotAllowed]
+        );
+    }
+
     /// The provider's own error is the client's answer, recorded with
     /// its status.
     #[tokio::test]
@@ -1351,7 +1463,7 @@ mod tests {
         let response = rig.post(CHAT, &value, "{\"model\":\"m\"}").await;
         assert_eq!(response.status(), 429);
         assert_eq!(response.text().await.unwrap(), "{\"error\":\"slow\"}");
-        let rows = rig.rows(&proxy_session(&token.id, None));
+        let rows = rig.calls(&token);
         assert!(
             matches!(
                 rows.get(1),
@@ -1733,7 +1845,7 @@ mod tests {
                 ),
             ]
         );
-        let rows = rig.rows(&proxy_session(&token.id, None));
+        let rows = rig.calls(&token);
         assert!(
             matches!(
                 rows.as_slice(),
@@ -1785,7 +1897,7 @@ mod tests {
         let response = rig.post(CHAT, &value, "{\"model\":\"m\"}").await;
         assert_eq!(response.status(), 200);
         assert_eq!(response.text().await.unwrap(), "{}");
-        let rows = rig.rows(&proxy_session(&token.id, None));
+        let rows = rig.calls(&token);
         assert!(
             matches!(
                 rows.as_slice(),
@@ -1839,7 +1951,11 @@ mod tests {
         let sent = "data: {\"partial\":1}\n\n";
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let rows = rig.rows(&proxy_session(&token.id, None));
+            let rows = rig
+                .lanes(&token)
+                .first()
+                .map(|l| rig.rows(l))
+                .unwrap_or_default();
             if let Some(SessionEvent::ProxyResponse {
                 complete,
                 response_sha256,
@@ -1933,7 +2049,7 @@ mod tests {
         assert_eq!(response.status(), 200);
         assert_eq!(response.text().await.unwrap(), "{\"ok\":true}");
         assert_eq!(got.lock().unwrap().len(), 1);
-        assert_eq!(rig.rows(&proxy_session(&token.id, None)).len(), 2);
+        assert_eq!(rig.calls(&token).len(), 2);
 
         // A client that does not trust the certificate stops at the
         // handshake: its token is never sent.
@@ -2017,7 +2133,7 @@ mod tests {
         let (token, value) = rig.issue("laptop", &["down"]);
         let response = rig.post(CHAT, &value, "{\"model\":\"m\"}").await;
         assert_eq!(response.status(), 502);
-        let rows = rig.rows(&proxy_session(&token.id, None));
+        let rows = rig.calls(&token);
         assert!(
             matches!(
                 rows.as_slice(),

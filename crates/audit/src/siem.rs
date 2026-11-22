@@ -2840,6 +2840,7 @@ mod identity_tests {
                     sha256: crate::HashHex("00".repeat(32)),
                     operator: "uid:1000 (op)".into(),
                     reason: "request".into(),
+                    session: None,
                 },
                 None,
                 None,

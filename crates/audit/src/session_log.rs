@@ -2407,6 +2407,10 @@ pub enum SessionEvent {
         sha256: HashHex,
         operator: String,
         reason: String,
+        /// The proxy session whose bodies were redacted together, when
+        /// the body was redacted as one of them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     /// A stdio MCP server started on the host, outside any container,
     /// because its entry says `"sandbox": "off"`. Written at every
@@ -3007,8 +3011,10 @@ impl ProxyRefusal {
 /// token's own calls are on its lane, [`proxy_session`].
 pub const PROXY_SESSION: &str = "gateway-proxy";
 
-/// The lane a token's proxied calls are recorded on: `proxy-<id>`, or
-/// `proxy-<id>-<label>` for the session label a client sent.
+/// A lane of a token's proxied calls. One conversation is one lane:
+/// `proxy-<id>-<label>`, where the label is the one the client sent or
+/// the one the proxy gave the conversation. Refusals, which belong to
+/// no conversation, are on `proxy-<id>`.
 pub fn proxy_session(token_id: &str, label: Option<&str>) -> String {
     match label {
         Some(label) => format!("proxy-{token_id}-{label}"),
