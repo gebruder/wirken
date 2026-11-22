@@ -877,6 +877,81 @@ impl LlmClient {
         })
     }
 
+    /// Forward a request a client outside Wirken built, as it is, to
+    /// this client's provider, and hand back the provider's response
+    /// unread.
+    ///
+    /// `body` is sent byte for byte to the endpoint that takes `shape`
+    /// at the configured `base_url`, through the client every agent
+    /// call uses: HTTPS or loopback only, no redirect followed, and for
+    /// Tinfoil the attested, pinned connection. `api_key` is the
+    /// provider's key, put in the provider's own header; whatever
+    /// credential the client sent is not in `headers` and is not
+    /// forwarded. Of `headers`, only the few that describe the request
+    /// to the provider are sent on ([`FORWARDED_HEADERS`]).
+    ///
+    /// Refused before anything is sent: a shape the provider's endpoint
+    /// does not take ([`provider_speaks`]), and a body that carries a
+    /// stored secret. Sent once; a failure or a 429 is the client's to
+    /// retry.
+    pub async fn forward(
+        &self,
+        shape: wirken_audit::ProxyShape,
+        body: Vec<u8>,
+        headers: &[(String, String)],
+        api_key: Option<&str>,
+    ) -> Result<reqwest::Response, AgentError> {
+        use wirken_audit::ProxyShape;
+
+        let provider = self.config.provider.as_str();
+        if self.config.auth.is_plan() || !provider_speaks(provider, shape) {
+            return Err(AgentError::Llm(format!(
+                "provider {provider} does not take {} requests",
+                shape.as_str()
+            )));
+        }
+        if let Some(credential) = self.leak_matcher.find(&String::from_utf8_lossy(&body)) {
+            return Err(AgentError::LeakRefused { credential });
+        }
+        let path = match shape {
+            ProxyShape::OpenaiChat => "chat/completions",
+            ProxyShape::AnthropicMessages => "messages",
+        };
+        let (http, url) = if provider == "tinfoil" {
+            let client = self.tinfoil_client().await?;
+            let pinned = client
+                .http_client()
+                .map_err(|e| AgentError::Llm(format!("tinfoil pinned client unavailable: {e}")))?
+                .clone();
+            (
+                pinned,
+                format!("{}/v1/{path}", client.secure_client().base_url()),
+            )
+        } else {
+            (
+                self.http.clone(),
+                format!("{}/{path}", self.config.base_url),
+            )
+        };
+        let mut request = http.post(&url);
+        for (name, value) in headers {
+            if FORWARDED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+                request = request.header(name.as_str(), value.as_str());
+            }
+        }
+        if let Some(key) = api_key {
+            request = match provider {
+                "anthropic" => request.header("x-api-key", key),
+                _ => request.header("Authorization", format!("Bearer {key}")),
+            };
+        }
+        request
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| AgentError::Http(e.without_url().to_string()))
+    }
+
     /// The models the Tinfoil enclave at this client's `base_url`
     /// lists for `api_key`. The enclave is attested and the connection
     /// pinned exactly as for a chat call ([`Self::tinfoil_client`]),
@@ -1467,6 +1542,32 @@ impl LlmClient {
     /// Get the HTTP client (for streaming).
     pub(crate) fn http_client(&self) -> &reqwest::Client {
         &self.http
+    }
+}
+
+/// The request headers a forwarded call keeps: the ones that describe
+/// the body or select the provider's API version. Everything else a
+/// client sent, its own credential included, stays behind.
+pub const FORWARDED_HEADERS: &[&str] = &[
+    "content-type",
+    "accept",
+    "anthropic-version",
+    "anthropic-beta",
+];
+
+/// Whether `provider`'s endpoint takes requests of `shape` as they
+/// are, with no translation. Gemini and Bedrock have request shapes of
+/// their own and take neither.
+pub fn provider_speaks(provider: &str, shape: wirken_audit::ProxyShape) -> bool {
+    use wirken_audit::ProxyShape;
+    match (provider, shape) {
+        ("gemini" | "bedrock", _) => false,
+        // Anthropic's own API, and Ollama's compatible endpoint.
+        ("anthropic" | "ollama", ProxyShape::AnthropicMessages) => true,
+        (_, ProxyShape::AnthropicMessages) => false,
+        ("anthropic", ProxyShape::OpenaiChat) => false,
+        // OpenAI and every OpenAI-compatible provider, Ollama included.
+        (_, ProxyShape::OpenaiChat) => true,
     }
 }
 
@@ -2466,5 +2567,237 @@ mod redirect_tests {
             false,
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod forward_tests {
+    use super::{LlmClient, LlmConfig, provider_speaks};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use wirken_audit::ProxyShape;
+
+    /// A loopback server that keeps each whole request and answers
+    /// with `reply`.
+    async fn server(reply: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let kept = got.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let (kept, reply) = (kept.clone(), reply.clone());
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                        let text = String::from_utf8_lossy(&buf).into_owned();
+                        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                            let length = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if body.len() >= length {
+                                break;
+                            }
+                        }
+                    }
+                    kept.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf).into_owned());
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (base, got)
+    }
+
+    fn ok(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[test]
+    fn each_provider_takes_its_own_shape_and_no_other() {
+        use ProxyShape::{AnthropicMessages, OpenaiChat};
+        for provider in [
+            "openai",
+            "custom",
+            "hetzner",
+            "infomaniak",
+            "tinfoil",
+            "ollama",
+        ] {
+            assert!(provider_speaks(provider, OpenaiChat), "{provider}");
+        }
+        for provider in ["anthropic", "ollama"] {
+            assert!(provider_speaks(provider, AnthropicMessages), "{provider}");
+        }
+        for provider in ["openai", "custom", "hetzner", "tinfoil"] {
+            assert!(!provider_speaks(provider, AnthropicMessages), "{provider}");
+        }
+        assert!(!provider_speaks("anthropic", OpenaiChat));
+        for provider in ["gemini", "bedrock"] {
+            assert!(!provider_speaks(provider, OpenaiChat), "{provider}");
+            assert!(!provider_speaks(provider, AnthropicMessages), "{provider}");
+        }
+    }
+
+    /// The body reaches the provider byte for byte at the endpoint for
+    /// its shape, with the provider's key in the provider's header.
+    /// The client's own credential and its other headers stay behind,
+    /// and the response comes back as the provider sent it.
+    #[tokio::test]
+    async fn a_request_is_forwarded_byte_for_byte_with_the_providers_key() {
+        // Odd spacing, key order and an unknown field: a re-serialized
+        // body would differ.
+        let body = "{ \"model\":\"m\",  \"unknown_field\": [1,2 ,3],\"messages\":[]}";
+        for (provider, shape, path, key_header) in [
+            (
+                "anthropic",
+                ProxyShape::AnthropicMessages,
+                "/v1/messages",
+                "x-api-key: sk-provider-key",
+            ),
+            (
+                "custom",
+                ProxyShape::OpenaiChat,
+                "/v1/chat/completions",
+                "authorization: Bearer sk-provider-key",
+            ),
+        ] {
+            let (base, got) = server(ok("{ \"answer\" : 1 }")).await;
+            let client = LlmClient::new(LlmConfig::from_provider(
+                provider,
+                &format!("{base}/v1"),
+                "unused",
+            ))
+            .unwrap();
+            let headers = [
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                (
+                    "Authorization".to_string(),
+                    "Bearer wkp_client_token".to_string(),
+                ),
+                ("X-Api-Key".to_string(), "wkp_client_token".to_string()),
+                ("Cookie".to_string(), "a=b".to_string()),
+            ];
+            let response = client
+                .forward(
+                    shape,
+                    body.as_bytes().to_vec(),
+                    &headers,
+                    Some("sk-provider-key"),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.text().await.unwrap(), "{ \"answer\" : 1 }");
+
+            let got = got.lock().unwrap().clone();
+            assert_eq!(got.len(), 1, "{provider}");
+            let (head, sent) = got[0].split_once("\r\n\r\n").unwrap();
+            assert_eq!(sent, body, "{provider}");
+            assert!(head.starts_with(&format!("POST {path} ")), "{head}");
+            let lower = head.to_ascii_lowercase();
+            assert!(lower.contains(&key_header.to_ascii_lowercase()), "{head}");
+            assert!(lower.contains("anthropic-version: 2023-06-01"), "{head}");
+            assert!(!head.contains("wkp_client_token"), "{head}");
+            assert!(!lower.contains("cookie"), "{head}");
+        }
+    }
+
+    /// A shape the provider does not take is refused by name before
+    /// anything is sent, and so is a body carrying a stored secret.
+    #[tokio::test]
+    async fn a_shape_the_provider_does_not_take_and_a_leaking_body_are_not_sent() {
+        let (base, got) = server(ok("{}")).await;
+        let client = LlmClient::new(LlmConfig::from_provider(
+            "custom",
+            &format!("{base}/v1"),
+            "m",
+        ))
+        .unwrap();
+        let err = client
+            .forward(ProxyShape::AnthropicMessages, b"{}".to_vec(), &[], None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("custom does not take anthropic_messages"),
+            "{err}"
+        );
+
+        let mut client = LlmClient::new(LlmConfig::from_provider(
+            "custom",
+            &format!("{base}/v1"),
+            "m",
+        ))
+        .unwrap();
+        let matcher = wirken_gateway::leak::LeakMatcher::new();
+        matcher.learn(
+            "other-key",
+            "sk-stored-secret-0123456789",
+            wirken_vault::CredentialKind::Secret,
+        );
+        client.set_leak_matcher(Arc::new(matcher));
+        let err = client
+            .forward(
+                ProxyShape::OpenaiChat,
+                b"{\"messages\":[{\"content\":\"sk-stored-secret-0123456789\"}]}".to_vec(),
+                &[],
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, crate::error::AgentError::LeakRefused { credential } if credential == "other-key"),
+            "{err}"
+        );
+        assert!(got.lock().unwrap().is_empty());
+    }
+
+    /// A forwarded call follows no redirect, as an agent call does not.
+    #[tokio::test]
+    async fn a_forwarded_request_follows_no_redirect() {
+        let (elsewhere, followed) = server(ok("{}")).await;
+        let (base, _) = server(format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {elsewhere}/taken\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        ))
+        .await;
+        let client = LlmClient::new(LlmConfig::from_provider(
+            "anthropic",
+            &format!("{base}/v1"),
+            "m",
+        ))
+        .unwrap();
+        let response = client
+            .forward(
+                ProxyShape::AnthropicMessages,
+                b"{}".to_vec(),
+                &[],
+                Some("sk-provider-key"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 307);
+        assert!(followed.lock().unwrap().is_empty());
     }
 }
