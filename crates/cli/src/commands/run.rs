@@ -2187,11 +2187,23 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
             let addr = proxy_config
                 .bind_addr()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let tls = proxy_config
+                .tls
+                .as_ref()
+                .map(super::proxy_server::tls_acceptor)
+                .transpose()?;
+            if tls.is_none() && !addr.ip().is_loopback() {
+                tracing::warn!(
+                    "the proxy listener is bound to {addr} without TLS: tokens and \
+                     conversations cross the network in the clear"
+                );
+            }
             let listener = super::proxy_server::bind(addr)
                 .await
                 .with_context(|| format!("Failed to bind the proxy listener at {addr}"))?;
             println!(
-                "  Proxy: http://{addr} ({} upstream{}{})",
+                "  Proxy: {}://{addr} ({} upstream{}{})",
+                if tls.is_some() { "https" } else { "http" },
                 proxy_config.upstreams.len(),
                 if proxy_config.upstreams.len() == 1 {
                     ""
@@ -2203,7 +2215,9 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                     None => String::new(),
                 }
             );
-            Some(tokio::spawn(super::proxy_server::serve(listener, state)))
+            Some(tokio::spawn(super::proxy_server::serve(
+                listener, tls, state,
+            )))
         }
         None => None,
     };

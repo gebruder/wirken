@@ -52,6 +52,7 @@ serde_json = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 subtle = "2.6"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 base64 = { workspace = true }
 bytes = "1"
 chacha20poly1305 = { workspace = true }

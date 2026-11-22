@@ -45,14 +45,17 @@ pub const TOKEN_PREFIX: &str = "wkp_";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
-    /// Address the listener binds. Loopback unless
-    /// `bind_beyond_loopback` is set as well.
+    /// Address the listener binds. A loopback address, unless `tls` is
+    /// set or `bind_beyond_loopback` is.
     #[serde(default = "default_bind")]
     pub bind: String,
-    /// Required for a `bind` that is not a loopback address. The
-    /// listener speaks plain HTTP, so a token sent to it from another
-    /// host crosses the network in the clear unless something in front
-    /// of it terminates TLS.
+    /// The certificate and key the listener serves TLS with. Without
+    /// it the listener speaks plain HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
+    /// Allows a `bind` that is not a loopback address with no `tls`:
+    /// tokens, requests and answers then cross the network in the
+    /// clear unless something in front of the listener terminates TLS.
     #[serde(default)]
     pub bind_beyond_loopback: bool,
     /// The providers calls are forwarded to, by the name tokens are
@@ -80,6 +83,17 @@ fn default_max_body() -> u64 {
 
 fn default_idle_timeout() -> u64 {
     DEFAULT_IDLE_TIMEOUT_SECS
+}
+
+/// The listener's TLS identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    /// A PEM file holding the certificate, followed by any
+    /// intermediates.
+    pub certificate: String,
+    /// A PEM file holding the certificate's private key.
+    pub private_key: String,
 }
 
 /// One provider the proxy forwards to.
@@ -175,10 +189,12 @@ impl ProxyConfig {
             .bind
             .parse()
             .map_err(|e| GatewayError::Config(format!("proxy.json: bind {:?}: {e}", self.bind)))?;
-        if !addr.ip().is_loopback() && !self.bind_beyond_loopback {
+        if !addr.ip().is_loopback() && self.tls.is_none() && !self.bind_beyond_loopback {
             return Err(GatewayError::Config(format!(
-                "proxy.json: bind {addr} is not a loopback address. The listener speaks plain \
-                 HTTP; set \"bind_beyond_loopback\": true to bind it anyway"
+                "proxy.json: bind {addr} is not a loopback address and there is no tls block, \
+                 so tokens and conversations would cross the network in the clear. Add \
+                 \"tls\" with a certificate and key, or set \"bind_beyond_loopback\": true to \
+                 bind it in the clear anyway"
             )));
         }
         Ok(addr)
@@ -697,6 +713,17 @@ mod tests {
         );
         let config = ProxyConfig::load(tmp.path()).unwrap().unwrap();
         assert_eq!(config.bind_addr().unwrap().to_string(), "0.0.0.0:9000");
+
+        // With TLS the address needs no second setting.
+        write(
+            tmp.path(),
+            &format!(
+                r#"{{"bind":"0.0.0.0:9000","tls":{{"certificate":"/c.pem","private_key":"/k.pem"}},{upstreams}}}"#
+            ),
+        );
+        let config = ProxyConfig::load(tmp.path()).unwrap().unwrap();
+        assert_eq!(config.bind_addr().unwrap().to_string(), "0.0.0.0:9000");
+        assert_eq!(config.tls.unwrap().private_key, "/k.pem");
     }
 
     #[test]

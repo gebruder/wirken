@@ -869,25 +869,84 @@ impl ProxyState {
     }
 }
 
-/// Serve the listener until the task is dropped.
-pub async fn serve(listener: tokio::net::TcpListener, state: Arc<ProxyState>) {
+/// How long a client has to finish a TLS handshake.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The acceptor for the certificate and key `tls` names: TLS 1.2 and
+/// 1.3, no client certificate asked for. The files are read once,
+/// here; a renewed certificate is picked up at the next start.
+pub fn tls_acceptor(
+    tls: &wirken_gateway::proxy::TlsConfig,
+) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    use anyhow::Context as _;
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    let certificates: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_file_iter(&tls.certificate)
+            .with_context(|| format!("proxy.json: tls.certificate {}", tls.certificate))?
+            .collect::<Result<_, _>>()
+            .with_context(|| format!("proxy.json: tls.certificate {}", tls.certificate))?;
+    if certificates.is_empty() {
+        anyhow::bail!(
+            "proxy.json: tls.certificate {} holds no certificate",
+            tls.certificate
+        );
+    }
+    let key = PrivateKeyDer::from_pem_file(&tls.private_key)
+        .with_context(|| format!("proxy.json: tls.private_key {}", tls.private_key))?;
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("proxy.json: tls")?
+    .with_no_client_auth()
+    .with_single_cert(certificates, key)
+    .context("proxy.json: tls: the certificate and the private key do not go together")?;
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
+async fn serve_connection<S>(stream: S, state: Arc<ProxyState>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = hyper::service::service_fn(|req| {
+        let state = state.clone();
+        async move { Ok::<_, std::convert::Infallible>(state.handle(req).await) }
+    });
+    if let Err(e) = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(std::time::Duration::from_secs(30))
+        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+        .await
+    {
+        tracing::debug!("proxy connection ended: {e}");
+    }
+}
+
+/// Serve the listener until the task is dropped. With `tls`, every
+/// connection is a TLS handshake first, and one that is not, or does
+/// not finish in time, is closed.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    state: Arc<ProxyState>,
+) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
-        let state = state.clone();
+        let (state, tls) = (state.clone(), tls.clone());
         tokio::spawn(async move {
-            let service = hyper::service::service_fn(|req| {
-                let state = state.clone();
-                async move { Ok::<_, std::convert::Infallible>(state.handle(req).await) }
-            });
-            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .timer(hyper_util::rt::TokioTimer::new())
-                .header_read_timeout(std::time::Duration::from_secs(30))
-                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
-                .await
-            {
-                tracing::debug!("proxy connection ended: {e}");
+            match tls {
+                Some(acceptor) => {
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                        Ok(Ok(stream)) => serve_connection(stream, state).await,
+                        Ok(Err(e)) => tracing::debug!("proxy TLS handshake failed: {e}"),
+                        Err(_) => tracing::debug!("proxy TLS handshake timed out"),
+                    }
+                }
+                None => serve_connection(stream, state).await,
             }
         });
     }
@@ -1048,7 +1107,7 @@ mod tests {
         });
         let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(serve(listener, state.clone()));
+        tokio::spawn(serve(listener, None, state.clone()));
         Rig {
             base,
             state,
@@ -1795,6 +1854,152 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "no response row: {rows:?}");
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A certificate for `localhost` and its key, made with `openssl`
+    /// in `dir`.
+    fn certificate(dir: &std::path::Path, name: &str) -> wirken_gateway::proxy::TlsConfig {
+        let (certificate, private_key) = (
+            dir.join(format!("{name}.pem")),
+            dir.join(format!("{name}.key")),
+        );
+        let made = std::process::Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+            ])
+            .args(["-nodes", "-days", "2", "-subj", "/CN=localhost"])
+            .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
+            // An end-entity certificate, trusted directly: the client
+            // refuses a CA certificate presented as the server's own.
+            .args(["-addext", "basicConstraints=critical,CA:FALSE"])
+            .arg("-keyout")
+            .arg(&private_key)
+            .arg("-out")
+            .arg(&certificate)
+            .output()
+            .expect("openssl is needed to make a test certificate");
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        wirken_gateway::proxy::TlsConfig {
+            certificate: certificate.to_string_lossy().into_owned(),
+            private_key: private_key.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// With a certificate configured the listener speaks TLS and only
+    /// TLS: a client that trusts the certificate gets its call
+    /// forwarded, one that does not trust it sends nothing, and a
+    /// plain-HTTP request to the same port gets no answer.
+    #[tokio::test]
+    async fn a_listener_with_a_certificate_serves_tls_and_nothing_else() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (upstream, got) = provider(json_reply("{\"ok\":true}")).await;
+        let rig = rig(vec![("local", "custom", upstream, None)]).await;
+        let (token, value) = rig.issue("laptop", &["local"]);
+        let dir = tempfile::tempdir().unwrap();
+        let tls = certificate(dir.path(), "listener");
+        let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve(
+            listener,
+            Some(tls_acceptor(&tls).unwrap()),
+            rig.state.clone(),
+        ));
+
+        let trusting = reqwest::Client::builder()
+            .tls_certs_only([reqwest::Certificate::from_pem(
+                &std::fs::read(&tls.certificate).unwrap(),
+            )
+            .unwrap()])
+            .build()
+            .unwrap();
+        let url = format!("https://localhost:{port}{CHAT}");
+        let response = trusting
+            .post(&url)
+            .bearer_auth(&value)
+            .body("{\"model\":\"m\"}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "{\"ok\":true}");
+        assert_eq!(got.lock().unwrap().len(), 1);
+        assert_eq!(rig.rows(&proxy_session(&token.id, None)).len(), 2);
+
+        // A client that does not trust the certificate stops at the
+        // handshake: its token is never sent.
+        let other = certificate(dir.path(), "other");
+        let distrusting = reqwest::Client::builder()
+            .tls_certs_only([reqwest::Certificate::from_pem(
+                &std::fs::read(&other.certificate).unwrap(),
+            )
+            .unwrap()])
+            .build()
+            .unwrap();
+        assert!(
+            distrusting
+                .post(&url)
+                .bearer_auth(&value)
+                .body("{\"model\":\"m\"}")
+                .send()
+                .await
+                .is_err()
+        );
+
+        // Plain HTTP to the TLS port is not answered.
+        let plain = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}{CHAT}"))
+            .bearer_auth(&value)
+            .body("{\"model\":\"m\"}")
+            .send()
+            .await;
+        assert!(plain.is_err(), "{plain:?}");
+        assert_eq!(got.lock().unwrap().len(), 1);
+    }
+
+    /// A certificate or key that is missing, empty, or that do not go
+    /// together stops the listener from starting, naming the file.
+    #[test]
+    fn a_tls_block_that_cannot_be_served_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = certificate(dir.path(), "good");
+        let other = certificate(dir.path(), "other");
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "").unwrap();
+        let tls = |certificate: &str, private_key: &str| wirken_gateway::proxy::TlsConfig {
+            certificate: certificate.to_string(),
+            private_key: private_key.to_string(),
+        };
+        assert!(tls_acceptor(&good).is_ok());
+        for (config, says) in [
+            (
+                tls("/nonexistent/c.pem", &good.private_key),
+                "tls.certificate /nonexistent/c.pem",
+            ),
+            (
+                tls(&empty.to_string_lossy(), &good.private_key),
+                "holds no certificate",
+            ),
+            (
+                tls(&good.certificate, "/nonexistent/k.pem"),
+                "tls.private_key /nonexistent/k.pem",
+            ),
+            (
+                tls(&good.certificate, &other.private_key),
+                "do not go together",
+            ),
+        ] {
+            let err = format!("{:#}", tls_acceptor(&config).err().unwrap());
+            assert!(err.contains(says), "{err} does not say {says}");
         }
     }
 

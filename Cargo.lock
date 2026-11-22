@@ -6476,6 +6476,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tracing",
  "tracing-subscriber",
  "unicode-segmentation",
