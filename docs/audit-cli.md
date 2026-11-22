@@ -66,7 +66,7 @@ the same detail, targeting the job id; the firing is not deferred.
 | `leak_refused` | `credential`, `surface`, `agent_id`, `adapter_id`, `sender_id`, `tool_name`, `server_name`, `skill_name` | Content carrying a stored secret was refused at `surface`: `tool_output`, `tool_arguments`, `provider_request`, `reply`, `user_message` or `skill_load`. Names the credential, never the value. Forwarded at `error`. See [architecture](architecture.md#2-credential-lifecycle). |
 | `mcp_credential_refetched` | `credential` | The gateway sent the MCP proxy a credential's current vault value after an HTTP server refused it, on the `gateway-mcp-credentials` lane. Never the value. See [mcp](mcp.md#supported-transports). |
 | `mcp_credential_injected` / `mcp_inject_refused` | `server_name`, `agent_id` | One request a contained MCP server sent to the host its injected credential is bound to: made with the credential set, or refused with a `reason`. Carries the credential's name, the host, the method and the path without its query, on the `gateway-mcp` sentinel session. Never the value. See [mcp](mcp.md#injecting-a-credential). |
-| `proxy_request` / `proxy_response` / `proxy_refused` | `token_id` | One call a client made through the inference proxy: forwarded, answered, or refused with a `reason`. Carries the token's id, the upstream, provider and model, timing, the provider's token counts, and the SHA-256 of the request and response bodies as exchanged, on the token's lane `proxy-<token id>`. Never a token, a key or a body. See [inference proxy](inference-proxy.md#what-is-recorded). |
+| `proxy_request` / `proxy_response` / `proxy_refused` | `token_id` | One call a client made through the inference proxy: forwarded, answered, or refused with a `reason`. Carries the token's id, the upstream, provider and model, timing, the provider's token counts, and the SHA-256 of the request and response bodies as exchanged, on the session's lane, or for a refusal on the token's, `proxy-<token id>`. Never a token, a key or a body. See [inference proxy](inference-proxy.md#what-is-recorded). |
 | `proxy_archive_redacted` | none | The key of an archived body was destroyed, with the body's hash, the operator and the reason, on the `gateway-proxy` lane. See [inference proxy](inference-proxy.md#redacting-an-archived-body). |
 | `mcp_credential_refresh_discarded` | `credential` | The gateway refreshed an MCP OAuth credential and did not write the result, because the vault entry no longer held the refresh token the refresh started from, on the `gateway-mcp-credentials` lane. `reason` is `removed` (the entry stays removed), `reauthorized` (the new sign-in stays and is what the proxy gets) or `unreadable`. Never a value. Forwarded by default, at `warn`. |
 | `memory_entry_written` / `cross_channel_memory_read` | `agent_id` | Memory provenance and trust-zone crossings. |
@@ -447,7 +447,7 @@ failure, which exits `1`.
 
 ### `wirken sessions verify`
 
-For a proxy lane (`proxy-<token id>`) there is no agent to replay: the chain
+For a proxy session (`proxy-<token id>-<label>`) there is no agent to replay: the chain
 is checked, and with an archive configured each archived body against its
 row ([inference-proxy.md](inference-proxy.md#verifying-a-proxy-session)). The
 rest of this section is about a session an agent ran.

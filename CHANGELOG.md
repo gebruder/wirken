@@ -27,6 +27,24 @@ tagged.
   `crates/cli/tests/proxy_forwards_through_the_gateway.rs`;
   [docs/inference-proxy.md](docs/inference-proxy.md)).
 
+- The proxy listener serves TLS with `tls` in `proxy.json`, a certificate
+  and key in PEM. A bind beyond loopback needs `tls` or
+  `bind_beyond_loopback`. A forwarded call ends when the provider has sent
+  nothing for `idle_timeout_secs` (300) and has no limit on its length
+  (`a_listener_with_a_certificate_serves_tls_and_nothing_else`,
+  `a_stream_that_goes_idle_is_ended_and_recorded_as_incomplete`,
+  `crates/cli/src/commands/proxy_server.rs`;
+  [docs/inference-proxy.md](docs/inference-proxy.md#tls)).
+
+- A proxy session is one conversation. Calls with no `X-Wirken-Session`
+  label are split by whether a request extends an earlier one of the token,
+  each conversation on its own lane, so `sessions export` writes one
+  trajectory for each. `wirken proxy sessions` lists them and `wirken proxy
+  archive redact --session <lane>` redacts every body of one
+  (`two_conversations_are_two_sessions_and_one_is_redacted_whole`,
+  `crates/cli/tests/proxy_forwards_through_the_gateway.rs`;
+  [docs/inference-proxy.md](docs/inference-proxy.md#sessions)).
+
 - Write-once archive for proxied calls. `archive` in `proxy.json` writes each
   request and response body to an S3-compatible bucket under Object Lock,
   keyed by the hash on its row and encrypted before upload under a key of its

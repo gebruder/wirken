@@ -385,7 +385,8 @@ wirken proxy token issue <NAME> --upstream U [--upstream U2] [--model M]
                                [--ceiling-usd N] [--ceiling-calls N] [--window hour|day|week]
 wirken proxy token revoke <ID-OR-NAME>
 wirken proxy token list
-wirken proxy archive redact <SHA256> --reason <WHY>
+wirken proxy sessions [--token ID-OR-NAME]
+wirken proxy archive redact (<SHA256> | --session <LANE>) --reason <WHY>
 ```
 
 `issue`, `revoke` and `redact` run at a terminal and refuse inside a Wirken
@@ -465,8 +466,8 @@ wirken sessions export <SESSION-ID> --format atif [--output FILE] [--skip-archiv
 ```
 
 What `verify` replays and what a `tools_hash` attests:
-[audit-cli.md](audit-cli.md#wirken-sessions-verify). A proxy lane
-(`proxy-<token id>`) is verified against its chain and its archived bodies,
+[audit-cli.md](audit-cli.md#wirken-sessions-verify). A proxy session
+(`wirken proxy sessions` lists them) is verified against its chain and its archived bodies,
 and `export` writes a session as a trajectory file:
 [inference-proxy.md](inference-proxy.md#verifying-a-proxy-session).
 

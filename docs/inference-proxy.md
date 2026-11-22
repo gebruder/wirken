@@ -30,17 +30,46 @@ The listener runs inside `wirken run` when the data directory has a
 |---|---|---|
 | `upstreams` | required | The providers calls are forwarded to, by the name tokens are issued for. `provider` is a provider id as in `provider.json`; `credential` is the vault entry holding its key, absent for a provider that takes none. |
 | `bind` | `127.0.0.1:18791` | The address the listener binds. |
-| `bind_beyond_loopback` | `false` | Required, as `true`, for a `bind` that is not a loopback address. |
+| `tls` | none | `{ "certificate": "<path>", "private_key": "<path>" }`: PEM files the listener serves TLS with. See [TLS](#tls). |
+| `bind_beyond_loopback` | `false` | Allows, as `true`, a `bind` that is not a loopback address with no `tls`. |
 | `max_body_bytes` | 33554432 | The largest request body read. A larger one is refused. |
+| `idle_timeout_secs` | 300 | How long a forwarded call waits for the provider's next bytes. See [Long answers](#long-answers). |
 | `archive` | none | See [Write-once archive](#write-once-archive). |
 
 `wirken run` prints the listener's address at start. A `proxy.json` that
 cannot be served, an unknown field included, stops the start.
 
-The listener speaks plain HTTP. On loopback a token never leaves the host. A
-bind beyond loopback sends tokens and conversations over the network in the
-clear unless something in front of it terminates TLS, which is why it takes a
-second setting.
+### TLS
+
+Without `tls` the listener speaks plain HTTP. On loopback that stays on the
+host. With `tls` it speaks TLS 1.2 and 1.3 only: a connection that is not a
+TLS handshake, or does not finish one in 15 seconds, is closed, and plain
+HTTP to the port gets no answer.
+
+```json
+"bind": "0.0.0.0:8443",
+"tls": { "certificate": "/etc/wirken/proxy.pem", "private_key": "/etc/wirken/proxy.key" }
+```
+
+`certificate` is the server certificate followed by any intermediates.
+Clients then use `https://` and have to trust the certificate's issuer. The
+files are read when `wirken run` starts: a renewed certificate is picked up
+at the next start. A file that is missing or empty, or a key that does not
+belong to the certificate, stops the start. No client certificate is asked
+for; the token is what authenticates a client.
+
+A `bind` that is not a loopback address is refused unless `tls` is set or
+`bind_beyond_loopback` is `true`. Binding beyond loopback without TLS puts on
+the network, readable and alterable by anything on the path:
+
+- every client's token, on every request, which is enough to make calls as
+  that client up to its ceilings;
+- every request and response in full: prompts, files a coding agent sends,
+  tool output, the model's answers.
+
+Provider keys are not among them: they travel only between Wirken and the
+provider. `wirken run` logs a warning at start for such a bind. Use it only
+behind something that terminates TLS for the listener.
 
 ## Tokens
 
@@ -81,9 +110,39 @@ bind:
 
 Streaming works for both. Any other path or method is answered 404.
 
-A client may send `X-Wirken-Session: <label>` (letters, digits, `-`, `_`).
-Calls with the same token and label are recorded on one lane,
-`proxy-<token id>-<label>`; calls without one on `proxy-<token id>`.
+## Sessions
+
+One conversation is one session, and one session is one lane on the chain,
+`proxy-<token id>-<label>`. It is what `sessions verify` checks, what
+`sessions export` writes as one trajectory, and what `proxy archive redact
+--session` redacts.
+
+A client can name its session with `X-Wirken-Session: <label>` (letters,
+digits, `-`, `_`): calls with the same token and label are one session.
+
+Most clients send no label, and one token then carries many conversations.
+The proxy tells them apart by what each request holds. A request repeats the
+conversation so far in its `messages`. One whose messages extend those of an
+earlier request of the same token, at any point of it, continues that
+request's session; any other starts a new one, labelled `c` and twelve hex
+characters. For this the proxy keeps a hash of each request's message list
+in `proxy_tokens.db`, for thirty days. No message text is kept.
+
+```bash
+wirken proxy sessions [--token <id or name>]
+```
+
+lists the sessions: lane, token, start, calls and model.
+
+- Messages are compared without their `cache_control` markers, which clients
+  move between turns. A system prompt outside `messages` is not compared.
+- A client that rewrites its history, by compacting it or editing an earlier
+  message, starts a new session from there. So does the continuation of a
+  conversation idle for more than thirty days.
+- Two conversations that begin with the same messages are one session until
+  they differ, and stay one after: both extend the same request.
+- Refusals belong to no conversation. They are on the token's own lane,
+  `proxy-<token id>`.
 
 ## What is forwarded
 
@@ -148,9 +207,18 @@ token for a local model takes a call ceiling. Both are fixed windows. A
 ceiling is checked before a call and charged after it, so calls in flight at
 once can pass it by what they cost.
 
+## Long answers
+
+A forwarded call has no limit on how long it takes in all: a stream runs for
+as long as it keeps arriving. It is ended when the provider has sent nothing
+for `idle_timeout_secs`, which also bounds the wait for the first byte of an
+answer that is not streamed. A call ended that way is recorded with what was
+exchanged and `complete: false`. Calls an agent makes keep their own
+timeout.
+
 ## What is recorded
 
-Each forwarded call is two rows on the token's lane:
+Each forwarded call is two rows on its session's lane:
 
 - `proxy_request`, before the call is sent: `request_id`, `token_id`,
   `token_name`, `upstream`, `provider`, `model`, `shape`, `stream`,
@@ -235,21 +303,26 @@ An object under Object Lock cannot be deleted or changed. A body is made
 unreadable by destroying its key:
 
 ```bash
+wirken proxy archive redact --session <lane> --reason "customer request"
 wirken proxy archive redact <sha256> --reason "customer request"
 ```
 
-The command runs at a terminal and refuses inside a Wirken `exec`. It
-destroys the key held for that hash in `proxy_archive_keys.db`, overwrites
-the freed pages, and writes a `proxy_archive_redacted` row with the hash, the
-operator and the reason. The object stays in the bucket until its retention
+The first form redacts every archived body of one session, requests and
+responses; the second one body. The command runs at a terminal and refuses
+inside a Wirken `exec`. For each body it destroys the key held for that hash
+in `proxy_archive_keys.db`, overwrites the freed pages, and writes a
+`proxy_archive_redacted` row with the hash, the operator, the reason and,
+for the first form, the session. The object stays in the bucket until its retention
 ends and nothing can decrypt it. A hash that is redacted takes no new key: the
 same body sent again is not archived readable. It cannot be undone.
 
 What it does not do:
 
-- It redacts one body. An answer can quote its prompt, and a later request
-  repeats the conversation before it. Each body that holds the text has a
-  hash of its own to redact.
+- A body is redacted by its hash. Redacting one body leaves the others of
+  its conversation: an answer can quote its prompt, and a later request
+  repeats the conversation before it. `--session` takes them all.
+- Two sessions that exchanged the same bytes share that object. Redacting it
+  for one makes it unreadable for the other.
 - It does not remove the rows. The chain still shows that the call was made,
   with its hashes and counts.
 - A copy of `proxy_archive_keys.db` made before the redaction still holds the
@@ -258,7 +331,7 @@ What it does not do:
 ## Verifying a proxy session
 
 ```bash
-wirken sessions verify proxy-<token id>
+wirken sessions verify <lane>
 ```
 
 For a proxy lane, `sessions verify` checks the hash chain and prints how many
@@ -287,7 +360,8 @@ wirken sessions export <session id> --format atif --output session.json
 
 `sessions export` writes one session as an ATIF trajectory, version 1.8
 (`schema_version` `ATIF-v1.8`): to the file, or to stdout. It takes a proxy
-lane or the id of a session an agent ran. Nothing is sent anywhere; pushing
+session's lane or the id of a session an agent ran. A proxy session is one
+conversation, so two conversations on one token are two trajectories. Nothing is sent anywhere; pushing
 the file to a tool that reads the format is a separate step.
 
 A session an agent ran is exported from its rows: each user message, each
@@ -319,10 +393,8 @@ is not written.
 
 ## Limits
 
-- A proxied call is cut off 300 seconds after it starts, the timeout of the
-  provider client. A stream that runs longer ends there, recorded as
-  `complete: false`.
-- The listener has no TLS.
+- A Tinfoil upstream goes through the attested client, whose timeouts are
+  that client's own and not `idle_timeout_secs`.
 - Images and other non-text content in a proxied conversation are exported
   as a placeholder naming their type.
 - Gemini and Bedrock have request shapes of their own and are not served.
