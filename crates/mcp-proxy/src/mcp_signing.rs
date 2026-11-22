@@ -246,6 +246,29 @@ fn hash_sandbox(hasher: &mut Sha256, sandbox: &StdioSandbox) {
             in_env.sort_unstable();
             in_env.dedup();
             write_list(hasher, &in_env);
+            // Written only for a block that has one, so an entry
+            // without it hashes as it did before the field existed.
+            if let Some(inject) = &c.inject {
+                hasher.update(b"inject\0");
+                write_len_prefixed(hasher, inject.credential_env.as_bytes());
+                write_len_prefixed(hasher, inject.host.as_bytes());
+                write_len_prefixed(hasher, inject.header.as_bytes());
+                write_opt(hasher, inject.scheme.as_deref());
+                write_len_prefixed(hasher, inject.base_url_env.as_bytes());
+                // The longest match wins, so the order rules are
+                // written in changes nothing.
+                let mut paths: Vec<(&str, &str)> = inject
+                    .paths
+                    .iter()
+                    .map(|p| (p.from.as_str(), p.to.as_str()))
+                    .collect();
+                paths.sort_unstable();
+                hasher.update((paths.len() as u32).to_le_bytes());
+                for (from, to) in paths {
+                    write_len_prefixed(hasher, from.as_bytes());
+                    write_len_prefixed(hasher, to.as_bytes());
+                }
+            }
         }
         StdioSandbox::Invalid(value) => {
             hasher.update(b"invalid\0");
@@ -957,5 +980,55 @@ mod tests {
         assert_ne!(none, off);
         assert_ne!(none, invalid);
         assert_ne!(off, invalid);
+    }
+
+    const INJECT: &str = r#"{"credential_env":"GITHUB_PERSONAL_ACCESS_TOKEN","host":"api.github.com","header":"Authorization","scheme":"Bearer","base_url_env":"GITHUB_HOST","paths":[{"from":"/api/v3/","to":"/"},{"from":"/api/graphql","to":"/graphql"}]}"#;
+
+    fn with_inject(inject: &str) -> McpServerConfig {
+        let block = BLOCK.strip_suffix('}').unwrap();
+        sandboxed(&format!(r#"{block},"inject":{inject}}}"#))
+    }
+
+    /// The digest of an entry with no `inject` block, pinned: adding
+    /// the field to the format left it as it was, so signatures made
+    /// before the field existed still verify.
+    #[test]
+    fn an_entry_without_an_inject_block_keeps_its_digest() {
+        assert_eq!(
+            entry_digest("github", &sandboxed(BLOCK)),
+            "sha256:d9f818c96ac41a25312b4f35b1c4411ee7c5edd18d2ea0e3b77c838e733e5ff9"
+        );
+    }
+
+    /// Every field of the block is under the signature, and the order
+    /// its path rules are written in is not.
+    #[test]
+    fn each_inject_field_changes_the_hash_and_rule_order_does_not() {
+        let base = hash_mcp_entry("github", &with_inject(INJECT));
+        assert_ne!(base, hash_mcp_entry("github", &sandboxed(BLOCK)));
+        for (from, to) in [
+            ("GITHUB_PERSONAL_ACCESS_TOKEN", "OTHER_TOKEN"),
+            ("api.github.com", "api.example.com"),
+            ("Authorization", "X-Api-Key"),
+            (r#""scheme":"Bearer","#, ""),
+            ("Bearer", "token"),
+            ("GITHUB_HOST", "GH_HOST"),
+            (r#""to":"/graphql""#, r#""to":"/graphql2""#),
+            (r#""from":"/api/v3/""#, r#""from":"/api/v4/""#),
+            (r#",{"from":"/api/graphql","to":"/graphql"}"#, ""),
+        ] {
+            assert!(INJECT.contains(from), "{from}");
+            assert_ne!(
+                base,
+                hash_mcp_entry("github", &with_inject(&INJECT.replace(from, to))),
+                "{from} -> {to}"
+            );
+        }
+        let reordered = INJECT.replace(
+            r#"{"from":"/api/v3/","to":"/"},{"from":"/api/graphql","to":"/graphql"}"#,
+            r#"{"from":"/api/graphql","to":"/graphql"},{"from":"/api/v3/","to":"/"}"#,
+        );
+        assert_ne!(reordered, INJECT);
+        assert_eq!(base, hash_mcp_entry("github", &with_inject(&reordered)));
     }
 }

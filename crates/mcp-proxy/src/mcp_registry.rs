@@ -145,7 +145,7 @@ impl ProxyRegistry {
     pub(crate) async fn restart_host_using(
         &mut self,
         name: &str,
-        credentials: &crate::credentials::ProxyCredentials,
+        credentials: &SharedCredentials,
     ) -> Vec<String> {
         let mut restarted = Vec::new();
         let specs: Vec<usize> = self
@@ -176,6 +176,8 @@ impl ProxyRegistry {
                 args: &h.args,
                 env: &h.env,
                 sandbox: h.sandbox.as_ref(),
+                credentials,
+                pin: &h.pin,
             };
             let audit = self.audit.clone();
             let detail = match start_stdio(&self.sandbox, entry, &resolved, audit.as_ref()).await {
@@ -338,6 +340,8 @@ impl ProxyRegistry {
                             args,
                             env,
                             sandbox: sandbox.as_deref(),
+                            credentials: &credentials,
+                            pin: &pin,
                         },
                         &resolved_env,
                         audit,
@@ -682,6 +686,9 @@ pub(crate) struct StdioEntry<'a> {
     /// The config's env: `vault:` values are still references.
     pub env: &'a HashMap<String, String>,
     pub sandbox: Option<&'a StdioSandbox>,
+    /// What an injected credential is read from, for this entry.
+    pub credentials: &'a SharedCredentials,
+    pub pin: &'a crate::credentials::ServerPin,
 }
 
 /// Why a stdio server did not start.
@@ -786,15 +793,33 @@ pub(crate) async fn start_stdio(
             ),
         )
     })?;
-    if !plan.egress_hosts.is_empty() {
+    if plan.needs_route() {
         host.ready_sidecar_binary()
             .map_err(|why| StartError::refused(REFUSED_SANDBOX_UNAVAILABLE, why))?;
     }
+    let inject = match &plan.inject {
+        Some(inject) => {
+            let upstream = crate::inject::Upstream::https(&inject.host)
+                .map_err(|e| StartError::Failed(ProxyError::Mcp(e)))?;
+            let route: Arc<dyn wirken_sandbox::egress::InjectRoute> =
+                Arc::new(crate::inject::Injector {
+                    plan: inject.clone(),
+                    agent_id: plan.agent_id.clone(),
+                    server: plan.server.clone(),
+                    pin: entry.pin.clone(),
+                    credentials: entry.credentials.clone(),
+                    audit: audit.cloned(),
+                    upstream,
+                });
+            Some((route, crate::inject::new_placeholder()))
+        }
+        None => None,
+    };
 
-    let route = if plan.egress_hosts.is_empty() {
+    let route = if !plan.needs_route() {
         None
     } else {
-        let route = crate::container::start_route(docker, host, &plan, audit.cloned())
+        let route = crate::container::start_route(docker, host, &plan, audit.cloned(), inject)
             .await
             .map_err(|e| {
                 StartError::Failed(ProxyError::Mcp(format!(
@@ -825,8 +850,12 @@ pub(crate) async fn start_stdio(
             nano_cpus: plan.nano_cpus,
             secrets_as_files: plan.secret_file_names.clone(),
             secrets_in_env: plan.env_secret_names.clone(),
-            secrets_injected: Vec::new(),
-            inject_host: None,
+            secrets_injected: plan
+                .inject
+                .iter()
+                .map(|i| i.credential_env.clone())
+                .collect(),
+            inject_host: plan.inject.as_ref().map(|i| i.host.clone()),
         },
     );
     Ok(transport)

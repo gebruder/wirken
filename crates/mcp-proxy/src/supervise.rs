@@ -473,6 +473,8 @@ impl ServerLife for ContainerLife {
             args: &p.args,
             env: &p.env,
             sandbox: Some(&p.sandbox),
+            credentials: &self.credentials,
+            pin: &p.pin,
         };
         let transport = start_stdio(&p.host, entry, &resolved, self.audit.as_ref())
             .await

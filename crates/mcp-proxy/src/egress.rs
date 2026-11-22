@@ -60,6 +60,10 @@ pub struct McpEgressPolicy {
     pub server: String,
     /// The entry's `egress.hosts`, already checked.
     pub hosts: Vec<String>,
+    /// The host the entry's injected credential is bound to. The
+    /// server reaches it through the injected route only, whatever
+    /// `hosts` lists.
+    pub inject_host: Option<String>,
     pub audit: Option<Arc<dyn SessionLog>>,
 }
 
@@ -77,6 +81,16 @@ impl McpEgressPolicy {
     pub fn check(&self, host: &str, port: u16, kind: RequestKind) -> Verdict {
         if let Err(reason) = check_shape(host, port, kind) {
             return Verdict::deny(reason);
+        }
+        // Compared as DNS compares names, so another spelling of the
+        // bound host is not a way round the injected route.
+        if let Some(bound) = &self.inject_host
+            && host
+                .strip_suffix('.')
+                .unwrap_or(host)
+                .eq_ignore_ascii_case(bound)
+        {
+            return Verdict::deny(SandboxEgressDenyReason::InjectedHost);
         }
         let listed = self
             .hosts
@@ -145,8 +159,43 @@ mod tests {
             agent_id: "agent-1".into(),
             server: "github".into(),
             hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            inject_host: None,
             audit: None,
         }
+    }
+
+    /// The bound host of an injected entry is refused on the direct
+    /// route, under the wildcard and under its own listing, in any
+    /// spelling DNS would take for the same name. Other hosts are
+    /// decided as before.
+    #[test]
+    fn the_bound_host_of_an_injected_entry_is_refused_on_the_direct_route() {
+        for hosts in [&["*"][..], &["api.github.com", "uploads.github.com"][..]] {
+            let policy = McpEgressPolicy {
+                inject_host: Some("api.github.com".into()),
+                ..policy(hosts)
+            };
+            for spelling in ["api.github.com", "API.GitHub.com", "api.github.com."] {
+                for (port, kind) in [(443, RequestKind::Connect), (80, RequestKind::Plain)] {
+                    assert_eq!(
+                        policy.check(spelling, port, kind),
+                        Verdict::deny(SandboxEgressDenyReason::InjectedHost),
+                        "{spelling} {hosts:?}"
+                    );
+                }
+            }
+            assert!(
+                policy
+                    .check("uploads.github.com", 443, RequestKind::Connect)
+                    .allowed
+            );
+        }
+        // Without an injected credential the same host is reachable.
+        assert!(
+            policy(&["api.github.com"])
+                .check("api.github.com", 443, RequestKind::Connect)
+                .allowed
+        );
     }
 
     #[test]

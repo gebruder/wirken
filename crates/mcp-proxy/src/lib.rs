@@ -17,6 +17,7 @@ pub mod container;
 pub mod credentials;
 pub mod egress;
 pub mod error;
+pub mod inject;
 pub mod mcp_client;
 pub mod mcp_config;
 pub mod mcp_registry;

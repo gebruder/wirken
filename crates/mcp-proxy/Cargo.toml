@@ -33,6 +33,11 @@ bollard = { workspace = true }
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 libc = "0.2"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

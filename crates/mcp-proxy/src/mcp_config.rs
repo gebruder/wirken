@@ -208,6 +208,47 @@ pub struct ContainerSandbox {
     /// variable is set to `<NAME>_FILE` holding the file's path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets_in_env: Vec<String>,
+    /// One `vault:` value the server never holds: the container gets a
+    /// placeholder, and the proxy sets the real value on the requests
+    /// the server sends to one host. See [`crate::inject`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject: Option<Box<SandboxInject>>,
+}
+
+/// A credential bound to one host and set by the proxy.
+///
+/// The server is pointed at a plain-HTTP base URL on its own loopback.
+/// What it sends there is carried to the proxy, which maps the path,
+/// sets the header from the vault value and makes the HTTPS request to
+/// `host` itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxInject {
+    /// The `env` variable whose `vault:` value is injected. The
+    /// container gets a placeholder in it.
+    pub credential_env: String,
+    /// The host the credential is sent to: one domain name, HTTPS on
+    /// port 443.
+    pub host: String,
+    /// The header the proxy sets.
+    pub header: String,
+    /// Put before the value with one space, as in `Bearer <value>`.
+    /// Absent sends the value alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// The variable the server reads its API base URL from. The proxy
+    /// sets it.
+    pub base_url_env: String,
+    /// Which paths are forwarded, and to where on `host`.
+    pub paths: Vec<InjectPath>,
+}
+
+/// One rule of an injected route's path map. A `from` ending in `/`
+/// matches every path under it and `to` replaces that prefix; any
+/// other `from` matches that path alone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InjectPath {
+    pub from: String,
+    pub to: String,
 }
 
 /// Where the install directory appears inside the container.

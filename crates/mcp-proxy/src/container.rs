@@ -50,11 +50,19 @@ const RESERVED_TARGETS: &[&str] = &[
     INSTALL_DIR_TARGET,
     SCRATCH_TARGET,
     SECRETS_TARGET,
+    RELAY_BIN_TARGET,
     "/tmp",
     "/proc",
     "/sys",
     "/dev",
 ];
+
+/// Where the loopback relay's binary appears inside the container of
+/// a server with an injected credential.
+pub const RELAY_BIN_TARGET: &str = "/wirken-relay";
+
+/// The loopback port that relay listens on.
+pub const RELAY_PORT: u16 = 3180;
 
 /// How many stderr lines of a failed or exited server reach the log.
 const STDERR_TAIL_LINES: usize = 20;
@@ -340,6 +348,9 @@ pub struct ContainerPlan {
     pub labels: HashMap<String, String>,
     /// Host directory to create before the container starts.
     pub scratch_dir: Option<PathBuf>,
+    /// The block's `inject`, checked. Its credential is in none of the
+    /// secret lists above: the container gets a placeholder for it.
+    pub inject: Option<crate::inject::InjectPlan>,
 }
 
 impl ContainerPlan {
@@ -424,11 +435,19 @@ impl ContainerPlan {
                 .into());
             }
         }
+        let inject = block
+            .inject
+            .as_ref()
+            .map(|inject| crate::inject::InjectPlan::new(inject, env, &block.secrets_in_env))
+            .transpose()?;
         let mut plain = Vec::new();
         let mut env_secret_names = Vec::new();
         let mut secret_file_names = Vec::new();
         for (name, value) in env {
-            if !value.starts_with("vault:") {
+            if inject.as_ref().is_some_and(|i| &i.credential_env == name) {
+                // Neither a file nor a variable: the value stays in
+                // the proxy.
+            } else if !value.starts_with("vault:") {
                 plain.push(format!("{name}={value}"));
             } else if block.secrets_in_env.contains(name) {
                 env_secret_names.push(name.clone());
@@ -482,11 +501,11 @@ impl ContainerPlan {
                     .to_string(),
             ));
         }
-        if !egress_hosts.is_empty()
+        if (!egress_hosts.is_empty() || inject.is_some())
             && let Some(why) = host.facts.and_then(|f| f.egress_unsupported())
         {
             return Err(PlanError::EgressUnsupported(format!(
-                "{why}; egress.hosts needs rootful Docker on Linux. Remove egress.hosts \
+                "{why}; egress.hosts and inject need rootful Docker on Linux. Remove them \
                  to run the server with no network"
             )));
         }
@@ -522,7 +541,14 @@ impl ContainerPlan {
                 .map_err(PlanError::Unavailable)?,
             labels,
             scratch_dir,
+            inject,
         })
+    }
+
+    /// Whether the server needs a route: it lists egress hosts, or it
+    /// has an injected credential, which travels through the sidecar.
+    pub fn needs_route(&self) -> bool {
+        !self.egress_hosts.is_empty() || self.inject.is_some()
     }
 
     /// Each mount as `source:target:ro` or `source:target:rw`, for the
@@ -554,10 +580,24 @@ impl ContainerPlan {
     /// container joins its internal network, gets the sidecar as its
     /// proxy, and has no working resolver: names are resolved by the
     /// broker, after the policy decision.
+    ///
+    /// A server with an injected credential, on a route that serves
+    /// one, is started under the loopback relay: the relay binary is
+    /// the entrypoint and runs the entry's command as its child. The
+    /// credential's variable holds the route's placeholder and the
+    /// base-URL variable names the relay.
     pub fn create_body(
         &self,
         secrets: &HashMap<String, String>,
         route: Option<&ServerRoute>,
+    ) -> ContainerCreateBody {
+        self.body(secrets, route.map(ServerRoute::facts))
+    }
+
+    fn body(
+        &self,
+        secrets: &HashMap<String, String>,
+        route: Option<RouteFacts<'_>>,
     ) -> ContainerCreateBody {
         // A secret file the proxy holds no value for is not written, and
         // its `NAME_FILE` variable is left out with it.
@@ -578,13 +618,42 @@ impl ContainerPlan {
                 env.push(format!("{name}={value}"));
             }
         }
+        let relay = route.as_ref().and_then(|r| r.relay);
         let network_mode = match route {
             Some(route) => {
-                env.extend(route.proxy_env());
-                route.network()
+                env.extend(route.proxy_env);
+                route.network
             }
             None => self.network_mode.clone(),
         };
+        let mut mounts = self.mounts.clone();
+        let mut cmd = self.cmd.clone();
+        if let (Some(inject), Some(relay)) = (&self.inject, relay) {
+            env.push(format!("{}={}", inject.credential_env, relay.placeholder));
+            env.push(format!(
+                "{}=http://127.0.0.1:{RELAY_PORT}",
+                inject.base_url_env
+            ));
+            // The relay is on the container's own loopback. A client
+            // that honours the proxy variables for every address would
+            // otherwise ask the sidecar for it.
+            env.retain(|e| !e.starts_with("NO_PROXY=") && !e.starts_with("no_proxy="));
+            env.push("NO_PROXY=127.0.0.1".to_string());
+            env.push("no_proxy=127.0.0.1".to_string());
+            mounts.push(bind(&relay.binary, RELAY_BIN_TARGET, false));
+            cmd = [
+                RELAY_BIN_TARGET.to_string(),
+                "inject-relay".to_string(),
+                "--listen".to_string(),
+                format!("127.0.0.1:{RELAY_PORT}"),
+                "--to".to_string(),
+                relay.to.to_string(),
+                "--".to_string(),
+            ]
+            .into_iter()
+            .chain(cmd)
+            .collect();
+        }
         // On the egress network the server must not resolve names
         // itself; the broker does, after the hosts check. With no
         // network it cannot. Either way the loopback resolver and the
@@ -593,7 +662,7 @@ impl ContainerPlan {
         // an `exec` container's does.
         let dns = Some(vec!["127.0.0.1".to_string()]);
         let dns_search = Some(vec![".".to_string()]);
-        let (entrypoint, args) = self.cmd.split_at(self.cmd.len().min(1));
+        let (entrypoint, args) = cmd.split_at(cmd.len().min(1));
         ContainerCreateBody {
             image: Some(self.image.clone()),
             entrypoint: Some(entrypoint.to_vec()),
@@ -611,7 +680,7 @@ impl ContainerPlan {
             host_config: Some(wirken_sandbox::hardened_host_config(
                 wirken_sandbox::HostSettings {
                     binds: Vec::new(),
-                    mounts: self.mounts.clone(),
+                    mounts,
                     network_mode: Some(network_mode),
                     dns,
                     dns_search,
@@ -755,7 +824,30 @@ fn path_component<'a>(name: &'a str, what: &str) -> Result<&'a str, PlanError> {
 /// A contained server's route out: its networks, sidecar and broker.
 /// Held with the server's container and torn down after it.
 #[cfg(unix)]
-pub struct ServerRoute(wirken_sandbox::egress_net::EgressRoute);
+pub struct ServerRoute {
+    route: wirken_sandbox::egress_net::EgressRoute,
+    relay: Option<Relay>,
+}
+
+/// What a route gives the container it serves: the network to join,
+/// the proxy variables, and the relay for an injected credential.
+struct RouteFacts<'a> {
+    network: String,
+    proxy_env: Vec<String>,
+    relay: Option<&'a Relay>,
+}
+
+/// What a container needs to start its server under the loopback
+/// relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relay {
+    /// The static binary mounted at [`RELAY_BIN_TARGET`].
+    pub binary: PathBuf,
+    /// The sidecar's injected-route listener.
+    pub to: std::net::SocketAddr,
+    /// What the container holds in place of the credential.
+    pub placeholder: String,
+}
 
 /// No route can exist without a Unix socket for the broker; a plan
 /// with egress hosts is refused on this host before one is asked for.
@@ -763,29 +855,24 @@ pub struct ServerRoute(wirken_sandbox::egress_net::EgressRoute);
 pub enum ServerRoute {}
 
 impl ServerRoute {
+    /// What the container this route serves is created with.
     #[cfg(unix)]
-    fn network(&self) -> String {
-        self.0.internal_network.clone()
+    fn facts(&self) -> RouteFacts<'_> {
+        RouteFacts {
+            network: self.route.internal_network.clone(),
+            proxy_env: self.route.proxy_env(),
+            relay: self.relay.as_ref(),
+        }
     }
 
-    #[cfg(unix)]
-    fn proxy_env(&self) -> Vec<String> {
-        self.0.proxy_env()
+    #[cfg(not(unix))]
+    fn facts(&self) -> RouteFacts<'_> {
+        match *self {}
     }
 
     #[cfg(unix)]
     pub async fn teardown(self, docker: &Docker) {
-        self.0.teardown(docker).await;
-    }
-
-    #[cfg(not(unix))]
-    fn network(&self) -> String {
-        match *self {}
-    }
-
-    #[cfg(not(unix))]
-    fn proxy_env(&self) -> Vec<String> {
-        match *self {}
+        self.route.teardown(docker).await;
     }
 
     #[cfg(not(unix))]
@@ -798,12 +885,17 @@ impl ServerRoute {
 /// on its egress hosts. The sidecar runs the server's image with the
 /// sidecar binary mounted in, as the server's user, so its socket
 /// needs no wider permissions than the operator's own.
+///
+/// `inject` answers the plan's injected route and names the
+/// placeholder its container holds. The broker then refuses the direct
+/// way to the bound host.
 #[cfg(unix)]
 pub async fn start_route(
     docker: &Docker,
     host: &SandboxHost,
     plan: &ContainerPlan,
     audit: Option<Arc<dyn SessionLog>>,
+    inject: Option<(Arc<dyn wirken_sandbox::egress::InjectRoute>, String)>,
 ) -> Result<ServerRoute, String> {
     let binary = host.ready_sidecar_binary()?;
     let id = crate::mcp_transport::random_suffix();
@@ -818,17 +910,29 @@ pub async fn start_route(
         socket_dir_mode: 0o700,
         socket_mode: 0o600,
         seccomp: plan.seccomp.clone(),
-        inject: None,
+        inject: inject.as_ref().map(|(route, _)| route.clone()),
     };
     let policy = crate::egress::McpEgressPolicy {
         agent_id: plan.agent_id.clone(),
         server: plan.server.clone(),
         hosts: plan.egress_hosts.clone(),
+        inject_host: inject
+            .as_ref()
+            .and(plan.inject.as_ref())
+            .map(|i| i.host.clone()),
         audit,
     };
-    wirken_sandbox::egress_net::provision(docker, spec, Arc::new(policy))
-        .await
-        .map(ServerRoute)
+    let relay_binary = spec.binary.clone();
+    let route = wirken_sandbox::egress_net::provision(docker, spec, Arc::new(policy)).await?;
+    let relay = match (inject, route.inject_addr()) {
+        (Some((_, placeholder)), Some(to)) => Some(Relay {
+            binary: relay_binary,
+            to,
+            placeholder,
+        }),
+        _ => None,
+    };
+    Ok(ServerRoute { route, relay })
 }
 
 #[cfg(not(unix))]
@@ -837,6 +941,7 @@ pub async fn start_route(
     _host: &SandboxHost,
     _plan: &ContainerPlan,
     _audit: Option<Arc<dyn SessionLog>>,
+    _inject: Option<(Arc<dyn wirken_sandbox::egress::InjectRoute>, String)>,
 ) -> Result<ServerRoute, String> {
     Err("the egress broker needs a Unix socket, which this host does not have".into())
 }
@@ -1507,6 +1612,172 @@ mod tests {
         assert!(!is_tmpfs(Path::new("/proc")));
     }
 
+    fn injected(dirs: &tempfile::TempDir) -> ContainerSandbox {
+        ContainerSandbox {
+            inject: Some(Box::new(crate::mcp_config::SandboxInject {
+                credential_env: "GITHUB_PERSONAL_ACCESS_TOKEN".into(),
+                host: "api.github.com".into(),
+                header: "Authorization".into(),
+                scheme: Some("Bearer".into()),
+                base_url_env: "GITHUB_HOST".into(),
+                paths: vec![crate::mcp_config::InjectPath {
+                    from: "/api/v3/".into(),
+                    to: "/".into(),
+                }],
+            })),
+            ..block(dirs)
+        }
+    }
+
+    fn injected_plan(host: &SandboxHost, block: &ContainerSandbox) -> ContainerPlan {
+        ContainerPlan::new(
+            host,
+            "agent-1",
+            "github",
+            "/server/github-mcp-server",
+            &["stdio".to_string()],
+            &HashMap::from([
+                (
+                    "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                    "vault:github-token".to_string(),
+                ),
+                ("OTHER".to_string(), "vault:other".to_string()),
+            ]),
+            block,
+        )
+        .unwrap()
+    }
+
+    /// An injected credential is neither a secret file nor a secret
+    /// variable, and the server needs a route though it lists no host.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn an_injected_credential_is_in_no_secret_list_and_needs_a_route() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        let plan = injected_plan(&host, &injected(&dirs));
+        assert_eq!(plan.secret_file_names, ["OTHER"]);
+        assert!(plan.env_secret_names.is_empty());
+        assert!(plan.env.iter().all(|e| !e.starts_with("GITHUB_")));
+        assert!(plan.egress_hosts.is_empty());
+        assert!(plan.needs_route());
+        assert_eq!(plan.inject.as_ref().unwrap().credential, "github-token");
+    }
+
+    /// On its route the server is started under the relay: the relay
+    /// binary is the entrypoint and the entry's command its argument,
+    /// the credential's variable holds the placeholder, the base-URL
+    /// variable names the relay's loopback port, and the real value is
+    /// nowhere in the body.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn an_injected_server_starts_under_the_relay_holding_a_placeholder() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        let plan = injected_plan(&host, &injected(&dirs));
+        let relay = Relay {
+            binary: "/opt/wirken/wirken".into(),
+            to: "172.30.0.2:3129".parse().unwrap(),
+            placeholder: "wirken-placeholder-abc".into(),
+        };
+        let secrets = HashMap::from([
+            (
+                "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                "ghp_realvalue".to_string(),
+            ),
+            ("OTHER".to_string(), "other-value".to_string()),
+        ]);
+        let body = plan.body(
+            &secrets,
+            Some(RouteFacts {
+                network: "wirken-mcp-egress-x".into(),
+                proxy_env: vec![
+                    "HTTP_PROXY=http://172.30.0.2:3128".into(),
+                    "NO_PROXY=".into(),
+                    "no_proxy=".into(),
+                ],
+                relay: Some(&relay),
+            }),
+        );
+        assert_eq!(body.entrypoint, Some(vec![RELAY_BIN_TARGET.to_string()]));
+        assert_eq!(
+            body.cmd.unwrap(),
+            [
+                "inject-relay",
+                "--listen",
+                "127.0.0.1:3180",
+                "--to",
+                "172.30.0.2:3129",
+                "--",
+                "/server/github-mcp-server",
+                "stdio"
+            ]
+        );
+        let env = body.env.unwrap();
+        for expected in [
+            "GITHUB_PERSONAL_ACCESS_TOKEN=wirken-placeholder-abc",
+            "GITHUB_HOST=http://127.0.0.1:3180",
+            "NO_PROXY=127.0.0.1",
+            "no_proxy=127.0.0.1",
+            "HTTP_PROXY=http://172.30.0.2:3128",
+        ] {
+            assert!(env.contains(&expected.to_string()), "{expected} in {env:?}");
+        }
+        assert!(!env.contains(&"NO_PROXY=".to_string()));
+        let host_config = body.host_config.unwrap();
+        let whole = format!("{env:?} {host_config:?}");
+        assert!(!whole.contains("ghp_realvalue"));
+        let relay_mount = host_config
+            .mounts
+            .unwrap()
+            .into_iter()
+            .find(|m| m.target.as_deref() == Some(RELAY_BIN_TARGET))
+            .unwrap();
+        assert_eq!(relay_mount.source.as_deref(), Some("/opt/wirken/wirken"));
+        assert_eq!(relay_mount.read_only, Some(true));
+        assert_eq!(
+            host_config.network_mode.as_deref(),
+            Some("wirken-mcp-egress-x")
+        );
+    }
+
+    /// Without a route that serves the injected credential the server
+    /// is started as the entry says and its variable is left unset: no
+    /// placeholder that nothing would replace.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn an_injected_server_without_its_route_gets_no_placeholder() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        let plan = injected_plan(&host, &injected(&dirs));
+        let body = plan.create_body(&HashMap::new(), None);
+        assert_eq!(
+            body.entrypoint,
+            Some(vec!["/server/github-mcp-server".to_string()])
+        );
+        assert!(body.env.unwrap().iter().all(|e| !e.starts_with("GITHUB_")));
+    }
+
+    /// A block the forwarder cannot serve is refused when the plan is
+    /// made, as a block that is wrong.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn an_inject_block_that_cannot_be_served_refuses_the_plan() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        let mut block = injected(&dirs);
+        block.inject.as_mut().unwrap().host = "10.0.0.1".into();
+        let err = plan(&host, &block).unwrap_err();
+        assert!(matches!(err, PlanError::Invalid(_)), "{err:?}");
+    }
+
+    /// A mount cannot cover the relay binary.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn a_mount_cannot_target_the_relay_binary() {
+        assert!(container_target(RELAY_BIN_TARGET).is_err());
+    }
+
     fn with_hosts(dirs: &tempfile::TempDir, hosts: &[&str]) -> ContainerSandbox {
         ContainerSandbox {
             egress: Some(crate::mcp_config::SandboxEgress {
@@ -1996,10 +2267,10 @@ read rest"#;
         .unwrap();
         let log: Arc<dyn SessionLog> =
             Arc::new(wirken_audit::SqliteSessionLog::open_in_memory().unwrap());
-        let route = start_route(&docker, &host, &plan, Some(log.clone()))
+        let route = start_route(&docker, &host, &plan, Some(log.clone()), None)
             .await
             .unwrap();
-        let network = route.network();
+        let network = route.facts().network;
         let mut transport =
             StdioTransport::spawn_container(&docker, &plan, &HashMap::new(), Some(route))
                 .await
@@ -2140,6 +2411,233 @@ read rest"#;
 
         transport.shutdown().await;
         assert!(!exists(&docker, &id).await, "container outlived shutdown");
+    }
+
+    /// What a server holding a real credential would be given.
+    const INJECTED_SECRET: &str = "ghp_liveTestSecretValue0123456789";
+
+    /// Start a server with an injected credential under `runtime` and
+    /// have it call its base URL. The server holds a placeholder, in its
+    /// environment and in what the runtime reports of it; the bound
+    /// host's stand-in received the real value on the mapped path; the
+    /// direct way to the bound host is refused; each of those is a row.
+    /// The server's stdin and stdout reach it through the relay.
+    async fn injected_round_trip(docker: &Docker, runtime: Option<&str>) {
+        let Some(binary) = sidecar_binary() else {
+            assert!(
+                std::env::var(REQUIRE_RUNSC_ENV).as_deref() != Ok("1"),
+                "{REQUIRE_RUNSC_ENV}=1 and there is no static sidecar binary"
+            );
+            eprintln!(
+                "skipping: no static sidecar binary; set WIRKEN_SIDECAR_BINARY or build \
+                 `cargo build -p wirken-cli --bin wirken --target x86_64-unknown-linux-musl`"
+            );
+            return;
+        };
+        let data = tempfile::tempdir().unwrap();
+        let mut host = host(docker, data.path());
+        host.sidecar_binary = Some(binary);
+        host.runtime = runtime.map(str::to_string);
+        host.probe().await;
+        if let Some(why) = host.facts.and_then(|f| f.egress_unsupported()) {
+            eprintln!("skipping: {why}");
+            return;
+        }
+        // A daemon may register runsc with no network of its own, and
+        // then no container it starts reaches a sidecar.
+        if let Some(name) = runtime
+            && docker
+                .info()
+                .await
+                .ok()
+                .and_then(|i| i.runtimes)
+                .and_then(|r| r.get(name).cloned())
+                .and_then(|r| r.runtime_args)
+                .is_some_and(|args| args.iter().any(|a| a == "--network=none"))
+        {
+            assert!(
+                std::env::var(REQUIRE_RUNSC_ENV).as_deref() != Ok("1"),
+                "{REQUIRE_RUNSC_ENV}=1 and {name} is registered with --network=none"
+            );
+            eprintln!("skipping: {name} is registered with --network=none on this host");
+            return;
+        }
+
+        let script = r#"read line
+tok=$GITHUB_PERSONAL_ACCESS_TOKEN
+b=${GITHUB_HOST#http://}; h=${b%:*}; p=${b##*:}
+exec 3<>/dev/tcp/$h/$p
+printf 'GET /api/v3/user?per_page=1 HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n' "$b" "$tok" >&3
+read -r s <&3; s=${s%$'\r'}
+body=$(tail -n1 <&3 | tr -d '"\\\r')
+exec 3>&-
+px=${HTTPS_PROXY#http://}; ph=${px%:*}; pp=${px##*:}
+exec 4<>/dev/tcp/$ph/$pp; printf 'CONNECT api.github.com:443 HTTP/1.1\r\n\r\n' >&4; read -r d <&4; exec 4>&-; d=${d%$'\r'}
+printf '{"jsonrpc":"2.0","id":1,"result":{"status":"%s","body":"%s","token":"%s","direct":"%s","first":"%s"}}\n' "${s:9:3}" "$body" "$tok" "${d:9:3}" "$(cat /proc/1/comm)"
+read rest"#;
+        let plan = ContainerPlan::new(
+            &host,
+            "agent-1",
+            "github",
+            "bash",
+            &["-c".to_string(), script.to_string()],
+            &HashMap::from([(
+                "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                "vault:github-token".to_string(),
+            )]),
+            &ContainerSandbox {
+                image: Some(IMAGE.into()),
+                inject: Some(Box::new(crate::mcp_config::SandboxInject {
+                    credential_env: "GITHUB_PERSONAL_ACCESS_TOKEN".into(),
+                    host: "api.github.com".into(),
+                    header: "Authorization".into(),
+                    scheme: Some("Bearer".into()),
+                    base_url_env: "GITHUB_HOST".into(),
+                    paths: vec![crate::mcp_config::InjectPath {
+                        from: "/api/v3/".into(),
+                        to: "/".into(),
+                    }],
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.runtime.as_deref(), runtime);
+
+        let (origin, got) =
+            crate::inject::stub::upstream(|_, _| crate::inject::stub::ok("hello-from-upstream"))
+                .await;
+        let log: Arc<dyn SessionLog> =
+            Arc::new(wirken_audit::SqliteSessionLog::open_in_memory().unwrap());
+        let credentials = Arc::new(crate::credentials::ProxyCredentials::new(
+            HashMap::from([(
+                "github-token".to_string(),
+                wirken_vault::VaultSecret::new(INJECTED_SECRET.into()),
+            )]),
+            None,
+        ));
+        let injector: Arc<dyn wirken_sandbox::egress::InjectRoute> =
+            Arc::new(crate::inject::Injector {
+                plan: plan.inject.clone().unwrap(),
+                agent_id: plan.agent_id.clone(),
+                server: plan.server.clone(),
+                pin: crate::credentials::ServerPin {
+                    server: "github".into(),
+                    entry: "sha256:aa".into(),
+                },
+                credentials,
+                audit: Some(log.clone()),
+                upstream: crate::inject::Upstream::at(origin),
+            });
+        let placeholder = crate::inject::new_placeholder();
+        let route = start_route(
+            docker,
+            &host,
+            &plan,
+            Some(log.clone()),
+            Some((injector, placeholder.clone())),
+        )
+        .await
+        .unwrap();
+        let mut transport =
+            StdioTransport::spawn_container(docker, &plan, &HashMap::new(), Some(route))
+                .await
+                .unwrap();
+        let id = transport.container_id().unwrap().to_string();
+
+        let response = match transport.request("probe", None).await {
+            Ok(response) => response,
+            Err(e) => panic!(
+                "no answer from the server: {e}; its stderr: {:?}",
+                transport.stderr_tail().await
+            ),
+        };
+        let result = response.result.unwrap();
+        eprintln!("injected probe: runtime={runtime:?} result={result}");
+        assert_eq!(result["status"], "200", "{result}");
+        assert_eq!(result["body"], "hello-from-upstream", "{result}");
+        assert_eq!(result["token"], placeholder.as_str(), "{result}");
+        assert_eq!(result["direct"], "403", "{result}");
+        assert_eq!(result["first"], "wirken-relay", "{result}");
+
+        let got = got.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].target, "/user?per_page=1");
+        assert_eq!(
+            got[0].header("authorization"),
+            Some(format!("Bearer {INJECTED_SECRET}").as_str())
+        );
+
+        let inspected = docker.inspect_container(&id, None).await.unwrap();
+        let reported = format!("{inspected:?}");
+        assert!(!reported.contains(INJECTED_SECRET));
+        assert!(reported.contains(&placeholder));
+        assert_eq!(
+            inspected.host_config.unwrap().runtime.as_deref(),
+            Some(runtime.unwrap_or("runc"))
+        );
+
+        let handle = log.handle_for(wirken_audit::SessionId::new(
+            crate::mcp_registry::MCP_SENTINEL_SESSION,
+        ));
+        let rows: Vec<_> = log
+            .get_since(&handle, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        assert!(
+            rows.iter().any(|e| matches!(
+                e,
+                wirken_audit::SessionEvent::McpCredentialInjected {
+                    credential, host, method, path, ..
+                } if credential == "github-token"
+                    && host == "api.github.com"
+                    && method == "GET"
+                    && path == "/user"
+            )),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|e| matches!(
+                e,
+                wirken_audit::SessionEvent::SandboxEgressVerdict {
+                    host,
+                    allowed: false,
+                    reason: Some(wirken_audit::SandboxEgressDenyReason::InjectedHost),
+                    ..
+                } if host == "api.github.com"
+            )),
+            "{rows:?}"
+        );
+        assert!(
+            !serde_json::to_string(&rows)
+                .unwrap()
+                .contains(INJECTED_SECRET)
+        );
+
+        transport.shutdown().await;
+        assert!(!exists(docker, &id).await, "container outlived shutdown");
+    }
+
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
+    #[tokio::test]
+    async fn an_injected_server_holds_a_placeholder_and_its_request_carries_the_credential() {
+        let Some(docker) = docker().await else {
+            return;
+        };
+        injected_round_trip(&docker, None).await;
+    }
+
+    /// The same under `runsc`, where the relay's loopback listener is
+    /// inside the sandbox's own network stack.
+    #[cfg_attr(miri, ignore = "talks to the container runtime; miri has no I/O")]
+    #[tokio::test]
+    async fn a_gvisor_injected_server_holds_a_placeholder_and_its_request_carries_the_credential() {
+        let Some(docker) = gvisor_docker().await else {
+            return;
+        };
+        injected_round_trip(&docker, Some("runsc")).await;
     }
 
     /// A started server leaves nothing in the daemon's log: its
