@@ -218,6 +218,27 @@ pub struct DecisionReply {
 /// never startable against a proxy that is not yet serving.
 pub const SIDECAR_HELLO: &str = "hello";
 
+/// First line of a connection the sidecar opens for its injected
+/// route. Everything after it is the sandbox's own bytes, copied
+/// unread: an HTTP exchange the host answers through an
+/// [`InjectRoute`].
+pub const SIDECAR_INJECT: &str = "inject";
+
+/// A byte stream between the sandbox and the host.
+pub trait InjectStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> InjectStream for T {}
+
+/// The host side of a sandbox's injected route: what answers the
+/// plain HTTP a sandbox sends to its loopback relay. The relay and the
+/// sidecar copy bytes and hold nothing; what a request may reach, and
+/// with which credential, is decided here.
+#[async_trait::async_trait]
+pub trait InjectRoute: Send + Sync + 'static {
+    /// Serve one connection from the sandbox until either end closes.
+    async fn serve(&self, stream: Box<dyn InjectStream>);
+}
+
 /// One request's outcome, as the broker records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
@@ -325,9 +346,13 @@ impl EgressBroker {
     /// `socket_mode` is the socket's permission bits. It has to let
     /// the uid the sidecar runs as connect, and nothing wider than
     /// that needs to.
+    ///
+    /// `inject` answers the connections the sidecar opens for an
+    /// injected route. Without one such a connection is closed.
     pub async fn bind(
         socket_path: std::path::PathBuf,
         decider: Arc<dyn EgressDecider>,
+        inject: Option<Arc<dyn InjectRoute>>,
         socket_mode: u32,
     ) -> std::io::Result<Self> {
         use std::os::unix::fs::PermissionsExt;
@@ -344,9 +369,10 @@ impl EgressBroker {
                 // The greeting arrives on its own connection and is
                 // the readiness signal.
                 let decider = decider.clone();
+                let inject = inject.clone();
                 let tx = ready_tx.take();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_decision(stream, decider, tx).await {
+                    if let Err(e) = serve_decision(stream, decider, inject, tx).await {
                         tracing::debug!("sandbox egress decision ended: {e}");
                     }
                 });
@@ -388,19 +414,28 @@ impl Drop for EgressBroker {
 }
 
 #[cfg(unix)]
-/// Serve one decision exchange, or consume the readiness greeting.
+/// Serve one decision exchange, consume the readiness greeting, or
+/// hand an injected-route connection to `inject`.
 async fn serve_decision(
     stream: tokio::net::UnixStream,
     decider: Arc<dyn EgressDecider>,
+    inject: Option<Arc<dyn InjectRoute>>,
     ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    let (rd, mut wr) = stream.into_split();
-    let mut lines = BufReader::new(rd).lines();
-    let Some(line) = lines.next_line().await? else {
+    // One reader for the whole connection: on an injected route the
+    // bytes after the first line may already be buffered in it.
+    let mut stream = BufReader::new(stream);
+    let mut line = String::new();
+    if (&mut stream)
+        .take(MAX_HEAD as u64)
+        .read_line(&mut line)
+        .await?
+        == 0
+    {
         return Ok(());
-    };
+    }
 
     if line.trim() == SIDECAR_HELLO {
         if let Some(tx) = ready_tx {
@@ -408,6 +443,13 @@ async fn serve_decision(
         }
         return Ok(());
     }
+    if line.trim() == SIDECAR_INJECT {
+        if let Some(inject) = inject {
+            inject.serve(Box::new(stream)).await;
+        }
+        return Ok(());
+    }
+    let mut wr = stream;
     // A greeting we were not waiting for still must not be mistaken
     // for a decision request.
     let req: DecisionRequest = match serde_json::from_str(&line) {
@@ -564,11 +606,46 @@ async fn write_reply<W: tokio::io::AsyncWrite + Unpin>(
 /// This process holds no policy. For each connection it parses the
 /// request head, asks the host broker over the bind-mounted socket,
 /// and either refuses or dials the addresses the host returned.
+///
+/// With `inject_listen`, a second listener serves the sandbox's
+/// injected route: each connection is copied to the broker socket
+/// under [`SIDECAR_INJECT`] and nothing in it is read here.
 pub async fn run_sidecar(
     socket_path: std::path::PathBuf,
     listen: SocketAddr,
+    inject_listen: Option<SocketAddr>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(listen).await?;
+    let inject = match inject_listen {
+        Some(addr) => Some(TcpListener::bind(addr).await?),
+        None => None,
+    };
+    serve_sidecar(socket_path, listener, inject).await
+}
+
+#[cfg(unix)]
+/// [`run_sidecar`] on listeners that are already bound.
+async fn serve_sidecar(
+    socket_path: std::path::PathBuf,
+    listener: TcpListener,
+    inject: Option<TcpListener>,
+) -> std::io::Result<()> {
+    if let Some(inject) = inject {
+        let socket_path = socket_path.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = inject.accept().await else {
+                    continue;
+                };
+                let socket_path = socket_path.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = inject_connection(stream, &socket_path).await {
+                        tracing::debug!("sidecar injected-route connection ended: {e}");
+                    }
+                });
+            }
+        });
+    }
     // Announce readiness only once the listener is accepting, so the
     // host never starts a sandbox against a proxy that is not up.
     {
@@ -587,6 +664,20 @@ pub async fn run_sidecar(
             }
         });
     }
+}
+
+#[cfg(unix)]
+/// Copy one injected-route connection to the broker socket and back.
+async fn inject_connection(
+    mut client: TcpStream,
+    socket_path: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut host = tokio::net::UnixStream::connect(socket_path).await?;
+    host.write_all(format!("{SIDECAR_INJECT}\n").as_bytes())
+        .await?;
+    tokio::io::copy_bidirectional(&mut client, &mut host)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(unix)]
@@ -1211,7 +1302,7 @@ mod tests {
             recorded: Default::default(),
         });
         let socket = dir.join("egress.sock");
-        let broker = EgressBroker::bind(socket.clone(), decider.clone(), 0o600)
+        let broker = EgressBroker::bind(socket.clone(), decider.clone(), None, 0o600)
             .await
             .unwrap();
         let reply = ask_broker(
@@ -1297,7 +1388,7 @@ mod tests {
             verdict: Verdict::allow(),
             recorded: Default::default(),
         });
-        let broker = EgressBroker::bind(socket.clone(), decider, 0o600)
+        let broker = EgressBroker::bind(socket.clone(), decider, None, 0o600)
             .await
             .unwrap();
         let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
@@ -1305,5 +1396,90 @@ mod tests {
         assert!(!socket.exists(), "the socket outlived the broker");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(mode, 0o600);
+    }
+
+    /// An injected route that answers each connection with what it was
+    /// sent, in upper case.
+    #[cfg(unix)]
+    struct Shout;
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl InjectRoute for Shout {
+        async fn serve(&self, mut stream: Box<dyn InjectStream>) {
+            let mut buf = [0u8; 5];
+            if stream.read_exact(&mut buf).await.is_ok() {
+                let _ = stream.write_all(&buf.to_ascii_uppercase()).await;
+            }
+        }
+    }
+
+    /// A connection to the sidecar's injected-route listener reaches
+    /// the broker's [`InjectRoute`] with its bytes unread and the
+    /// answer comes back the same way. The decider is never asked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_injected_route_connection_is_copied_to_the_host_route_and_back() {
+        let dir = std::env::temp_dir().join(format!("wirken-broker-inject-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("egress.sock");
+        let decider = Arc::new(Fixed {
+            verdict: Verdict::allow(),
+            recorded: Default::default(),
+        });
+        let mut broker = EgressBroker::bind(
+            socket.clone(),
+            decider.clone(),
+            Some(Arc::new(Shout)),
+            0o600,
+        )
+        .await
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let injected = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let inject = injected.local_addr().unwrap();
+        let sidecar = tokio::spawn(serve_sidecar(socket.clone(), listener, Some(injected)));
+        broker
+            .await_sidecar(std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let mut client = TcpStream::connect(inject).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut answer = [0u8; 5];
+        client.read_exact(&mut answer).await.unwrap();
+        assert_eq!(&answer, b"HELLO");
+        assert!(decider.recorded.lock().unwrap().is_empty());
+
+        sidecar.abort();
+        drop(broker);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A broker with no injected route closes such a connection.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_injected_route_connection_to_a_broker_without_one_is_closed() {
+        let dir =
+            std::env::temp_dir().join(format!("wirken-broker-noinject-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("egress.sock");
+        let decider = Arc::new(Fixed {
+            verdict: Verdict::allow(),
+            recorded: Default::default(),
+        });
+        let broker = EgressBroker::bind(socket.clone(), decider, None, 0o600)
+            .await
+            .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        stream
+            .write_all(format!("{SIDECAR_INJECT}\nGET / HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut answer = Vec::new();
+        let _ = stream.read_to_end(&mut answer).await;
+        assert!(answer.is_empty());
+        drop(broker);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

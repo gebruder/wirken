@@ -1148,6 +1148,7 @@ pub(crate) fn exec_sidecar_spec(
         // As JSON, which is how Docker takes it; `provision_egress`
         // replaces it with the runtime's own form.
         seccomp: wirken_sandbox::seccomp::Seccomp::Profile,
+        inject: None,
     }
 }
 

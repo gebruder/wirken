@@ -22,13 +22,17 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 
-use crate::egress::{EgressBroker, EgressDecider};
+use crate::egress::{EgressBroker, EgressDecider, InjectRoute};
 use crate::{MEMORY_LIMIT, PIDS_LIMIT};
 
 /// Port the sidecar listens on inside the internal network. Fixed
 /// rather than ephemeral: it is a container-private port on a network
 /// of its own, so there is nothing to collide with.
 pub const SIDECAR_PORT: u16 = 3128;
+
+/// Port the sidecar's injected-route listener is on, for a sandbox
+/// that has one.
+pub const SIDECAR_INJECT_PORT: u16 = 3129;
 
 /// How long to wait for the sidecar to report its listener is up.
 pub const SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -68,6 +72,10 @@ pub struct SidecarSpec {
     /// it serves runs under, handed over the way the runtime takes it
     /// ([`crate::seccomp::for_runtime`]).
     pub seccomp: crate::seccomp::Seccomp,
+    /// What answers the sandbox's injected route. With one, the
+    /// sidecar listens on [`SIDECAR_INJECT_PORT`] as well and copies
+    /// each connection there to the broker socket.
+    pub inject: Option<Arc<dyn InjectRoute>>,
 }
 
 /// One sandbox's provisioned route out. Hold it for as long as the
@@ -78,6 +86,8 @@ pub struct EgressRoute {
     pub sidecar_id: String,
     pub socket_dir: PathBuf,
     pub sidecar_ip: IpAddr,
+    /// Whether the sidecar serves an injected route.
+    pub injects: bool,
     broker: EgressBroker,
 }
 
@@ -86,6 +96,13 @@ impl EgressRoute {
     /// internal network. No host port is involved.
     pub fn proxy_url(&self) -> String {
         format!("http://{}:{}", self.sidecar_ip, SIDECAR_PORT)
+    }
+
+    /// Where the sandbox's loopback relay copies to: the sidecar's
+    /// injected-route listener. `None` for a route without one.
+    pub fn inject_addr(&self) -> Option<std::net::SocketAddr> {
+        self.injects
+            .then(|| std::net::SocketAddr::new(self.sidecar_ip, SIDECAR_INJECT_PORT))
     }
 
     /// The proxy variables the sandbox is started with.
@@ -206,7 +223,13 @@ pub async fn provision(
         ));
     }
     let socket_path = spec.socket_dir.join(SOCKET_NAME);
-    let mut broker = match EgressBroker::bind(socket_path.clone(), decider, spec.socket_mode).await
+    let mut broker = match EgressBroker::bind(
+        socket_path.clone(),
+        decider,
+        spec.inject.clone(),
+        spec.socket_mode,
+    )
+    .await
     {
         Ok(b) => b,
         Err(e) => {
@@ -293,6 +316,7 @@ pub async fn provision(
         sidecar_id: created.id,
         socket_dir: spec.socket_dir,
         sidecar_ip,
+        injects: spec.inject.is_some(),
         broker,
     })
 }
@@ -308,16 +332,21 @@ fn sidecar_body(
     internal_network: &str,
     labels: Option<HashMap<String, String>>,
 ) -> ContainerCreateBody {
+    let mut cmd = vec![
+        "egress-sidecar".into(),
+        "--socket".into(),
+        format!("{SOCKET_DIR_TARGET}/{SOCKET_NAME}"),
+        "--listen".into(),
+        format!("0.0.0.0:{SIDECAR_PORT}"),
+    ];
+    if spec.inject.is_some() {
+        cmd.push("--inject-listen".into());
+        cmd.push(format!("0.0.0.0:{SIDECAR_INJECT_PORT}"));
+    }
     ContainerCreateBody {
         image: Some(spec.image.clone()),
         entrypoint: Some(vec![SIDECAR_BIN_TARGET.into()]),
-        cmd: Some(vec![
-            "egress-sidecar".into(),
-            "--socket".into(),
-            format!("{SOCKET_DIR_TARGET}/{SOCKET_NAME}"),
-            "--listen".into(),
-            format!("0.0.0.0:{SIDECAR_PORT}"),
-        ]),
+        cmd: Some(cmd),
         user: spec.user.clone(),
         labels,
         host_config: Some(HostConfig {
@@ -454,7 +483,30 @@ mod tests {
             socket_dir_mode: 0o700,
             socket_mode: 0o600,
             seccomp: crate::seccomp::Seccomp::Profile,
+            inject: None,
         }
+    }
+
+    struct NoRoute;
+
+    #[async_trait::async_trait]
+    impl InjectRoute for NoRoute {
+        async fn serve(&self, _stream: Box<dyn crate::egress::InjectStream>) {}
+    }
+
+    /// The second listener is asked for only by a spec with an
+    /// injected route.
+    #[test]
+    fn the_sidecar_listens_for_an_injected_route_only_when_the_spec_has_one() {
+        let plain = sidecar_body(&spec(), "net", None);
+        assert!(!plain.cmd.unwrap().contains(&"--inject-listen".to_string()));
+        let injected = SidecarSpec {
+            inject: Some(Arc::new(NoRoute)),
+            ..spec()
+        };
+        let cmd = sidecar_body(&injected, "net", None).cmd.unwrap();
+        let at = cmd.iter().position(|a| a == "--inject-listen").unwrap();
+        assert_eq!(cmd[at + 1], format!("0.0.0.0:{SIDECAR_INJECT_PORT}"));
     }
 
     #[test]

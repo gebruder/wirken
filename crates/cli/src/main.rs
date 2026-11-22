@@ -75,6 +75,26 @@ enum Commands {
         /// Address to accept sandbox connections on.
         #[arg(long)]
         listen: String,
+        /// Address to accept the sandbox's injected-route connections
+        /// on, copied to the socket unread.
+        #[arg(long)]
+        inject_listen: Option<String>,
+    },
+
+    /// Run a contained MCP server under a loopback relay (called by
+    /// wirken). Holds no secret and no rule: it copies connections
+    /// to the sidecar and leaves the server's stdin and stdout alone.
+    #[command(name = "inject-relay", hide = true)]
+    InjectRelay {
+        /// Loopback address to listen on inside the container.
+        #[arg(long)]
+        listen: String,
+        /// The sidecar's injected-route listener.
+        #[arg(long)]
+        to: String,
+        /// The server's command and arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<std::ffi::OsString>,
     },
 
     /// Manage messaging channels
@@ -1731,19 +1751,52 @@ async fn main() -> Result<()> {
         }
         Commands::Adapter { channel } => commands::adapter::run(&channel).await,
         Commands::McpProxy => commands::mcp_proxy::run().await,
-        Commands::EgressSidecar { socket, listen } => {
+        Commands::EgressSidecar {
+            socket,
+            listen,
+            inject_listen,
+        } => {
             let addr: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid --listen '{listen}': {e}"))?;
+            let inject: Option<std::net::SocketAddr> = inject_listen
+                .map(|a| {
+                    a.parse()
+                        .map_err(|e| anyhow::anyhow!("invalid --inject-listen '{a}': {e}"))
+                })
+                .transpose()?;
             #[cfg(unix)]
             {
-                wirken_agent::sandbox_egress::run_sidecar(socket, addr).await?;
+                wirken_agent::sandbox_egress::run_sidecar(socket, addr, inject).await?;
                 Ok(())
             }
             #[cfg(not(unix))]
             {
-                let _ = (socket, addr);
+                let _ = (socket, addr, inject);
                 anyhow::bail!("egress-sidecar is not available on this platform")
+            }
+        }
+        Commands::InjectRelay {
+            listen,
+            to,
+            command,
+        } => {
+            let listen: std::net::SocketAddr = listen
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid --listen '{listen}': {e}"))?;
+            let to: std::net::SocketAddr = to
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid --to '{to}': {e}"))?;
+            #[cfg(unix)]
+            {
+                let status =
+                    wirken_agent::sandbox_egress::run_inject_relay(listen, to, command).await?;
+                std::process::exit(status);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (listen, to, command);
+                anyhow::bail!("inject-relay is not available on this platform")
             }
         }
         Commands::Channel(cmd) => match cmd {

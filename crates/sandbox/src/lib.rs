@@ -26,6 +26,8 @@ pub mod child_env;
 pub mod egress;
 #[cfg(unix)]
 pub mod egress_net;
+#[cfg(unix)]
+pub mod relay;
 pub mod seccomp;
 
 use std::collections::HashMap;

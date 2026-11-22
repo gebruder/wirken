@@ -74,6 +74,8 @@ pub use wirken_sandbox::egress::{
     DecisionReply, DecisionRequest, RequestKind, RequestSeen, SIDECAR_HELLO, Verdict, check_shape,
     is_global_unicast, is_ip_literal,
 };
+#[cfg(unix)]
+pub use wirken_sandbox::relay::run as run_inject_relay;
 
 /// Operator-selected egress posture for one channel's sandboxed
 /// `exec`.
