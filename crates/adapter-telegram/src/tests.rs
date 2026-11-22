@@ -1,5 +1,7 @@
+#[cfg(unix)]
 use wirken_ipc::transport::split_stream;
 use wirken_ipc::wirken_capnp::frame;
+#[cfg(unix)]
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 
 use crate::convert;
@@ -116,6 +118,7 @@ fn parse_outbound_no_reply() {
 // Handshake over UDS
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn adapter_handshake_with_gateway() {
     let identity = AdapterIdentity::generate("telegram");
@@ -148,6 +151,7 @@ async fn adapter_handshake_with_gateway() {
 // End-to-end IPC roundtrips
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inbound_frame_roundtrip_over_uds() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -189,6 +193,7 @@ async fn inbound_frame_roundtrip_over_uds() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn outbound_result_flow_over_uds() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -217,6 +222,7 @@ async fn outbound_result_flow_over_uds() {
 // Full flow: handshake → inbound → outbound → result
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn full_message_flow_simulation() {
     let (adapter_stream, gateway_stream) = tokio::net::UnixStream::pair().unwrap();

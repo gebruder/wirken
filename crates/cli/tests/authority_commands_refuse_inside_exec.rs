@@ -1,6 +1,8 @@
 //! Commands that change authority refuse to run inside a Wirken `exec`,
 //! and each refusal is a row on the operator lane.
 
+#![cfg(not(windows))]
+
 mod common;
 
 use common::wirken;
@@ -142,7 +144,6 @@ fn refusals(data: &std::path::Path) -> Vec<(String, String, String)> {
     .collect()
 }
 
-#[cfg(not(windows))]
 #[test]
 fn authority_commands_refuse_inside_exec_and_record_it() {
     let tmp = tempfile::tempdir().unwrap();
@@ -180,7 +181,6 @@ fn authority_commands_refuse_inside_exec_and_record_it() {
     );
 }
 
-#[cfg(not(windows))]
 #[test]
 fn reads_and_sessions_close_run_inside_exec() {
     for args in [

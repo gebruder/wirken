@@ -5162,18 +5162,13 @@ async fn c5_exec_strips_ansi_escape_sequences_from_stdout() {
 // handle opened in ToolRegistry::new)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn write_file_refuses_broken_symlink_via_cap_std() {
     // A dangling symlink inside the workspace pointing at a path
     // outside it used to bypass the hand-rolled ancestor check. The
     // cap-std Dir refuses any path whose resolution crosses the
     // workspace boundary, regardless of whether the target exists.
-    #[cfg(not(unix))]
-    {
-        eprintln!("skipping: symlink creation requires unix");
-        return;
-    }
-
     let workspace = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();
     let victim = outside.path().join("victim.txt");
@@ -5197,6 +5192,7 @@ async fn write_file_refuses_broken_symlink_via_cap_std() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn read_file_follows_inside_workspace_symlink() {
     // Counterpart to the symlink-escape test: a symlink that stays
@@ -5205,12 +5201,6 @@ async fn read_file_follows_inside_workspace_symlink() {
     // rather than RESOLVE_NO_SYMLINKS (refuses any symlink), so
     // the next person touching the file boundary knows which
     // rejections are load-bearing and which would be a regression.
-    #[cfg(not(unix))]
-    {
-        eprintln!("skipping: symlinks require unix");
-        return;
-    }
-
     let workspace = TempDir::new().unwrap();
     let target = workspace.path().join("target.txt");
     std::fs::write(&target, "hello via symlink").unwrap();

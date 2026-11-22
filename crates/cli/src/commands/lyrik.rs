@@ -59,7 +59,7 @@ pub(crate) const LYRIK_VERSION: &str = "1.0.1";
 /// `PATH` under sandbox mode off, otherwise the configured sandbox
 /// image, asked through the same sandbox an approved command runs in.
 /// `None` when it cannot be asked, such as no container runtime.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn binaries_missing_for_exec(
     sandbox: &wirken_agent::sandbox::SandboxConfig,
     workspace: &Path,
@@ -10171,6 +10171,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     /// The default image has neither binary the walks' commands need,
     /// and the probe says so before anyone is asked to approve one.
     #[tokio::test]

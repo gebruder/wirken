@@ -1313,6 +1313,7 @@ mod start_tests {
         registry.shutdown().await;
     }
 
+    #[cfg(unix)]
     async fn docker_with(image: &str) -> Option<bollard::Docker> {
         let docker = bollard::Docker::connect_with_local_defaults().ok()?;
         docker.ping().await.ok()?;

@@ -208,7 +208,7 @@ impl ApprovalGate for TerminalApprovalGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::sync::Mutex as AsyncMutex;

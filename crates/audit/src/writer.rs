@@ -1849,6 +1849,7 @@ mod tests {
         assert!(halted);
     }
 
+    #[cfg(unix)]
     /// A log whose every write fails: a second connection holds the
     /// database's write lock for as long as this value lives, so the
     /// writer's batch gets `SQLITE_BUSY` once its busy timeout runs
@@ -1859,6 +1860,7 @@ mod tests {
         _lock: rusqlite::Connection,
     }
 
+    #[cfg(unix)]
     impl LockedLog {
         fn new() -> Self {
             let tmp = tempfile::TempDir::new().unwrap();
@@ -1874,6 +1876,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     /// A webhook sink: one request's body, as a JSON array.
     async fn webhook_sink() -> (
         String,
@@ -1919,6 +1922,7 @@ mod tests {
         (endpoint, rx)
     }
 
+    #[cfg(unix)]
     fn webhook_forwarder(endpoint: String) -> SiemForwarder {
         SiemForwarder::new(SiemConfig {
             target: crate::siem::SiemTarget::Webhook,
@@ -1936,6 +1940,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     /// Drive one write-failure halt path end to end: the flush that
     /// trips it, then the drain, with one event still in the channel.
     /// That event and the buffered ones reach the SIEM sink in one
@@ -2017,6 +2022,7 @@ mod tests {
         .await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn write_batch_failure_retains_buffer() {
         // Buffer-retention contract on `write_batch` failure. Open a

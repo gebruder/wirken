@@ -30,6 +30,8 @@
 //! - The gateway → adapter forwarding inside `wirken run`. Covered by
 //!   `OutboundDispatcher` tests + `push_client` loopback tests.
 
+#![cfg(unix)]
+
 use std::path::Path;
 use std::sync::Arc;
 

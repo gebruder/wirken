@@ -1186,7 +1186,7 @@ pub fn read_secret(prompt: &str) -> anyhow::Result<String> {
 /// the command before its environment is configured stand in for what
 /// the parent process had exported, and `CARGO_PKG_NAME`, which cargo
 /// sets on every test process, stands in for anything else inherited.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod child_env_tests {
     /// Set on the command before the site configures it, the way an
     /// inherited variable would be.

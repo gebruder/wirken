@@ -2,6 +2,8 @@
 //! lands in the permission store, the grants `--revoke-all` names go,
 //! and each command is one sealed row on the operator lane.
 
+#![cfg(not(windows))]
+
 mod common;
 
 use std::path::Path;
@@ -57,7 +59,6 @@ fn operator_rows(data: &Path) -> Vec<(String, serde_json::Value)> {
     .collect()
 }
 
-#[cfg(not(windows))]
 #[test]
 fn stop_and_resume_hold_without_a_gateway_and_leave_sealed_rows() {
     let tmp = tempfile::tempdir().unwrap();

@@ -114,7 +114,7 @@ impl OutboundDispatcher {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use wirken_ipc::{IpcFrameWriter, split_stream, test_pair};

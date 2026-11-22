@@ -152,7 +152,7 @@ impl Drop for TerminalSessionGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use wirken_ipc::{split_stream, test_pair};

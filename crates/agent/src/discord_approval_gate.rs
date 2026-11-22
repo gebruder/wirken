@@ -166,7 +166,7 @@ impl ApprovalGate for DiscordApprovalGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::sync::Mutex as AsyncMutex;

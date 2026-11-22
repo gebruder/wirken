@@ -6,6 +6,8 @@
 //! Driven through the binary with stdin closed, which is how a script,
 //! a service manager or a model's `exec` would run it.
 
+#![cfg(not(windows))]
+
 mod common;
 
 use common::wirken;
@@ -25,7 +27,6 @@ fn run(data: &std::path::Path, args: &[&str], exec_marker: bool) -> (bool, Strin
     )
 }
 
-#[cfg(not(windows))]
 #[test]
 fn a_non_terminal_install_or_rollback_is_refused_before_any_fetch() {
     let tmp = tempfile::tempdir().unwrap();
@@ -48,7 +49,6 @@ fn a_non_terminal_install_or_rollback_is_refused_before_any_fetch() {
 /// the exec marker before it fetches or writes anything, and each
 /// refusal is an `update_refused` row on the `gateway-install` lane
 /// naming what was asked for.
-#[cfg(not(windows))]
 #[test]
 fn a_run_inside_a_wirken_exec_is_refused_first() {
     let tmp = tempfile::tempdir().unwrap();

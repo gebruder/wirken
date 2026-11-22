@@ -213,7 +213,7 @@ impl ApprovalGate for SignalApprovalGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tempfile::TempDir;

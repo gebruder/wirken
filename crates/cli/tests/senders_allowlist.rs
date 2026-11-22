@@ -1,5 +1,7 @@
 //! `wirken senders`, driven through the binary with stdin closed.
 
+#![cfg(not(windows))]
+
 mod common;
 
 use common::wirken;
@@ -52,7 +54,6 @@ fn sealed(data: &std::path::Path) -> bool {
     last == "chain_head"
 }
 
-#[cfg(not(windows))]
 #[test]
 fn add_and_remove_change_the_allowlist_and_leave_sealed_rows() {
     let tmp = tempfile::tempdir().unwrap();
@@ -116,7 +117,6 @@ fn add_and_remove_change_the_allowlist_and_leave_sealed_rows() {
     assert!(out.contains("every message on it is dropped"), "{out}");
 }
 
-#[cfg(not(windows))]
 #[test]
 fn a_negative_group_id_is_taken_as_it_is() {
     let tmp = tempfile::tempdir().unwrap();
@@ -154,7 +154,6 @@ fn a_negative_group_id_is_taken_as_it_is() {
     );
 }
 
-#[cfg(not(windows))]
 #[test]
 fn an_unknown_channel_or_a_padded_id_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
@@ -176,7 +175,6 @@ fn an_unknown_channel_or_a_padded_id_is_refused() {
     assert!(out.contains("No senders admitted on any channel"), "{out}");
 }
 
-#[cfg(not(windows))]
 #[test]
 fn every_subcommand_refuses_inside_a_wirken_exec() {
     let tmp = tempfile::tempdir().unwrap();
@@ -216,7 +214,6 @@ fn refusals(data: &std::path::Path) -> Vec<String> {
     .collect()
 }
 
-#[cfg(not(windows))]
 #[test]
 fn refused_lists_the_ids_the_gateway_dropped() {
     use wirken_audit::{SessionEvent, SessionId, SessionLog as _, SqliteSessionLog, TrustLevel};

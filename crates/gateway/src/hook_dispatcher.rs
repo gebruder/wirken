@@ -456,7 +456,7 @@ async fn invoke_one(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::collections::HashMap;

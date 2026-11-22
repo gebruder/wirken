@@ -20,9 +20,11 @@ fn run(data: &std::path::Path, args: &[&str], exec_marker: bool) -> (bool, Strin
     )
 }
 
+#[cfg(not(windows))]
 /// `(kind, adapter_id, user_id, invocation)` of a row.
 type Row = (String, Option<String>, Option<String>, Option<String>);
 
+#[cfg(not(windows))]
 /// Every row on the approvers lane other than chain heads, in order.
 fn rows(data: &std::path::Path) -> Vec<Row> {
     let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
@@ -41,10 +43,12 @@ fn rows(data: &std::path::Path) -> Vec<Row> {
     .collect()
 }
 
+#[cfg(not(windows))]
 /// `(adapter_id, previous_conversation_id, conversation_id)` of every
 /// `approval_chat_set` row, in order.
 type ChatRow = (Option<String>, Option<String>, Option<String>);
 
+#[cfg(not(windows))]
 fn chat_rows(data: &std::path::Path) -> Vec<ChatRow> {
     let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
     db.prepare(
@@ -63,6 +67,7 @@ fn chat_rows(data: &std::path::Path) -> Vec<ChatRow> {
     .collect()
 }
 
+#[cfg(not(windows))]
 fn sealed(data: &std::path::Path) -> bool {
     let db = rusqlite::Connection::open(data.join("audit.db")).unwrap();
     let last: String = db
@@ -76,6 +81,7 @@ fn sealed(data: &std::path::Path) -> bool {
     last == "chain_head"
 }
 
+#[cfg(not(windows))]
 fn s(v: &str) -> Option<String> {
     Some(v.to_string())
 }

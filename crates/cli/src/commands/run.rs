@@ -8531,7 +8531,7 @@ mod orchestrator_delivery_tests {
 
 /// The reply's `message.outbound` row follows a successful send, and
 /// a failed send leaves none.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod reply_outbound_tests {
     use super::send_reply_then_record;
     use tokio::sync::Mutex;

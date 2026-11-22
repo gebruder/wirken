@@ -42,5 +42,5 @@ pub use oauth::{
 pub use runner::{ConfiguredCredentials, configured_credentials, run, server_entries};
 pub use tool_error::{McpToolError, detect_scope_not_granted};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

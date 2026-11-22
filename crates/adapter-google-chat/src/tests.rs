@@ -1,6 +1,9 @@
+use wirken_ipc::AdapterIdentity;
+#[cfg(unix)]
 use wirken_ipc::transport::split_stream;
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
+#[cfg(unix)]
+use wirken_ipc::{perform_adapter_handshake, perform_gateway_handshake};
 
 use crate::adapter::GoogleChatAdapter;
 use crate::auth::{JwksCache, extract_bearer_token};
@@ -285,6 +288,7 @@ fn build_outbound_result() {
 // Handshake over UDS
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn adapter_handshake_with_gateway() {
     let identity = AdapterIdentity::generate("google-chat");
@@ -317,6 +321,7 @@ async fn adapter_handshake_with_gateway() {
 // Full flow: handshake -> inbound -> outbound -> result
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn full_message_flow_simulation() {
     let (adapter_stream, gateway_stream) = tokio::net::UnixStream::pair().unwrap();

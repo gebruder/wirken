@@ -244,7 +244,7 @@ impl ApprovalGate for TelegramApprovalGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tempfile::TempDir;
