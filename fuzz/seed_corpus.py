@@ -19,6 +19,10 @@ Provenance, per target:
                      hostile corpus: that one is tool calls, this is
                      wire bytes.
 
+  proxy_bodies       hand-built request and response bodies in the two
+                     shapes the proxy forwards, as JSON and as event
+                     streams, plus bodies with the wrong types.
+
 What libFuzzer discovers during a run is not committed. The seeds are
 the part with provenance; a few thousand mutated inputs are not worth
 carrying in a product repository.
@@ -138,6 +142,94 @@ def ipc_frame_decode() -> int:
     return 6
 
 
+def proxy_bodies() -> int:
+    """A shape byte, a request body, a NUL, a response body."""
+    def case(shape: int, request, response) -> bytes:
+        def raw(body) -> bytes:
+            return body if isinstance(body, bytes) else json.dumps(body).encode()
+        return bytes([shape]) + raw(request) + b"\x00" + raw(response)
+
+    def sse(events) -> bytes:
+        return b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" for e in events)
+
+    openai_request = {
+        "model": "m",
+        "messages": [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": [{"type": "text", "text": "look"},
+                                         {"type": "image_url", "image_url": {"url": "x"}}]},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "ls", "arguments": "{\"p\":1}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "a.txt"},
+        ],
+    }
+    anthropic_request = {
+        "model": "m",
+        "system": [{"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}],
+        "messages": [
+            {"role": "user", "content": "list files"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "I should look."},
+                {"type": "text", "text": "Looking."},
+                {"type": "tool_use", "id": "tu1", "name": "ls", "input": {"path": "."}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": "a.txt"},
+                {"type": "text", "text": "and now?"}]},
+        ],
+    }
+    seeds = {
+        "openai-json": case(0, openai_request, {
+            "choices": [{"message": {"role": "assistant", "content": "Found.",
+                                     "reasoning": "It is there."}}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 2}}),
+        "openai-stream": case(0, openai_request, sse([
+            {"choices": [{"delta": {"role": "assistant", "content": "Fo"}}]},
+            {"choices": [{"delta": {"content": "und."}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "c2", "function": {"name": "cat", "arguments": "{\"f\":"}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "\"a\"}"}}]}}]},
+            {"choices": [], "usage": {"prompt_tokens": 4, "completion_tokens": 1}},
+        ]) + b"data: [DONE]\n\n"),
+        "anthropic-json": case(1, anthropic_request, {
+            "content": [{"type": "text", "text": "One file."},
+                        {"type": "tool_use", "id": "tu2", "name": "cat", "input": {"f": "a"}}],
+            "usage": {"input_tokens": 5, "output_tokens": 3}}),
+        "anthropic-stream": case(1, anthropic_request, sse([
+            {"type": "message_start", "message": {"usage": {"input_tokens": 30}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "Looking."}},
+            {"type": "content_block_start", "index": 1,
+             "content_block": {"type": "tool_use", "id": "tu3", "name": "ls", "input": {}}},
+            {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\".\"}"}},
+            {"type": "message_delta", "usage": {"output_tokens": 12}},
+        ])),
+        # A tool result naming a call no step made, the same call id
+        # twice, and arguments that are not an object.
+        "orphan-result": case(0, {"model": "m", "messages": [
+            {"role": "tool", "tool_call_id": "nobody", "content": "x"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "d", "function": {"name": "a", "arguments": "[1]"}},
+                {"id": "d", "function": {"name": "b", "arguments": "not json"}}]},
+            {"role": "tool", "tool_call_id": "d", "content": [{"type": "text", "text": "y"}]},
+        ]}, {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "d", "function": {"name": "c", "arguments": ""}}]}}]}),
+        "not-json": case(0, b"{\"model\":", b"data: {\"choices\":[{\"delta\":"),
+        "empty": case(1, b"", b""),
+        "wrong-types": case(1, {"model": 1, "system": 7, "messages": [
+            3, None, {"role": 5, "content": {"a": 1}},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": 1, "name": None}]}]},
+            {"content": [{"type": "tool_use", "id": "t", "name": "n", "input": "text"}, 4]}),
+    }
+    for name, payload in seeds.items():
+        write("proxy_bodies", name, payload)
+    return len(seeds)
+
+
 if __name__ == "__main__":
-    for fn in (exec_classifier, skill_frontmatter, injection_scan, ipc_frame_decode):
+    for fn in (exec_classifier, skill_frontmatter, injection_scan, ipc_frame_decode, proxy_bodies):
         print(f"{fn.__name__}: {fn()} seeds")
