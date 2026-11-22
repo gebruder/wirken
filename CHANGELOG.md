@@ -12,6 +12,23 @@ tagged.
 
 ### Added
 
+- `inject` in a stdio MCP entry's `sandbox` block: one `vault:` credential the
+  server never holds. Its container gets a placeholder and a plain-HTTP base
+  URL on its own loopback; `wirken-mcp-proxy` maps the path, sets the header
+  from the vault value and makes the HTTPS request to the one bound host. The
+  server has no direct route to that host (`sandbox_egress_verdict` reason
+  `injected_host`), each request is an `mcp_credential_injected` row with the
+  credential's name, host, method and path, and each refusal an
+  `mcp_inject_refused` row. `mcp_server_sandboxed` gains `secrets_injected`
+  and `inject_host`. The gateway mints the placeholder and leak detection
+  refuses content that carries it. The server still acts as the credential on
+  the bound host. An entry without the block keeps its signature
+  (`an_injected_server_holds_a_placeholder_and_its_request_carries_the_credential`,
+  `crates/mcp-proxy/src/container.rs`;
+  `the_credential_header_is_set_and_nothing_else_is_substituted`,
+  `crates/mcp-proxy/src/inject.rs`;
+  [docs/mcp.md](docs/mcp.md#injecting-a-credential)).
+
 - A Lyrik run can use a plan sign-in. A run pin with `"auth": "plan"` on the
   `openai` provider takes its bearer from the sign-in's vault entry
   (`credential`, default `openai-plan`) and asks for no API key; per-walk

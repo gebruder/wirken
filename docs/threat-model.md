@@ -414,6 +414,10 @@ What each control leaves outside it, stated once. Other pages link here.
   write a value to any resource on an allowed host. Leak detection on its
   tool output is exact-match: an encoded or split value passes
   ([mcp.md](mcp.md#what-containment-does-not-cover)).
+- A credential an entry's `inject` block names is not in the server's
+  container. The server can still use it: every request it sends to a mapped
+  path on the bound host is authenticated. A response body from that host is
+  not checked for the value ([mcp.md](mcp.md#injecting-a-credential)).
 
 ### Skills
 

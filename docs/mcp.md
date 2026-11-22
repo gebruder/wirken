@@ -49,6 +49,7 @@ If the entry is signed, re-sign it after any change to it, the `sandbox` block i
 | `egress.hosts` | none | Domain names the server may reach over HTTP(S). Empty or absent means no network. See [Network](#network). |
 | `limits` | 512 MB, 256 processes, 1 CPU | `memory_mb`, `pids`, `cpus`. Each one given replaces its default; there is no ceiling. |
 | `secrets_in_env` | none | `vault:` variables to deliver in the environment instead of as files. See [Using vault secrets](#using-vault-secrets-in-mcp-config). |
+| `inject` | none | One `vault:` variable the server never holds: the proxy sets its value on the requests the server sends to one host. See [Injecting a credential](#injecting-a-credential). |
 
 Every server container also gets: all Linux capabilities dropped, `no-new-privileges`, the seccomp profile `exec` containers run under ([sandbox-properties.md](sandbox-properties.md)), an `/etc/resolv.conf` that names a loopback resolver and no search domain, a read-only root with a 64 MB tmpfs at `/tmp`, and the operator's own uid and gid (container uid 0 under a rootless runtime, which is the operator). `sandbox.json`'s `mode` chooses the runtime: `gvisor` runs servers under `runsc`, and refuses them where `runsc` is not registered; anything else runs them under Docker's default. `"mode": "off"` turns off the `exec` sandbox only. It does not run MCP servers on the host.
 
@@ -66,10 +67,10 @@ The proxy refuses a stdio server, logs why and what to change, and writes `mcp_e
 
 | Reason | When |
 |---|---|
-| `sandbox_config_invalid` | No `sandbox` block. A block with no `image`. A path that is not absolute or does not exist. An `install_dir` or mount `source` inside the data directory or containing it. A reserved or repeated mount target. A limit of zero. An `egress.hosts` entry that is not a domain name. A `secrets_in_env` name that is not a `vault:` variable. |
+| `sandbox_config_invalid` | No `sandbox` block. A block with no `image`. A path that is not absolute or does not exist. An `install_dir` or mount `source` inside the data directory or containing it. A reserved or repeated mount target. A limit of zero. An `egress.hosts` entry that is not a domain name. A `secrets_in_env` name that is not a `vault:` variable. An `inject` block the proxy cannot serve ([what is refused](#what-is-refused)). |
 | `sandbox_unavailable` | No container runtime answers. The mode is `gvisor` and `runsc` is not registered with the runtime. A secret has to be delivered as a file and the host has no memory-backed directory for it. The egress sidecar's binary is missing. |
 | `image_unavailable` | The image is not on the host. |
-| `egress_unsupported_runtime` | `egress.hosts` is set and the runtime is rootless Docker, Podman, or Windows. |
+| `egress_unsupported_runtime` | `egress.hosts` or `inject` is set and the runtime is rootless Docker, Podman, or Windows. |
 
 A refused server is not retried at load; fix the entry or the host and restart the gateway. A server that started and whose restart then meets one of these conditions is retried as a `start_failed` restart with the backoff under [Restarts](#restarts), and no `mcp_entry_refused` row is written for it (`ContainerLife::start`, `crates/mcp-proxy/src/supervise.rs`). `wirken mcp verify` and `wirken doctor` both name stdio entries that will be refused for want of a `sandbox` block, before the gateway starts.
 
@@ -108,9 +109,108 @@ docker pull ghcr.io/github/github-mcp-server
 }
 ```
 
+### Injecting a credential
+
+A server whose `sandbox` block carries `inject` does not hold the credential the block names. Its container gets a placeholder in the credential's variable, and `wirken-mcp-proxy`, which holds the value already, sets it on the requests the server sends to one host.
+
+The GitHub server, pinned by digest (v2.2.0):
+
+```bash
+docker pull ghcr.io/github/github-mcp-server@sha256:040c4e99810076035eb1d9beb4b4a96fcf589c43cefed6ff51a46a553eb4e174
+```
+
+```json
+{
+    "servers": {
+        "github": {
+            "command": "/server/github-mcp-server",
+            "args": ["stdio"],
+            "env": {
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "vault:github-token"
+            },
+            "sandbox": {
+                "image": "ghcr.io/github/github-mcp-server@sha256:040c4e99810076035eb1d9beb4b4a96fcf589c43cefed6ff51a46a553eb4e174",
+                "egress": { "hosts": ["*.blob.core.windows.net", "results-receiver.actions.githubusercontent.com"] },
+                "inject": {
+                    "credential_env": "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "host": "api.github.com",
+                    "header": "Authorization",
+                    "scheme": "Bearer",
+                    "base_url_env": "GITHUB_HOST",
+                    "paths": [
+                        { "from": "/api/v3/", "to": "/" },
+                        { "from": "/api/graphql", "to": "/graphql" }
+                    ]
+                }
+            }
+        }
+    }
+}
+```
+
+```bash
+wirken mcp sign github
+wirken credentials add github-token --mcp-server github
+```
+
+| Field | Meaning |
+|---|---|
+| `credential_env` | The `env` variable whose `vault:` value is injected. The container gets a placeholder in it. The vault entry is one plain secret. |
+| `host` | The host the value is sent to: one domain name, HTTPS on port 443. |
+| `header`, `scheme` | The header the proxy sets, as `<scheme> <value>`, or the value alone without `scheme`. |
+| `base_url_env` | The variable the server reads its API base URL from. The proxy sets it to `http://127.0.0.1:3180`. |
+| `paths` | Which paths are forwarded, and to where on `host`. A `from` ending in `/` matches every path under it and `to` replaces that prefix. Any other `from` matches that path alone. The longest match wins. |
+
+One block per entry: one credential, one host. The block is inside the signed entry hash, and an entry without one hashes as before. `egress.hosts` here lists the hosts GitHub redirects log and artifact downloads to; `api.github.com` is not among them.
+
+**The route.** The server's command is started by a relay, the statically linked `wirken` binary mounted read-only at `/wirken-relay`, which listens on the container's loopback and runs the command as its child with stdin and stdout untouched. The relay copies each connection to the server's sidecar, which copies it to the proxy. Neither reads it or holds a secret or a rule. The proxy maps the path, removes `Authorization`, `Proxy-Authorization` and the configured header, sets the configured header from the vault value, and makes the HTTPS request to `host` itself, at a global-unicast address it resolved. The response goes back as received. Nothing is substituted: a placeholder in a body, a query, a path or another header stays a placeholder. An injected server gets a sidecar whether or not it lists `egress.hosts`.
+
+**Redirects.** The proxy follows a redirect (301, 302, 307, 308) only for a GET or HEAD with no body, to `host` itself, to a path the path map can produce, three times at most. Every other redirect is returned to the server.
+
+**What injection gives.**
+
+- The server and its sidecar hold a placeholder. The value is in no container environment, no secret file and nothing `docker inspect` reports.
+- The method and path of every request to the bound host are on the chain: one `mcp_credential_injected` row per request, written before it is made, naming the credential, the host, the method and the path without its query. A followed redirect is one more row. A request whose row cannot be written is not made.
+- There is no direct route to the bound host. The broker refuses a CONNECT or plain-HTTP request to it from an injected server, whatever `egress.hosts` lists, with a `sandbox_egress_verdict` row of reason `injected_host`.
+- The gateway mints the placeholder and its leak detection knows it. A tool result, a message or a model request that carries it is refused with a `leak_refused` row naming `<credential> (placeholder)`.
+
+**What it does not give.**
+
+- The server still acts as the credential on the bound host. Every request it sends to a mapped path is authenticated, so it can read and write whatever the token can there. What bounds that is the token's scope and the path map.
+- Hosts in `egress.hosts` are reached as before, through a tunnel the proxy does not see into.
+- A response is checked for the credential's exact bytes in its head, the header names and values, and refused with `credential_in_response` if one carries them. A response body is not checked: a bound host that returns the value in a body hands it to the server. An encoded form of the value in a head passes as well.
+
+#### What is refused
+
+When the entry is loaded, as `sandbox_config_invalid`: a `credential_env` that is not a `vault:` value in `env` or is also in `secrets_in_env`; a `host` that is an address, a wildcard, or carries a port or a scheme; a `header` that is not a header name or is one the proxy sets itself (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `Proxy-Authorization`, `TE`, `Trailer`, `Keep-Alive`); a `scheme` that is not one word; a `base_url_env` that `env` also sets; an empty `paths`; a `from` or `to` that does not start with `/` or contains `..`, `%`, `?`, `#` or `\`; a prefix `from` whose `to` does not end in `/`; a repeated `from`. A credential that is not a plain secret (an OAuth sign-in, an identifier) is not handed to the entry, with a `credential_destination_refused` row.
+
+At request time, each with an `mcp_inject_refused` row and no credential set:
+
+| `reason` | When | Answer |
+|---|---|---|
+| `unmapped_path` | No rule matches the path. | 404 |
+| `path_shape` | A `.` or `..` segment, a backslash, or an encoded slash, backslash or dot. | 400 |
+| `malformed` | An absolute or authority target, `CONNECT`, an `Upgrade`, both `Content-Length` and `Transfer-Encoding`, a head over 8 KiB or one that is not HTTP/1.x. | 400 |
+| `resolution_failed` | The bound host resolved to no global-unicast address. | 502 |
+| `credential_unavailable` | The proxy holds no value for the credential for this entry. | 502 |
+| `credential_in_response` | The response head carried the credential's exact bytes. | 502 |
+| `record_failed` | The `mcp_credential_injected` row could not be written. | 502 |
+
+#### The GitHub server under a custom host
+
+`GITHUB_HOST` makes the server treat the host as GitHub Enterprise Server. Measured on v2.2.0:
+
+- REST requests go to `/api/v3/...` and GraphQL to `/api/graphql`, which the two rules above map to `api.github.com`.
+- The tool list is the same as without the variable. `search_issues` uses lexical search instead of semantic, and the resolution-reason variant of the review-write tool is off.
+- No tool uses the raw-content or upload host. File contents, directories and binary files are read through the REST API. A file of 1 MB or more comes back as a link to `raw.githubusercontent.com` that the server does not fetch.
+- Log and artifact downloads answer with a redirect to a signed URL on another host, which the server fetches without the credential through its sidecar. Those hosts are the entry's `egress.hosts`.
+- A renamed or transferred repository answers with a redirect on `api.github.com`, which the proxy follows.
+- The server accepts a plain-HTTP host on loopback only, which the relay provides.
+- A path with an encoded slash, backslash or dot is refused as `path_shape`.
+
 ## Network
 
-A server with no `egress.hosts` runs with `--network none`.
+A server with no `egress.hosts` and no `inject` runs with `--network none`.
 
 A server that lists hosts gets the route `exec` gets under an allowlist ([egress.md](egress.md#sandbox-egress)): an internal network it shares only with its own egress sidecar, which is its `HTTP_PROXY` and `HTTPS_PROXY`, and a decision broker in `wirken-mcp-proxy`. For every connection the server opens through the sidecar, a CONNECT tunnel or a plain-HTTP request, the broker checks the target against the listed hosts, resolves the name itself, and drops any address outside global unicast. Each verdict, allowed or not, is a `sandbox_egress_verdict` row naming the agent and the server (`mcp_server`). Requests a server sends inside a tunnel it already holds are not decided again: a row stands for a connection, not for each HTTP request on it.
 
@@ -118,6 +218,8 @@ A server that lists hosts gets the route `exec` gets under an allowlist ([egress
 - CONNECT to port 443 and plain HTTP to port 80 are the only requests forwarded. IP-address targets are refused whatever the list says.
 - A server that ignores the proxy variables and opens its own socket has no route anywhere.
 - The CONNECT tunnel is not inspected after the target is decided. A client that presents a different TLS server name inside an allowed tunnel reaches whatever the allowed host's address serves for that name.
+
+Where the daemon registers `runsc` with `--network=none`, a container it starts has no network of its own: under mode `gvisor` a server then reaches neither its sidecar nor an injected route, and its requests fail.
 
 Proxied egress is verified on rootful Docker on Linux. It is refused with `egress_unsupported_runtime` on rootless Docker, Podman and Windows (`RuntimeFacts::egress_unsupported`, `crates/sandbox/src/lib.rs`); any other runtime, rootful Docker on macOS included, is not refused and not verified. `--network none` works on every runtime.
 
@@ -157,7 +259,8 @@ wirken run                        gateway + agent (holds the vault key, provider
                                   never opens the vault, asks the gateway to refresh OAuth tokens
                                   and for a credential's current value after a server refuses it
        ├─ <server container>      one per agent and server, started through the container runtime
-       └─ <egress sidecar>        one per server that lists egress hosts; that server's only route out
+       └─ <egress sidecar>        one per server that lists egress hosts or injects a credential;
+                                  that server's only route out
 ```
 
 The proxy reaches each server through the container runtime's attach stream, not as a child process. Provider API keys, the agent's session log writer, and adapter Ed25519 secrets live in the gateway process and adapter subprocesses, and are not reachable from inside a server's container.
@@ -165,8 +268,8 @@ The proxy reaches each server through the container runtime's attach stream, not
 ### What a contained server can reach
 
 - **Files:** its install directory (read-only), the mounts its entry declares, its scratch directory, its own secret files, and its `/tmp`. Not the data directory (`audit.db`, `vault.db`, agent identity keys): no mount may be inside it or contain it. Not the operator's home unless a mount puts it there.
-- **Network:** nothing, or HTTP(S) to its listed hosts through its sidecar.
-- **Credentials:** the `vault:` values in its own `env` block, and nothing else from the vault.
+- **Network:** nothing, or HTTP(S) to its listed hosts through its sidecar, and the bound host of an `inject` block through the proxy only.
+- **Credentials:** the `vault:` values in its own `env` block, and nothing else from the vault. For the one an `inject` block names, a placeholder.
 - **Resources:** its memory, process and CPU limits.
 - **Its declared tool surface,** which is operator-trusted like any tool.
 
@@ -178,7 +281,7 @@ The boundaries are stated in [threat-model.md](threat-model.md#mcp-servers) and 
 - **Writable mounts.** Files a server writes there are owned by the operator's uid on the host.
 - **Env-delivered secrets.** A variable in `secrets_in_env` is readable through `docker inspect` by anyone who can reach the Docker socket.
 - **The image.** The signature covers the entry, not the image's contents; a digest-pinned `image` fixes them.
-- **The server's own credentials.** A contained server holds its `vault:` values live, as a file or an environment variable, for as long as it runs. The egress allowlist is by host: the proxy does not see inside a CONNECT tunnel, so the server can write a value to any resource on a host it is allowed, a public one included. Leak detection on tool output matches the exact bytes of a stored secret; a value the server returns encoded, or split across two results, reaches the model. What bounds a server that misuses its credential is the scope of the token it was given, the hosts listed for it, and a digest-pinned image.
+- **The server's own credentials.** A contained server holds its `vault:` values live, as a file or an environment variable, for as long as it runs. The egress allowlist is by host: the proxy does not see inside a CONNECT tunnel, so the server can write a value to any resource on a host it is allowed, a public one included. Leak detection on tool output matches the exact bytes of a stored secret; a value the server returns encoded, or split across two results, reaches the model. What bounds a server that misuses its credential is the scope of the token it was given, the hosts listed for it, and a digest-pinned image. A credential named by an `inject` block is the exception: the server holds a placeholder and can only use the value, on mapped paths of the bound host ([Injecting a credential](#injecting-a-credential)).
 
 ### `"sandbox": "off"`
 

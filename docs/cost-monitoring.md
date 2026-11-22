@@ -59,6 +59,8 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
         "mcp_server_restart",
         "mcp_server_restart_abandoned",
         "mcp_credential_refetched",
+        "mcp_credential_injected",
+        "mcp_inject_refused",
         "leak_refused",
         "egress_hook_dispatched",
         "tool_output_redacted",
