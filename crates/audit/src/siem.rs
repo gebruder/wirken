@@ -939,9 +939,9 @@ fn extract_identity_for_sentinel(
         | SessionEvent::McpServerUnsandboxed { agent_id, .. }
         | SessionEvent::McpServerExited { agent_id, .. }
         | SessionEvent::McpServerRestart { agent_id, .. }
-        | SessionEvent::McpServerRestartAbandoned { agent_id, .. } => {
-            (None, None, Some(agent_id.clone()))
-        }
+        | SessionEvent::McpServerRestartAbandoned { agent_id, .. }
+        | SessionEvent::McpCredentialInjected { agent_id, .. }
+        | SessionEvent::McpInjectRefused { agent_id, .. } => (None, None, Some(agent_id.clone())),
         // A credential name; none of the three.
         SessionEvent::McpCredentialRefetched { .. } => (None, None, None),
         SessionEvent::McpCredentialRefreshDiscarded { .. } => (None, None, None),
@@ -1303,10 +1303,11 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             image,
             egress_hosts,
             secrets_in_env,
+            secrets_injected,
             ..
         } => format!(
             "mcp_server_sandboxed server={server_name} image={image} egress_hosts={egress_hosts:?} \
-             secrets_in_env={secrets_in_env:?}"
+             secrets_in_env={secrets_in_env:?} secrets_injected={secrets_injected:?}"
         ),
         SessionEvent::McpServerUnsandboxed { server_name, .. } => {
             format!("mcp_server_unsandboxed server={server_name}")
@@ -1342,6 +1343,29 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::McpCredentialRefetched { credential } => {
             format!("mcp_credential_refetched credential={credential}")
         }
+        SessionEvent::McpCredentialInjected {
+            server_name,
+            credential,
+            host,
+            method,
+            path,
+            ..
+        } => format!(
+            "mcp_credential_injected server={server_name} credential={credential} host={host} \
+             method={method} path={path}"
+        ),
+        SessionEvent::McpInjectRefused {
+            server_name,
+            host,
+            method,
+            path,
+            reason,
+            ..
+        } => format!(
+            "mcp_inject_refused server={server_name} host={host} method={method} path={path} \
+             reason={}",
+            reason.as_str()
+        ),
         SessionEvent::McpCredentialRefreshDiscarded { credential, reason } => {
             format!("mcp_credential_refresh_discarded credential={credential} reason={reason}")
         }
@@ -2620,6 +2644,8 @@ mod identity_tests {
                     nano_cpus: 1,
                     secrets_as_files: vec![],
                     secrets_in_env: vec!["GITHUB_PERSONAL_ACCESS_TOKEN".into()],
+                    secrets_injected: vec![],
+                    inject_host: None,
                 },
                 None,
                 None,
@@ -2679,6 +2705,32 @@ mod identity_tests {
                 None,
                 None,
                 None,
+            ),
+            (
+                SessionEvent::McpCredentialInjected {
+                    server_name: "github".into(),
+                    agent_id: agent(),
+                    credential: "github-token".into(),
+                    host: "api.github.com".into(),
+                    method: "GET".into(),
+                    path: "/user".into(),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::McpInjectRefused {
+                    server_name: "github".into(),
+                    agent_id: agent(),
+                    host: "api.github.com".into(),
+                    method: "GET".into(),
+                    path: "/raw/o/r".into(),
+                    reason: crate::McpInjectRefusal::UnmappedPath,
+                },
+                None,
+                None,
+                Some("worker"),
             ),
             (
                 SessionEvent::SandboxEgressUnsupported {

@@ -3827,6 +3827,8 @@ fn every_session_event() -> Vec<SessionEvent> {
             nano_cpus: 0,
             secrets_as_files: Vec::new(),
             secrets_in_env: Vec::new(),
+            secrets_injected: Vec::new(),
+            inject_host: None,
         },
         SessionEvent::McpServerUnsandboxed {
             server_name: String::new(),
@@ -3857,6 +3859,22 @@ fn every_session_event() -> Vec<SessionEvent> {
         },
         SessionEvent::McpCredentialRefetched {
             credential: String::new(),
+        },
+        SessionEvent::McpCredentialInjected {
+            server_name: String::new(),
+            agent_id: String::new(),
+            credential: String::new(),
+            host: String::new(),
+            method: String::new(),
+            path: String::new(),
+        },
+        SessionEvent::McpInjectRefused {
+            server_name: String::new(),
+            agent_id: String::new(),
+            host: String::new(),
+            method: String::new(),
+            path: String::new(),
+            reason: crate::session_log::McpInjectRefusal::UnmappedPath,
         },
         SessionEvent::LeakRefused {
             credential: String::new(),
@@ -4114,6 +4132,8 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::McpServerRestart { .. } => "McpServerRestart",
         SessionEvent::McpServerRestartAbandoned { .. } => "McpServerRestartAbandoned",
         SessionEvent::McpCredentialRefetched { .. } => "McpCredentialRefetched",
+        SessionEvent::McpCredentialInjected { .. } => "McpCredentialInjected",
+        SessionEvent::McpInjectRefused { .. } => "McpInjectRefused",
         SessionEvent::LeakRefused { .. } => "LeakRefused",
         SessionEvent::LlmRequestFailed { .. } => "LlmRequestFailed",
         SessionEvent::McpEntryVerified { .. } => "McpEntryVerified",
@@ -4121,7 +4141,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 93;
+const SESSION_EVENT_VARIANTS: usize = 95;
 
 /// The list covers the enum.
 #[test]

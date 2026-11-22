@@ -78,6 +78,9 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   being given up on.
 /// - `McpCredentialRefetched`: the gateway giving the MCP proxy a
 ///   credential's current vault value after a server refused it.
+/// - `McpCredentialInjected`, `McpInjectRefused`: each request on a
+///   contained server's injected route, made with the credential or
+///   refused.
 /// - `LeakRefused`: content carrying a stored secret, refused. Names
 ///   the credential, never the value.
 /// - `EgressHookDispatched`, `ToolOutputRedacted`: post-execution
@@ -152,6 +155,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::McpServerRestart { .. } => true,
         SessionEvent::McpServerRestartAbandoned { .. } => true,
         SessionEvent::McpCredentialRefetched { .. } => true,
+        SessionEvent::McpCredentialInjected { .. } => true,
+        SessionEvent::McpInjectRefused { .. } => true,
         // A refresh that lost to a removal or a new sign-in.
         SessionEvent::McpCredentialRefreshDiscarded { .. } => true,
         // Where credentials may go, and where they went.
@@ -367,6 +372,8 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::McpServerRestart { .. } => "mcp_server_restart",
         SessionEvent::McpServerRestartAbandoned { .. } => "mcp_server_restart_abandoned",
         SessionEvent::McpCredentialRefetched { .. } => "mcp_credential_refetched",
+        SessionEvent::McpCredentialInjected { .. } => "mcp_credential_injected",
+        SessionEvent::McpInjectRefused { .. } => "mcp_inject_refused",
         SessionEvent::McpCredentialRefreshDiscarded { .. } => "mcp_credential_refresh_discarded",
         SessionEvent::CredentialDestinationRefused { .. } => "credential_destination_refused",
         SessionEvent::CredentialDestinationGranted { .. } => "credential_destination_granted",

@@ -2296,6 +2296,40 @@ pub enum SessionEvent {
         secrets_as_files: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         secrets_in_env: Vec<String>,
+        /// Variables that hold a placeholder: the proxy sets the real
+        /// value on requests to `inject_host` and the container never
+        /// has it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        secrets_injected: Vec<String>,
+        /// The host an injected credential is bound to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inject_host: Option<String>,
+    },
+    /// The MCP proxy set `credential` on one request a contained
+    /// server sent to its injected route. Written before the request
+    /// is made, one row per request, a followed redirect included.
+    /// `path` is the upstream path without its query. Names the
+    /// credential, never its value. On the `gateway-mcp` sentinel
+    /// session.
+    McpCredentialInjected {
+        server_name: String,
+        agent_id: String,
+        credential: String,
+        host: String,
+        method: String,
+        path: String,
+    },
+    /// A request a contained server sent to its injected route was
+    /// refused, and no credential was set on it. `path` is the path
+    /// the server asked for, without its query. On the `gateway-mcp`
+    /// sentinel session.
+    McpInjectRefused {
+        server_name: String,
+        agent_id: String,
+        host: String,
+        method: String,
+        path: String,
+        reason: McpInjectRefusal,
     },
     /// A stdio MCP server started on the host, outside any container,
     /// because its entry says `"sandbox": "off"`. Written at every
@@ -2781,6 +2815,49 @@ pub enum SandboxEgressDenyReason {
     /// written to the session log, so it was refused: nothing reaches
     /// the network without a row saying it did.
     RecordFailed,
+    /// The host is the one a contained MCP server's injected
+    /// credential is bound to. The server reaches it only through the
+    /// injected route.
+    InjectedHost,
+}
+
+/// Why a request on a contained MCP server's injected route was
+/// refused. A closed set, as [`SandboxEgressDenyReason`] is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpInjectRefusal {
+    /// No rule in the entry's path map matches the path.
+    UnmappedPath,
+    /// The path has a dot segment, an encoded slash or an encoded dot.
+    PathShape,
+    /// Not a plain HTTP/1.1 request in origin form: an absolute or
+    /// authority target, `CONNECT`, an upgrade, both a length and a
+    /// transfer coding, or a head that does not parse or is too long.
+    Malformed,
+    /// The bound host resolved to no global-unicast address.
+    ResolutionFailed,
+    /// The proxy holds no value for the credential for this entry.
+    CredentialUnavailable,
+    /// The response head carried the credential's exact bytes.
+    CredentialInResponse,
+    /// The injection row could not be written, so the request was not
+    /// made.
+    RecordFailed,
+}
+
+impl McpInjectRefusal {
+    /// The value the row carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnmappedPath => "unmapped_path",
+            Self::PathShape => "path_shape",
+            Self::Malformed => "malformed",
+            Self::ResolutionFailed => "resolution_failed",
+            Self::CredentialUnavailable => "credential_unavailable",
+            Self::CredentialInResponse => "credential_in_response",
+            Self::RecordFailed => "record_failed",
+        }
+    }
 }
 
 /// Egress mode recorded on a [`SessionEvent::SandboxEgressVerdict`]

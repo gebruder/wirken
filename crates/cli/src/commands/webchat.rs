@@ -4653,6 +4653,10 @@ pub fn session_events(
             // A credential the gateway sent the MCP proxy again; on the
             // gateway's own lane, not a conversation's.
             SessionEvent::McpCredentialRefetched { .. } => None,
+            // A contained server's requests to its bound host; on the
+            // gateway's own lane, not a conversation's.
+            SessionEvent::McpCredentialInjected { .. } => None,
+            SessionEvent::McpInjectRefused { .. } => None,
             SessionEvent::McpCredentialRefreshDiscarded { .. } => None,
             // What the session has read, for the http_request gate; the
             // tool calls that read it are on the page already.

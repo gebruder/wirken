@@ -577,6 +577,10 @@ impl OtelProjector {
             SessionEvent::McpServerRestartAbandoned { .. } => Vec::new(),
             // A credential handed to the proxy; no span to attach it to.
             SessionEvent::McpCredentialRefetched { .. } => Vec::new(),
+            // One request on a server's injected route; no span to
+            // attach it to.
+            SessionEvent::McpCredentialInjected { .. } => Vec::new(),
+            SessionEvent::McpInjectRefused { .. } => Vec::new(),
             SessionEvent::McpCredentialRefreshDiscarded { .. } => Vec::new(),
             SessionEvent::CredentialDestinationRefused { .. }
             | SessionEvent::CredentialDestinationGranted { .. }

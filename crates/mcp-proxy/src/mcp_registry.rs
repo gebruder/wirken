@@ -825,6 +825,8 @@ pub(crate) async fn start_stdio(
             nano_cpus: plan.nano_cpus,
             secrets_as_files: plan.secret_file_names.clone(),
             secrets_in_env: plan.env_secret_names.clone(),
+            secrets_injected: Vec::new(),
+            inject_host: None,
         },
     );
     Ok(transport)
