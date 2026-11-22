@@ -1,4 +1,5 @@
-//! Minimal AWS SigV4 request signing for Bedrock.
+//! Minimal AWS SigV4 request signing, for Bedrock and for an
+//! S3-compatible bucket.
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
@@ -18,13 +19,46 @@ pub fn sign(
     url: &url::Url,
     body: &[u8],
 ) -> Vec<(String, String)> {
+    sign_with_headers(
+        access_key,
+        secret_key,
+        session_token,
+        region,
+        service,
+        method,
+        url,
+        body,
+        &[],
+    )
+}
+
+/// [`sign`], with `extra` headers under the signature as well. Their
+/// names are lowercase. S3 requires every `x-amz-` header a request
+/// carries to be signed. The headers returned include them.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_with_headers(
+    access_key: &str,
+    secret_key: &str,
+    session_token: Option<&str>,
+    region: &str,
+    service: &str,
+    method: &str,
+    url: &url::Url,
+    body: &[u8],
+    extra: &[(String, String)],
+) -> Vec<(String, String)> {
     let now = wirken_time::now();
     let datestamp = now.strftime("%Y%m%d").to_string();
     let amz_date = now.strftime("%Y%m%dT%H%M%SZ").to_string();
 
     let payload_hash = hex_sha256(body);
 
-    let host = url.host_str().unwrap_or("");
+    // The host as the request's Host header carries it: with the port
+    // when the URL names one that is not the scheme's own.
+    let host = match (url.host_str().unwrap_or(""), url.port()) {
+        (host, Some(port)) => format!("{host}:{port}"),
+        (host, None) => host.to_string(),
+    };
     let path = url.path();
 
     // Canonical query string (sorted)
@@ -45,12 +79,15 @@ pub fn sign(
 
     // Signed headers (must include host and x-amz-date)
     let mut headers: Vec<(String, String)> = vec![
-        ("host".into(), host.into()),
+        ("host".into(), host),
         ("x-amz-content-sha256".into(), payload_hash.clone()),
         ("x-amz-date".into(), amz_date.clone()),
     ];
     if let Some(token) = session_token {
         headers.push(("x-amz-security-token".into(), token.into()));
+    }
+    for (name, value) in extra {
+        headers.push((name.to_ascii_lowercase(), value.trim().to_string()));
     }
     headers.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -92,6 +129,7 @@ pub fn sign(
     if let Some(token) = session_token {
         result.push(("x-amz-security-token".into(), token.into()));
     }
+    result.extend(extra.iter().cloned());
 
     result
 }
@@ -217,5 +255,61 @@ mod tests {
             b"",
         );
         assert_eq!(h1, h2);
+    }
+
+    /// Extra headers are named in the signature and returned, and a
+    /// port the URL spells out is part of the signed host.
+    #[test]
+    fn extra_headers_and_an_explicit_port_are_signed() {
+        let url = url::Url::parse("http://127.0.0.1:9000/bucket/request/abc").unwrap();
+        let extra = [(
+            "x-amz-object-lock-mode".to_string(),
+            "COMPLIANCE".to_string(),
+        )];
+        let plain = sign(
+            TEST_ACCESS_KEY,
+            TEST_SECRET_KEY,
+            None,
+            "us-east-1",
+            "s3",
+            "PUT",
+            &url,
+            b"x",
+        );
+        let signed = sign_with_headers(
+            TEST_ACCESS_KEY,
+            TEST_SECRET_KEY,
+            None,
+            "us-east-1",
+            "s3",
+            "PUT",
+            &url,
+            b"x",
+            &extra,
+        );
+        let auth = |headers: &[(String, String)]| {
+            headers
+                .iter()
+                .find(|(k, _)| k == "Authorization")
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert!(
+            auth(&signed).contains(
+                "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-object-lock-mode"
+            ),
+            "{}",
+            auth(&signed)
+        );
+        assert!(
+            signed
+                .iter()
+                .any(|(k, v)| k == "x-amz-object-lock-mode" && v == "COMPLIANCE")
+        );
+        assert_ne!(
+            auth(&plain).rsplit("Signature=").next(),
+            auth(&signed).rsplit("Signature=").next()
+        );
     }
 }

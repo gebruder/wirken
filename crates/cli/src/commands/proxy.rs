@@ -171,6 +171,64 @@ pub fn token_revoke(id_or_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Destroy the key of the archived body with this hash in `data_dir`,
+/// then record it. The object stays in the bucket for its retention
+/// period and can no longer be read. Returns how many keys were
+/// destroyed.
+pub(crate) fn redact_recorded(
+    data_dir: &std::path::Path,
+    sha256: &str,
+    reason: &str,
+) -> Result<usize> {
+    use wirken_audit::SessionLog as _;
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("{sha256:?} is not a SHA-256 hash: 64 hex characters, as on the row");
+    }
+    let sha256 = sha256.to_ascii_lowercase();
+    let keys = super::proxy_archive::KeyStore::open(
+        &data_dir.join(super::proxy_archive::ARCHIVE_KEYS_FILE),
+    )
+    .map_err(|e| anyhow::anyhow!("the archive key store: {e}"))?;
+    // The key first, the row after: the row says what was done.
+    let destroyed = keys
+        .destroy(&sha256)
+        .map_err(|e| anyhow::anyhow!("the key was not destroyed: {e}"))?;
+    let log = super::open_signed_session_log(&config())?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(
+        wirken_audit::PROXY_SESSION.to_string(),
+    ));
+    log.append(
+        &handle,
+        wirken_audit::TrustLevel::User,
+        wirken_audit::SessionEvent::ProxyArchiveRedacted {
+            sha256: wirken_audit::HashHex(sha256),
+            operator: super::local_operator(),
+            reason: reason.to_string(),
+        },
+    )
+    .context("the key is destroyed, but its row could not be written")?;
+    super::seal_operator_lane(&log, wirken_audit::PROXY_SESSION);
+    Ok(destroyed)
+}
+
+pub fn archive_redact(sha256: &str, reason: &str) -> Result<()> {
+    require_terminal("archive redact")?;
+    let destroyed = redact_recorded(&config().data_dir, sha256, reason)?;
+    if destroyed == 0 {
+        println!(
+            "  No key was held for {sha256}. It is marked: a body with this hash is not \
+             archived readable from here on."
+        );
+    } else {
+        println!(
+            "  Destroyed {destroyed} key{} for {sha256}. The object stays in the bucket until \
+             its retention ends and can no longer be read.",
+            if destroyed == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
+}
+
 pub fn token_list() -> Result<()> {
     let tokens = open_store(&config().data_dir)?
         .list()

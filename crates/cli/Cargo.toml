@@ -52,7 +52,9 @@ serde_json = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 subtle = "2.6"
+base64 = { workspace = true }
 bytes = "1"
+chacha20poly1305 = { workspace = true }
 futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }

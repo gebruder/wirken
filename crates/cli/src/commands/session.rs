@@ -327,7 +327,17 @@ pub async fn verify(
     strict: bool,
     with_parent: bool,
     with_children: bool,
+    skip_archive: bool,
 ) -> Result<()> {
+    // A proxy lane holds no agent's turns to replay: its chain is
+    // checked, and its archived bodies against it.
+    if super::proxy_archive::is_proxy_session(session_id) {
+        let status = super::proxy_archive::verify_session(session_id, skip_archive).await?;
+        if status != 0 {
+            std::process::exit(status);
+        }
+        return Ok(());
+    }
     use std::collections::HashMap;
     use std::sync::Arc;
 

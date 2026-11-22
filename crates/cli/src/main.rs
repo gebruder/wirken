@@ -511,6 +511,13 @@ enum SessionCommands {
         /// not opened.
         #[arg(long)]
         with_children: bool,
+        /// For a proxy session: do not read archived bodies back from
+        /// the bucket. The chain is still verified. Without the flag,
+        /// and with an archive in proxy.json, each archived body is
+        /// fetched, decrypted and compared with the hash on its row,
+        /// and a mismatch exits 7.
+        #[arg(long)]
+        skip_archive: bool,
     },
 }
 
@@ -1383,6 +1390,24 @@ enum ProxyCommands {
     /// Manage client tokens
     #[command(subcommand)]
     Token(ProxyTokenCommands),
+    /// Manage the write-once archive of bodies
+    #[command(subcommand)]
+    Archive(ProxyArchiveCommands),
+}
+
+#[derive(Subcommand)]
+enum ProxyArchiveCommands {
+    /// Make an archived body unreadable by destroying its key. The
+    /// object stays locked in the bucket. This cannot be undone. Run
+    /// at a terminal.
+    Redact {
+        /// The body's SHA-256, as on its proxy_request or
+        /// proxy_response row.
+        sha256: String,
+        /// Why, for the row.
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1577,6 +1602,9 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
                 ProxyTokenCommands::List => return None,
             },
         ),
+        Commands::Proxy(ProxyCommands::Archive(ProxyArchiveCommands::Redact { .. })) => {
+            ("proxy", "archive redact")
+        }
         Commands::Mcp(cmd) => (
             "mcp",
             match cmd {
@@ -1933,7 +1961,11 @@ async fn main() -> Result<()> {
                 strict,
                 with_parent,
                 with_children,
-            } => commands::session::verify(&id, strict, with_parent, with_children).await,
+                skip_archive,
+            } => {
+                commands::session::verify(&id, strict, with_parent, with_children, skip_archive)
+                    .await
+            }
         },
         Commands::Permissions(cmd) => match cmd {
             PermissionCommands::List { agent } => commands::permission::list(&agent).await,
@@ -2141,6 +2173,10 @@ async fn main() -> Result<()> {
             ProxyTokenCommands::Revoke { token } => commands::proxy::token_revoke(&token),
             ProxyTokenCommands::List => commands::proxy::token_list(),
         },
+        Commands::Proxy(ProxyCommands::Archive(ProxyArchiveCommands::Redact {
+            sha256,
+            reason,
+        })) => commands::proxy::archive_redact(&sha256, &reason),
         Commands::Hooks(cmd) => match cmd {
             HookCommands::Register {
                 hook_id,

@@ -34,7 +34,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod sandbox_egress;
 pub mod signal_approval_gate;
-pub(crate) mod sigv4;
+pub mod sigv4;
 pub mod skill;
 pub mod skill_perms;
 pub mod slash;

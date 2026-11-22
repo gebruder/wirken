@@ -217,7 +217,20 @@ fn proxy_state(
     session_log: Arc<dyn wirken_audit::SessionLog>,
     leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
 ) -> Result<Arc<super::proxy_server::ProxyState>> {
-    use super::proxy_server::{ProxyState, UpstreamClient};
+    use super::proxy_server::{BodySink, ProxyState, UpstreamClient};
+    // An archive that is configured and cannot be opened stops the
+    // start: the listener does not run with bodies going nowhere.
+    let archive: Option<Arc<dyn BodySink>> = match (&proxy_config.archive, &vault) {
+        (Some(archive), Some(store)) => {
+            let store = store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("vault mutex poisoned"))?;
+            let archive = super::proxy_archive::Archive::open(archive, &store, &cfg.data_dir)
+                .map_err(|e| anyhow::anyhow!("proxy.json: archive: {e}"))?;
+            Some(Arc::new(archive))
+        }
+        _ => None,
+    };
     let mut upstreams = std::collections::BTreeMap::new();
     for (name, upstream) in &proxy_config.upstreams {
         let key: Option<Arc<dyn wirken_agent::llm::ProviderKeySource>> =
@@ -259,7 +272,7 @@ fn proxy_state(
         log: session_log,
         budget,
         leak: leak_matcher,
-        archive: None,
+        archive,
         last_unknown_row: std::sync::Mutex::new(None),
     }))
 }
@@ -2173,12 +2186,16 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                 .await
                 .with_context(|| format!("Failed to bind the proxy listener at {addr}"))?;
             println!(
-                "  Proxy: http://{addr} ({} upstream{})",
+                "  Proxy: http://{addr} ({} upstream{}{})",
                 proxy_config.upstreams.len(),
                 if proxy_config.upstreams.len() == 1 {
                     ""
                 } else {
                     "s"
+                },
+                match &proxy_config.archive {
+                    Some(archive) => format!(", archive {}", archive.bucket),
+                    None => String::new(),
                 }
             );
             Some(tokio::spawn(super::proxy_server::serve(listener, state)))
