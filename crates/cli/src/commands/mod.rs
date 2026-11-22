@@ -676,18 +676,34 @@ pub async fn list_ollama_models(base_url: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// List models available from the Anthropic API.
-pub async fn list_anthropic_models(api_key: &str) -> Vec<String> {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+/// The client a model listing is asked with: `base_url` over HTTPS,
+/// or plain HTTP on loopback, and no redirect followed. A listing
+/// carries the provider's key, which goes to the origin of `base_url`,
+/// the one the key is stored for, and nowhere a redirect points.
+/// `None` for any other URL.
+fn listing_client(base_url: &str, timeout_s: u64) -> Option<reqwest::Client> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    let loopback = url.scheme() == "http"
+        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if url.scheme() != "https" && !loopback {
+        return None;
+    }
+    reqwest::Client::builder()
+        .https_only(!loopback)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(timeout_s))
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+        .ok()
+}
+
+/// List models available from the Anthropic API at `base_url`.
+pub async fn list_anthropic_models(base_url: &str, api_key: &str) -> Vec<String> {
+    let Some(client) = listing_client(base_url, 5) else {
+        return Vec::new();
     };
 
     let resp = match client
-        .get("https://api.anthropic.com/v1/models")
+        .get(format!("{base_url}/models"))
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .send()
@@ -776,10 +792,11 @@ pub async fn list_openai_compatible_models(
     base_url: &str,
     api_key: &str,
 ) -> Result<Vec<String>, ModelListError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| ModelListError::Unreachable(e.to_string()))?;
+    let client = listing_client(base_url, 15).ok_or_else(|| {
+        ModelListError::Unreachable(format!(
+            "{base_url} is neither an https URL nor plain http on this host"
+        ))
+    })?;
 
     let url = format!("{base_url}/models");
     let mut req = client.get(&url);
@@ -822,12 +839,8 @@ pub async fn list_openai_compatible_models(
 /// Filters to chat-capable models (gpt-*, o1-*, o3-*, o4-*) and excludes
 /// legacy/embedding/audio models to keep the picker manageable.
 pub async fn list_openai_models(base_url: &str, api_key: &str) -> Vec<String> {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+    let Some(client) = listing_client(base_url, 15) else {
+        return Vec::new();
     };
 
     let url = format!("{base_url}/models");
@@ -912,17 +925,13 @@ pub fn pick_model(models: Vec<String>) -> anyhow::Result<String> {
     Ok(models[idx].clone())
 }
 
-/// List models available from the Google Gemini API.
-pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+/// List models available from the Google Gemini API at `base_url`.
+pub async fn list_gemini_models(base_url: &str, api_key: &str) -> Vec<String> {
+    let Some(client) = listing_client(base_url, 5) else {
+        return Vec::new();
     };
 
-    let url = "https://generativelanguage.googleapis.com/v1beta/models";
+    let url = format!("{base_url}/models");
     let resp = match client
         .get(url)
         .header("x-goog-api-key", api_key)
@@ -1764,5 +1773,108 @@ mod column_width_tests {
         assert_eq!(column_width("KIND", [12, 6], 10), 12);
         assert_eq!(column_width("MODEL", [], 20), 20);
         assert_eq!(column_width("MODEL", [25], 20), 25);
+    }
+}
+
+#[cfg(test)]
+mod model_listing_tests {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A loopback server that keeps the head of each request and
+    /// answers every one with `reply`.
+    async fn server(reply: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let heads = Arc::new(Mutex::new(Vec::new()));
+        let kept = heads.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let (kept, reply) = (kept.clone(), reply.clone());
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    kept.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf).to_ascii_lowercase());
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (base, heads)
+    }
+
+    fn json(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    const KEY: &str = "sk-listing-test-key-0123456789";
+
+    /// An Anthropic or Gemini listing asks the endpoint it is given,
+    /// the one the key is stored for, with the key in the provider's
+    /// own header.
+    #[tokio::test]
+    async fn a_listing_asks_the_configured_endpoint() {
+        let (base, asked) = server(json(r#"{"data":[{"id":"model-a"}]}"#)).await;
+        let models = super::list_anthropic_models(&format!("{base}/v1"), KEY).await;
+        assert_eq!(models, ["model-a"]);
+        let head = asked.lock().unwrap()[0].clone();
+        assert!(head.starts_with("get /v1/models "), "{head}");
+        assert!(head.contains("x-api-key: sk-listing"), "{head}");
+
+        let (base, asked) = server(json(r#"{"models":[{"name":"models/model-g"}]}"#)).await;
+        let models = super::list_gemini_models(&format!("{base}/v1beta"), KEY).await;
+        assert_eq!(models, ["model-g"]);
+        let head = asked.lock().unwrap()[0].clone();
+        assert!(head.starts_with("get /v1beta/models "), "{head}");
+        assert!(head.contains("x-goog-api-key: sk-listing"), "{head}");
+    }
+
+    /// A listing answered with a redirect lists nothing, and nothing is
+    /// sent to where the redirect points.
+    #[tokio::test]
+    async fn no_listing_follows_a_redirect() {
+        for provider in ["anthropic", "gemini", "openai", "custom"] {
+            let (elsewhere, followed) = server(json(r#"{"data":[{"id":"gpt-x"}]}"#)).await;
+            let (base, asked) = server(format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {elsewhere}/taken\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            ))
+            .await;
+            let base_url = format!("{base}/v1");
+            let models = super::provider_pick::list_models(provider, &base_url, KEY).await;
+            assert!(models.is_empty(), "{provider}: {models:?}");
+            assert_eq!(asked.lock().unwrap().len(), 1, "{provider}");
+            let followed = followed.lock().unwrap().clone();
+            assert!(followed.is_empty(), "{provider}: {followed:?}");
+        }
+    }
+
+    /// A key is not sent over plain HTTP to another host.
+    #[tokio::test]
+    async fn a_listing_is_not_asked_over_plain_http_off_this_host() {
+        assert!(super::listing_client("http://llm.example.com/v1", 1).is_none());
+        assert!(super::listing_client("llm.example.com/v1", 1).is_none());
+        assert!(super::listing_client("https://llm.example.com/v1", 1).is_some());
+        assert!(super::listing_client("http://127.0.0.1:8080/v1", 1).is_some());
+        assert!(
+            super::list_openai_models("http://llm.example.com/v1", KEY)
+                .await
+                .is_empty()
+        );
     }
 }

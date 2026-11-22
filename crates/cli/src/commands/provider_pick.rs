@@ -87,8 +87,8 @@ pub struct ChosenKey {
 pub async fn list_models(provider: &str, base_url: &str, api_key: &str) -> Vec<String> {
     match provider {
         "openai" | "tinfoil" => super::list_openai_models(base_url, api_key).await,
-        "anthropic" => super::list_anthropic_models(api_key).await,
-        "gemini" => super::list_gemini_models(api_key).await,
+        "anthropic" => super::list_anthropic_models(base_url, api_key).await,
+        "gemini" => super::list_gemini_models(base_url, api_key).await,
         "ollama" => super::list_ollama_models(base_url).await,
         "bedrock" => Vec::new(),
         _ => super::list_openai_compatible_models(base_url, api_key)
@@ -215,39 +215,27 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
         }
         2 => {
             // Anthropic
-            let key = api_key_for(cfg, "anthropic", "  API key: ")?;
-            let models = super::list_anthropic_models(&key.secret).await;
+            let base_url = "https://api.anthropic.com/v1";
+            let key = api_key_for(cfg, "anthropic", base_url, "  API key: ")?;
+            let models = super::list_anthropic_models(base_url, &key.secret).await;
             let model = super::pick_model(models)?;
-            choice(
-                "anthropic",
-                model,
-                "https://api.anthropic.com/v1".to_string(),
-                Some(key),
-            )
+            choice("anthropic", model, base_url.to_string(), Some(key))
         }
         3 => {
             // OpenAI
-            let key = api_key_for(cfg, "openai", "  API key: ")?;
-            let models = super::list_openai_models("https://api.openai.com/v1", &key.secret).await;
+            let base_url = "https://api.openai.com/v1";
+            let key = api_key_for(cfg, "openai", base_url, "  API key: ")?;
+            let models = super::list_openai_models(base_url, &key.secret).await;
             let model = super::pick_model(models)?;
-            choice(
-                "openai",
-                model,
-                "https://api.openai.com/v1".to_string(),
-                Some(key),
-            )
+            choice("openai", model, base_url.to_string(), Some(key))
         }
         4 => {
             // Google Gemini
-            let key = api_key_for(cfg, "gemini", "  API key: ")?;
-            let models = super::list_gemini_models(&key.secret).await;
+            let base_url = "https://generativelanguage.googleapis.com/v1beta";
+            let key = api_key_for(cfg, "gemini", base_url, "  API key: ")?;
+            let models = super::list_gemini_models(base_url, &key.secret).await;
             let model = super::pick_model(models)?;
-            choice(
-                "gemini",
-                model,
-                "https://generativelanguage.googleapis.com/v1beta".to_string(),
-                Some(key),
-            )
+            choice("gemini", model, base_url.to_string(), Some(key))
         }
         5 => {
             // AWS Bedrock
@@ -262,7 +250,7 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
             // default: a model id written into this repo is a guess
             // about someone else's catalogue.
             let model: String = super::pick_model(Vec::new())?;
-            let key = match offer_stored_key(cfg, "bedrock")? {
+            let key = match offer_stored_key(cfg, "bedrock", &base)? {
                 Some(secret) => ChosenKey {
                     secret,
                     fresh: false,
@@ -290,7 +278,12 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
             println!("  against the published enclave repo, then pins TLS to the attested cert.");
             println!("  See the Tinfoil section of docs/configuration.md for the trust model.");
             println!("  Get an API key at https://dash.tinfoil.sh");
-            let key = api_key_for(cfg, "tinfoil", "  API key: ")?;
+            let key = api_key_for(
+                cfg,
+                "tinfoil",
+                "https://inference.tinfoil.sh/v1",
+                "  API key: ",
+            )?;
             let models =
                 super::list_openai_models("https://inference.tinfoil.sh/v1", &key.secret).await;
             let model = super::pick_model(models)?;
@@ -360,12 +353,12 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
             let (base_url, key, models, manual_model) = loop {
                 let product_id: String =
                     Input::new().with_prompt("  Product ID").interact_text()?;
+                let base_url = format!("https://api.infomaniak.com/2/ai/{product_id}/openai/v1");
                 let key = if std::mem::take(&mut offer_stored) {
-                    api_key_for(cfg, "infomaniak", "  API token: ")?
+                    api_key_for(cfg, "infomaniak", &base_url, "  API token: ")?
                 } else {
                     fresh(super::read_secret("  API token: ")?)
                 };
-                let base_url = format!("https://api.infomaniak.com/2/ai/{product_id}/openai/v1");
 
                 let summary =
                     match super::list_openai_compatible_models(&base_url, &key.secret).await {
@@ -417,7 +410,7 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
             let mut offer_stored = true;
             let (key, models, manual_model) = loop {
                 let key = if std::mem::take(&mut offer_stored) {
-                    api_key_for(cfg, "hetzner", "  API token: ")?
+                    api_key_for(cfg, "hetzner", base_url, "  API token: ")?
                 } else {
                     fresh(super::read_secret("  API token: ")?)
                 };
@@ -457,7 +450,7 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
                 .default(true)
                 .interact()?;
             if has_key {
-                let key = api_key_for(cfg, "custom", "  API key: ")?;
+                let key = api_key_for(cfg, "custom", &url, "  API key: ")?;
                 let models = super::list_openai_models(&url, &key.secret).await;
                 let model = super::pick_model(models)?;
                 choice("custom", model, url, Some(key))
@@ -520,13 +513,18 @@ fn keep_plan_sign_in(cfg: &GatewayConfig, entry: &str) -> Result<bool> {
         .interact()?)
 }
 
-/// A live key for this provider, if the vault holds one and the
-/// operator wants to keep it. Re-running setup to switch providers
+/// A live key for this provider, if the vault holds one that may be
+/// sent to `base_url` and the operator wants to keep it. Re-running setup to switch providers
 /// used to ask for a key the vault already had, and storing the answer
 /// reset the key's rotation date. The names are read first, which
 /// needs no passphrase, so a first setup is not asked for one here.
-/// An expired key reads as absent.
-fn offer_stored_key(cfg: &GatewayConfig, provider_name: &str) -> Result<Option<String>> {
+/// An expired key reads as absent, and so does one stored for another
+/// origin: setup sends the key to `base_url` to list its models.
+fn offer_stored_key(
+    cfg: &GatewayConfig,
+    provider_name: &str,
+    base_url: &str,
+) -> Result<Option<String>> {
     let name = format!("{provider_name}-api-key");
     let names = CredentialStore::names(&cfg.vault_db_path()).unwrap_or_default();
     if !names.contains(&name) {
@@ -536,7 +534,7 @@ fn offer_stored_key(cfg: &GatewayConfig, provider_name: &str) -> Result<Option<S
     let keychain = probe_keychain(&cfg.data_dir, move || pp);
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
-    let Some(key) = stored_api_key(&store, provider_name) else {
+    let Some(key) = stored_api_key(&store, provider_name, base_url) else {
         return Ok(None);
     };
     let keep = Confirm::new()
@@ -547,17 +545,26 @@ fn offer_stored_key(cfg: &GatewayConfig, provider_name: &str) -> Result<Option<S
 }
 
 /// The provider's key as the vault holds it, or `None` when there is
-/// no key under that name or it has expired.
-fn stored_api_key(store: &CredentialStore, provider_name: &str) -> Option<String> {
+/// no key under that name, it has expired, or its binding does not
+/// allow it to be sent to this provider at `base_url`.
+fn stored_api_key(store: &CredentialStore, provider_name: &str, base_url: &str) -> Option<String> {
     store
-        .retrieve(&format!("{provider_name}-api-key"))
+        .retrieve_for(
+            &format!("{provider_name}-api-key"),
+            &super::destinations::provider(provider_name, base_url),
+        )
         .ok()
         .map(|(secret, _)| secret.expose().to_string())
 }
 
 /// The stored key if the operator keeps it, otherwise what they type.
-fn api_key_for(cfg: &GatewayConfig, provider_name: &str, prompt: &str) -> Result<ChosenKey> {
-    Ok(match offer_stored_key(cfg, provider_name)? {
+fn api_key_for(
+    cfg: &GatewayConfig,
+    provider_name: &str,
+    base_url: &str,
+    prompt: &str,
+) -> Result<ChosenKey> {
+    Ok(match offer_stored_key(cfg, provider_name, base_url)? {
         Some(secret) => ChosenKey {
             secret,
             fresh: false,
@@ -584,20 +591,37 @@ mod tests {
         (tmp, store)
     }
 
+    const ANTHROPIC: &str = "https://api.anthropic.com/v1";
+
+    /// Store `provider`'s key as setup does: allowed at `base_url`.
+    fn put(
+        store: &CredentialStore,
+        provider: &str,
+        base_url: &str,
+        value: &str,
+        expires_at: Option<wirken_time::Timestamp>,
+    ) {
+        let mut binding = wirken_vault::Binding::default();
+        binding.grant(crate::commands::destinations::provider(provider, base_url));
+        store
+            .store_bound(
+                &format!("{provider}-api-key"),
+                provider,
+                &VaultSecret::new(value.into()),
+                expires_at,
+                None,
+                &binding,
+                wirken_vault::CredentialKind::Secret,
+            )
+            .unwrap();
+    }
+
     #[test]
     fn a_live_key_is_offered() {
         let (_tmp, store) = store();
-        store
-            .store(
-                "anthropic-api-key",
-                "anthropic",
-                &VaultSecret::new("sk-stored".into()),
-                None,
-                None,
-            )
-            .unwrap();
+        put(&store, "anthropic", ANTHROPIC, "sk-stored", None);
         assert_eq!(
-            stored_api_key(&store, "anthropic").as_deref(),
+            stored_api_key(&store, "anthropic", ANTHROPIC).as_deref(),
             Some("sk-stored")
         );
     }
@@ -605,31 +629,61 @@ mod tests {
     #[test]
     fn another_providers_key_is_not() {
         let (_tmp, store) = store();
-        store
-            .store(
-                "openai-api-key",
-                "openai",
-                &VaultSecret::new("sk-openai".into()),
-                None,
-                None,
-            )
-            .unwrap();
-        assert_eq!(stored_api_key(&store, "anthropic"), None);
+        put(
+            &store,
+            "openai",
+            "https://api.openai.com/v1",
+            "sk-openai",
+            None,
+        );
+        assert_eq!(stored_api_key(&store, "anthropic", ANTHROPIC), None);
     }
 
     #[test]
     fn an_expired_key_is_not() {
         let (_tmp, store) = store();
+        put(
+            &store,
+            "anthropic",
+            ANTHROPIC,
+            "sk-old",
+            Some(wirken_time::now() - wirken_time::days(1)),
+        );
+        assert_eq!(stored_api_key(&store, "anthropic", ANTHROPIC), None);
+    }
+
+    /// Setup sends the key it keeps to the endpoint being set up, to
+    /// list its models. A key stored for another origin is not offered
+    /// for that, and neither is one stored with no destination.
+    #[test]
+    fn a_key_stored_for_another_origin_is_not_offered() {
+        let (_tmp, store) = store();
+        put(
+            &store,
+            "custom",
+            "https://llm.example.com/v1",
+            "sk-custom",
+            None,
+        );
+        assert_eq!(
+            stored_api_key(&store, "custom", "https://llm.example.com/v2").as_deref(),
+            Some("sk-custom"),
+            "the same origin under another path"
+        );
+        assert_eq!(
+            stored_api_key(&store, "custom", "https://other.example.net/v1"),
+            None
+        );
         store
             .store(
                 "anthropic-api-key",
                 "anthropic",
-                &VaultSecret::new("sk-old".into()),
-                Some(wirken_time::now() - wirken_time::days(1)),
+                &VaultSecret::new("sk-unbound".into()),
+                None,
                 None,
             )
             .unwrap();
-        assert_eq!(stored_api_key(&store, "anthropic"), None);
+        assert_eq!(stored_api_key(&store, "anthropic", ANTHROPIC), None);
     }
 
     /// A provider with a fixed endpoint needs no `--base-url`; the
