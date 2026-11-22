@@ -100,13 +100,11 @@ jobs:
       # anywhere, and checking one crate leaves them to surface in the
       # release build, which only runs on a tag.
       #
-      # No --all-targets: this is parity with what the release build
-      # compiles, which is the class that burned v1.14.0 and v1.15.0.
-      # Test code across the adapter crates has never been compiled for
-      # Windows and does not pass yet; widening to --all-targets is
-      # tracked separately.
+      #
+      # --all-targets compiles the test code too. A test that needs a
+      # Unix socket or another Unix-only API is under `cfg(unix)`.
       - name: Check workspace
-        run: cargo check --workspace
+        run: cargo check --workspace --all-targets
 
       - name: Build ipc crate
         run: cargo build -p wirken-ipc --tests

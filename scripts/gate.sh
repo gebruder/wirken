@@ -71,7 +71,7 @@ same_as_ci() {
 # Smoke workflow's "Check workspace" step compiles it. That step runs
 # on a Windows host for the MSVC target; this one cross-checks for the
 # GNU target, which sees the same `cfg(windows)` and `cfg(unix)` code.
-# No --all-targets, as there: test code is not compiled for Windows.
+# --all-targets, as there: test code is compiled for Windows too.
 WINDOWS_TARGET=x86_64-pc-windows-gnu
 windows_check() {
 	rustup target list --installed 2>/dev/null | grep -qxF "$WINDOWS_TARGET" || {
@@ -82,7 +82,7 @@ windows_check() {
 		echo "x86_64-w64-mingw32-gcc is not installed: apt-get install gcc-mingw-w64-x86-64"
 		return 1
 	}
-	RUSTFLAGS="-D warnings" cargo check --workspace --target "$WINDOWS_TARGET"
+	RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --target "$WINDOWS_TARGET"
 }
 
 # Documentation: a Markdown file at the root or under docs/ that no
