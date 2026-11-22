@@ -98,6 +98,7 @@ impl UpstreamClient {
         upstream: Upstream,
         key: Option<Arc<dyn ProviderKeySource>>,
         leak: Arc<LeakMatcher>,
+        idle: std::time::Duration,
     ) -> anyhow::Result<Self> {
         let mut client = LlmClient::new(LlmConfig::from_provider(
             &upstream.provider,
@@ -106,6 +107,9 @@ impl UpstreamClient {
         ))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
         client.set_leak_matcher(leak);
+        client
+            .set_forward_idle_timeout(idle)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         if let Some(key) = &key {
             client.set_key_source(key.clone());
         }
@@ -905,6 +909,9 @@ mod tests {
 
     const PROVIDER_KEY: &str = "sk-provider-key-0123456789";
 
+    /// How long a test listener waits for a provider's next bytes.
+    const TEST_IDLE: std::time::Duration = std::time::Duration::from_millis(600);
+
     /// A provider's key, or the reason there is none.
     #[derive(Debug)]
     struct FixedKey(Result<String, String>);
@@ -1022,6 +1029,7 @@ mod tests {
                     },
                     key,
                     leak.clone(),
+                    TEST_IDLE,
                 )
                 .unwrap(),
             );
@@ -1733,6 +1741,61 @@ mod tests {
             ),
             "{rows:?}"
         );
+    }
+
+    /// A provider that sends the start of a stream and then nothing:
+    /// the stream ends at the idle timeout, and the row has the hash
+    /// of what was exchanged and says the exchange did not complete.
+    #[tokio::test]
+    async fn a_stream_that_goes_idle_is_ended_and_recorded_as_incomplete() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
+                              data: {\"partial\":1}\n\n",
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                });
+            }
+        });
+        let rig = rig(vec![("local", "custom", upstream, None)]).await;
+        let (token, value) = rig.issue("laptop", &["local"]);
+        let started = Instant::now();
+        let response = rig
+            .post(CHAT, &value, "{\"model\":\"m\",\"stream\":true}")
+            .await;
+        assert_eq!(response.status(), 200);
+        // The client's read ends when the proxy ends the stream.
+        let _ = response.bytes().await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+
+        let sent = "data: {\"partial\":1}\n\n";
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let rows = rig.rows(&proxy_session(&token.id, None));
+            if let Some(SessionEvent::ProxyResponse {
+                complete,
+                response_sha256,
+                response_bytes,
+                ..
+            }) = rows.get(1)
+            {
+                assert!(!complete);
+                assert_eq!(*response_bytes, sent.len() as u64);
+                assert_eq!(response_sha256.0, sha256_hex(sent.as_bytes()));
+                break;
+            }
+            assert!(Instant::now() < deadline, "no response row: {rows:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// A provider that cannot be reached answers 502, and the response

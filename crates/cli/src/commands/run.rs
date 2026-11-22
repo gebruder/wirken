@@ -251,8 +251,13 @@ fn proxy_state(
                  until it is: {why}"
             );
         }
-        let client = UpstreamClient::new(upstream.clone(), key, leak_matcher.clone())
-            .with_context(|| format!("proxy.json: upstream {name}"))?;
+        let client = UpstreamClient::new(
+            upstream.clone(),
+            key,
+            leak_matcher.clone(),
+            std::time::Duration::from_secs(proxy_config.idle_timeout_secs),
+        )
+        .with_context(|| format!("proxy.json: upstream {name}"))?;
         upstreams.insert(name.clone(), client);
     }
     let budget = match wirken_gateway::budget::BudgetStore::open(&cfg.budget_db_path()) {

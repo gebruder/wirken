@@ -433,6 +433,10 @@ pub(crate) fn bounded_raw(raw: &str) -> String {
 pub struct LlmClient {
     config: LlmConfig,
     http: reqwest::Client,
+    /// The client [`Self::forward`] sends through: `http` with an idle
+    /// timeout in place of the total one. A forwarded answer may
+    /// stream for as long as its client keeps reading.
+    forward_http: reqwest::Client,
     /// Recovery observer registered by the harness (lyrik dispatch
     /// runner, …). Receives per-attempt rate-limit notifications from
     /// `send_with_retry` so the harness can emit audit records as
@@ -505,10 +509,12 @@ impl LlmClient {
         let http = builder
             .build()
             .map_err(|e| AgentError::Http(format!("HTTP client: {e}")))?;
+        let forward_http = Self::forward_client(&config, DEFAULT_FORWARD_IDLE)?;
 
         Ok(Self {
             config,
             http,
+            forward_http,
             observer: Mutex::new(None),
             last_stop: Mutex::new(None),
             transport_retries: std::sync::atomic::AtomicU32::new(0),
@@ -520,6 +526,33 @@ impl LlmClient {
             plan_endpoints: crate::plan_auth::Endpoints::pinned(),
             plan_unavailable_backoff: crate::llm_responses::UNAVAILABLE_BACKOFF.to_vec(),
         })
+    }
+
+    /// The client forwarded calls use: the endpoint rules of every
+    /// other call here (HTTPS or loopback, no redirect followed), no
+    /// limit on how long an answer takes in all, and `idle` as the
+    /// longest wait for the next bytes of it.
+    fn forward_client(
+        config: &LlmConfig,
+        idle: std::time::Duration,
+    ) -> Result<reqwest::Client, AgentError> {
+        reqwest::Client::builder()
+            .https_only(!plain_http_to_loopback(&config.base_url))
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(idle)
+            .build()
+            .map_err(|e| AgentError::Http(format!("HTTP client: {e}")))
+    }
+
+    /// End a forwarded call when the provider has sent nothing for
+    /// `idle`. The wait for the first byte of an answer counts.
+    pub fn set_forward_idle_timeout(
+        &mut self,
+        idle: std::time::Duration,
+    ) -> Result<(), AgentError> {
+        self.forward_http = Self::forward_client(&self.config, idle)?;
+        Ok(())
     }
 
     /// Ask `source` before the model key is sent to an origin other
@@ -894,6 +927,12 @@ impl LlmClient {
     /// does not take ([`provider_speaks`]), and a body that carries a
     /// stored secret. Sent once; a failure or a 429 is the client's to
     /// retry.
+    ///
+    /// There is no limit on how long the answer takes in all. It ends
+    /// when the provider has sent nothing for the idle timeout
+    /// ([`Self::set_forward_idle_timeout`]), so a stream runs for as
+    /// long as it keeps arriving. A Tinfoil call goes through the
+    /// attested client, whose timeouts are that client's own.
     pub async fn forward(
         &self,
         shape: wirken_audit::ProxyShape,
@@ -929,7 +968,7 @@ impl LlmClient {
             )
         } else {
             (
-                self.http.clone(),
+                self.forward_http.clone(),
                 format!("{}/{path}", self.config.base_url),
             )
         };
@@ -1544,6 +1583,10 @@ impl LlmClient {
         &self.http
     }
 }
+
+/// How long a forwarded call waits for the provider's next bytes
+/// unless told otherwise.
+pub const DEFAULT_FORWARD_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The request headers a forwarded call keeps: the ones that describe
 /// the body or select the provider's API version. Everything else a
@@ -2771,6 +2814,82 @@ mod forward_tests {
             "{err}"
         );
         assert!(got.lock().unwrap().is_empty());
+    }
+
+    /// A provider that sends its head, then `pieces` chunks `gap`
+    /// apart, each one byte, and closes.
+    async fn slow_stream(pieces: usize, gap: std::time::Duration) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                              Connection: close\r\n\r\n",
+                        )
+                        .await;
+                    for _ in 0..pieces {
+                        tokio::time::sleep(gap).await;
+                        if stream.write_all(b"x").await.is_err() {
+                            return;
+                        }
+                        let _ = stream.flush().await;
+                    }
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        base
+    }
+
+    /// A forwarded answer is not cut for taking long: it runs past the
+    /// idle timeout many times over while bytes keep arriving. One
+    /// that stops arriving ends at the idle timeout.
+    #[tokio::test]
+    async fn a_forwarded_stream_ends_on_idleness_and_not_on_total_time() {
+        let idle = std::time::Duration::from_millis(400);
+        let client_for = |base: &str| {
+            let mut client = LlmClient::new(LlmConfig::from_provider(
+                "custom",
+                &format!("{base}/v1"),
+                "m",
+            ))
+            .unwrap();
+            client.set_forward_idle_timeout(idle).unwrap();
+            client
+        };
+
+        // Twelve bytes, 150 ms apart: 1.8 s in all, each gap inside
+        // the idle timeout.
+        let steady = slow_stream(12, std::time::Duration::from_millis(150)).await;
+        let started = std::time::Instant::now();
+        let response = client_for(&steady)
+            .forward(ProxyShape::OpenaiChat, b"{}".to_vec(), &[], None)
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "x".repeat(12));
+        assert!(started.elapsed() > idle * 3, "{:?}", started.elapsed());
+
+        // Two bytes, two seconds apart: the second never arrives in
+        // time.
+        let stalled = slow_stream(2, std::time::Duration::from_secs(2)).await;
+        let started = std::time::Instant::now();
+        let outcome = match client_for(&stalled)
+            .forward(ProxyShape::OpenaiChat, b"{}".to_vec(), &[], None)
+            .await
+        {
+            Ok(response) => response.text().await.map(|_| ()),
+            Err(_) => Ok(()),
+        };
+        assert!(outcome.is_err(), "a stalled stream was read to its end");
+        assert!(started.elapsed() < std::time::Duration::from_millis(1900));
     }
 
     /// A forwarded call follows no redirect, as an agent call does not.

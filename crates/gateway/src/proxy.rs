@@ -34,6 +34,10 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:18791";
 /// The largest request body the listener reads, unless configured.
 pub const DEFAULT_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 
+/// How long a forwarded call may go without a byte from the provider,
+/// unless configured.
+pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+
 /// What every token starts with.
 pub const TOKEN_PREFIX: &str = "wkp_";
 
@@ -56,6 +60,10 @@ pub struct ProxyConfig {
     pub upstreams: BTreeMap<String, Upstream>,
     #[serde(default = "default_max_body")]
     pub max_body_bytes: u64,
+    /// How long a forwarded call waits for the provider's next bytes
+    /// before it is ended. There is no limit on its length in all.
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_secs: u64,
     /// Where full request and response bodies are written. Absent
     /// means bodies are kept nowhere: the chain holds their hashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +76,10 @@ fn default_bind() -> String {
 
 fn default_max_body() -> u64 {
     DEFAULT_MAX_BODY_BYTES
+}
+
+fn default_idle_timeout() -> u64 {
+    DEFAULT_IDLE_TIMEOUT_SECS
 }
 
 /// One provider the proxy forwards to.
@@ -174,6 +186,11 @@ impl ProxyConfig {
 
     fn validate(&self) -> Result<(), GatewayError> {
         self.bind_addr()?;
+        if self.idle_timeout_secs == 0 {
+            return Err(GatewayError::Config(
+                "proxy.json: idle_timeout_secs must be above zero".into(),
+            ));
+        }
         if self.upstreams.is_empty() {
             return Err(GatewayError::Config(
                 "proxy.json: upstreams is empty: there is nowhere to forward to".into(),
@@ -664,6 +681,7 @@ mod tests {
         let config = ProxyConfig::load(tmp.path()).unwrap().unwrap();
         assert_eq!(config.bind_addr().unwrap().to_string(), DEFAULT_BIND);
         assert_eq!(config.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+        assert_eq!(config.idle_timeout_secs, DEFAULT_IDLE_TIMEOUT_SECS);
         assert!(config.archive.is_none());
 
         write(
@@ -686,6 +704,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         for (body, says) in [
             (r#"{"upstreams":{}}"#, "upstreams is empty"),
+            (
+                r#"{"idle_timeout_secs":0,"upstreams":{"a":{"provider":"ollama","base_url":"http://localhost/v1"}}}"#,
+                "idle_timeout_secs",
+            ),
             (
                 r#"{"upstreams":{"a b":{"provider":"ollama","base_url":"http://localhost/v1"}}}"#,
                 "upstream name",
