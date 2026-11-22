@@ -7756,7 +7756,10 @@ mod channel_overrides_tests {
         let store = CredentialStore::open(&vault_path, &keychain).unwrap();
         // Allowed to the providers these tests name.
         let mut binding = wirken_vault::Binding::default();
-        for (provider, base_url) in [("privatemode", "http://localhost:8080/v1"), ("openai", "")] {
+        for (provider, base_url) in [
+            ("privatemode", "http://localhost:8080/v1"),
+            ("openai", "https://api.openai.com/v1"),
+        ] {
             binding.grant(crate::commands::destinations::provider(provider, base_url));
         }
         store
@@ -7873,7 +7876,12 @@ mod channel_overrides_tests {
             "provider": "anthropic",
             "model": "base-model",
             "channel_overrides": {
-                "signal": {"provider": "openai", "model": "m", "api_key_name": "openai-plan"}
+                "signal": {
+                    "provider": "openai",
+                    "model": "m",
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key_name": "openai-plan"
+                }
             }
         });
         let err = resolve_channel_overrides(&named, tmp.path(), &vault_path, "test-passphrase")
