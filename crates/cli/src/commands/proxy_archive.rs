@@ -575,6 +575,9 @@ mod tests {
     const ENDPOINT_ENV: &str = "WIRKEN_TEST_S3_ENDPOINT";
     const ACCESS_ENV: &str = "WIRKEN_TEST_S3_ACCESS_KEY";
     const SECRET_ENV: &str = "WIRKEN_TEST_S3_SECRET_KEY";
+    /// Set to `1` where these tests must run: the CI job that starts
+    /// a server. A missing server then fails them.
+    const REQUIRE_ENV: &str = "WIRKEN_TEST_REQUIRE_S3";
 
     struct Live {
         archive: Archive,
@@ -621,6 +624,10 @@ mod tests {
     /// environment names.
     async fn live() -> Option<Live> {
         let Ok(endpoint) = std::env::var(ENDPOINT_ENV) else {
+            assert!(
+                std::env::var(REQUIRE_ENV).as_deref() != Ok("1"),
+                "{REQUIRE_ENV}=1 and {ENDPOINT_ENV} names no server"
+            );
             eprintln!("skipping: {ENDPOINT_ENV} names no S3-compatible server");
             return None;
         };

@@ -175,6 +175,58 @@ jobs:
           grep -q 'a_gvisor_injected_server_holds_a_placeholder_and_its_request_carries_the_credential \.\.\. ok' "$RUNNER_TEMP/gvisor-mcp.log"
           ! grep -q '^skipping:' "$RUNNER_TEMP/gvisor-mcp.log"
 
+  archive:
+    name: Archive under Object Lock
+    runs-on: ubuntu-latest
+    env:
+      # An S3-compatible server with Object Lock, pinned by digest.
+      S3_IMAGE: rustfs/rustfs@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
+      WIRKEN_TEST_S3_ENDPOINT: http://127.0.0.1:19000
+      WIRKEN_TEST_S3_ACCESS_KEY: wirken-ci
+      WIRKEN_TEST_S3_SECRET_KEY: wirken-ci-secret-0123456789
+      # A test that finds no server fails here.
+      WIRKEN_TEST_REQUIRE_S3: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
+      - name: Install Cap'n Proto
+        run: sudo apt-get install -y capnproto
+      - name: Start the S3-compatible server
+        run: |
+          docker run -d --name s3 -p 127.0.0.1:19000:9000 \
+            -e RUSTFS_ACCESS_KEY="$WIRKEN_TEST_S3_ACCESS_KEY" \
+            -e RUSTFS_SECRET_KEY="$WIRKEN_TEST_S3_SECRET_KEY" \
+            "$S3_IMAGE" /data
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19000/ || true)
+            [ "$code" != "000" ] && break
+            sleep 1
+          done
+          [ "$code" != "000" ] || { docker logs s3; exit 1; }
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-archive-${{ hashFiles('**/Cargo.lock') }}
+      - name: Archive, Object Lock and redaction against the server
+        run: |
+          cargo test -p wirken-cli --bin wirken proxy_archive -- --nocapture 2>&1 | tee "$RUNNER_TEMP/archive.log"
+          grep -q 'an_archived_body_is_encrypted_locked_and_found_by_its_hash \.\.\. ok' "$RUNNER_TEMP/archive.log"
+          grep -q 'a_missing_or_replaced_object_fails_the_check \.\.\. ok' "$RUNNER_TEMP/archive.log"
+          grep -q 'a_redacted_body_stays_locked_and_cannot_be_read \.\.\. ok' "$RUNNER_TEMP/archive.log"
+          ! grep -q '^skipping:' "$RUNNER_TEMP/archive.log"
+      # The gateway serving the proxy with the archive on the server:
+      # two conversations, verify, export, and one session redacted at
+      # a pseudo-terminal.
+      - name: Proxy sessions through the gateway with the archive
+        run: |
+          cargo test -p wirken-cli --test proxy_forwards_through_the_gateway -- --nocapture 2>&1 | tee "$RUNNER_TEMP/archive-e2e.log"
+          grep -q 'two_conversations_are_two_sessions_and_one_is_redacted_whole \.\.\. ok' "$RUNNER_TEMP/archive-e2e.log"
+          ! grep -q '^skipping:' "$RUNNER_TEMP/archive-e2e.log"
+
   corpus:
     name: Hostile corpus
     runs-on: ubuntu-latest
