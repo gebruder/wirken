@@ -12,6 +12,39 @@ tagged.
 
 ### Added
 
+- Inference proxy. With a `proxy.json` in the data directory, `wirken run`
+  serves a listener that a client Wirken does not run points its model base
+  URL at: OpenAI chat completions and Anthropic messages, streaming included,
+  forwarded in the shape they arrive in, byte for byte, to the configured
+  providers. Clients authenticate with a token from `wirken proxy token
+  issue`, which names the upstreams and models it may use and carries call
+  and spend ceilings. The provider key is read from the vault per call under
+  the destination check agent calls get. Each call is a `proxy_request` and a
+  `proxy_response` row with the SHA-256 of each body as exchanged; each
+  refusal a `proxy_refused` row. Loopback unless `bind_beyond_loopback` is
+  set (`a_chat_completion_is_forwarded_and_recorded_with_both_hashes`,
+  `crates/cli/src/commands/proxy_server.rs`;
+  `crates/cli/tests/proxy_forwards_through_the_gateway.rs`;
+  [docs/inference-proxy.md](docs/inference-proxy.md)).
+
+- Write-once archive for proxied calls. `archive` in `proxy.json` writes each
+  request and response body to an S3-compatible bucket under Object Lock,
+  keyed by the hash on its row and encrypted before upload under a key of its
+  own. `wirken proxy archive redact <sha256>` destroys a body's key: the
+  object stays locked and cannot be read. `wirken sessions verify` on a proxy
+  lane reads each archived body back and compares it with its row, exit 7 on
+  a mismatch; `--skip-archive` checks the chain alone
+  (`an_archived_body_is_encrypted_locked_and_found_by_its_hash`,
+  `crates/cli/src/commands/proxy_archive.rs`;
+  [docs/inference-proxy.md](docs/inference-proxy.md#write-once-archive)).
+
+- `wirken sessions export <id> --format atif` writes a session, agent-run or
+  proxied, as an ATIF v1.8 trajectory, checked against the format before it
+  is written. Rewritten rows, replaced tool output and redacted bodies are
+  exported as they stand now (`an_agent_session_exports_as_a_valid_trajectory`,
+  `crates/audit/src/atif.rs`; `crates/cli/tests/sessions_export_atif.rs`;
+  [docs/inference-proxy.md](docs/inference-proxy.md#exporting-a-session)).
+
 - `inject` in a stdio MCP entry's `sandbox` block: one `vault:` credential the
   server never holds. Its container gets a placeholder and a plain-HTTP base
   URL on its own loopback; `wirken-mcp-proxy` maps the path, sets the header

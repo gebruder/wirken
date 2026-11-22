@@ -378,6 +378,19 @@ wirken hooks register <ID> <PUBKEY_HEX> --type <observe|veto|egress>
 See [enforcement-model.md](enforcement-model.md#veto-and-egress-hooks) and
 [siem-forwarder.md](siem-forwarder.md#observe-hook).
 
+## wirken proxy
+
+```bash
+wirken proxy token issue <NAME> --upstream U [--upstream U2] [--model M]
+                               [--ceiling-usd N] [--ceiling-calls N] [--window hour|day|week]
+wirken proxy token revoke <ID-OR-NAME>
+wirken proxy token list
+wirken proxy archive redact <SHA256> --reason <WHY>
+```
+
+`issue`, `revoke` and `redact` run at a terminal and refuse inside a Wirken
+`exec`. See [inference-proxy.md](inference-proxy.md).
+
 ## wirken approvers
 
 Channel-adapter approver allowlist and per-adapter approval chat.
@@ -447,11 +460,15 @@ Flags, exit codes, JSON schema and what each verification proves:
 ```bash
 wirken sessions list [--channel C] [--parent SESSION_ID]
 wirken sessions close <SESSION-ID>
-wirken sessions verify <SESSION-ID> [--strict] [--with-parent] [--with-children]
+wirken sessions verify <SESSION-ID> [--strict] [--with-parent] [--with-children] [--skip-archive]
+wirken sessions export <SESSION-ID> --format atif [--output FILE] [--skip-archive]
 ```
 
 What `verify` replays and what a `tools_hash` attests:
-[audit-cli.md](audit-cli.md#wirken-sessions-verify).
+[audit-cli.md](audit-cli.md#wirken-sessions-verify). A proxy lane
+(`proxy-<token id>`) is verified against its chain and its archived bodies,
+and `export` writes a session as a trajectory file:
+[inference-proxy.md](inference-proxy.md#verifying-a-proxy-session).
 
 ## wirken permissions
 

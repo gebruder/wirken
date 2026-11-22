@@ -275,6 +275,7 @@ In defender mode Lyrik also checks a fix. For each confirmed finding it writes (
 [Multiple agents](docs/multi-agent.md) ·
 [Credentials and OAuth scopes](docs/credentials.md) ·
 [Cost monitoring](docs/cost-monitoring.md) ·
+[Inference proxy](docs/inference-proxy.md) (other clients' model calls through Wirken, write-once archive, trajectory export) ·
 [Getting the chain out](docs/siem-forwarder.md) (SIEM, hooks, OpenTelemetry) ·
 [Imported archives](docs/imported-archives.md)
 
