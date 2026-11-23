@@ -25,7 +25,7 @@ moves every process at once.
 | `cron.db` | Scheduled cron jobs | `wirken cron create` |
 | `memory.db` | Labelled cross-channel memory entries | `wirken run` |
 | `imported.db` | Imported assistant archives | `wirken import` |
-| `lyrik.json` | Lyrik settings. Keys read: `walks_dir`, the walks directory for targets that do not set their own (default `lyrik/walks/`), `walk_tool_rounds`, the model calls a walk's turn may make (default 20), and `fix_tool_rounds`, the model calls each agent of the defender fix step may make (default 60); see [lyrik.md](lyrik.md#lyrikconfigjson) | Manual |
+| `lyrik.json` | Lyrik settings. Keys read: `walks_dir`, the walks directory for targets that do not set their own (default `lyrik/walks/`), `walk_tool_rounds`, the model calls a walk's turn may make (default 20), `fix_tool_rounds`, the model calls each agent of the defender fix step may make (default 60), `walk_continuations`, `transport_retries`, `run_ceiling_usd`, `run_ceiling_model_seconds` and `run_ceiling_model_calls`; see [lyrik.md](lyrik.md#lyrikconfigjson) | Manual |
 | `update.json` | `wirken update` settings. Key read: `mirror`, a local mirror of the release files used instead of GitHub; see [update.md](update.md#mirrors) | Manual |
 | `sandbox.json` | Sandbox settings. Keys read: `mode`, `image`, `network`, `shell`, `sidecar_binary`, `memory_mb`, `pids_limit`, `timeout_secs`; any other key is named in a startup warning and ignored. `mode` is `exec-only`, `gvisor` or `off`. With no file, or no `mode` key, the mode is `exec-only`. A `mode` that is none of the three, or a file that cannot be read or parsed, is refused with an error naming the file and the value: `wirken run`, `wirken ask`, `wirken lyrik` and the MCP proxy do not start | `wirken setup` or manual |
 | `siem.json` | SIEM forwarding config | Manual or org config |
@@ -38,16 +38,22 @@ moves every process at once.
 | `signing-key.hex` | Per-author skill and MCP signing seed | `wirken skills sign` |
 | `keychain/` | age-encrypted device key when the OS keychain is unavailable | `wirken setup` |
 | `skills/` | Installed skills | `wirken skills install` or setup |
-
-`wirken run` reads `provider.json`, `agent_config.db`, `tool_policy.json`,
-`sandbox.json`, `budget.json`, `permissions.json`, `mcp.json` and `skills/`
-once at start; a change to any of them takes effect at the next start. It
-reads `permissions.db` and `senders.db` on every check, `cron.db` on every
-scheduler tick, and takes up changes to `vault.db`, `adapters.db` and
-`hooks.db` within seconds.
 | `agents/<id>/` | Per-agent `identity.{key,pub}`, `workspace/`, `skills/`, `mcp.json`. The `workspace/` is shared by all of that agent's channels and sessions | `wirken agents add` |
 | `sockets/` | Unix domain sockets for IPC. On Windows the gateway uses named pipes derived from these path stems and the directory holds no live files | `wirken run` |
 | `workspace/` | Default agent workspace, shared by all of its channels and sessions | `wirken run` |
+| `proxy.json` | The proxy listener: upstreams, bind, TLS, archive. The listener is off without it; see [inference-proxy.md](inference-proxy.md#turning-it-on) | Manual |
+| `proxy_tokens.db` | Proxy client tokens, as digests, and a hash of each request's message list for thirty days | `wirken proxy token issue` |
+| `proxy_archive_keys.db` | One wrapped key for each archived body, and the encrypted search text of each. Back it up with `vault.db`; see [proxy-archive.md](proxy-archive.md) | `wirken run` |
+| `approvers.db` | Channel approver allowlist and approval chats | `wirken approvers add` |
+
+`wirken run` reads `provider.json`, `agent_config.db`, `tool_policy.json`,
+`sandbox.json`, `budget.json`, `permissions.json`, `mcp.json`, `skills/`, and
+`proxy.json` with its certificate, once at start; a change to any of them
+takes effect at the next start. It
+reads `permissions.db` and `senders.db` on every check, `proxy_tokens.db` on
+every proxied request, `cron.db` on every
+scheduler tick, and takes up changes to `vault.db`, `adapters.db` and
+`hooks.db` within seconds.
 
 The data directory is created at mode 0o700, and re-chmod'd on every start so
 a loose 0o755 left by an earlier run or a permissive umask converges back.
@@ -66,6 +72,11 @@ Values `wirken setup` writes: `openai`, `anthropic`, `gemini`, `bedrock`,
 `ollama`, `tinfoil`, `infomaniak`, `hetzner`, `custom`. Privatemode is saved
 as `openai` pointed at its loopback proxy (`http://localhost:8080/v1` by
 default), and NIM as `custom`, which covers any OpenAI-compatible endpoint.
+
+`base_url` is HTTPS, or plain HTTP to `localhost`, `127.0.0.1` or `[::1]`. A
+host that is not ASCII is written in its `xn--` form. No provider request
+follows a redirect, and the key is sent only to the origin its vault entry
+allows ([credentials.md](credentials.md#where-a-credential-may-go)).
 
 Bedrock adds a `region` field:
 
@@ -293,7 +304,10 @@ Each stdio server runs in its own container with no network unless
 refused; `"sandbox": "off"` runs that one server on the host instead. A
 `vault:` value in `env` resolves from the encrypted vault and reaches the
 server as a file, `NAME_FILE`, unless `sandbox.secrets_in_env` lists the
-variable. See [mcp.md](mcp.md).
+variable. With `sandbox.inject` the server gets neither: it holds a
+placeholder, and the MCP proxy sets the credential on its requests to the one
+bound host ([mcp.md](mcp.md#injecting-a-credential)). An HTTP server's calls
+follow no redirect. See [mcp.md](mcp.md).
 
 ## Environment variables
 
@@ -305,6 +319,7 @@ variable. See [mcp.md](mcp.md).
 | `WIRKEN_CACHE_MODE` | `drop` bypasses the agent LRU cache so every inbound message wakes a fresh agent from the session log. Default: `cached` |
 | `WIRKEN_AGENT_CACHE_SIZE` | LRU cache capacity in hot sessions. Default: `64` |
 | `WIRKEN_ASK_APPROVAL_TIMEOUT_S` | Deadline on the `wirken ask` approval prompt. Default: `60` |
+| `WIRKEN_CLI_APPROVAL_TIMEOUT_S` | Seconds a request waits in the operator's pending queue (`wirken permissions pending`) before it is denied. Default: `300` |
 | `WIRKEN_VETO_BUDGET_MS` / `WIRKEN_EGRESS_BUDGET_MS` | Cumulative hook-dispatch budget. Default `1000` each, per-hook ceiling 500ms |
 | `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES` | Flush cycles between continuous verification passes. Default: `100` |
 | `WIRKEN_LIVE_RELOAD_INTERVAL_S` | Seconds between the gateway's looks at `vault.db`, `adapters.db` and `hooks.db` for changes made by another process. Default: `2`. A whole number from `1` to `3600`; `wirken run` does not start on anything else |

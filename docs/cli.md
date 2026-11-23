@@ -13,8 +13,11 @@ every `credentials` subcommand but `list` and `show`; `vault reset` and
 `channel add` and `remove`; `cron create`, `delete`, `pause` and `resume`;
 `hooks register` and `unregister`; `persona create`, `edit` and `delete`;
 `preset install`, `schedule` and `unschedule`; `webchat open`; `zirkel bind`,
-`unbind` and `auth-set`; `setup`; `import`. Reads run, and so does `sessions close`, which only
-takes authority away.
+`unbind` and `auth-set`; `proxy token issue` and `revoke`, and `proxy archive
+redact`; `setup`; `import`. Other reads run, and so does `sessions close`,
+which only takes authority away. `sessions search` is a read and is refused
+all the same: inside an `exec` it would read every session to the agent that
+ran it.
 
 ## wirken setup
 
@@ -29,11 +32,15 @@ Interactive wizard: provider, channels, credentials, service, sandbox, audit.
 ## wirken run
 
 Starts the gateway. Spawns adapter processes, serves WebChat, accepts
-connections.
+connections. With a `proxy.json` in the data directory it also serves the
+proxy listener, on 127.0.0.1:18791 by default ([proxy.md](proxy.md)).
 
 | Option | Description |
 |--------|-------------|
 | `-p, --port <PORT>` | WebChat port (default: 18790) |
+| `--provider <PROVIDER>` | Run the default agent against this provider for this run only. Changing the provider needs `--model` too |
+| `--model <MODEL>` | Run the default agent against this model for this run only |
+| `--base-url <BASE_URL>` | API base URL for this run |
 
 ### What WebChat serves
 
@@ -274,11 +281,16 @@ wirken agents stop <ID> [--revoke-all]
 wirken agents resume <ID>
 wirken agents bind <AGENT> <CHANNEL>
 wirken agents set <ID> [--model M] [--base-url U] [--tools-enabled true|false|auto] [--api-key]
+                       [--exempt-exec-mcp-output true|false]
 wirken agents set-egress <ID> --channel C --mode none|allowlist|open [--domains "a,b"]
 wirken agents allow-subagent <PARENT> <CHILD> [--tools T] [--max-tier tier1|tier2|tier3]
                                               [--max-rounds N] [--max-runtime S]
 wirken agents deny-subagent <PARENT> <CHILD>
 ```
+
+`--exempt-exec-mcp-output true` stops `exec` and MCP output from sending the
+agent's `http_request` to the operator. It does not change sandbox egress
+([egress.md](egress.md#after-a-restricting-read)).
 
 An agent in plan mode (`--auth plan`) runs on a sign-in stored by `wirken
 credentials authorize`, named by `--credential` (default `openai-plan`). It
@@ -606,6 +618,6 @@ timestamp, target and binary path. Makes no network request.
 wirken doctor
 ```
 
-Checks the data directory, provider config, vault access, adapter registry,
+Checks the data directory, `provider.json`, that `vault.db` exists, the adapter registry,
 MCP signing, the audit log and its alarm log, the attestation chain across all
 sessions, Docker, and gVisor.
