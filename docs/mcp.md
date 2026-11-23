@@ -1,6 +1,6 @@
 # MCP Setup
 
-Wirken includes an MCP (Model Context Protocol) client. MCP servers expose tools, resources, and prompts that the agent can use alongside its built-in tools.
+Wirken includes an MCP (Model Context Protocol) client. MCP servers expose tools, resources, and prompts that the agent can use alongside its built-in tools. A client Wirken does not run can be granted an agent's signed MCP servers and call their tools at the proxy's MCP endpoint, under that agent's Tier 3 gate ([proxy-mcp.md](proxy-mcp.md)); nothing about a server changes.
 
 A stdio MCP server runs in a container of its own, under the same hardening as the `exec` sandbox. It is installed beforehand, nothing is fetched when it starts, and it has no network unless its entry lists the hosts it may reach. Stdio servers therefore need Docker, or a per-server opt-out that runs them on the host.
 
@@ -233,7 +233,7 @@ On startup, `wirken-mcp-proxy`:
 4. Performs the MCP `initialize` handshake and calls `tools/list` to discover tools.
 5. Adds discovered tools to the agent's tool definitions, prefixed with `mcp_{server}_`.
 
-When the LLM calls an MCP tool, the proxy routes the call to the correct server via `tools/call` and returns the result. When the gateway stops, the proxy stops and removes every container, sidecar, network and secret file it started. A gateway killed outright is noticed too: the proxy holds a connection open on the gateway's refresh socket, and when it closes the proxy shuts down the same way and exits. The removal at startup (step 2) stays as the backstop.
+When the LLM calls an MCP tool, the proxy routes the call to the correct server via `tools/call` and returns the result. When the gateway stops, the proxy stops and removes every container, sidecar, network and secret file it started. A gateway killed outright is noticed too: the proxy holds a connection open on the gateway's refresh socket, and when it closes the proxy shuts down the same way and exits. The removal at startup (step 1) stays as the backstop.
 
 ### Restarts
 

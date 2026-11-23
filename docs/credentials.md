@@ -79,8 +79,12 @@ the key. `wirken credentials add` takes the same flags as `grant`. Anything else
 goes nowhere until granted.
 
 A credential is not handed to a destination it does not allow: `http_request`
-is refused, an MCP server starts without it, an agent starts with no key, and
-an adapter is not started. Each refusal is a `credential_destination_refused`
+is refused, an MCP server starts without it, an agent starts with no key, an
+adapter is not started, and a call a proxy client makes to that upstream is
+refused (`credential_refused`). The bucket credentials of a proxy archive are
+read under a `--host` binding to the archive's endpoint
+([proxy-archive.md](proxy-archive.md#write-once-archive)). A proxy client's
+token is not in the vault: only its SHA-256 is kept, in `proxy_tokens.db`. Each refusal is a `credential_destination_refused`
 row naming the configuration that asked, and the gateway logs the `grant`
 command that would allow it. Each handoff at start or respawn is a
 `credential_handed_out` row.
@@ -271,7 +275,7 @@ Non-OAuth credentials cannot be rescoped; the command errors with
 a typed message before any picker UI is rendered. Use `wirken
 credentials rotate <name>` to replace a raw secret.
 
-Every credentials verb reads the vault passphrase from
+Every credentials verb but `grant` and `revoke` reads the vault passphrase from
 `WIRKEN_VAULT_PASSPHRASE` when it is set and prompts only when it is
 not. `add` and `rotate` take the value from `--stdin` or
 `--value-file`, so a setup script or a container entrypoint can store
@@ -340,9 +344,9 @@ Two layers protect against accidental token disclosure:
    impl, so `{}` print is a compile error.
 
 Together these mean a bearer token cannot reach stdout, stderr,
-or the tracing log through ordinary Rust formatting. The encrypted
-vault row remains the only place the secret exists outside of an
-in-flight HTTP request.
+or the tracing log through ordinary Rust formatting. On disk the encrypted
+vault row is the only place the token is kept; in memory it is in the
+gateway, the leak matcher and, for an MCP credential, the MCP proxy.
 
 ## Plan sign-in (openai)
 

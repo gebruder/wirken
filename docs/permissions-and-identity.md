@@ -232,9 +232,13 @@ The surfaces, and what each adds after the card:
   `wirken run` attaches a channel approval gate to.
 - A session on any other channel, Slack included, prompts on the CLI
   surface: the request appears in `wirken permissions pending list` and is
-  decided with `wirken permissions approve` or `deny`. Nothing is posted in
-  the channel, and a request nobody decides within the CLI gate's timeout
-  resolves to deny.
+  decided with `wirken permissions pending approve` or `pending deny`.
+  Nothing is posted in the channel, and a request nobody decides within the
+  CLI gate's timeout resolves to deny.
+- A tool call a proxy client makes at the MCP endpoint is asked on the CLI
+  surface too. It has no message it answers, and is denied after 300 seconds
+  (`WIRKEN_CLI_APPROVAL_TIMEOUT_S`) if nobody decides
+  ([proxy-mcp.md](proxy-mcp.md#the-gate)).
 
 A `wirken lyrik run` asks in a shorter form, because its triggering message
 is the staged walk text, which says nothing about the one command being
@@ -355,7 +359,7 @@ group.
 
 Each adapter runs in its own OS process with a distinct ed25519 IPC identity. A compromised adapter can only deliver inbound frames for its own channel and request outbound sends for its own channel. It cannot invoke tools directly, cannot read other channels' sessions through the IPC surface, and cannot request other channels' credentials through the IPC surface.
 
-Process isolation is not credential ACL. The vault itself does not enforce per-process access: a process with access to `~/.wirken/vault.db` and the device key can retrieve any credential by name. The isolation is that adapters are spawned with a narrow retrieval pattern (only entries named `{channel}-*`) and run under the wirken daemon's boundary.
+Process isolation is not credential ACL. The vault itself does not enforce per-process access: a process with access to `~/.wirken/vault.db` and the device key can retrieve any credential by name. The isolation is that an adapter never opens the vault: the gateway hands it a fixed set of its own channel's entries on stdin.
 
 ## Downstream identity
 
@@ -373,7 +377,9 @@ string. Nothing on the wire to the provider carries it.
 ## Identity scope
 
 Wirken is not an identity provider
-([threat-model.md](threat-model.md#senders-and-approvals)). It issues no identities, manages no user
-accounts, and has no login flow. There is no SAML, no OIDC, no SCIM. Platform
+([threat-model.md](threat-model.md#senders-and-approvals)). It issues no identities for people and manages no user
+accounts. There is no SAML, no OIDC, no SCIM. The two credentials it issues
+are its own: a WebChat login for the operator and a proxy token for a client
+program ([proxy.md](proxy.md)). Platform
 sender identity is checked against the inbound sender allowlist and recorded
 on every inbound audit event; it is not an identity Wirken authenticates.

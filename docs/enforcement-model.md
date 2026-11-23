@@ -115,7 +115,8 @@ recompiling.
 | Skill loading | On next `load_skills`, currently a gateway restart; there is no filesystem watcher | [skills.md](skills.md) |
 | Org policy | Refreshed at gateway start. Mid-session changes require a restart | [enterprise.md](enterprise.md) |
 | Provider configuration | Requires a restart. The `LlmClient` is constructed once per agent at startup | [configuration.md](configuration.md) |
-| Sandbox mode | Requires a restart. Container resource limits are constants in the sandbox module | [sandbox-properties.md](sandbox-properties.md) |
+| Sandbox mode | Requires a restart. Limits are 512 MB, 256 processes and 300 s unless `sandbox.json` sets others | [sandbox-properties.md](sandbox-properties.md) |
+| Proxy listener | `proxy.json` (bind, TLS files, upstreams, archive) is read at start. Token issue and revoke are read on every request | [proxy.md](proxy.md) |
 | Sandbox egress per channel | Next `exec` | [egress.md](egress.md#sandbox-egress) |
 | SIEM targets | Requires a restart after editing `siem.json`. Forwarding is non-blocking; failures are logged and do not block the audit pipeline | [siem-forwarder.md](siem-forwarder.md) |
 | Audit chain-head key rotation | A fresh gateway start picks up a new keypair. The verifier accepts heads signed by any key whose public part is on the row and reports the distinct set | [audit-cli.md](audit-cli.md#chain-head-signing) |

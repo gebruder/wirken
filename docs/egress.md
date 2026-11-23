@@ -172,9 +172,9 @@ Two kinds of MCP traffic are outside that boundary:
 
 ### LLM HTTP client
 
-The agent's LLM client uses its own `reqwest::Client` so traffic to the configured provider always works regardless of the operator's egress posture for skill tools. The provider host is gated by `provider.json::base_url` (and by the bound channel-override `base_url` for channel-specific overrides) but not by `egress.domains`.
+The agent's LLM client uses its own `reqwest::Client` so traffic to the configured provider always works regardless of the operator's egress posture for skill tools. The provider host is the configured `base_url` (or the bound channel override's), the key is sent only to the origin its vault entry allows, and no redirect is followed ([credentials.md](credentials.md#where-a-credential-may-go)); `egress.domains` is not consulted. The proxy listener's forwarding to its upstreams goes through the same client and the same rules.
 
-This is deliberate: an `egress.domains` rule that accidentally excludes the provider would break the agent entirely with a vague tool-side error, when the right place to enforce provider-host policy is the operator's network config.
+This is deliberate: an `egress.domains` rule that accidentally excludes the provider would break the agent entirely with a vague tool-side error.
 
 **Mitigation.** Provider choice plus network controls. For TEE-backed providers (Tinfoil, Privatemode), end-to-end encryption to the enclave gives an additional confidentiality layer that does not depend on the network path.
 
@@ -201,7 +201,8 @@ Source: `crates/agent/src/sandbox_egress.rs` (exec's policy), `crates/sandbox/sr
 wirken agents set-egress work --channel slack \
   --mode allowlist --domains "api.example.com,*.internal.example"
 
-# Any domain, still bounded to 443/80 and still refusing IP literals.
+# Any domain on 443/80, no IP literals. An agent turn's exec is still refused
+# every request (see After a restricting read).
 wirken agents set-egress work --channel slack --mode open
 
 # Revoke: back to no networking at all.
@@ -273,7 +274,7 @@ A request that clears the channel policy is then conditioned on what the session
 
 ### Audit
 
-Every request the sidecar hands to the broker emits `SessionEvent::SandboxEgressVerdict` on the agent's hash-chained session log, allowed or not. A request the sidecar turns away before asking, with a head over 8 KiB, a head that times out, or one its parser rejects, is refused without a row (`sidecar_connection`, `crates/sandbox/src/egress.rs`). A CONNECT tunnel is one request to the proxy, however many HTTP requests the client then sends inside it. The row carries the host, the port, the `method` (`CONNECT` for a tunnel, whose inner requests the proxy does not see, or the verb of a plain HTTP request), `allowed`, the mode in force, the confidentiality labels the session had observed, whether a label changed the verdict, and the structural attribution. On a refusal it also carries a closed-set `reason`: `mode_none`, `not_allowed`, `ip_literal`, `port_not_allowed`, `method_not_allowed`, `malformed`, `resolution_failed`, `sensitivity_refused`, `record_failed`, or `injected_host` (a contained MCP server asking for the host its injected credential is bound to). The last is an allow whose row did not land: the broker refuses the request rather than connect unrecorded, and offers the refusal to the log as well.
+Every request the sidecar hands to the broker emits `SessionEvent::SandboxEgressVerdict` on the agent's hash-chained session log, allowed or not. A request the sidecar turns away before asking, with a head over 8 KiB, a head that times out, or one its parser rejects, is refused without a row (`sidecar_connection`, `crates/sandbox/src/egress.rs`). A CONNECT tunnel is one request to the proxy, however many HTTP requests the client then sends inside it. The row carries the host, the port, the `method` (`CONNECT` for a tunnel, whose inner requests the proxy does not see, or the verb of a plain HTTP request), `allowed`, the mode in force, the confidentiality labels the session had observed, whether a label changed the verdict, and the structural attribution. On a refusal it also carries a closed-set `reason`: `mode_none`, `not_allowed`, `ip_literal`, `port_not_allowed`, `method_not_allowed`, `malformed`, `resolution_failed`, `sensitivity_refused`, `record_failed`, or `injected_host` (a contained MCP server asking for the host its injected credential is bound to). `record_failed` is an allow whose row did not land: the broker refuses the request rather than connect unrecorded, and offers the refusal to the log as well.
 
 The platform refusal is a separate variant rather than a reason on this one, because nothing reached a proxy to have a verdict taken on it: `SessionEvent::SandboxEgressUnsupported` carries the mode and the attribution and no host.
 
