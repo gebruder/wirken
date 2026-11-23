@@ -627,6 +627,28 @@ pub fn conversation_chain(body: &Value) -> Vec<String> {
 
 /// The assistant turn a response body holds, whether it is one JSON
 /// document or a stream of events.
+/// The text a model's answer adds up to, read as [`response_turn`]
+/// reads it: what it said, its reasoning, and each tool call's name
+/// and arguments. `None` when the body is not an answer in `shape`.
+pub(crate) fn streamed_text(shape: ProxyShape, body: &[u8]) -> Option<String> {
+    let Turn::Assistant {
+        text,
+        reasoning,
+        calls,
+    } = response_turn(shape, body)?
+    else {
+        return None;
+    };
+    let mut parts = vec![text];
+    parts.extend(reasoning);
+    for (_, name, arguments) in calls {
+        parts.push(name);
+        parts.push(crate::search::value_text(&arguments));
+    }
+    parts.retain(|part| !part.is_empty());
+    Some(parts.join("\n"))
+}
+
 fn response_turn(shape: ProxyShape, body: &[u8]) -> Option<Turn> {
     if let Ok(value) = serde_json::from_slice::<Value>(body) {
         return match shape {

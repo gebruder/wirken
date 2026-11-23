@@ -14,6 +14,7 @@ pub mod otel_forwarder;
 pub mod otel_otlp;
 pub mod otel_projector;
 pub mod pricing;
+pub mod search;
 mod session_log;
 pub mod siem;
 pub mod siem_legacy_shim;
