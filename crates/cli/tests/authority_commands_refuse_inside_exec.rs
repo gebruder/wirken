@@ -57,6 +57,7 @@ const INVOCATIONS: &[(&str, &str, &[&str])] = &[
         "pending deny",
         &["permissions", "pending", "deny", "req-1"],
     ),
+    ("sessions", "search", &["sessions", "search", "password"]),
     ("skills", "install", &["skills", "install", "/nonexistent"]),
     (
         "skills",

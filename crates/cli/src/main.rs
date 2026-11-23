@@ -543,6 +543,44 @@ enum SessionCommands {
         #[arg(long)]
         skip_archive: bool,
     },
+    /// Find text across sessions: in the rows of agent-run and proxied
+    /// sessions, and in archived proxied bodies when an archive is
+    /// configured. Matches whatever the case. Each hit names its
+    /// session, row and chain hash. Refuses inside a Wirken `exec`.
+    Search {
+        /// The text to find.
+        text: String,
+        /// Rows of this agent's sessions, or naming this agent.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Rows of this proxy token, by id or name.
+        #[arg(long)]
+        token: Option<String>,
+        /// Rows of sessions on this channel.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Rows naming this tool.
+        #[arg(long)]
+        tool: Option<String>,
+        /// Rows of this session only.
+        #[arg(long)]
+        session: Option<String>,
+        /// Rows at or after this time (RFC 3339).
+        #[arg(long)]
+        since: Option<String>,
+        /// Rows at or before this time (RFC 3339).
+        #[arg(long)]
+        until: Option<String>,
+        /// The most hits to return.
+        #[arg(short = 'n', long, default_value = "50")]
+        limit: usize,
+        /// `text` or `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Do not read archived bodies; search the rows only.
+        #[arg(long)]
+        skip_archive: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1772,6 +1810,10 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
                 | ZirkelCommands::Calibrate { .. } => return None,
             },
         ),
+        // Not a change of authority, and refused all the same: a search
+        // inside an `exec` would read every session to the agent that
+        // ran it.
+        Commands::Sessions(SessionCommands::Search { .. }) => ("sessions", "search"),
         _ => return None,
     };
     Some(change)
@@ -2017,6 +2059,39 @@ async fn main() -> Result<()> {
                 output,
                 skip_archive,
             } => commands::session::export(&id, output.as_deref(), skip_archive).await,
+            SessionCommands::Search {
+                text,
+                agent,
+                token,
+                channel,
+                tool,
+                session,
+                since,
+                until,
+                limit,
+                format,
+                skip_archive,
+            } => {
+                let json = match format.as_str() {
+                    "text" => false,
+                    "json" => true,
+                    other => anyhow::bail!("--format {other:?} is not text or json"),
+                };
+                commands::session_search::search(commands::session_search::Args {
+                    text: &text,
+                    agent: agent.as_deref(),
+                    token: token.as_deref(),
+                    channel: channel.as_deref(),
+                    tool: tool.as_deref(),
+                    session: session.as_deref(),
+                    since: since.as_deref(),
+                    until: until.as_deref(),
+                    limit,
+                    json,
+                    skip_archive,
+                })
+                .await
+            }
         },
         Commands::Permissions(cmd) => match cmd {
             PermissionCommands::List { agent } => commands::permission::list(&agent).await,

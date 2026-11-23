@@ -51,6 +51,7 @@ pub mod run;
 pub mod senders;
 pub mod service;
 pub mod session;
+pub mod session_search;
 pub mod setup;
 pub mod skills;
 pub mod stdin_approval;
