@@ -4,7 +4,8 @@ Two shapes. **Org config**: each person runs their own instance and IT
 controls what it can do from a central URL. **Shared instance**: one instance
 serves a team across chat channels, with a self-hosted inference endpoint.
 They compose; the second half of this page is the hard boundaries that apply
-to both.
+to both. A shared instance can also serve the team's own coding agents and
+scripts in [proxy mode](proxy.md), each client on its own token.
 
 ## Org config
 
@@ -73,7 +74,7 @@ starts on login; or a person running `curl | sh` and the same setup command.
                    │  Wirken   │  separate adapter process per channel
                    │   host    │  local IPC + ed25519, XChaCha20-Poly1305 vault
                    └─────┬─────┘
-                         │  HTTPS (rustls) or WireGuard-tunneled HTTP
+                         │  HTTPS (rustls)
                          ▼
                    ┌───────────┐
                    │ Inference │  self-hosted vLLM, or Ollama with an
@@ -84,15 +85,17 @@ starts on login; or a person running `curl | sh` and the same setup command.
                  Datadog / Splunk / Sentinel / webhook (optional)
 ```
 
-Wirken runs on its own VPS or bare metal. The two hosts talk over HTTPS, or
-over a WireGuard or Tailscale tunnel for a plain-HTTP inference endpoint so
-the bearer is not on the public internet. Adapters connect outward from the
+Wirken runs on its own VPS or bare metal. The two hosts talk over HTTPS.
+Wirken refuses a plain-HTTP `base_url` unless its host is `localhost`,
+`127.0.0.1` or `[::1]`, so an inference host reached over a WireGuard or
+Tailscale tunnel still needs TLS on its endpoint, or a TLS-terminating
+forwarder on the Wirken host's loopback. Adapters connect outward from the
 wirken host to each platform.
 
 ### Worked example: twelve people, self-hosted Qwen
 
-`provider.json` points `base_url` at the inference host's tunnel address, not
-its public IP. Tools are on by default for every provider, `ollama`
+`provider.json` points `base_url` at the inference host's HTTPS endpoint on
+the tunnel, not its public IP. Tools are on by default for every provider, `ollama`
 included. Local tool-calling support varies by model; if the model on the
 inference host loops on invented tool calls, turn tools off for that agent:
 
@@ -131,9 +134,11 @@ channel, create a named agent and bind it. See
 4. `wirken sessions verify <agent>/<channel>/<conversation>` to replay the
    typed transcript with chain integrity and LLM input hashes.
 
-Flags and exit codes: [audit-cli.md](audit-cli.md). For cross-incident work
-across many sessions, the SIEM side carries the same actor, action, target,
-channel and session fields; see [siem-forwarder.md](siem-forwarder.md).
+Flags and exit codes: [audit-cli.md](audit-cli.md). To find a string across
+sessions, `wirken sessions search <text>` cites each hit by session, row and
+chain hash ([audit-cli.md](audit-cli.md#wirken-sessions-search)). The SIEM
+side carries the same actor, action, target, channel and session fields; see
+[siem-forwarder.md](siem-forwarder.md).
 
 ## Hard boundaries
 
@@ -165,12 +170,15 @@ build on top.
 - **No JSONL streaming audit export.** `wirken audit log --format json` emits
   a one-shot document. For batched structured egress configure SIEM
   forwarding; for offline regulator-facing export, query `audit.db` directly
-  or use the JSON output.
+  or use the JSON output. `wirken sessions export <id> --format atif` writes
+  one session as an ATIF trajectory.
 - **The audit chain is per-session, not global.** Do not describe it as one
   chain for the whole deployment.
 - **No content DLP scanner is bundled.** The prompt-injection detector flags
-  inbound text and writes the flag to the audit log; inbound and outbound
-  content are not pattern-scanned for secrets, PII or policy violations.
+  inbound text and writes the flag to the audit log. Content is matched
+  against the secrets the vault holds and refused on a hit
+  ([architecture.md](architecture.md#2-credential-lifecycle)); there is no
+  pattern scan for other secrets, PII or policy violations.
   Operators who need that wire an external process as a `HookType::Egress`
   hook. See [enforcement-model.md](enforcement-model.md#veto-and-egress-hooks).
 - **No certification under any framework.** Wirken ships mechanisms. Whether a

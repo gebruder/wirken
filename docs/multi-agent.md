@@ -44,7 +44,9 @@ workspace directory and skills stay on disk.
   and `<data_dir>/skills/` (shared by all agents). To give one agent GitHub
   and not another, copy the skill directory into that agent's tree.
 - **MCP servers.** `<data_dir>/agents/{id}/mcp.json` when present, otherwise
-  the shared `<data_dir>/mcp.json`. See [mcp.md](mcp.md).
+  the shared `<data_dir>/mcp.json`. See [mcp.md](mcp.md). A proxy token can be
+  granted an agent's signed MCP servers; its calls then run under that agent's
+  gate ([proxy-mcp.md](proxy-mcp.md)).
 
 Agents can reuse one provider config or override provider, model, API key and
 tool settings in `agent_config.db`.
@@ -142,7 +144,7 @@ parent and child audit independently. See
 
 The permission gate takes the session id and the logical agent id as separate
 arguments. Session-scoped grants key on the session; persisted grants key on
-the agent. A child's session id is its parent's with a `#sub-N` suffix and its
+the agent and the channel of the session. A child's session id is its parent's with a `#sub-N` suffix and its
 agent id is whatever config it was woken as, so neither kind of grant reaches
 it from its caller.
 

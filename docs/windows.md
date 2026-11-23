@@ -1,6 +1,6 @@
 # Wirken on Windows
 
-Wirken runs natively on Windows 11 (x86_64). The Windows binary uses named pipes for IPC, native peer-SID extraction for the orchestrator-push trust boundary, and the same hash-chained audit log as the Linux and macOS builds. This page is the installation and operational reference for Windows.
+Wirken runs natively on Windows 11 (x86_64). The Windows binary uses named pipes for IPC and the same hash-chained audit log as the Linux and macOS builds. This page is the installation and operational reference for Windows.
 
 ## What's different on Windows
 
@@ -11,6 +11,10 @@ Wirken targets a researcher / single-user-workstation profile on Windows. The Li
 - **Zirkel's orchestrator digest push is Linux/macOS only.** After a successful `wirken zirkel run`, the digest is delivered to the bound channel over the orchestrator push socket, a same-user JSON-line trust boundary that has no analog on Windows. On Windows the run completes and reports the push as skipped; the rest of zirkel works.
 - **The Signal adapter is Linux/macOS only.** It connects to `signal-cli`'s unix-domain socket, which doesn't exist on Windows. The other channel adapters (Telegram, Discord, Slack, Teams, Matrix, WhatsApp, Google Chat) work.
 - **Service install is Unix-only.** `wirken setup --install-service` installs the systemd (Linux) or launchd (macOS) unit; there is no Windows equivalent. Run wirken manually, or schedule it via Task Scheduler.
+- **`wirken chat` is Linux/macOS only.** Use WebChat or `wirken ask`.
+- **`wirken permissions pending` is Linux/macOS only.** The gateway's pending queue has no CLI on Windows; approve in WebChat or on a channel. A tool call made at the proxy's [MCP endpoint](proxy-mcp.md#the-gate) is asked on that queue.
+- **Sandbox egress modes `allowlist` and `open` are Linux/macOS only.** An `exec` under them is refused ([egress.md](egress.md#sandbox-egress)).
+- **`wirken update` refuses on Windows.** Reinstall from the release page.
 - **`wirken cron` works on all platforms.** The `wirken cron` subcommand and its in-process scheduler (under `wirken run`) are not platform-gated. Task Scheduler remains an alternative on Windows if you prefer to run jobs outside the gateway process.
 
 These are not bugs to file; they are deliberate scope cuts. The Linux/macOS docs describe the full surface.
@@ -102,8 +106,8 @@ wirken audit log --session "assistant/webchat/550e..." --format json > session.j
 
 If your research involves data subject to IRB review, FERPA, HIPAA, or institutional data-handling policies, two facts about Wirken are relevant:
 
-1. **Where data goes.** To the configured model provider, and to whatever the agent's tools reach ([threat-model.md](threat-model.md#network)). Wirken sends user messages and tool results to the configured provider (OpenAI, Anthropic, Gemini, Bedrock, Tinfoil, Privatemode, Ollama, or a custom endpoint). The provider's data-handling policy governs what happens to that data; check it against your institutional requirements.
-2. **What's logged locally.** The hash-chained audit log records every tool call, message, and refusal locally at `%USERPROFILE%\.wirken\audit.db`. The audit log is not transmitted anywhere unless you've configured SIEM forwarding. Local provider (Ollama) keeps everything on your machine.
+1. **Where data goes.** To the configured model provider, and to whatever the agent's tools reach ([threat-model.md](threat-model.md#network)). Wirken sends user messages and tool results to the configured provider (OpenAI, Anthropic, Gemini, Bedrock, Tinfoil, Privatemode, Infomaniak, Hetzner, Ollama, or a custom endpoint). With the [proxy](proxy.md) on, a client's requests go to the upstreams in `proxy.json`, and with an archive configured their bodies are written, encrypted, to the bucket it names. The provider's data-handling policy governs what happens to that data; check it against your institutional requirements.
+2. **What's logged locally.** The hash-chained audit log records every tool call, message, and refusal locally at `%USERPROFILE%\.wirken\audit.db`. The audit log is not transmitted anywhere unless you've configured SIEM forwarding, an observe hook or the OpenTelemetry projection ([siem-forwarder.md](siem-forwarder.md)). Local provider (Ollama) keeps everything on your machine.
 
 The audit log is the artifact that makes a Wirken-driven research workflow auditable. The provider's logs are governed by the provider's policy, not Wirken's.
 

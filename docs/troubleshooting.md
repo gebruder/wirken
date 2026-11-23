@@ -16,14 +16,17 @@ The Matrix adapter requires HTTPS for all non-localhost homeservers. Use `https:
 
 Run `wirken setup` first. This creates `~/.wirken/provider.json`.
 
-**"Failed to bind UDS"**
+**"Failed to bind IPC at <path>"**
 
-The socket file already exists from a previous run. Either wirken is already running, or it crashed without cleanup. Delete the socket:
+`wirken run` removes a socket file left by an earlier run before it binds, so this is the socket directory or the path: check that `<data_dir>/sockets/` exists and is writable by you, and that the data directory's path is short enough for a Unix socket (about 100 characters with the socket's name).
 
-```bash
-rm ~/.wirken/sockets/gateway.sock
-wirken run
-```
+**"Failed to bind the proxy listener at <addr>"**
+
+Another process holds the address. Change `bind` in `proxy.json`.
+
+**"LLM endpoint must use HTTPS"**
+
+A `base_url` is HTTPS, or plain HTTP to `localhost`, `127.0.0.1` or `[::1]` only.
 
 **"Adapter '<id>' process_exited", "connection_ended" or "connection_panicked"**
 
@@ -57,7 +60,7 @@ Fix what stops it from starting, usually one of the causes above, then restart `
 
 **With `wirken ask`:**
 - Check that the API key is valid: `wirken credentials list` shows the credential metadata
-- Check provider connectivity: `wirken doctor`
+- Check the provider config: `wirken doctor` prints the provider and model from `provider.json`. It does not contact the provider.
 - Try with debug logging: `RUST_LOG=wirken=debug wirken ask -m "hello"`
 
 **With Ollama:**
@@ -82,13 +85,21 @@ Use the same passphrase consistently across all commands.
 
 ## Tool execution fails
 
-**"access denied: path is outside the workspace"**
+**A file tool fails on a path outside the workspace**
 
 File operations are confined to the agent's workspace directory (`~/.wirken/workspace/` by default). The agent cannot read or write files outside this boundary.
 
 **"Command timed out after 300s"**
 
-Shell commands have a 5-minute timeout. The process is killed automatically. If you need longer-running commands, consider running them in tmux via the tmux skill.
+Shell commands time out after `timeout_secs` in `sandbox.json`, 300 by default. The process is killed automatically. Raise it there and restart `wirken run`.
+
+**`http_request` to a listed host on another port is refused**
+
+A host in `egress.domains` or `http.post_paths`, and a credential's `--host`, means port 443. Add the port to the entry as `host:port` (`wirken credentials grant NAME --host api.example.com:8443`).
+
+**An HTTP MCP server's calls fail naming a redirect target**
+
+The entry's URL redirects, and an HTTP MCP server's calls follow no redirect. Put the server's real URL in the entry and sign it again (`wirken mcp sign <name>`).
 
 ## Credential issues
 
@@ -178,7 +189,7 @@ RUST_LOG=wirken=trace wirken run    # very verbose
 wirken doctor
 ```
 
-This checks provider config, vault access, adapter registration, and reports any issues.
+This checks the data directory, `provider.json`, that `vault.db` exists, adapter registration, and reports any issues.
 
 ## Reporting bugs
 

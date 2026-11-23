@@ -8,7 +8,8 @@ and verification call site. No single key signs across surfaces.
 ## Chain-head signing
 
 Per-instance signing of `ChainHead` records. The key is generated lazily on
-first use, stored owner-only, and never leaves the gateway process.
+first use and stored owner-only. The gateway and each CLI command that writes
+a sealed row read it from that file; it is sent nowhere.
 
 - **Key material.** Ed25519 raw 32-byte seed at
   `<data_dir>/audit/audit-signing.key` (mode 0o600 on Unix), public counterpart
