@@ -918,6 +918,53 @@ fn export_proxied(
                 steps.push(agent);
                 answered = matches!(response_body, Body::Plain(_));
             }
+            // A tool call the client made at the MCP endpoint, which
+            // the gateway ran. One the model's answer already carries,
+            // by the id of its tool use, stays on that step; any other
+            // is a step of its own.
+            SessionEvent::AssistantToolCalls { calls: made, .. } => {
+                let unseen: Vec<_> = made.iter().filter(|c| !calls.contains_key(&c.id)).collect();
+                if !unseen.is_empty() {
+                    let mut agent = step("agent", row, "", format!("seq-{}", row.seq));
+                    agent.insert(
+                        "tool_calls".into(),
+                        Value::Array(
+                            unseen
+                                .iter()
+                                .map(|c| tool_call(&c.id, &c.name, arguments(&c.arguments)))
+                                .collect(),
+                        ),
+                    );
+                    extra_mut(&mut agent).insert("wirken".into(), json!({ "mcp_endpoint": true }));
+                    for call in unseen {
+                        calls.insert(call.id.clone(), steps.len());
+                    }
+                    steps.push(agent);
+                }
+            }
+            // What the gateway recorded the tool returning. The result
+            // the client later sends its model is a second entry, with
+            // no `recorded_by`.
+            SessionEvent::ToolResult {
+                call_id,
+                tool_name,
+                output,
+                success,
+                ..
+            } => observe(
+                &mut steps,
+                &calls,
+                row,
+                format!("seq-{}", row.seq),
+                Some(call_id),
+                output,
+                Some(json!({
+                    "tool_name": tool_name,
+                    "success": success,
+                    "seq": row.seq,
+                    "recorded_by": "wirken",
+                })),
+            ),
             _ => {}
         }
     }
@@ -1643,6 +1690,66 @@ mod tests {
         assert_eq!(called["extra"]["wirken"]["response_body"], "exported");
         assert_eq!(doc["final_metrics"]["total_prompt_tokens"], 80);
         assert_eq!(doc["final_metrics"]["total_completion_tokens"], 18);
+    }
+
+    /// Tool calls the client made at the MCP endpoint are in a proxied
+    /// session's trajectory: one the model's answer carries, by its
+    /// tool-use id, gets the recorded result on the model's step, beside
+    /// the result the client sent back; one with no such id is a step.
+    #[test]
+    fn tool_calls_run_at_the_mcp_endpoint_are_in_a_proxied_trajectory() {
+        let first = br#"{"model":"model-p","messages":[{"role":"user","content":"read it"}]}"#;
+        let first_answer = br#"{"content":[{"type":"tool_use","id":"tu1","name":"files_read","input":{"path":"a.txt"}}],"usage":{"input_tokens":5,"output_tokens":2}}"#;
+        let second = br#"{"model":"model-p","messages":[{"role":"user","content":"read it"},
+              {"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"files_read","input":{"path":"a.txt"}}]},
+              {"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"hello"}]}]}"#;
+        let second_answer =
+            br#"{"content":[{"type":"text","text":"It says hello"}],"usage":{"input_tokens":9,"output_tokens":3}}"#;
+        let tool_calls = |id: &str| {
+            json!({"kind":"assistant_tool_calls","agent_id":"default",
+                   "calls":[{"id":id,"name":"mcp_files_read","arguments":"{\"path\":\"a.txt\"}"}]})
+        };
+        let tool_result = |id: &str, output: &str| {
+            json!({"kind":"tool_result","call_id":id,"tool_name":"mcp_files_read",
+                   "output":output,"success":true,"agent_id":"default"})
+        };
+        let session = rows(vec![
+            proxy_request("r1", "anthropic_messages", first, false),
+            proxy_response("r1", first_answer, Some(5), Some(2)),
+            tool_calls("tu1"),
+            tool_result("tu1", "hello"),
+            proxy_request("r2", "anthropic_messages", second, false),
+            proxy_response("r2", second_answer, Some(9), Some(3)),
+            tool_calls("mcp-0a1b"),
+            tool_result("mcp-0a1b", "hello again"),
+        ]);
+        let doc = export(
+            "proxy-tok1-work",
+            &session,
+            &bodies(&[first, first_answer, second, second_answer]),
+            &PRODUCER,
+        );
+        assert_eq!(validate(&doc), Vec::<String>::new());
+        let steps = doc["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 4, "{steps:#?}");
+
+        let asked = &steps[1];
+        assert_eq!(asked["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(asked["tool_calls"][0]["tool_call_id"], "tu1");
+        let results = asked["observation"]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["content"], "hello");
+        assert_eq!(results[0]["extra"]["recorded_by"], "wirken");
+        assert_eq!(results[0]["extra"]["tool_name"], "mcp_files_read");
+        assert_eq!(results[1]["content"], "hello");
+        assert!(results[1]["extra"]["recorded_by"].is_null());
+
+        let alone = &steps[3];
+        assert_eq!(alone["source"], "agent");
+        assert_eq!(alone["extra"]["wirken"]["mcp_endpoint"], true);
+        assert_eq!(alone["tool_calls"][0]["tool_call_id"], "mcp-0a1b");
+        assert_eq!(alone["tool_calls"][0]["function_name"], "mcp_files_read");
+        assert_eq!(alone["observation"]["results"][0]["content"], "hello again");
     }
 
     /// An OpenAI-shaped call: the system and user messages, a tool
