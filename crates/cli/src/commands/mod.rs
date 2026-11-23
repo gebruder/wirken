@@ -45,6 +45,7 @@ pub mod preset;
 pub mod provider_pick;
 pub mod proxy;
 pub mod proxy_archive;
+pub mod proxy_mcp;
 pub mod proxy_server;
 pub mod run;
 pub mod senders;

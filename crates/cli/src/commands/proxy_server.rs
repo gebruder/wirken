@@ -135,11 +135,13 @@ pub struct ProxyState {
     /// When the last refusal of an unknown token was recorded: at most
     /// one such row a second, so a stranger cannot fill the chain.
     pub last_unknown_row: std::sync::Mutex<Option<Instant>>,
+    /// The MCP endpoint, when the gateway can run an agent's tools.
+    pub mcp: Option<super::proxy_mcp::McpEndpoint>,
 }
 
-type ReplyBody = UnsyncBoxBody<Bytes, std::io::Error>;
+pub(super) type ReplyBody = UnsyncBoxBody<Bytes, std::io::Error>;
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
@@ -177,7 +179,7 @@ fn error_reply(
 }
 
 /// The token a client presented, from the header its SDK uses.
-fn presented_token(headers: &HeaderMap) -> Option<String> {
+pub(super) fn presented_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         return Some(value.trim().to_string());
     }
@@ -419,7 +421,7 @@ impl Drop for Open {
 }
 
 impl ProxyState {
-    fn record(&self, session: &str, event: SessionEvent) -> Result<(), String> {
+    pub(super) fn record(&self, session: &str, event: SessionEvent) -> Result<(), String> {
         let handle = self.log.handle_for(SessionId::new(session.to_string()));
         self.log
             .append(&handle, TrustLevel::System, event)
@@ -430,7 +432,7 @@ impl ProxyState {
     /// Record a refusal and build the answer. The message says what
     /// was refused and why; nothing was forwarded.
     #[allow(clippy::too_many_arguments)]
-    fn refuse(
+    pub(super) fn refuse(
         &self,
         session: &str,
         token: Option<&ProxyToken>,
@@ -542,6 +544,9 @@ impl ProxyState {
 
     /// Answer one request.
     async fn handle(self: &Arc<Self>, req: Request<Incoming>) -> Response<ReplyBody> {
+        if req.uri().path() == super::proxy_mcp::MCP_PATH {
+            return self.handle_mcp(req).await;
+        }
         let shape = match (req.method(), req.uri().path()) {
             (&Method::POST, "/v1/chat/completions") => ProxyShape::OpenaiChat,
             (&Method::POST, "/v1/messages") => ProxyShape::AnthropicMessages,
@@ -1132,6 +1137,7 @@ mod tests {
             leak,
             archive,
             last_unknown_row: std::sync::Mutex::new(None),
+            mcp: None,
         });
         let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

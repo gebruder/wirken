@@ -210,12 +210,69 @@ impl wirken_agent::llm::ProviderKeySource for VaultProviderKey {
 
 /// What the proxy listener works with: a client for each upstream in
 /// `proxy.json`, each with the source its key is read from per call.
+/// The agents behind the proxy's MCP endpoint: a token's tools are an
+/// agent's MCP tools, and its calls run as that agent's calls, on the
+/// session the endpoint names.
+struct FactoryToolHost {
+    factory: Arc<AgentFactory>,
+    data_dir: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl super::proxy_mcp::ToolHost for FactoryToolHost {
+    fn signed_servers(
+        &self,
+        agent: &str,
+    ) -> std::result::Result<std::collections::BTreeSet<String>, String> {
+        super::proxy::signed_mcp_servers(&self.data_dir, agent)
+            .map(|servers| servers.into_keys().collect())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn tools(
+        &self,
+        agent: &str,
+        session: &str,
+    ) -> std::result::Result<Vec<wirken_agent::tool::ToolDef>, String> {
+        let woken = self
+            .factory
+            .wake(agent, session)
+            .map_err(|e| e.to_string())?;
+        let agent = woken.lock().await;
+        Ok(agent.mcp_tool_defs().await)
+    }
+
+    async fn call(
+        &self,
+        agent: &str,
+        session: &str,
+        call: super::proxy_mcp::ClientCall<'_>,
+    ) -> std::result::Result<wirken_agent::tool::ToolResult, String> {
+        let woken = self
+            .factory
+            .wake(agent, session)
+            .map_err(|e| e.to_string())?;
+        let mut agent = woken.lock().await;
+        agent
+            .run_tool_for_client(
+                call.call_id,
+                call.tool,
+                call.arguments,
+                call.allowed,
+                call.sender,
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 fn proxy_state(
     cfg: &wirken_gateway::config::GatewayConfig,
     proxy_config: &wirken_gateway::proxy::ProxyConfig,
     vault: Option<Arc<std::sync::Mutex<CredentialStore>>>,
     session_log: Arc<dyn wirken_audit::SessionLog>,
     leak_matcher: Arc<wirken_gateway::leak::LeakMatcher>,
+    factory: Arc<AgentFactory>,
 ) -> Result<Arc<super::proxy_server::ProxyState>> {
     use super::proxy_server::{BodySink, ProxyState, UpstreamClient};
     // An archive that is configured and cannot be opened stops the
@@ -279,6 +336,12 @@ fn proxy_state(
         leak: leak_matcher,
         archive,
         last_unknown_row: std::sync::Mutex::new(None),
+        mcp: Some(super::proxy_mcp::McpEndpoint::new(Arc::new(
+            FactoryToolHost {
+                factory,
+                data_dir: cfg.data_dir.clone(),
+            },
+        ))),
     }))
 }
 
@@ -2183,6 +2246,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                 vault,
                 session_log.clone(),
                 leak_matcher.clone(),
+                factory.clone(),
             )?;
             let addr = proxy_config
                 .bind_addr()
