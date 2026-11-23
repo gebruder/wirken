@@ -658,6 +658,118 @@ async fn two_conversations_are_two_sessions_and_one_is_redacted_whole() {
         ["user:BETA-TOPIC unrelated", "agent:pong"]
     );
 
+    // A search reads the archived bodies: the first session's question
+    // is found in both of its requests, each cited by its row, and the
+    // other session's in its own.
+    let search = |text: &str| -> serde_json::Value {
+        let out = wirken(data)
+            .args(["sessions", "search", text, "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let cited = |found: &serde_json::Value| -> Vec<(String, String)> {
+        found["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| {
+                (
+                    h["session"].as_str().unwrap().to_string(),
+                    h["found_in"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let found = search("alpha-secret");
+    assert_eq!(found["archive"], "configured");
+    assert_eq!(
+        cited(&found),
+        vec![
+            (alpha.clone(), "request_body".to_string()),
+            (alpha.clone(), "request_body".to_string()),
+        ]
+    );
+    let hit = &found["hits"][0];
+    let request_row = {
+        let log = wirken_audit::SqliteSessionLog::open(&data.join("audit.db")).unwrap();
+        log.get_since(&log.handle_for(SessionId::new(alpha.clone())), 0)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.seq == hit["seq"].as_u64().unwrap())
+            .unwrap()
+    };
+    let SessionEvent::ProxyRequest { request_sha256, .. } = &request_row.event else {
+        panic!("the hit cites a request row: {:?}", request_row.event);
+    };
+    assert_eq!(hit["body_sha256"], request_sha256.0);
+    assert_eq!(hit["chain_hash"], request_row.hash.0);
+    assert!(
+        hit["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("ALPHA-SECRET first question")
+    );
+    assert_eq!(
+        cited(&search("beta-topic")),
+        vec![(other.clone(), "request_body".to_string())]
+    );
+    // The answer is in each call's response body, and in the request
+    // that repeats it.
+    let found = search("pong");
+    let places: Vec<&str> = found["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["found_in"].as_str().unwrap())
+        .collect();
+    assert_eq!(places.iter().filter(|p| **p == "response_body").count(), 3);
+    assert_eq!(places.iter().filter(|p| **p == "request_body").count(), 1);
+
+    // The search kept text for each body it read, and none of it is
+    // readable in the key store's files.
+    let index_rows = |hash: Option<&str>| -> i64 {
+        let db = rusqlite::Connection::open(data.join("proxy_archive_keys.db")).unwrap();
+        match hash {
+            Some(hash) => db
+                .query_row(
+                    "SELECT count(*) FROM body_text WHERE sha256 = ?1",
+                    [hash],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+            None => db
+                .query_row("SELECT count(*) FROM body_text", [], |r| r.get(0))
+                .unwrap(),
+        }
+    };
+    let at_rest = |needle: &str| -> bool {
+        std::fs::read_dir(data)
+            .unwrap()
+            .flatten()
+            .filter(|f| {
+                f.file_name()
+                    .to_string_lossy()
+                    .starts_with("proxy_archive_keys.db")
+            })
+            .any(|f| {
+                std::fs::read(f.path())
+                    .unwrap()
+                    .windows(needle.len())
+                    .any(|w| w == needle.as_bytes())
+            })
+    };
+    assert_eq!(index_rows(None), 4, "three requests and one answer");
+    assert_eq!(index_rows(Some(&request_sha256.0)), 1);
+    for needle in ["ALPHA-SECRET", "BETA-TOPIC", "pong"] {
+        assert!(!at_rest(needle), "{needle} is in the index in the clear");
+    }
+
     // One command redacts every body of the first session.
     let redacted = at_terminal(
         data,
@@ -678,6 +790,20 @@ async fn two_conversations_are_two_sessions_and_one_is_redacted_whole() {
         text.contains("4 named, 0 match their row, 4 redacted, 0 failed"),
         "{text}"
     );
+    // The redacted bodies are found by no search, and the index holds
+    // no entry for them. The other session's request is still found.
+    let found = search("alpha-secret");
+    assert!(found["hits"].as_array().unwrap().is_empty(), "{found}");
+    assert_eq!(found["bodies_unavailable"], 0);
+    assert!(search("pong")["hits"].as_array().unwrap().is_empty());
+    assert_eq!(index_rows(Some(&request_sha256.0)), 0);
+    assert_eq!(index_rows(None), 1, "the other session's request");
+    assert!(!at_rest("ALPHA-SECRET"));
+    assert_eq!(
+        cited(&search("beta-topic")),
+        vec![(other.clone(), "request_body".to_string())]
+    );
+
     let after = export(alpha);
     assert!(!after.to_string().contains("ALPHA-SECRET"), "{after}");
     assert_eq!(said(&after), ["agent:", "agent:"]);
