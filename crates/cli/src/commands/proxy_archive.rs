@@ -944,27 +944,40 @@ pub struct ArchiveReport {
 /// The bodies `rows` say were archived.
 fn named(rows: &[wirken_audit::StoredSessionEvent]) -> Vec<Named> {
     use wirken_audit::SessionEvent;
+    let named = |seq, kind, sha256: &wirken_audit::HashHex| Named {
+        seq,
+        kind,
+        sha256: sha256.0.clone(),
+    };
     rows.iter()
-        .filter_map(|row| match &row.event {
+        .flat_map(|row| match &row.event {
             SessionEvent::ProxyRequest {
                 request_sha256,
                 archived: true,
                 ..
-            } => Some(Named {
-                seq: row.seq,
-                kind: BodyKind::Request,
-                sha256: request_sha256.0.clone(),
-            }),
+            } => vec![named(row.seq, BodyKind::Request, request_sha256)],
             SessionEvent::ProxyResponse {
                 response_sha256,
                 archived: true,
                 ..
-            } => Some(Named {
-                seq: row.seq,
-                kind: BodyKind::Response,
-                sha256: response_sha256.0.clone(),
-            }),
-            _ => None,
+            } => vec![named(row.seq, BodyKind::Response, response_sha256)],
+            // The tool list an MCP session was shown, and both bodies
+            // of a tool call.
+            SessionEvent::ProxyToolsListed {
+                tools_sha256,
+                archived: true,
+                ..
+            } => vec![named(row.seq, BodyKind::Response, tools_sha256)],
+            SessionEvent::ProxyToolCall {
+                request_sha256,
+                response_sha256,
+                archived: true,
+                ..
+            } => vec![
+                named(row.seq, BodyKind::Request, request_sha256),
+                named(row.seq, BodyKind::Response, response_sha256),
+            ],
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -1171,4 +1184,70 @@ pub async fn verify_session(session_id: &str, skip_archive: bool) -> anyhow::Res
         println!("    {failure}");
     }
     Ok(if report.failures.is_empty() { 0 } else { 7 })
+}
+
+#[cfg(test)]
+mod mcp_rows_tests {
+    use super::*;
+
+    /// The archived bodies of an MCP session are its tool list and both
+    /// bodies of each call, so `sessions verify` checks them and a
+    /// session's redaction takes them.
+    #[test]
+    fn a_tool_list_and_both_bodies_of_a_tool_call_are_named() {
+        use wirken_audit::{HashHex, SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let tmp = tempfile::tempdir().unwrap();
+        let log = SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap();
+        let lane = log.handle_for(SessionId::new("proxy-0a0a0a0a-work".to_string()));
+        let hash = |c: &str| HashHex(c.repeat(64));
+        for event in [
+            SessionEvent::ProxyToolsListed {
+                token_id: "0a0a0a0a".into(),
+                agent_id: "default".into(),
+                mcp_session: "s".into(),
+                servers: vec!["files".into()],
+                tools: vec!["mcp_files_read".into()],
+                tools_sha256: hash("a"),
+                archived: true,
+            },
+            SessionEvent::ProxyToolCall {
+                call_id: "c1".into(),
+                token_id: "0a0a0a0a".into(),
+                agent_id: "default".into(),
+                mcp_session: "s".into(),
+                tool: "mcp_files_read".into(),
+                success: true,
+                latency_ms: 1,
+                request_sha256: hash("b"),
+                request_bytes: 1,
+                response_sha256: hash("c"),
+                response_bytes: 1,
+                archived: true,
+            },
+            SessionEvent::ProxyToolCall {
+                call_id: "c2".into(),
+                token_id: "0a0a0a0a".into(),
+                agent_id: "default".into(),
+                mcp_session: "s".into(),
+                tool: "mcp_files_read".into(),
+                success: true,
+                latency_ms: 1,
+                request_sha256: hash("d"),
+                request_bytes: 1,
+                response_sha256: hash("e"),
+                response_bytes: 1,
+                archived: false,
+            },
+        ] {
+            log.append(&lane, wirken_audit::TrustLevel::System, event)
+                .unwrap();
+        }
+        let rows = log.get_since(&lane, 0).unwrap();
+        assert_eq!(
+            archived_hashes(&rows),
+            vec!["a".repeat(64), "b".repeat(64), "c".repeat(64)]
+        );
+        let kinds: Vec<&str> = named(&rows).iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["response", "request", "response"]);
+    }
 }
