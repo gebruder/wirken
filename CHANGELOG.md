@@ -23,6 +23,18 @@ tagged.
   `wirken run` stops naming the command: `wirken credentials grant <NAME>
   --archive <host>`, then `wirken credentials revoke <NAME> --host <host>`.
 
+### Security
+
+- `http_request` cannot send a proxy archive's bucket credentials. They are
+  bound to an archive destination, which is not a host `http_request` may
+  send to (`an_archive_grant_is_not_a_host_grant`,
+  `crates/vault/src/binding.rs`;
+  [docs/proxy-archive.md](docs/proxy-archive.md)).
+- `wirken sessions export` and `wirken sessions verify` refuse inside a
+  Wirken `exec`. There they would read sessions, and an archive's bodies, to
+  the agent that ran them
+  (`crates/cli/tests/authority_commands_refuse_inside_exec.rs`).
+
 ### Changed
 
 - The child process a Lyrik run starts on its child-process route gets a
