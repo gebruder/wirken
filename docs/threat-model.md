@@ -491,9 +491,10 @@ What each control leaves outside it, stated once. Other pages link here.
   `proxy_archive_keys.db`. Once a search has read a body, its text is
   readable from the data directory and the vault alone, and is kept until the
   body is redacted, past the object's retention.
-- Redaction destroys a key. It does not remove the object, any row, a copy of
-  `proxy_archive_keys.db` made earlier, rows already forwarded to a SIEM, or
-  what the provider and the client hold. Two sessions that exchanged the same
+- Redacting a session destroys keys and rewrites the rows of its tool calls.
+  It does not remove the object, a copy of `proxy_archive_keys.db` or
+  `audit.db` made earlier, rows already forwarded to a SIEM, or what the
+  provider and the client hold. Two sessions that exchanged the same
   bytes share one object and one key.
 - A holder of the bucket credentials can write a new version under an
   object's key. `sessions verify` reads the current version and reports the
@@ -521,14 +522,15 @@ What each control leaves outside it, stated once. Other pages link here.
   verify` does. Verification re-executes `read_file` and `list_files` only,
   against the current workspace.
 - The audit library can redact a row: it rewrites the payload and signs a
-  head recording the superseded one. No `wirken` command performs it.
-  `wirken proxy archive redact` is a different operation: it destroys an
-  archived body's key and leaves the rows.
+  head recording the superseded one. One `wirken` command performs it:
+  `wirken proxy archive redact --session`, for the rows of a proxy session
+  that hold a tool call's arguments and output. The same command destroys
+  the keys of the session's archived bodies.
 - A proxied model call's rows hold the SHA-256 and size of each body, not
   the body. With no archive the bodies are kept nowhere. With one they are in
   the bucket, encrypted, and their keys in `proxy_archive_keys.db`. A proxy
   client's tool call is recorded as an agent's is: its arguments and output
-  are on the chain, and redacting the archive does not remove them.
+  are on the chain until the session is redacted.
 - A `proxy_response` row is written after the answer is sent.
 - `wirken sessions search` writes no row for a search. A search refused
   inside an `exec` is a row.

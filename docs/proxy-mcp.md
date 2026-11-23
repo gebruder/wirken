@@ -180,9 +180,10 @@ and answer of each call are written to it. `sessions verify` checks them,
 destroys the keys of those bodies: all in
 [proxy-archive.md](proxy-archive.md).
 
-Redacting the archive does not redact a tool call. The `assistant_tool_calls`
-and `tool_result` rows keep the arguments and the output, and no command
-removes a row.
+A tool call's arguments and output are on its rows, not only in the archive.
+`proxy archive redact --session` rewrites those rows with the bodies, each
+under a signed redaction record
+([proxy-archive.md](proxy-archive.md#redacting-a-session)).
 
 ## Limits
 

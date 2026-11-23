@@ -101,15 +101,16 @@ Without an archive nothing but the rows is kept.
 | Check a session against its chain and, with an archive, each body against its row | `wirken sessions verify <lane>` | [proxy-archive.md](proxy-archive.md#verifying-a-proxy-session) |
 | Find text across sessions, in rows and in archived bodies | `wirken sessions search <text>` | [audit-cli.md](audit-cli.md#wirken-sessions-search) |
 | Write one session as an ATIF trajectory file | `wirken sessions export <lane> --format atif` | [proxy-archive.md](proxy-archive.md#exporting-a-session) |
-| Make archived bodies unreadable | `wirken proxy archive redact --session <lane> --reason <why>` | [proxy-archive.md](proxy-archive.md#redacting-an-archived-body) |
+| Remove what a session said | `wirken proxy archive redact --session <lane> --reason <why>` | [proxy-archive.md](proxy-archive.md#redacting-a-session) |
 
 Search keeps text it extracted from a body encrypted under that body's own
 key, so the index is never a plaintext copy and goes with the key
 ([proxy-archive.md](proxy-archive.md#search-text-at-rest)).
 
-Redaction destroys a body's key. The object stays locked in the bucket and
-nothing can read it. It does not change the chain: the rows of the call
-stay, and for a tool call so do the arguments and output they hold.
+Redacting a session destroys the key of each of its bodies, so the objects
+stay locked in the bucket and nothing can read them, and rewrites the rows
+that hold a tool call's arguments and output. Each rewritten row is recorded
+on the chain by a signed head, and the session still verifies.
 
 All four are operator commands, and all four refuse inside a Wirken `exec`.
 

@@ -68,7 +68,7 @@ the same detail, targeting the job id; the firing is not deferred.
 | `mcp_credential_injected` / `mcp_inject_refused` | `server_name`, `agent_id` | One request a contained MCP server sent to the host its injected credential is bound to: made with the credential set, or refused with a `reason`. Carries the credential's name, the host, the method and the path without its query, on the `gateway-mcp` sentinel session. Never the value. See [mcp](mcp.md#injecting-a-credential). |
 | `proxy_request` / `proxy_response` / `proxy_refused` | `token_id` | One call a client made through the inference proxy: forwarded, answered, or refused with a `reason`. Carries the token's id, the upstream, provider and model, timing, the provider's token counts, and the SHA-256 of the request and response bodies as exchanged, on the session's lane, or for a refusal on the token's, `proxy-<token id>`, or on `gateway-proxy` when no known token was presented. Never a token, a key or a body. See [inference proxy](inference-proxy.md#what-is-recorded). |
 | `proxy_tools_listed` / `proxy_tool_call` / `proxy_tool_refused` | `token_id`, `agent_id` | At the proxy's MCP endpoint: the tools a client's session was shown, one tool call it made, or a request refused before the gate with a `reason`. Names, hashes and sizes; the call's arguments and output are on the `assistant_tool_calls` and `tool_result` rows with the same call id. See [MCP endpoint](proxy-mcp.md#what-is-recorded). |
-| `proxy_archive_redacted` | none | The key of an archived body was destroyed, with the body's hash, the operator and the reason, on the `gateway-proxy` lane. See [inference proxy](proxy-archive.md#redacting-an-archived-body). |
+| `proxy_archive_redacted` | none | The key of an archived body was destroyed, with the body's hash, the operator and the reason, on the `gateway-proxy` lane. See [inference proxy](proxy-archive.md#redacting-a-session). |
 | `mcp_credential_refresh_discarded` | `credential` | The gateway refreshed an MCP OAuth credential and did not write the result, because the vault entry no longer held the refresh token the refresh started from, on the `gateway-mcp-credentials` lane. `reason` is `removed` (the entry stays removed), `reauthorized` (the new sign-in stays and is what the proxy gets) or `unreadable`. Never a value. Forwarded by default, at `warn`. |
 | `memory_entry_written` / `cross_channel_memory_read` | `agent_id` | Memory provenance and trust-zone crossings. |
 | `import_started` / `import_completed` / `imported_chat_read` / `imported_chat_searched` | `agent_id` | Archive imports and gated reads. See [imported archives](imported-archives.md). |
@@ -253,7 +253,10 @@ row onward and the head signed before it stops covering what is on disk.
 Left there, the log reads as tampered from that row on and every row after
 it is unusable with it.
 
-`SqliteSessionLog::redact` is the sanctioned form. It replaces the row,
+`SqliteSessionLog::redact` is the sanctioned form, and `wirken proxy archive
+redact --session` uses it for the rows of a proxy session that hold a tool
+call's arguments and output
+([proxy-archive.md](proxy-archive.md#redacting-a-session)). It replaces the row,
 re-hashes to the end of the session, and mints a head with
 `reason: redaction` over the rewritten range. That head carries the
 superseded head's `current_chain_hash` and `signature`:
@@ -290,7 +293,10 @@ stated reason and any other reason someone prefers, which is why the
 record is bound into it rather than left to the chain.
 
 `verify` treats a head that a redaction names as accounted for rather than
-invalid; every other head still has to match its stored hash. A row
+invalid. A head written before a redaction made its claims over hashes that
+have moved wherever they concern the rewritten row or a later one, and is
+held to the stored hashes only for rows before it; every other head still has
+to match its stored hash. A row
 rewritten without minting a redaction head still reports `broken` at that
 row, with the count of rows that verified before it.
 
@@ -680,7 +686,7 @@ would read every session to the agent that ran it.
 Not done: the search reads every row each time and keeps no index of rows. A
 proxied model call with no archive has only hashes on its rows, so its text
 is not found; a proxied tool call's arguments and output are on its rows and
-are found.
+are found, until the session is redacted.
 
 ## JSON schema
 

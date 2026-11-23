@@ -12,12 +12,27 @@ tagged.
 
 ### Operator notes
 
+- One gateway serves a data directory. A second `wirken run` on a directory
+  a running one holds refuses to start and names its process.
+- `wirken sessions export` and `wirken sessions verify` refuse inside a
+  Wirken `exec`, as `sessions search` does.
 - A proxy archive's bucket credentials need an `--archive` binding to the
   endpoint's host. One stored with `--host` no longer opens the archive, and
   `wirken run` stops naming the command: `wirken credentials grant <NAME>
   --archive <host>`, then `wirken credentials revoke <NAME> --host <host>`.
 
 ### Added
+
+- `wirken proxy archive redact --session <lane>` rewrites the rows of the
+  session that hold a tool call's arguments and output, with the session's
+  archived bodies. Each rewritten row is recorded by a signed redaction head
+  with the hash it had, the operator and the reason, and the session still
+  verifies. A search and an export then find nothing of what the rows held
+  (`redacting_a_session_takes_its_tool_call_rows`,
+  `crates/cli/tests/proxy_session_redaction.rs`;
+  `several_redactions_in_a_session_with_several_heads_verify`,
+  `crates/audit/src/tests.rs`;
+  [docs/proxy-archive.md](docs/proxy-archive.md#redacting-a-session)).
 
 - `wirken sessions search <text>` finds text across sessions: in the rows of
   agent-run and proxied sessions, and with an archive in the archived

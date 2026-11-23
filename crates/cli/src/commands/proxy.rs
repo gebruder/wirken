@@ -291,6 +291,66 @@ fn session_hashes(lane: &str) -> Result<Vec<String>> {
     Ok(super::proxy_archive::archived_hashes(&rows))
 }
 
+/// What a row holds in place of content a redaction removed.
+const REDACTED: &str = "[redacted]";
+
+/// The row that replaces `event` when its session is redacted, for a
+/// row that holds what a client's tool call said: the call's arguments,
+/// or the tool's output. The call's id, tool and outcome stay. `None`
+/// for a row that holds no such content.
+fn redacted_row(event: &wirken_audit::SessionEvent) -> Option<wirken_audit::SessionEvent> {
+    use wirken_audit::SessionEvent;
+    let mut value = serde_json::to_value(event).ok()?;
+    match event {
+        SessionEvent::AssistantToolCalls { .. } => {
+            for call in value["calls"].as_array_mut()? {
+                call["arguments"] =
+                    serde_json::json!(serde_json::json!({ "redacted": true }).to_string());
+            }
+            for key in ["text", "reasoning"] {
+                if let Some(map) = value.as_object_mut() {
+                    map.remove(key);
+                }
+            }
+        }
+        SessionEvent::ToolResult { .. } => {
+            value["output"] = serde_json::json!(REDACTED);
+        }
+        _ => return None,
+    }
+    serde_json::from_value(value).ok()
+}
+
+/// Rewrite every row of the proxy session `lane` that holds a tool
+/// call's arguments or output, each through the session log's redaction:
+/// the row's content is replaced, the chain is resealed over it, and a
+/// signed head records the row, the hash it had, the operator and the
+/// reason. A row a redaction already rewrote is left as it is. Returns
+/// how many rows were rewritten.
+pub(crate) fn redact_rows(lane: &str, reason: &str) -> Result<usize> {
+    use wirken_audit::SessionLog as _;
+    let log = super::open_signed_session_log(&config())?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(lane.to_string()));
+    let rows = log
+        .get_since(&handle, 0)
+        .context("session log query failed")?;
+    let done = wirken_audit::search::rewritten(&rows);
+    let operator = super::local_operator();
+    let mut rewritten = 0;
+    for row in &rows {
+        if done.contains(&row.seq) {
+            continue;
+        }
+        let Some(replacement) = redacted_row(&row.event) else {
+            continue;
+        };
+        log.redact(&handle, row.seq, &replacement, &operator, reason)
+            .with_context(|| format!("row {} of {lane} was not rewritten", row.seq))?;
+        rewritten += 1;
+    }
+    Ok(rewritten)
+}
+
 pub fn archive_redact(sha256: Option<&str>, session: Option<&str>, reason: &str) -> Result<()> {
     require_terminal("archive redact")?;
     let data_dir = config().data_dir;
@@ -314,15 +374,26 @@ pub fn archive_redact(sha256: Option<&str>, session: Option<&str>, reason: &str)
             let hashes = session_hashes(lane)?;
             if hashes.is_empty() {
                 println!("  Session {lane} has no archived bodies.");
-                return Ok(());
+            } else {
+                let destroyed = redact_recorded(&data_dir, &hashes, reason, Some(lane))?;
+                println!(
+                    "  Session {lane}: {} archived bodies, {destroyed} key{} destroyed. The \
+                     objects stay in the bucket until their retention ends and can no longer \
+                     be read.",
+                    hashes.len(),
+                    if destroyed == 1 { "" } else { "s" }
+                );
             }
-            let destroyed = redact_recorded(&data_dir, &hashes, reason, Some(lane))?;
-            println!(
-                "  Session {lane}: {} archived bodies, {destroyed} key{} destroyed. The objects \
-                 stay in the bucket until their retention ends and can no longer be read.",
-                hashes.len(),
-                if destroyed == 1 { "" } else { "s" }
-            );
+            // The rows of a client's tool calls hold what the bodies
+            // held. They go with the session.
+            let rows = redact_rows(lane, reason)?;
+            if rows > 0 {
+                println!(
+                    "  Session {lane}: {rows} row{} of tool calls rewritten. Each is recorded \
+                     on the session's chain with the hash it had.",
+                    if rows == 1 { "" } else { "s" }
+                );
+            }
         }
         _ => bail!("give one body's SHA-256, or --session with a proxy session"),
     }

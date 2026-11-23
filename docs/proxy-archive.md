@@ -70,7 +70,7 @@ session whose tool list cannot be archived does not open. A response body is
 archived when the response ends; if that write fails the call has already
 been answered, the failure is logged, and the row says `archived: false`.
 
-## Redacting an archived body
+## Redacting a session
 
 An object under Object Lock cannot be deleted or changed. A body is made
 unreadable by destroying its key:
@@ -80,8 +80,9 @@ wirken proxy archive redact --session <lane> --reason "customer request"
 wirken proxy archive redact <sha256> --reason "customer request"
 ```
 
-The first form redacts every archived body of one session; the second one
-body. The command runs at a terminal and refuses
+The first form redacts one session: every archived body of it, and every row
+of it that holds what a tool call said. The second redacts one body. The
+command runs at a terminal and refuses
 inside a Wirken `exec`. For each body it destroys the key held for that hash
 in `proxy_archive_keys.db`, overwrites the freed pages, and writes a
 `proxy_archive_redacted` row with the hash, the operator, the reason and,
@@ -90,6 +91,19 @@ ends and nothing can decrypt it. A hash that is redacted takes no new key: the
 same body sent again is not archived, and its row says `archived: false`. It cannot be undone. The
 [search text](#search-text-at-rest) kept for the body is deleted with it.
 
+**The rows of a tool call.** A model call's rows hold hashes, so destroying
+the keys is all there is to remove. A tool call made at the
+[MCP endpoint](proxy-mcp.md#what-is-recorded) is on the chain itself: its
+`assistant_tool_calls` row holds the arguments and its `tool_result` row the
+output. `--session` rewrites those rows. The arguments become
+`{"redacted":true}` and the output `[redacted]`; the call's id, tool, sender
+and outcome stay. Each rewrite goes through the session log's
+[redaction](audit-cli.md#redaction): the chain is resealed over the row, and
+a signed `chain_head` with `reason: redaction` records the row's number, the
+hash it had, the operator and the reason. The session still verifies, and
+the rewrite is on the record. Afterwards `wirken sessions search` and
+`wirken sessions export` find nothing of what the rows held.
+
 What it does not do:
 
 - A body is redacted by its hash. Redacting one body leaves the others of
@@ -97,13 +111,11 @@ What it does not do:
   repeats the conversation before it. `--session` takes them all.
 - Two sessions that exchanged the same bytes share that object. Redacting it
   for one makes it unreadable for the other.
-- It does not remove the rows. The chain still shows that the call was made,
-  with its hashes and counts.
-- It does not touch what the rows hold. A model call's rows hold no body. A
-  tool call made at the [MCP endpoint](proxy-mcp.md#what-is-recorded) is
-  different: its `assistant_tool_calls` and `tool_result` rows hold the
-  arguments and the output, and they stay readable on the chain and are found
-  by `wirken sessions search` after the archived bodies are redacted.
+- It does not remove the rows. The chain still shows that each call was
+  made, with its hashes, its tool and its outcome.
+- The form that takes one hash touches no row.
+- It does not reach rows already forwarded to a SIEM, or a copy of
+  `audit.db` made earlier.
 - A copy of `proxy_archive_keys.db` made before the redaction still holds the
   key.
 
