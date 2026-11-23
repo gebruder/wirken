@@ -529,6 +529,7 @@ mod tests {
             revoked_at: None,
             mcp_agent: "default".into(),
             mcp_servers: vec!["files".into()],
+            identity: None,
         };
         assert_eq!(
             describe(&token),

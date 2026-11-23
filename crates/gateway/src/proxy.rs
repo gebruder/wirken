@@ -414,6 +414,10 @@ pub struct ProxyToken {
     /// The MCP servers of that agent whose tools the token may list
     /// and call.
     pub mcp_servers: Vec<String>,
+    /// Who the caller is, when it presented a JWT and not a token:
+    /// the record is then the grant set its mapping selected, under
+    /// the id of its subject. `None` for a token issued here.
+    pub identity: Option<wirken_audit::ProxyIdentity>,
 }
 
 impl ProxyToken {
@@ -423,9 +427,106 @@ impl ProxyToken {
     }
 
     /// The ledger key the token's spend is kept under in `budget.db`.
+    /// A JWT's caller has its own, by subject: a ceiling of a grant
+    /// set is each subject's, not shared among them.
     pub fn budget_key(&self) -> String {
-        format!("proxy-token:{}", self.id)
+        self.principal()
     }
+
+    /// Who the caller is on a row that names a sender:
+    /// `proxy-token:<id>`, or `proxy-subject:<id>` for a JWT's caller.
+    pub fn principal(&self) -> String {
+        match self.identity {
+            None => format!("proxy-token:{}", self.id),
+            Some(_) => format!("proxy-subject:{}", self.id),
+        }
+    }
+
+    /// What the grants are held by, for a message: `token <name>`, or
+    /// `grant set <name>` for a JWT's caller.
+    pub fn held_by(&self) -> String {
+        match self.identity {
+            None => format!("token {}", self.name),
+            Some(_) => format!("grant set {}", self.name),
+        }
+    }
+}
+
+/// A named set of grants a JWT's caller is given: what a token carries,
+/// with no secret of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantSet {
+    pub name: String,
+    pub upstreams: Vec<String>,
+    pub models: Vec<String>,
+    pub ceiling_usd_micros: Option<u64>,
+    pub ceiling_calls: Option<u64>,
+    pub window: BudgetWindow,
+    pub mcp_agent: String,
+    pub mcp_servers: Vec<String>,
+    pub created_at: String,
+}
+
+impl GrantSet {
+    /// The record a call is made under by the subject whose id is
+    /// `id`: this grant set's grants, counted and charged to that
+    /// subject.
+    pub fn caller(&self, id: String, identity: wirken_audit::ProxyIdentity) -> ProxyToken {
+        ProxyToken {
+            id,
+            name: self.name.clone(),
+            upstreams: self.upstreams.clone(),
+            models: self.models.clone(),
+            ceiling_usd_micros: self.ceiling_usd_micros,
+            ceiling_calls: self.ceiling_calls,
+            window: self.window,
+            created_at: self.created_at.clone(),
+            revoked_at: None,
+            mcp_agent: self.mcp_agent.clone(),
+            mcp_servers: self.mcp_servers.clone(),
+            identity: Some(identity),
+        }
+    }
+}
+
+/// What a mapping matches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MappingKind {
+    /// A value of the configured grant claim.
+    Claim,
+    /// The JWT's subject.
+    Subject,
+}
+
+impl MappingKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::Subject => "subject",
+        }
+    }
+}
+
+/// One line of the operator's mapping: a JWT of `issuer` whose grant
+/// claim holds `value`, or whose subject is `value`, gets `grant_set`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityMapping {
+    pub issuer: String,
+    pub kind: MappingKind,
+    pub value: String,
+    pub grant_set: String,
+    pub created_at: String,
+}
+
+/// What the mapping gives a verified JWT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selection {
+    One(GrantSet),
+    /// No mapping matches: the caller gets nothing.
+    None,
+    /// Mappings match that name different grant sets, listed. The
+    /// caller is refused: nothing here says which it should have.
+    Several(Vec<String>),
 }
 
 /// What a presented token turned out to be.
@@ -481,6 +582,55 @@ fn random_hex(bytes: usize) -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+const GRANT_SET_COLUMNS: &str = "SELECT name, upstreams, models, ceiling_usd_micros, \
+     ceiling_calls, window, created_at, mcp_agent, mcp_servers FROM proxy_grant_sets";
+
+fn window_of(label: &str) -> BudgetWindow {
+    match label {
+        "hour" => BudgetWindow::Hour,
+        "week" => BudgetWindow::Week,
+        _ => BudgetWindow::Day,
+    }
+}
+
+/// Whether `grant` can be written as a `what` (a token, a grant set).
+/// Returns the agent its MCP servers belong to, empty when it has
+/// none.
+fn check_grant(grant: &TokenGrant, what: &str) -> Result<String, GatewayError> {
+    if !is_name(&grant.name) {
+        return Err(GatewayError::Config(format!(
+            "{what} name {:?} is not letters, digits, - or _",
+            grant.name
+        )));
+    }
+    if grant.upstreams.is_empty() && grant.mcp_servers.is_empty() {
+        return Err(GatewayError::Config(format!(
+            "a {what} needs at least one upstream or one MCP server"
+        )));
+    }
+    if grant
+        .upstreams
+        .iter()
+        .chain(&grant.models)
+        .chain(&grant.mcp_servers)
+        .any(|s| s.is_empty() || s.contains(','))
+    {
+        return Err(GatewayError::Config(
+            "an upstream, model or MCP server name is empty or contains a comma".into(),
+        ));
+    }
+    if !grant.mcp_servers.is_empty() && !is_name(&grant.mcp_agent) {
+        return Err(GatewayError::Config(format!(
+            "a {what} with MCP servers names the agent they belong to"
+        )));
+    }
+    Ok(if grant.mcp_servers.is_empty() {
+        String::new()
+    } else {
+        grant.mcp_agent.clone()
+    })
+}
+
 fn split(list: &str) -> Vec<String> {
     list.split(',')
         .filter(|s| !s.is_empty())
@@ -514,6 +664,25 @@ impl ProxyTokenStore {
                  updated_at INTEGER NOT NULL,
                  PRIMARY KEY (token_id, tail)
              );
+             CREATE TABLE IF NOT EXISTS proxy_grant_sets (
+                 name TEXT PRIMARY KEY,
+                 upstreams TEXT NOT NULL,
+                 models TEXT NOT NULL,
+                 ceiling_usd_micros INTEGER,
+                 ceiling_calls INTEGER,
+                 window TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 mcp_agent TEXT NOT NULL DEFAULT '',
+                 mcp_servers TEXT NOT NULL DEFAULT ''
+             );
+             CREATE TABLE IF NOT EXISTS proxy_identity_mappings (
+                 issuer TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 value TEXT NOT NULL,
+                 grant_set TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 PRIMARY KEY (issuer, kind, value)
+             );
              CREATE TABLE IF NOT EXISTS proxy_token_calls (
                  token_id TEXT NOT NULL,
                  window_start INTEGER NOT NULL,
@@ -546,38 +715,7 @@ impl ProxyTokenStore {
     /// Issue a token. Returns its record and the token itself, which
     /// is stored nowhere and cannot be shown again.
     pub fn issue(&self, grant: &TokenGrant) -> Result<(ProxyToken, String), GatewayError> {
-        if !is_name(&grant.name) {
-            return Err(GatewayError::Config(format!(
-                "token name {:?} is not letters, digits, - or _",
-                grant.name
-            )));
-        }
-        if grant.upstreams.is_empty() && grant.mcp_servers.is_empty() {
-            return Err(GatewayError::Config(
-                "a token needs at least one upstream or one MCP server".into(),
-            ));
-        }
-        if grant
-            .upstreams
-            .iter()
-            .chain(&grant.models)
-            .chain(&grant.mcp_servers)
-            .any(|s| s.is_empty() || s.contains(','))
-        {
-            return Err(GatewayError::Config(
-                "an upstream, model or MCP server name is empty or contains a comma".into(),
-            ));
-        }
-        if !grant.mcp_servers.is_empty() && !is_name(&grant.mcp_agent) {
-            return Err(GatewayError::Config(
-                "a token with MCP servers names the agent they belong to".into(),
-            ));
-        }
-        let mcp_agent = if grant.mcp_servers.is_empty() {
-            String::new()
-        } else {
-            grant.mcp_agent.clone()
-        };
+        let mcp_agent = check_grant(grant, "token")?;
         let id = random_hex(4);
         let token = format!("{TOKEN_PREFIX}{id}_{}", random_hex(32));
         let created_at = wirken_time::Timestamp::now().to_rfc3339();
@@ -623,9 +761,284 @@ impl ProxyTokenStore {
                 revoked_at: None,
                 mcp_agent,
                 mcp_servers: grant.mcp_servers.clone(),
+                identity: None,
             },
             token,
         ))
+    }
+
+    /// Write the grant set `grant` describes, in place of any of the
+    /// same name. Returns it, and the one it replaced.
+    pub fn set_grant_set(
+        &self,
+        grant: &TokenGrant,
+    ) -> Result<(GrantSet, Option<GrantSet>), GatewayError> {
+        let mcp_agent = check_grant(grant, "grant set")?;
+        let conn = self.conn();
+        let previous = Self::read_grant_set(&conn, &grant.name)?;
+        let created_at = wirken_time::Timestamp::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO proxy_grant_sets
+             (name, upstreams, models, ceiling_usd_micros, ceiling_calls, window,
+              created_at, mcp_agent, mcp_servers)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(name) DO UPDATE SET
+                 upstreams = ?2, models = ?3, ceiling_usd_micros = ?4, ceiling_calls = ?5,
+                 window = ?6, created_at = ?7, mcp_agent = ?8, mcp_servers = ?9",
+            params![
+                grant.name,
+                grant.upstreams.join(","),
+                grant.models.join(","),
+                grant.ceiling_usd_micros.map(|v| v as i64),
+                grant.ceiling_calls.map(|v| v as i64),
+                grant.window.label(),
+                created_at,
+                mcp_agent,
+                grant.mcp_servers.join(","),
+            ],
+        )?;
+        let written = Self::read_grant_set(&conn, &grant.name)?
+            .ok_or_else(|| GatewayError::Config("the grant set was not written".into()))?;
+        Ok((written, previous))
+    }
+
+    /// Put back the grant set `previous`, or remove `name` when there
+    /// was none: what undoes a [`Self::set_grant_set`] whose row could
+    /// not be recorded.
+    pub fn restore_grant_set(
+        &self,
+        name: &str,
+        previous: Option<&GrantSet>,
+    ) -> Result<(), GatewayError> {
+        let conn = self.conn();
+        match previous {
+            None => {
+                conn.execute(
+                    "DELETE FROM proxy_grant_sets WHERE name = ?1",
+                    params![name],
+                )?;
+            }
+            Some(p) => {
+                conn.execute(
+                    "UPDATE proxy_grant_sets SET
+                         upstreams = ?2, models = ?3, ceiling_usd_micros = ?4,
+                         ceiling_calls = ?5, window = ?6, created_at = ?7, mcp_agent = ?8,
+                         mcp_servers = ?9
+                     WHERE name = ?1",
+                    params![
+                        p.name,
+                        p.upstreams.join(","),
+                        p.models.join(","),
+                        p.ceiling_usd_micros.map(|v| v as i64),
+                        p.ceiling_calls.map(|v| v as i64),
+                        p.window.label(),
+                        p.created_at,
+                        p.mcp_agent,
+                        p.mcp_servers.join(","),
+                    ],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove the grant set `name`. Refused while a mapping names it:
+    /// a mapping to nothing would read as a grant and give none.
+    /// Returns the grant set, or `None` when there is none.
+    pub fn remove_grant_set(&self, name: &str) -> Result<Option<GrantSet>, GatewayError> {
+        let conn = self.conn();
+        let Some(set) = Self::read_grant_set(&conn, name)? else {
+            return Ok(None);
+        };
+        let mapped: i64 = conn.query_row(
+            "SELECT count(*) FROM proxy_identity_mappings WHERE grant_set = ?1",
+            params![name],
+            |r| r.get(0),
+        )?;
+        if mapped > 0 {
+            return Err(GatewayError::Config(format!(
+                "{mapped} mapping(s) name the grant set {name}; remove them first"
+            )));
+        }
+        conn.execute(
+            "DELETE FROM proxy_grant_sets WHERE name = ?1",
+            params![name],
+        )?;
+        Ok(Some(set))
+    }
+
+    /// Every grant set, by name.
+    pub fn grant_sets(&self) -> Result<Vec<GrantSet>, GatewayError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!("{GRANT_SET_COLUMNS} ORDER BY name"))?;
+        let rows = stmt.query_map([], Self::grant_set_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Map JWTs of `issuer` matching `value` to `grant_set`, in place
+    /// of any mapping of the same value. Returns the grant set the
+    /// value was mapped to before.
+    pub fn map_identity(
+        &self,
+        issuer: &str,
+        kind: MappingKind,
+        value: &str,
+        grant_set: &str,
+    ) -> Result<Option<String>, GatewayError> {
+        if value.is_empty() || value.len() > crate::proxy_identity::MAX_CLAIM_BYTES {
+            return Err(GatewayError::Config(format!(
+                "a mapped value is 1 to {} bytes",
+                crate::proxy_identity::MAX_CLAIM_BYTES
+            )));
+        }
+        let conn = self.conn();
+        if Self::read_grant_set(&conn, grant_set)?.is_none() {
+            return Err(GatewayError::Config(format!(
+                "there is no grant set named {grant_set}"
+            )));
+        }
+        let previous = Self::read_mapping(&conn, issuer, kind, value)?;
+        conn.execute(
+            "INSERT INTO proxy_identity_mappings (issuer, kind, value, grant_set, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(issuer, kind, value) DO UPDATE SET grant_set = ?4, created_at = ?5",
+            params![
+                issuer,
+                kind.as_str(),
+                value,
+                grant_set,
+                wirken_time::Timestamp::now().to_rfc3339()
+            ],
+        )?;
+        Ok(previous)
+    }
+
+    /// Remove the mapping of `value`. Returns the grant set it named,
+    /// or `None` when there was no such mapping.
+    pub fn unmap_identity(
+        &self,
+        issuer: &str,
+        kind: MappingKind,
+        value: &str,
+    ) -> Result<Option<String>, GatewayError> {
+        let conn = self.conn();
+        let previous = Self::read_mapping(&conn, issuer, kind, value)?;
+        conn.execute(
+            "DELETE FROM proxy_identity_mappings WHERE issuer = ?1 AND kind = ?2 AND value = ?3",
+            params![issuer, kind.as_str(), value],
+        )?;
+        Ok(previous)
+    }
+
+    /// Every mapping, by issuer, kind and value.
+    pub fn identity_mappings(&self) -> Result<Vec<IdentityMapping>, GatewayError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT issuer, kind, value, grant_set, created_at FROM proxy_identity_mappings
+             ORDER BY issuer, kind, value",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(IdentityMapping {
+                issuer: r.get(0)?,
+                kind: match r.get::<_, String>(1)?.as_str() {
+                    "subject" => MappingKind::Subject,
+                    _ => MappingKind::Claim,
+                },
+                value: r.get(2)?,
+                grant_set: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// The grant set the mapping gives a verified JWT of `issuer`
+    /// whose grant claim holds `claim_values` and whose subject is
+    /// `subject`.
+    ///
+    /// The claim selects. Where none of its values is mapped, the
+    /// subject does. Values mapped to one grant set select it once;
+    /// values mapped to different grant sets select none of them.
+    pub fn select_grant_set(
+        &self,
+        issuer: &str,
+        claim_values: &[String],
+        subject: &str,
+    ) -> Result<Selection, GatewayError> {
+        let conn = self.conn();
+        let mut names: Vec<String> = Vec::new();
+        for value in claim_values {
+            if let Some(name) = Self::read_mapping(&conn, issuer, MappingKind::Claim, value)?
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+        if names.is_empty()
+            && let Some(name) = Self::read_mapping(&conn, issuer, MappingKind::Subject, subject)?
+        {
+            names.push(name);
+        }
+        match names.as_slice() {
+            [] => Ok(Selection::None),
+            [name] => Ok(match Self::read_grant_set(&conn, name)? {
+                Some(set) => Selection::One(set),
+                // The grant set is gone from under its mapping.
+                None => Selection::None,
+            }),
+            _ => {
+                names.sort();
+                Ok(Selection::Several(names))
+            }
+        }
+    }
+
+    fn read_mapping(
+        conn: &Connection,
+        issuer: &str,
+        kind: MappingKind,
+        value: &str,
+    ) -> Result<Option<String>, GatewayError> {
+        Ok(conn
+            .query_row(
+                "SELECT grant_set FROM proxy_identity_mappings
+                 WHERE issuer = ?1 AND kind = ?2 AND value = ?3",
+                params![issuer, kind.as_str(), value],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    fn read_grant_set(conn: &Connection, name: &str) -> Result<Option<GrantSet>, GatewayError> {
+        Ok(conn
+            .query_row(
+                &format!("{GRANT_SET_COLUMNS} WHERE name = ?1"),
+                params![name],
+                Self::grant_set_row,
+            )
+            .optional()?)
+    }
+
+    fn grant_set_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GrantSet> {
+        Ok(GrantSet {
+            name: r.get(0)?,
+            upstreams: split(&r.get::<_, String>(1)?),
+            models: split(&r.get::<_, String>(2)?),
+            ceiling_usd_micros: r.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
+            ceiling_calls: r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
+            window: window_of(&r.get::<_, String>(5)?),
+            created_at: r.get(6)?,
+            mcp_agent: r.get(7)?,
+            mcp_servers: split(&r.get::<_, String>(8)?),
+        })
     }
 
     /// Revoke the token with this id or name. Returns it, or `None`
@@ -778,15 +1191,12 @@ impl ProxyTokenStore {
                 models: split(&r.get::<_, String>(3)?),
                 ceiling_usd_micros: r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
                 ceiling_calls: r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
-                window: match window.as_str() {
-                    "hour" => BudgetWindow::Hour,
-                    "week" => BudgetWindow::Week,
-                    _ => BudgetWindow::Day,
-                },
+                window: window_of(&window),
                 created_at: r.get(7)?,
                 revoked_at: r.get(8)?,
                 mcp_agent: r.get(10)?,
                 mcp_servers: split(&r.get::<_, String>(11)?),
+                identity: None,
             },
             r.get(9)?,
         ))
@@ -1044,6 +1454,152 @@ mod tests {
     fn no_file_means_the_listener_is_off() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(ProxyConfig::load(tmp.path()).unwrap(), None);
+    }
+
+    fn grant_to(name: &str, upstream: &str) -> TokenGrant {
+        TokenGrant {
+            name: name.into(),
+            upstreams: vec![upstream.into()],
+            ..Default::default()
+        }
+    }
+
+    /// The claim selects the grant set and the subject is the
+    /// fallback; a JWT no mapping matches gets nothing, and one whose
+    /// values name two grant sets is given neither.
+    #[test]
+    fn a_mapping_selects_one_grant_set_or_none() {
+        const ISSUER: &str = "https://idp.example.com";
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ProxyTokenStore::open(&tmp.path().join(PROXY_TOKENS_FILE)).unwrap();
+        store
+            .set_grant_set(&grant_to("engineers", "local"))
+            .unwrap();
+        store.set_grant_set(&grant_to("oncall", "cloud")).unwrap();
+        store
+            .set_grant_set(&grant_to("alice-own", "cloud"))
+            .unwrap();
+        let map = |kind, value: &str, set: &str| store.map_identity(ISSUER, kind, value, set);
+        assert_eq!(map(MappingKind::Claim, "eng", "engineers").unwrap(), None);
+        map(MappingKind::Claim, "eng-leads", "engineers").unwrap();
+        map(MappingKind::Claim, "sre", "oncall").unwrap();
+        map(MappingKind::Subject, "alice", "alice-own").unwrap();
+
+        let select = |values: &[&str], subject: &str| {
+            let values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+            match store.select_grant_set(ISSUER, &values, subject).unwrap() {
+                Selection::One(set) => set.name,
+                Selection::None => "none".into(),
+                Selection::Several(names) => format!("several: {}", names.join(",")),
+            }
+        };
+        assert_eq!(select(&["eng"], "bob"), "engineers");
+        // A value with no mapping beside one with: the mapped one.
+        assert_eq!(select(&["visitors", "sre"], "bob"), "oncall");
+        // Two values, one grant set: no question which.
+        assert_eq!(select(&["eng", "eng-leads"], "bob"), "engineers");
+        // Two values, two grant sets.
+        assert_eq!(select(&["eng", "sre"], "bob"), "several: engineers,oncall");
+        // No value mapped: the subject, where it is mapped.
+        assert_eq!(select(&["visitors"], "alice"), "alice-own");
+        assert_eq!(select(&[], "alice"), "alice-own");
+        assert_eq!(select(&["visitors"], "bob"), "none");
+        assert_eq!(select(&[], "bob"), "none");
+        // The claim selects, and the subject is not asked.
+        assert_eq!(select(&["eng"], "alice"), "engineers");
+        // A subject is not a claim value, nor the other way round.
+        assert_eq!(select(&["alice"], "eng"), "none");
+        // Another issuer's JWTs match nothing written for this one.
+        let other = store
+            .select_grant_set("https://other.example", &["eng".to_string()], "alice")
+            .unwrap();
+        assert_eq!(other, Selection::None);
+
+        // A mapping is replaced, and says what it replaced.
+        assert_eq!(
+            map(MappingKind::Claim, "sre", "engineers").unwrap(),
+            Some("oncall".into())
+        );
+        assert_eq!(select(&["eng", "sre"], "bob"), "engineers");
+        assert_eq!(
+            store
+                .unmap_identity(ISSUER, MappingKind::Claim, "sre")
+                .unwrap(),
+            Some("engineers".into())
+        );
+        assert_eq!(
+            store
+                .unmap_identity(ISSUER, MappingKind::Claim, "sre")
+                .unwrap(),
+            None
+        );
+        assert_eq!(select(&["sre"], "bob"), "none");
+
+        // A mapping names a grant set that exists, and a grant set a
+        // mapping names is not removed from under it.
+        assert!(map(MappingKind::Claim, "x", "nowhere").is_err());
+        let err = store.remove_grant_set("engineers").unwrap_err().to_string();
+        assert!(err.contains("2 mapping(s)"), "{err}");
+        assert_eq!(
+            store.remove_grant_set("oncall").unwrap().unwrap().name,
+            "oncall"
+        );
+        assert_eq!(store.remove_grant_set("oncall").unwrap(), None);
+        assert_eq!(store.identity_mappings().unwrap().len(), 3);
+    }
+
+    /// A grant set is what a token carries; a subject's calls under it
+    /// are that subject's, by id, ledger key and sender.
+    #[test]
+    fn a_grant_set_is_held_per_subject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ProxyTokenStore::open(&tmp.path().join(PROXY_TOKENS_FILE)).unwrap();
+        let wanted = TokenGrant {
+            name: "engineers".into(),
+            upstreams: vec!["local".into()],
+            models: vec!["m".into()],
+            ceiling_calls: Some(5),
+            mcp_agent: "default".into(),
+            mcp_servers: vec!["files".into()],
+            ..Default::default()
+        };
+        let (set, previous) = store.set_grant_set(&wanted).unwrap();
+        assert!(previous.is_none());
+        assert_eq!(store.grant_sets().unwrap(), vec![set.clone()]);
+        // Written again, it replaces and says what it replaced.
+        let (changed, previous) = store
+            .set_grant_set(&TokenGrant {
+                ceiling_calls: Some(9),
+                ..wanted.clone()
+            })
+            .unwrap();
+        assert_eq!(previous.as_ref(), Some(&set));
+        assert_eq!(changed.ceiling_calls, Some(9));
+        store
+            .restore_grant_set("engineers", previous.as_ref())
+            .unwrap();
+        assert_eq!(store.grant_sets().unwrap()[0].ceiling_calls, Some(5));
+        assert!(store.set_grant_set(&TokenGrant::default()).is_err());
+
+        let identity = |hash: &str| wirken_audit::ProxyIdentity {
+            issuer: "https://idp.example.com".into(),
+            grant_set: Some("engineers".into()),
+            jti: None,
+            subject_hash: Some(hash.into()),
+            subject: None,
+        };
+        let alice = set.caller("u1111111111111111".into(), identity("11"));
+        let bob = set.caller("u2222222222222222".into(), identity("22"));
+        assert_eq!(alice.budget_key(), "proxy-subject:u1111111111111111");
+        assert_ne!(alice.budget_key(), bob.budget_key());
+        assert_eq!(alice.held_by(), "grant set engineers");
+        assert_eq!((alice.ceiling_calls, alice.mcp_servers.len()), (Some(5), 1));
+        assert!(alice.allows_model("m") && !alice.allows_model("other"));
+
+        let (token, _) = store.issue(&grant_to("laptop", "local")).unwrap();
+        assert_eq!(token.budget_key(), format!("proxy-token:{}", token.id));
+        assert_eq!(token.held_by(), "token laptop");
+        assert!(token.identity.is_none());
     }
 
     /// The `oidc` block: off unless written, an https issuer or a
