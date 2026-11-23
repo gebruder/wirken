@@ -90,6 +90,7 @@ wirken proxy token revoke laptop
 | `--ceiling-usd` | Spend ceiling over the window. |
 | `--ceiling-calls` | Call ceiling over the window. |
 | `--window` | `hour`, `day` (the default) or `week`. |
+| `--mcp-server`, `--agent` | MCP servers of an agent whose tools the token may call at the [MCP endpoint](proxy-mcp.md). |
 
 `issue` and `revoke` run at a terminal and refuse inside a Wirken `exec`. Each
 is an `operator_command` row on the `gateway-operator` lane, sealed with a
@@ -108,7 +109,8 @@ bind:
 | OpenAI chat completions | `http://127.0.0.1:18791/v1` | `POST /v1/chat/completions` |
 | Anthropic messages | `http://127.0.0.1:18791` | `POST /v1/messages` |
 
-Streaming works for both. Any other path or method is answered 404.
+Streaming works for both. `/mcp` is the [MCP endpoint](proxy-mcp.md), for a
+token granted MCP servers. Any other path or method is answered 404.
 
 ## Sessions
 

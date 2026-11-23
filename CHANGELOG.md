@@ -10,6 +10,25 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- MCP endpoint on the proxy listener. A client Wirken does not run reaches
+  MCP tools at `POST /mcp`, MCP over Streamable HTTP, with the proxy token it
+  uses for inference. `wirken proxy token issue --mcp-server <server> --agent
+  <agent>` grants a token signed MCP servers of an agent; the client is shown
+  those servers' tools and no others. Each `tools/call` runs as the agent's
+  own call: the stored-secret checks, the Tier 3 gate and the operator's
+  pending queue, where an unanswered request is a denial. The tools a session
+  is shown are recorded and fixed, and a call to a tool whose definition
+  changed is refused. New rows `proxy_tools_listed`, `proxy_tool_call` and
+  `proxy_tool_refused`; with an archive, the tool list and both bodies of a
+  call are written to it, checked by `sessions verify` and redacted with the
+  session; `sessions export --format atif` includes the calls
+  (`crates/cli/src/commands/proxy_mcp.rs`; `a_client_tool_call`,
+  `crates/agent/src/tests.rs`;
+  `crates/cli/tests/proxy_mcp_live_round_trip.rs`;
+  [docs/proxy-mcp.md](docs/proxy-mcp.md)).
+
 ## [3.5.0] - 2026-11-22
 
 ### Operator notes

@@ -381,8 +381,9 @@ See [enforcement-model.md](enforcement-model.md#veto-and-egress-hooks) and
 ## wirken proxy
 
 ```bash
-wirken proxy token issue <NAME> --upstream U [--upstream U2] [--model M]
+wirken proxy token issue <NAME> [--upstream U] [--upstream U2] [--model M]
                                [--ceiling-usd N] [--ceiling-calls N] [--window hour|day|week]
+                               [--mcp-server S] [--agent A]
 wirken proxy token revoke <ID-OR-NAME>
 wirken proxy token list
 wirken proxy sessions [--token ID-OR-NAME]
@@ -390,7 +391,9 @@ wirken proxy archive redact (<SHA256> | --session <LANE>) --reason <WHY>
 ```
 
 `issue`, `revoke` and `redact` run at a terminal and refuse inside a Wirken
-`exec`. See [inference-proxy.md](inference-proxy.md).
+`exec`. A token needs `--upstream`, `--mcp-server` or both. See
+[inference-proxy.md](inference-proxy.md) and, for `--mcp-server`,
+[proxy-mcp.md](proxy-mcp.md).
 
 ## wirken approvers
 
