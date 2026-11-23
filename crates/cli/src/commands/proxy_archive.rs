@@ -855,6 +855,7 @@ mod tests {
                 request_bytes: body.len() as u64,
                 credential_id: None,
                 archived: true,
+                identity: None,
             },
         )
     }
@@ -1382,6 +1383,7 @@ mod mcp_rows_tests {
                 tools: vec!["mcp_files_read".into()],
                 tools_sha256: hash("a"),
                 archived: true,
+                identity: None,
             },
             SessionEvent::ProxyToolCall {
                 call_id: "c1".into(),
@@ -1396,6 +1398,7 @@ mod mcp_rows_tests {
                 response_sha256: hash("c"),
                 response_bytes: 1,
                 archived: true,
+                identity: None,
             },
             SessionEvent::ProxyToolCall {
                 call_id: "c2".into(),
@@ -1410,6 +1413,7 @@ mod mcp_rows_tests {
                 response_sha256: hash("e"),
                 response_bytes: 1,
                 archived: false,
+                identity: None,
             },
         ] {
             log.append(&lane, wirken_audit::TrustLevel::System, event)

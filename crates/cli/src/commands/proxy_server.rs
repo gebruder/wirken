@@ -397,6 +397,7 @@ impl Exchange {
             response_bytes: self.bytes,
             complete,
             archived,
+            identity: None,
         };
         if let Err(e) = self.state.record(&self.session, row) {
             tracing::error!(
@@ -471,6 +472,7 @@ impl ProxyState {
                     shape,
                     model: model.map(str::to_string),
                     reason,
+                    identity: None,
                 },
             )
         {
@@ -795,6 +797,7 @@ impl ProxyState {
                 request_bytes: body.len() as u64,
                 credential_id: upstream.key.as_ref().map(|k| k.credential().to_string()),
                 archived,
+                identity: None,
             },
         ) {
             return self.refuse(
@@ -1281,6 +1284,7 @@ mod tests {
                 request_bytes,
                 credential_id,
                 archived,
+                identity: None,
             },
             SessionEvent::ProxyResponse {
                 request_id: answered,

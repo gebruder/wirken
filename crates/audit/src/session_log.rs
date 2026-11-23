@@ -2355,6 +2355,10 @@ pub enum SessionEvent {
         /// The body was written to the archive under its hash.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         archived: bool,
+        /// Who the call was made as, when the client presented a JWT
+        /// from the identity provider in place of a token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<ProxyIdentity>,
     },
     /// The answer to a [`SessionEvent::ProxyRequest`], after its last
     /// byte went to the client. `response_sha256` is the hash of the
@@ -2385,10 +2389,16 @@ pub enum SessionEvent {
         complete: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         archived: bool,
+        /// Who the call was made as, when the client presented a JWT
+        /// from the identity provider in place of a token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<ProxyIdentity>,
     },
     /// A request on the proxy listener was refused and nothing was
     /// forwarded. `token_id` is absent when no known token came with
     /// it; such rows are on the `gateway-proxy` lane.
+    /// A JWT that was refused has no `token_id` either: where it was
+    /// verified, `identity` says whose it was.
     ProxyRefused {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token_id: Option<String>,
@@ -2397,6 +2407,10 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         reason: ProxyRefusal,
+        /// Who the call was made as, when the client presented a JWT
+        /// from the identity provider in place of a token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<ProxyIdentity>,
     },
     /// The tools a client was shown at the proxy's MCP endpoint, written
     /// when its MCP session opens. `tools` are their names;
@@ -2416,6 +2430,10 @@ pub enum SessionEvent {
         tools_sha256: HashHex,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         archived: bool,
+        /// Who the call was made as, when the client presented a JWT
+        /// from the identity provider in place of a token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<ProxyIdentity>,
     },
     /// One `tools/call` a client made at the proxy's MCP endpoint, after
     /// it ran or the gate refused it. `call_id` is the id on the
@@ -2436,6 +2454,10 @@ pub enum SessionEvent {
         response_bytes: u64,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         archived: bool,
+        /// Who the call was made as, when the client presented a JWT
+        /// from the identity provider in place of a token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<ProxyIdentity>,
     },
     /// A request at the proxy's MCP endpoint was refused before the
     /// permission gate, and no tool ran. A refusal by the gate is a
@@ -2449,6 +2471,10 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
         reason: ProxyToolRefusal,
+        /// Who the call was made as, when the client presented a JWT
+        /// from the identity provider in place of a token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<ProxyIdentity>,
     },
     /// The key an archived body was encrypted under was destroyed. The
     /// object stays in the bucket for its retention period and can no
@@ -3039,6 +3065,23 @@ pub enum ProxyRefusal {
     /// The body could not be written to the archive, so nothing was
     /// sent.
     ArchiveFailed,
+    /// A JWT that is not one: malformed, an algorithm that is not
+    /// accepted, a signature no key of the issuer made, a claim
+    /// missing or not yet valid.
+    JwtInvalid,
+    /// A JWT past its `exp`, or older than the configured maximum
+    /// lifetime.
+    JwtExpired,
+    /// A JWT whose `iss` is not the configured issuer.
+    JwtWrongIssuer,
+    /// A JWT whose `aud` does not name the configured audience.
+    JwtWrongAudience,
+    /// The issuer's keys could not be had, so no JWT can be verified.
+    JwtKeysUnavailable,
+    /// A verified JWT that no mapping gives a grant set.
+    JwtNoGrant,
+    /// A verified JWT that mappings give more than one grant set.
+    JwtAmbiguousGrant,
 }
 
 impl ProxyRefusal {
@@ -3054,8 +3097,41 @@ impl ProxyRefusal {
             Self::CredentialRefused => "credential_refused",
             Self::RecordFailed => "record_failed",
             Self::ArchiveFailed => "archive_failed",
+            Self::JwtInvalid => "jwt_invalid",
+            Self::JwtExpired => "jwt_expired",
+            Self::JwtWrongIssuer => "jwt_wrong_issuer",
+            Self::JwtWrongAudience => "jwt_wrong_audience",
+            Self::JwtKeysUnavailable => "jwt_keys_unavailable",
+            Self::JwtNoGrant => "jwt_no_grant",
+            Self::JwtAmbiguousGrant => "jwt_ambiguous_grant",
         }
     }
+}
+
+/// Who a call on the proxy listener was made as, when the client
+/// presented a JWT from the organization's identity provider in place of
+/// a token Wirken issued. Wirken verified the JWT; it issued nothing.
+/// The JWT itself is on no row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyIdentity {
+    /// The `iss` the JWT was verified against, as in `proxy.json`.
+    pub issuer: String,
+    /// The grant set the operator's mapping selected. Absent on a
+    /// refusal of a JWT that selected none, or more than one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_set: Option<String>,
+    /// The JWT's `jti`, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
+    /// HMAC-SHA256 of the issuer and the subject under a key held in
+    /// the vault, in hex. Absent when the operator set the subject to
+    /// be recorded as issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_hash: Option<String>,
+    /// The JWT's `sub` as issued. Present only when the operator set
+    /// it to be recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
 }
 
 /// Why the proxy's MCP endpoint refused a request before the

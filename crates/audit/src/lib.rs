@@ -42,7 +42,7 @@ pub use session_log::{
     LIVE_RELOAD_SESSION, LeakSurface, LlmCallPurpose, MCP_CREDENTIAL_SESSION, McpInjectRefusal,
     McpServerRestartCause, OPERATOR_APPROVERS_SESSION, OPERATOR_COMMANDS_SESSION,
     OPERATOR_SENDERS_SESSION, OwnSession, PROXY_SESSION, PermissionDenialRecord, PhaseDenyContent,
-    PhaseExitReason, ProxyRefusal, ProxyShape, ProxyToolRefusal, RedactionRecord,
+    PhaseExitReason, ProxyIdentity, ProxyRefusal, ProxyShape, ProxyToolRefusal, RedactionRecord,
     ReportedCacheWrite, ReportedCall, SANDBOX_RUNTIME_SESSION, SandboxEgressDenyReason,
     SandboxEgressModeLabel, SandboxLimits, SandboxModeLabel, SandboxProvenance,
     SandboxRuntimeLabel, SchemaDriftRecord, SessionEvent, SessionHandle, SessionId, SessionLog,

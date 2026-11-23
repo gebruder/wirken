@@ -579,6 +579,7 @@ mod tests {
             tools: vec![],
             tools_sha256: hash(),
             archived: false,
+            identity: None,
         };
         let tool_call = SessionEvent::ProxyToolCall {
             call_id: "c".into(),
@@ -593,6 +594,7 @@ mod tests {
             response_sha256: hash(),
             response_bytes: 1,
             archived: false,
+            identity: None,
         };
         let request = SessionEvent::ProxyRequest {
             request_id: "r".into(),
@@ -607,12 +609,14 @@ mod tests {
             request_bytes: 1,
             credential_id: None,
             archived: false,
+            identity: None,
         };
         let refused = SessionEvent::ProxyRefused {
             token_id: Some("t".into()),
             shape: None,
             model: None,
             reason: wirken_audit::ProxyRefusal::Malformed,
+            identity: None,
         };
         let summary = |lane: &str, events: Vec<SessionEvent>| {
             let handle = log.handle_for(SessionId::new(lane.to_string()));

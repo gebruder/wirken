@@ -257,6 +257,7 @@ impl ProxyState {
                 mcp_session: session.map(str::to_string),
                 tool: tool.map(str::to_string),
                 reason,
+                identity: None,
             },
         ) {
             tracing::error!("proxy: MCP refusal not recorded: {e}");
@@ -523,6 +524,7 @@ impl ProxyState {
                 tools: granted.iter().map(|def| def.name.clone()).collect(),
                 tools_sha256: HashHex(tools_sha256),
                 archived,
+                identity: None,
             },
         ) {
             return self.refuse_tool(
@@ -770,6 +772,7 @@ impl ProxyState {
                 response_sha256: HashHex(response_sha256),
                 response_bytes: answer_bytes.len() as u64,
                 archived,
+                identity: None,
             },
         ) {
             tracing::error!("proxy: MCP call row not written: {e}");
@@ -1054,6 +1057,7 @@ mod tests {
                 tools,
                 tools_sha256,
                 archived,
+                identity: None,
             },
         ] = &rows[..]
         else {

@@ -3949,6 +3949,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             request_bytes: 0,
             credential_id: None,
             archived: false,
+            identity: None,
         },
         SessionEvent::ProxyResponse {
             request_id: String::new(),
@@ -3964,12 +3965,14 @@ fn every_session_event() -> Vec<SessionEvent> {
             response_bytes: 0,
             complete: false,
             archived: false,
+            identity: None,
         },
         SessionEvent::ProxyRefused {
             token_id: None,
             shape: None,
             model: None,
             reason: crate::session_log::ProxyRefusal::UnknownToken,
+            identity: None,
         },
         SessionEvent::ProxyToolsListed {
             token_id: String::new(),
@@ -3979,6 +3982,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             tools: Vec::new(),
             tools_sha256: HashHex(String::new()),
             archived: false,
+            identity: None,
         },
         SessionEvent::ProxyToolCall {
             call_id: String::new(),
@@ -3993,6 +3997,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             response_sha256: HashHex(String::new()),
             response_bytes: 0,
             archived: false,
+            identity: None,
         },
         SessionEvent::ProxyToolRefused {
             token_id: String::new(),
@@ -4000,6 +4005,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             mcp_session: None,
             tool: None,
             reason: crate::session_log::ProxyToolRefusal::NotGranted,
+            identity: None,
         },
         SessionEvent::ProxyArchiveRedacted {
             sha256: HashHex(String::new()),
@@ -5005,4 +5011,54 @@ fn the_documented_default_forward_set_is_the_one_in_code() {
         .collect();
     want.sort();
     assert_eq!(example, want);
+}
+
+/// A proxied call made with a JWT carries who it was made as; one made
+/// with a token carries nothing more than it did, and a row written
+/// before the field existed reads as it was.
+#[test]
+fn a_proxy_row_carries_an_identity_only_where_a_jwt_was_presented() {
+    let identity = crate::ProxyIdentity {
+        issuer: "https://idp.example.com".into(),
+        grant_set: Some("engineers".into()),
+        jti: Some("j1".into()),
+        subject_hash: Some("ab".repeat(32)),
+        subject: None,
+    };
+    let row = |identity| SessionEvent::ProxyRefused {
+        token_id: None,
+        shape: None,
+        model: None,
+        reason: crate::ProxyRefusal::JwtNoGrant,
+        identity,
+    };
+    let with = serde_json::to_value(row(Some(identity.clone()))).unwrap();
+    assert_eq!(with["reason"], "jwt_no_grant");
+    assert_eq!(with["identity"]["issuer"], "https://idp.example.com");
+    assert_eq!(with["identity"]["grant_set"], "engineers");
+    assert_eq!(with["identity"]["jti"], "j1");
+    assert!(with["identity"].get("subject").is_none(), "{with}");
+    assert_eq!(
+        serde_json::from_value::<SessionEvent>(with).unwrap(),
+        row(Some(identity))
+    );
+
+    let without = serde_json::to_value(row(None)).unwrap();
+    assert!(without.get("identity").is_none(), "{without}");
+    assert_eq!(
+        serde_json::from_value::<SessionEvent>(without).unwrap(),
+        row(None)
+    );
+
+    for reason in [
+        crate::ProxyRefusal::JwtInvalid,
+        crate::ProxyRefusal::JwtExpired,
+        crate::ProxyRefusal::JwtWrongIssuer,
+        crate::ProxyRefusal::JwtWrongAudience,
+        crate::ProxyRefusal::JwtKeysUnavailable,
+        crate::ProxyRefusal::JwtNoGrant,
+        crate::ProxyRefusal::JwtAmbiguousGrant,
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+    }
 }
