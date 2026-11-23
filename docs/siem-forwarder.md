@@ -75,7 +75,15 @@ Default forward: `AssistantToolCalls`, `ToolResult`, `HttpFetch`,
 `CrossChannelMemoryRead`, `ImportStarted`, `ImportCompleted`,
 `ImportedChatRead`, `ImportedChatSearched`, `ExecLocationDisagreement`,
 `AdapterConnect`, `AdapterDisconnect`, `AdapterRestart`,
-`AdapterRestartAbandoned`.
+`AdapterRestartAbandoned`,
+`BinaryInstalled`, `UpdateRefused`, `ExecRuntimeAtStart`,
+`ExecRuntimeUnavailable`, `InboundSenderRefused`, `InboundSenderAdded`,
+`InboundSenderRemoved`, `ApproverAdded`, `ApproverRemoved`,
+`McpCredentialRefreshDiscarded`, `ApprovalChatSet`, `OperatorCommand`,
+`AuthorityReloaded`, `OperatorCommandRefused`, `SessionLivenessUnavailable`,
+`AgentStopped`, `AgentResumed`, `CredentialDestinationRefused`,
+`CredentialDestinationGranted`, `CredentialDestinationRevoked`, `CredentialHandedOut`,
+`VaultMigrated`.
 
 The four adapter variants are written by the gateway to the
 `gateway-adapters` lane: an adapter connecting, its connection ending with
@@ -90,9 +98,16 @@ forwarder reads every session, lanes included, from its cursor, so a finding
 recorded while the gateway is stopped is sent when it next starts.
 
 Default exclude, opt-in only: `UserMessage` and `AssistantMessage` (message
-bodies, PII), `LlmRequest` and `LlmResponse` (token accounting),
-`SystemPromptSet`, `Compaction`, `Rewind`, `Attestation`, `AuditLegacy`
-(already on the legacy pipe), and the Zirkel pipeline variants.
+bodies, PII), `LlmRequest`, `LlmResponse` and `LlmRequestFailed` (token
+accounting), `SystemPromptSet`, `Compaction`, `Rewind`, `Attestation`,
+`AuditLegacy` (already on the legacy pipe), `HttpRequest`, `ChildOpened`,
+`ExternalToolOutput`, `PermissionApproved`, `PermissionApprovalRefused`,
+`PermissionRevoked`, `PermissionRenewed`, `SessionScopedApprovalsCleared`,
+`PhaseEntered`, `PhaseExited`, `DeliveryConfirmed`, `DeliveryFailed`,
+`HookRegistered`, `HookDispatched`, `HookCrashed`, and the Zirkel pipeline
+variants `PerspectiveSkipped`, `PerspectiveExpansion`, `CandidateScored`,
+`CandidateLlmScored`, `CandidateKept`, `CandidateSkipped`, `ThemeNamed` and
+`InterestsEdited`.
 
 `typed_include_variants` is a full allowset rather than an addition: when set,
 only what it lists is forwarded and the default set is ignored. It wins over
@@ -126,7 +141,11 @@ or cause: `AdapterConnect` is `info`; `AdapterDisconnect` is `info`, or
 `start_failed` or `initialize_failed`; `McpServerRestartAbandoned` is `error`.
 `LeakRefused` is `error`. `LlmRequestFailed`, off the default set, is `warn`
 when an include list brings it. A legacy row an include list brings onto the
-typed pipe keeps its legacy level, and every other typed event is `info`.
+typed pipe keeps its legacy level. `InboundSenderRefused`,
+`McpCredentialRefreshDiscarded`, `OperatorCommandRefused`,
+`SessionLivenessUnavailable` and `AgentStopped` are `warn`, and
+`CredentialDestinationRefused` is `error`. Every other typed event is `info`,
+the proxy's refusals included.
 
 On the legacy pipe only Datadog carries a level, `status`. `connection.panic`
 is `error`. Other legacy rows are `error` when the action names a failure,

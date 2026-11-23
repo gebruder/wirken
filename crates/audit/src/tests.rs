@@ -4860,3 +4860,89 @@ mod children_check {
         assert_eq!(out.status, crate::CrossCheckStatus::ParentRowMissing);
     }
 }
+
+/// The kinds a default `siem.json` forwards, and the rest.
+fn forwarded_by_default() -> (Vec<&'static str>, Vec<&'static str>) {
+    let config = crate::siem::SiemConfig {
+        target: crate::siem::SiemTarget::Webhook,
+        endpoint: "https://siem.example/hook".into(),
+        api_key: String::new(),
+        service: "wirken".into(),
+        environment: "test".into(),
+        hmac_secret: None,
+        sentinel_typed: None,
+        typed_include_variants: None,
+        typed_exclude_variants: None,
+        typed_forwarding_enabled: None,
+        typed_poll_interval_ms: None,
+    };
+    let mut forwarded = Vec::new();
+    let mut held = Vec::new();
+    for event in every_session_event() {
+        if crate::siem_typed::should_forward(&event, &config) {
+            forwarded.push(variant_name(&event));
+        } else {
+            held.push(variant_name(&event));
+        }
+    }
+    (forwarded, held)
+}
+
+/// The two pages that list what is forwarded by default name what the
+/// code forwards: `docs/siem-forwarder.md` every variant on either side,
+/// and the `typed_include_variants` example in `docs/cost-monitoring.md`
+/// the default set plus `llm_response`, nothing else.
+#[test]
+fn the_documented_default_forward_set_is_the_one_in_code() {
+    let (forwarded, held) = forwarded_by_default();
+
+    let page = include_str!("../../../docs/siem-forwarder.md");
+    let section = |from: &str, to: &str| -> &str {
+        let start = page.find(from).unwrap_or_else(|| panic!("no {from:?}"));
+        let rest = &page[start..];
+        &rest[..rest.find(to).unwrap_or(rest.len())]
+    };
+    let listed_forward = section("Default forward:", "\n\n");
+    let listed_held = section("Default exclude", "\n\n");
+    let named = |text: &str, name: &str| text.contains(&format!("`{name}`"));
+    let missing: Vec<_> = forwarded
+        .iter()
+        .filter(|name| !named(listed_forward, name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "forwarded, not listed as such: {missing:?}"
+    );
+    let wrong: Vec<_> = held
+        .iter()
+        .filter(|name| named(listed_forward, name))
+        .collect();
+    assert!(wrong.is_empty(), "listed as forwarded, and held: {wrong:?}");
+    let unlisted: Vec<_> = held
+        .iter()
+        .filter(|name| !named(listed_held, name))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "held, not listed as such: {unlisted:?}"
+    );
+
+    let page = include_str!("../../../docs/cost-monitoring.md");
+    let start = page.find("\"typed_include_variants\": [").unwrap();
+    let list = &page[start..];
+    let list = &list[list.find('[').unwrap() + 1..list.find(']').unwrap()];
+    let mut example: Vec<String> = list
+        .split(',')
+        .map(|item| item.trim().trim_matches('"').to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    example.sort();
+    let mut want: Vec<String> = every_session_event()
+        .iter()
+        .filter(|event| forwarded.contains(&variant_name(event)))
+        .map(|event| crate::siem_typed::variant_kind_for(event).to_string())
+        .chain(["llm_response".to_string()])
+        .collect();
+    want.sort();
+    assert_eq!(example, want);
+}
