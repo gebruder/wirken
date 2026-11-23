@@ -2168,6 +2168,66 @@ mod chain_head_signing {
     /// auditor holding the old head sees the range it signed, the
     /// hash it signed it to, and that the hash on disk is a different
     /// one. Redaction buys attribution, not invisibility.
+    /// A session with several heads, and two rows rewritten in it, one
+    /// under the first head and one under a later one. Every head
+    /// written before a redaction made its claims over hashes that
+    /// have moved since; the signed redaction heads account for the
+    /// move, and the session still verifies. A row altered with no
+    /// redaction head still does not.
+    #[test]
+    fn several_redactions_in_a_session_with_several_heads_verify() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let audit = AuditLog::open_with_signer(&db_path, signer).unwrap();
+        let log = audit.session_log();
+        let h = log.handle_for(SessionId::new("several"));
+        for part in 0..3 {
+            for n in 0..3 {
+                log.append(
+                    &h,
+                    TrustLevel::User,
+                    user_msg(&format!("part {part} row {n}")),
+                )
+                .unwrap();
+            }
+            log.emit_chain_head(&h, ChainHeadReason::Checkpoint)
+                .unwrap()
+                .expect("a signed head");
+        }
+        let seq_of = |text: &str| {
+            log.get_since(&h, 0)
+                .unwrap()
+                .into_iter()
+                .find(|r| matches!(&r.event, SessionEvent::UserMessage { content, .. } if content == text))
+                .unwrap()
+                .seq
+        };
+        for text in ["part 0 row 1", "part 2 row 0"] {
+            log.redact(&h, seq_of(text), &user_msg("[removed]"), "op", "test")
+                .unwrap();
+        }
+        assert!(matches!(
+            log.verify(&h).unwrap(),
+            crate::session_log::SessionVerifyResult::Ok { .. }
+        ));
+        let sig = log.verify_signatures(&h).unwrap();
+        assert!(sig.first_invalid.is_none(), "{:?}", sig.first_invalid);
+
+        // A row changed behind the chain's back, with no head to say so.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE session_events SET payload = replace(payload, 'part 1 row 1', 'altered')
+              WHERE session_id = 'several'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            log.verify(&h).unwrap(),
+            crate::session_log::SessionVerifyResult::Broken { .. }
+        ));
+    }
+
     #[test]
     fn a_redaction_reseals_the_chain_and_names_the_head_it_replaced() {
         let tmp = tempfile::tempdir().unwrap();

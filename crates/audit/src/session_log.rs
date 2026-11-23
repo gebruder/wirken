@@ -4224,6 +4224,32 @@ impl SqliteSessionLog {
             })
             .collect();
 
+        // Every redaction, as (the seq of its head, the seq of the row
+        // it rewrote). A rewrite moves the hash of its row and of every
+        // row after it, so a head written before that redaction's head
+        // made its claims over hashes that are no longer the stored
+        // ones wherever they concern the rewritten row or a later one.
+        // Such a claim is waived on the same ground as the superseded
+        // head's above: a signed redaction head accounts for the move.
+        // A claim over rows before every rewrite is still held to the
+        // stored hash.
+        let rewrites: Vec<(u64, u64)> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::ChainHead {
+                    reason: ChainHeadReason::Redaction,
+                    redaction: Some(record),
+                    ..
+                } => Some((r.seq, record.seq)),
+                _ => None,
+            })
+            .collect();
+        let moved_since = |head_seq: u64, at: u64| {
+            rewrites
+                .iter()
+                .any(|(redaction_head, rewritten)| *redaction_head > head_seq && *rewritten <= at)
+        };
+
         for (idx, row) in rows.iter().enumerate() {
             let SessionEvent::ChainHead {
                 sequence_range_start,
@@ -4285,6 +4311,7 @@ impl SqliteSessionLog {
             if !current_chain_hash.0.is_empty()
                 && current_chain_hash.0 != actual_current
                 && !superseded.contains(&current_chain_hash.0)
+                && !moved_since(row.seq, *sequence_range_end)
             {
                 result.first_invalid = Some(InvalidSignatureDetail {
                     seq: row.seq,
@@ -4312,7 +4339,7 @@ impl SqliteSessionLog {
             } else {
                 let prev_seq = sequence_range_start - 1;
                 let actual_prev = stored_hashes.get(&prev_seq).cloned().unwrap_or_default();
-                if prev_chain_hash.0 != actual_prev {
+                if prev_chain_hash.0 != actual_prev && !moved_since(row.seq, prev_seq) {
                     result.first_invalid = Some(InvalidSignatureDetail {
                         seq: row.seq,
                         signing_key_id: signing_key_id.0.clone(),
