@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [3.5.1] - 2026-11-23
+
 ### Operator notes
 
 - One gateway serves a data directory. A second `wirken run` on a directory
@@ -75,6 +77,14 @@ tagged.
   `crates/agent/src/tests.rs`;
   `crates/cli/tests/proxy_mcp_live_round_trip.rs`;
   [docs/proxy-mcp.md](docs/proxy-mcp.md)).
+
+### Deferred
+
+- Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
+  serenity 0.12.5 in the Discord adapter, stay open as in 3.5.0. The fix for
+  all three is serenity on rustls 0.23, held until the migrated adapter
+  passes a live Discord round-trip.
+- #317 (sixteen Cargo updates) stays deferred whole, as in 3.5.0.
 
 ## [3.5.0] - 2026-11-22
 
