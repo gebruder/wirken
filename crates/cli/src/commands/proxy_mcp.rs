@@ -1111,6 +1111,11 @@ mod tests {
             vec!["mcp_files_list".to_string(), "mcp_files_read".to_string()]
         );
         assert_eq!(sender, &format!("proxy-token:{}", token.id));
+        // A tool call is not one of the token's inference calls.
+        let window = token
+            .window
+            .window_start(wirken_gateway::budget::now_unix_secs());
+        assert_eq!(rig.state.tokens.window_calls(&token.id, window).unwrap(), 0);
 
         let rows = rig.rows(&lane);
         let Some(SessionEvent::ProxyToolCall {
@@ -1339,5 +1344,40 @@ mod tests {
             404
         );
         assert!(rig.lanes().iter().all(|lane| lane.starts_with("proxy-")));
+    }
+    /// A session ends a day after it opened, whether or not it is used.
+    #[tokio::test]
+    async fn a_session_ends_a_day_after_it_opened() {
+        let rig = rig().await;
+        let (token, value) = rig.token("laptop", &["files"]);
+        let session = rig.open(&value, None).await;
+        let endpoint = rig.state.mcp.as_ref().unwrap();
+        assert!(endpoint.session(&session, &token).is_some());
+        {
+            let mut sessions = endpoint.sessions.lock().unwrap();
+            let held = sessions.remove(&session).unwrap();
+            let Some(opened) =
+                Instant::now().checked_sub(SESSION_LIFETIME + Duration::from_secs(1))
+            else {
+                // A host up for less than a day cannot go back that far.
+                return;
+            };
+            sessions.insert(
+                session.clone(),
+                Arc::new(McpSession {
+                    token_id: held.token_id.clone(),
+                    agent: held.agent.clone(),
+                    lane: held.lane.clone(),
+                    listing: held.listing.clone(),
+                    shown: held.shown.clone(),
+                    opened,
+                }),
+            );
+        }
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        assert_eq!(
+            rig.send(&value, Some(&session), None, list).await.status,
+            404
+        );
     }
 }
