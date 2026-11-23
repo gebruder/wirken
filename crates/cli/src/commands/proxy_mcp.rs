@@ -1345,6 +1345,72 @@ mod tests {
         );
         assert!(rig.lanes().iter().all(|lane| lane.starts_with("proxy-")));
     }
+    /// With an archive that cannot be written to, no session opens and
+    /// no call runs. A body over the size limit is refused.
+    #[tokio::test]
+    async fn a_failed_archive_write_or_an_oversized_body_refuses_the_request() {
+        struct Refusing;
+        #[async_trait::async_trait]
+        impl BodySink for Refusing {
+            async fn put(&self, _: BodyKind, _: &str, _: &[u8]) -> Result<(), String> {
+                Err("the bucket is gone".into())
+            }
+        }
+        let mut rig = rig().await;
+        let (token, value) = rig.token("laptop", &["files"]);
+        let session = rig.open(&value, Some("work")).await;
+        let lane = format!("proxy-{}-work", token.id);
+
+        let big = serde_json::json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"name": "files_read", "arguments": {"path": "x".repeat(70 * 1024)}},
+        })
+        .to_string();
+        let answer = rig.send(&value, Some(&session), None, &big).await;
+        assert_eq!(answer.status, 413);
+
+        // The same listener state with an archive that refuses writes.
+        let state = Arc::new(ProxyState {
+            max_body_bytes: 64 * 1024,
+            upstreams: Default::default(),
+            tokens: ProxyTokenStore::open(&rig._tmp.path().join(PROXY_TOKENS_FILE)).unwrap(),
+            log: rig.log.clone() as Arc<dyn SessionLog>,
+            budget: None,
+            leak: Arc::new(LeakMatcher::new()),
+            archive: Some(Arc::new(Refusing) as Arc<dyn BodySink>),
+            last_unknown_row: std::sync::Mutex::new(None),
+            mcp: Some(McpEndpoint::new(rig.host.clone() as Arc<dyn ToolHost>)),
+        });
+        let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        rig.base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(serve(listener, None, state));
+        let answer = rig
+            .send(
+                &value,
+                None,
+                Some("work"),
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            )
+            .await;
+        assert_eq!(answer.status, 502, "{}", answer.body);
+        assert!(answer.session.is_none());
+        assert!(rig.host.calls.lock().unwrap().is_empty());
+        let refusals: Vec<ProxyToolRefusal> = rig
+            .refusals(&format!("proxy-{}", token.id))
+            .into_iter()
+            .chain(rig.refusals(&lane))
+            .map(|(_, reason)| reason)
+            .collect();
+        assert!(
+            refusals.contains(&ProxyToolRefusal::Malformed),
+            "{refusals:?}"
+        );
+        assert!(
+            refusals.contains(&ProxyToolRefusal::ArchiveFailed),
+            "{refusals:?}"
+        );
+    }
+
     /// A session ends a day after it opened, whether or not it is used.
     #[tokio::test]
     async fn a_session_ends_a_day_after_it_opened() {
