@@ -111,8 +111,7 @@ Redaction destroys a body's key. The object stays locked in the bucket and
 nothing can read it. It does not change the chain: the rows of the call
 stay, and for a tool call so do the arguments and output they hold.
 
-All four are operator commands. `search` and `redact` refuse inside a Wirken
-`exec`.
+All four are operator commands, and all four refuse inside a Wirken `exec`.
 
 ## What the mode does not do
 

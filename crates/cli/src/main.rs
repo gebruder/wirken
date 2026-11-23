@@ -1810,10 +1810,12 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
                 | ZirkelCommands::Calibrate { .. } => return None,
             },
         ),
-        // Not a change of authority, and refused all the same: a search
-        // inside an `exec` would read every session to the agent that
-        // ran it.
+        // Not changes of authority, and refused all the same: inside an
+        // `exec` these would read sessions, and an archive's bodies, to
+        // the agent that ran them, across channels.
         Commands::Sessions(SessionCommands::Search { .. }) => ("sessions", "search"),
+        Commands::Sessions(SessionCommands::Export { .. }) => ("sessions", "export"),
+        Commands::Sessions(SessionCommands::Verify { .. }) => ("sessions", "verify"),
         _ => return None,
     };
     Some(change)

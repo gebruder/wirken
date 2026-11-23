@@ -58,6 +58,12 @@ const INVOCATIONS: &[(&str, &str, &[&str])] = &[
         &["permissions", "pending", "deny", "req-1"],
     ),
     ("sessions", "search", &["sessions", "search", "password"]),
+    (
+        "sessions",
+        "export",
+        &["sessions", "export", "default", "--format", "atif"],
+    ),
+    ("sessions", "verify", &["sessions", "verify", "default"]),
     ("skills", "install", &["skills", "install", "/nonexistent"]),
     (
         "skills",

@@ -15,9 +15,10 @@ every `credentials` subcommand but `list` and `show`; `vault reset` and
 `preset install`, `schedule` and `unschedule`; `webchat open`; `zirkel bind`,
 `unbind` and `auth-set`; `proxy token issue` and `revoke`, and `proxy archive
 redact`; `setup`; `import`. Other reads run, and so does `sessions close`,
-which only takes authority away. `sessions search` is a read and is refused
-all the same: inside an `exec` it would read every session to the agent that
-ran it.
+which only takes authority away. `sessions search`, `sessions export` and
+`sessions verify` are reads and are refused all the same: inside an `exec`
+they would read sessions, and an archive's bodies, to the agent that ran
+them.
 
 ## wirken setup
 
