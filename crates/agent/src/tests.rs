@@ -19175,3 +19175,178 @@ mod stop_reasons_and_rounds {
         )));
     }
 }
+
+// ---------------------------------------------------------------------------
+// A tool call a client outside Wirken asked for runs on the agent's
+// session under the agent's gate.
+// ---------------------------------------------------------------------------
+mod a_client_tool_call {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::approval_gate::ApprovalOutcome;
+    use crate::approval_gate::test_support::ScriptedGate;
+    use wirken_audit::{SessionEvent, SessionId};
+
+    const TOOL: &str = "mcp_files_read";
+    const SECRET: &str = "sk-live-0123456789abcdefghij";
+
+    struct Run {
+        output: String,
+        success: bool,
+        asked: Vec<String>,
+        events: Vec<SessionEvent>,
+    }
+
+    async fn call(tool: &str, arguments: serde_json::Value, outcomes: Vec<ApprovalOutcome>) -> Run {
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let session = "proxy-0a0a0a0a-work".to_string();
+        let mut agent = crate::runtime::Agent::new(
+            session.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "unused".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+                auth: Default::default(),
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
+        )
+        .unwrap();
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+        let matcher = Arc::new(wirken_gateway::leak::LeakMatcher::default());
+        matcher.learn("records-api", SECRET, wirken_vault::CredentialKind::Secret);
+        agent.set_leak_matcher(matcher);
+        let gate = Arc::new(ScriptedGate::new(outcomes));
+        agent.set_approval_gate(gate.clone());
+
+        let allowed: BTreeSet<String> = [TOOL.to_string()].into();
+        let result = agent
+            .run_tool_for_client("call-1", tool, &arguments, &allowed, "proxy-token:0a0a0a0a")
+            .await
+            .expect("the call is answered");
+        let events = log
+            .get_since(&log.handle_for(SessionId::new(session)), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        Run {
+            output: result.output,
+            success: result.success,
+            asked: gate.calls.lock().unwrap().clone(),
+            events,
+        }
+    }
+
+    fn denial(events: &[SessionEvent]) -> Option<Option<String>> {
+        events.iter().find_map(|e| match e {
+            SessionEvent::PermissionDenied { denial_reason, .. } => Some(denial_reason.clone()),
+            _ => None,
+        })
+    }
+
+    /// The call is asked of the approval route as a Tier 3 MCP call,
+    /// and an approval is a row before the call is dispatched.
+    #[tokio::test]
+    async fn an_approved_call_is_asked_recorded_and_dispatched() {
+        let r = call(
+            TOOL,
+            serde_json::json!({"path": "a.txt"}),
+            vec![ApprovalOutcome::Approved { actor: None }],
+        )
+        .await;
+        assert_eq!(r.asked, vec![TOOL.to_string()]);
+        assert!(r.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::PermissionApproved { action_key, .. } if action_key == "mcp:mcp_files_read"
+        )));
+        assert!(r.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::AssistantToolCalls { calls, sender_id, .. }
+                if calls[0].id == "call-1"
+                    && calls[0].name == TOOL
+                    && sender_id.as_deref() == Some("proxy-token:0a0a0a0a")
+        )));
+        assert!(r.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::ToolResult { call_id, tool_name, .. }
+                if call_id == "call-1" && tool_name == TOOL
+        )));
+        assert!(denial(&r.events).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_denied_call_does_not_run_and_is_a_row() {
+        let r = call(
+            TOOL,
+            serde_json::json!({}),
+            vec![ApprovalOutcome::Denied {
+                reason: Some("not this one".into()),
+                actor: None,
+            }],
+        )
+        .await;
+        assert!(!r.success);
+        assert!(r.output.starts_with("Permission denied"), "{}", r.output);
+        assert!(denial(&r.events).is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_approval_is_a_denial() {
+        let r = call(TOOL, serde_json::json!({}), vec![ApprovalOutcome::Timeout]).await;
+        assert!(!r.success);
+        assert_eq!(r.asked, vec![TOOL.to_string()]);
+        assert_eq!(
+            denial(&r.events),
+            Some(Some("approval timeout".to_string()))
+        );
+    }
+
+    /// A tool outside the set the client was shown is refused before
+    /// anyone is asked, an agent's own tool included.
+    #[tokio::test]
+    async fn a_tool_outside_the_allowed_set_is_refused_without_asking() {
+        for tool in ["exec", "mcp_other_read"] {
+            let r = call(
+                tool,
+                serde_json::json!({"command": "id"}),
+                vec![ApprovalOutcome::Approved { actor: None }],
+            )
+            .await;
+            assert!(!r.success, "{tool}: {}", r.output);
+            assert!(r.asked.is_empty(), "{tool} was asked about");
+        }
+    }
+
+    /// Arguments carrying a stored secret are refused before the gate,
+    /// and the secret is on no row.
+    #[tokio::test]
+    async fn arguments_with_a_stored_secret_are_refused() {
+        let r = call(
+            TOOL,
+            serde_json::json!({"path": SECRET}),
+            vec![ApprovalOutcome::Approved { actor: None }],
+        )
+        .await;
+        assert!(!r.success);
+        assert!(r.asked.is_empty());
+        assert!(r.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::LeakRefused { credential, .. } if credential == "records-api"
+        )));
+        assert!(!format!("{:?}", r.events).contains(SECRET));
+    }
+}

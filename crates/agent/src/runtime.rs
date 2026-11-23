@@ -1322,6 +1322,66 @@ impl Agent {
         Ok(result)
     }
 
+    /// The MCP tools this agent has now, as its proxy lists them.
+    pub async fn mcp_tool_defs(&self) -> Vec<crate::tool::ToolDef> {
+        self.turn_mcp_defs().await
+    }
+
+    /// Run one tool call that a client outside Wirken asked for, on
+    /// this agent's session: the stored-secret check on the arguments,
+    /// the permission gate, the approval route, output mediation and
+    /// the session-log rows a model's call gets. `allowed` is every
+    /// tool the client may call; any other name is refused by the same
+    /// clamp a sub-agent's tool grant is. `sender` is recorded as the
+    /// call's sender. The conversation is not touched.
+    pub async fn run_tool_for_client(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        allowed: &BTreeSet<String>,
+        sender: &str,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        self.refuse_if_stopped()?;
+        self.restrict_tools = Some(allowed.clone());
+        self.current_inbound = InboundContext {
+            adapter_id: None,
+            sender_id: Some(sender.to_string()),
+            channel: None,
+        };
+        self.current_assistant_text = None;
+        let call = crate::conversation::ToolCallRequest {
+            id: call_id.to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        };
+        let (checked, refused) = self.refuse_leaked_arguments(vec![call]).await;
+        let Some(call) = checked.into_iter().next() else {
+            return Err(AgentError::Tool("the call was lost".into()));
+        };
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::AssistantToolCalls {
+                calls: Self::calls_to_records(std::slice::from_ref(&call)),
+                text: None,
+                reasoning: None,
+                agent_id: self.audited_agent_id(),
+                adapter_id: None,
+                sender_id: self.current_inbound.sender_id.clone(),
+                step: None,
+            },
+        )?;
+        let result = match refused.get(&call.id) {
+            Some(credential) => refused_tool_result(credential),
+            None => {
+                let mut denials = Vec::new();
+                self.execute_and_record_tool(&call, &mut denials).await?
+            }
+        };
+        self.record_tool_result(&call.id, &call.name, &result)?;
+        Ok(result)
+    }
+
     /// `Err(AgentStopped)` when the operator has stopped this agent,
     /// read from the permission store on every call. A store that
     /// cannot be read reads as stopped.
