@@ -41,7 +41,7 @@ moves every process at once.
 | `agents/<id>/` | Per-agent `identity.{key,pub}`, `workspace/`, `skills/`, `mcp.json`. The `workspace/` is shared by all of that agent's channels and sessions | `wirken agents add` |
 | `sockets/` | Unix domain sockets for IPC. On Windows the gateway uses named pipes derived from these path stems and the directory holds no live files | `wirken run` |
 | `workspace/` | Default agent workspace, shared by all of its channels and sessions | `wirken run` |
-| `proxy.json` | The proxy listener: upstreams, bind, TLS, archive. The listener is off without it; see [inference-proxy.md](inference-proxy.md#turning-it-on) | Manual |
+| `proxy.json` | The proxy listener: upstreams, bind, TLS, archive, identity provider. The listener is off without it; see [inference-proxy.md](inference-proxy.md#turning-it-on) | Manual |
 | `proxy_tokens.db` | Proxy client tokens, as digests, and a hash of each request's message list for thirty days | `wirken proxy token issue` |
 | `proxy_archive_keys.db` | One wrapped key for each archived body, and the encrypted search text of each. Back it up with `vault.db`; see [proxy-archive.md](proxy-archive.md) | `wirken run` |
 | `approvers.db` | Channel approver allowlist and approval chats | `wirken approvers add` |

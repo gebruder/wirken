@@ -145,9 +145,13 @@ side carries the same actor, action, target, channel and session fields; see
 If a team requirement lands on one of these, either defer the requirement or
 build on top.
 
-- **Wirken is not an IdP and does not replace SSO**
+- **Wirken is not an IdP and does not replace SSO.** It verifies OIDC tokens
+  at the proxy listener, where a client can present a JWT from the
+  organization's identity provider in place of a proxy token
+  ([proxy-identity.md](proxy-identity.md)), and is still no identity
+  provider: no accounts, no login flow, no tokens issued or exchanged
   ([threat-model.md](threat-model.md#senders-and-approvals),
-  [permissions-and-identity.md](permissions-and-identity.md)).
+  [permissions-and-identity.md](permissions-and-identity.md#identity-scope)).
 - **Permissions are scoped per agent and channel, not per user.** A grant
   the operator records for a channel covers every admitted sender on that
   agent and channel

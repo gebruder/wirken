@@ -476,6 +476,14 @@ What each control leaves outside it, stated once. Other pages link here.
   reports no token counts costs nothing against a spend ceiling.
 - The token check is not rate-limited. A stranger's refusals are recorded at
   most once a second.
+- A JWT is a bearer secret too: whoever holds it is its subject until it
+  expires or passes `max_token_lifetime_secs`. There is no deny list. Wirken
+  trusts the configured issuer's keys for who a caller is; a compromise of
+  the issuer, or of the pinned key file, is a compromise of every grant set.
+  Verifying a signature costs more than looking up a token, and is not
+  rate-limited. A subject's keyed hash is on rows that cannot be removed, and
+  whoever holds the vault key can match it to a subject
+  ([proxy-identity.md](proxy-identity.md)).
 - Without `tls` the listener speaks plain HTTP: on a loopback bind any local
   process that can read the client's traffic reads its token, and on a wider
   bind the network does.

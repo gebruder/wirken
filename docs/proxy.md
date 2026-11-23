@@ -40,6 +40,10 @@ It is shown once and stored as a digest. Issuing and revoking are operator
 commands, each a row on the chain
 ([inference-proxy.md](inference-proxy.md#tokens)).
 
+With an `oidc` block in `proxy.json`, a client can present a JWT from the
+organization's identity provider in place of a token, and is given the grant
+set the operator mapped it to ([proxy-identity.md](proxy-identity.md)).
+
 ## What is gated
 
 - **Who.** Every request needs a token this gateway issued and has not
@@ -121,7 +125,9 @@ All four are operator commands, and all four refuse inside a Wirken `exec`.
 - It does not translate between provider shapes, and serves no Gemini or
   Bedrock shape.
 - It does not authenticate a person. A token names a client, not who is at
-  it.
+  it. A JWT from the organization's identity provider names who the issuer
+  says the caller is ([proxy-identity.md](proxy-identity.md)); Wirken
+  verifies it and issues nothing.
 - It serves MCP tools only: no resources, prompts or sampling.
 
 The trust boundaries are in [threat-model.md](threat-model.md#proxy-clients).

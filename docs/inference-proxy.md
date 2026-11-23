@@ -36,6 +36,7 @@ The listener runs inside `wirken run` when the data directory has a
 | `max_body_bytes` | 33554432 | The largest request body read. A larger one is refused. |
 | `idle_timeout_secs` | 300 | How long a forwarded call waits for the provider's next bytes. See [Long answers](#long-answers). |
 | `archive` | none | See [Write-once archive](proxy-archive.md#write-once-archive). |
+| `oidc` | none | The identity provider whose JWTs a client may present in place of a token. See [proxy-identity.md](proxy-identity.md). |
 
 `wirken run` prints the listener's address at start. A `proxy.json` that
 cannot be served, an unknown field included, stops the start.
@@ -200,6 +201,10 @@ and `complete: false`.
 | `credential_refused` | The upstream's key is gone, or may not be sent to it. | 502 |
 | `archive_failed` | The request body could not be archived. | 502 |
 | `record_failed` | The `proxy_request` row could not be written. | 502 |
+
+A JWT that is refused has its own reasons, `jwt_invalid` to
+`jwt_ambiguous_grant`: see
+[proxy-identity.md](proxy-identity.md#what-is-recorded).
 
 For the last two nothing was sent: a call is not forwarded unless its row,
 and with an archive its body, is written first.

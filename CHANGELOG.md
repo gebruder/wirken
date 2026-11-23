@@ -10,6 +10,32 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- A client of the proxy listener can present a JWT from the organization's
+  identity provider in place of a hand-issued token, at `/v1` and at `/mcp`.
+  An `oidc` block in `proxy.json` names the issuer, the audience and the
+  maximum token lifetime; keys come from the issuer's discovery document and
+  JWK set, fetched from the issuer's origin with no redirect followed, or
+  from a pinned `jwks_file`. Public-key algorithms only. A verified JWT gets
+  the grant set the operator mapped its claim value or its subject to with
+  `wirken proxy identity`; one that matches no mapping gets nothing and one
+  that matches two grant sets is refused. Ceilings are per subject. Each row
+  of such a call carries `identity`: the issuer, the grant set, the `jti` and
+  the subject as a keyed hash, or as issued with `record_subject`; never the
+  JWT. A refused JWT is a `proxy_refused` row with one of seven `jwt_*`
+  reasons. Wirken issues no identity and no token, and hand-issued tokens
+  work as before
+  (`crates/gateway/src/proxy_identity.rs`;
+  `a_mapping_selects_one_grant_set_or_none`, `crates/gateway/src/proxy.rs`;
+  `a_jwt_is_given_its_grant_set_and_its_rows_say_who_called`,
+  `crates/cli/src/commands/proxy_server.rs`;
+  `keys_are_fetched_from_the_issuers_origin_and_no_redirect_is_followed`,
+  `crates/cli/src/commands/proxy_oidc.rs`;
+  `crates/cli/tests/proxy_identity_commands.rs`;
+  `crates/cli/tests/proxy_oidc_live_round_trip.rs`;
+  [docs/proxy-identity.md](docs/proxy-identity.md)).
+
 ## [3.5.1] - 2026-11-23
 
 ### Operator notes

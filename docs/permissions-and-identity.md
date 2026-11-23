@@ -376,9 +376,19 @@ string. Nothing on the wire to the provider carries it.
 ## Identity scope
 
 Wirken is not an identity provider
-([threat-model.md](threat-model.md#senders-and-approvals)). It issues no identities for people and manages no user
-accounts. There is no SAML, no OIDC, no SCIM. The two credentials it issues
-are its own: a WebChat login for the operator and a proxy token for a client
-program ([proxy.md](proxy.md)). Platform
-sender identity is checked against the inbound sender allowlist and recorded
-on every inbound audit event; it is not an identity Wirken authenticates.
+([threat-model.md](threat-model.md#senders-and-approvals)). It issues no identities for people, manages no user
+accounts and has no login flow for them. There is no SAML and no SCIM. The two
+credentials it issues are its own: a WebChat login for the operator and a
+proxy token for a client program ([proxy.md](proxy.md)).
+
+It verifies OIDC tokens at the proxy listener and nowhere else. A client there
+can present a JWT from the organization's identity provider in place of a
+proxy token; Wirken checks it against the issuer's keys and gives the caller
+the grants the operator mapped it to
+([proxy-identity.md](proxy-identity.md)). The identity is the issuer's:
+Wirken issues no token for it and exchanges none, so a downstream system
+still sees Wirken's credential.
+
+Platform sender identity is checked against the inbound sender allowlist and
+recorded on every inbound audit event; it is not an identity Wirken
+authenticates.

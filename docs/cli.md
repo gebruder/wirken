@@ -13,8 +13,9 @@ every `credentials` subcommand but `list` and `show`; `vault reset` and
 `channel add` and `remove`; `cron create`, `delete`, `pause` and `resume`;
 `hooks register` and `unregister`; `persona create`, `edit` and `delete`;
 `preset install`, `schedule` and `unschedule`; `webchat open`; `zirkel bind`,
-`unbind` and `auth-set`; `proxy token issue` and `revoke`, and `proxy archive
-redact`; `setup`; `import`. Other reads run, and so does `sessions close`,
+`unbind` and `auth-set`; `proxy token issue` and `revoke`, `proxy archive
+redact`, and `proxy identity grant-set set` and `remove`, `map` and `unmap`;
+`setup`; `import`. Other reads run, and so does `sessions close`,
 which only takes authority away. `sessions search`, `sessions export` and
 `sessions verify` are reads and are refused all the same: inside an `exec`
 they would read sessions, and an archive's bodies, to the agent that ran
@@ -401,12 +402,21 @@ wirken proxy token revoke <ID-OR-NAME>
 wirken proxy token list
 wirken proxy sessions [--token ID-OR-NAME]
 wirken proxy archive redact (<SHA256> | --session <LANE>) --reason <WHY>
+wirken proxy identity grant-set set <NAME> [--upstream U] [--model M]
+                               [--ceiling-usd N] [--ceiling-calls N] [--window hour|day|week]
+                               [--mcp-server S] [--agent A]
+wirken proxy identity grant-set remove <NAME>
+wirken proxy identity map <GRANT-SET> (--claim-value <VALUE> | --subject <SUB>)
+wirken proxy identity unmap (--claim-value <VALUE> | --subject <SUB>)
+wirken proxy identity list
 ```
 
-`issue`, `revoke` and `redact` run at a terminal and refuse inside a Wirken
-`exec`. A token needs `--upstream`, `--mcp-server` or both. See
-[inference-proxy.md](inference-proxy.md) and, for `--mcp-server`,
-[proxy-mcp.md](proxy-mcp.md).
+`issue`, `revoke`, `redact` and every `identity` subcommand but `list` run at
+a terminal and refuse inside a Wirken `exec`. A token or a grant set needs
+`--upstream`, `--mcp-server` or both. See
+[inference-proxy.md](inference-proxy.md), for `--mcp-server`
+[proxy-mcp.md](proxy-mcp.md), and for `identity`
+[proxy-identity.md](proxy-identity.md).
 
 ## wirken approvers
 
