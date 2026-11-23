@@ -3911,6 +3911,36 @@ fn every_session_event() -> Vec<SessionEvent> {
             model: None,
             reason: crate::session_log::ProxyRefusal::UnknownToken,
         },
+        SessionEvent::ProxyToolsListed {
+            token_id: String::new(),
+            agent_id: String::new(),
+            mcp_session: String::new(),
+            servers: Vec::new(),
+            tools: Vec::new(),
+            tools_sha256: HashHex(String::new()),
+            archived: false,
+        },
+        SessionEvent::ProxyToolCall {
+            call_id: String::new(),
+            token_id: String::new(),
+            agent_id: String::new(),
+            mcp_session: String::new(),
+            tool: String::new(),
+            success: false,
+            latency_ms: 0,
+            request_sha256: HashHex(String::new()),
+            request_bytes: 0,
+            response_sha256: HashHex(String::new()),
+            response_bytes: 0,
+            archived: false,
+        },
+        SessionEvent::ProxyToolRefused {
+            token_id: String::new(),
+            agent_id: None,
+            mcp_session: None,
+            tool: None,
+            reason: crate::session_log::ProxyToolRefusal::NotGranted,
+        },
         SessionEvent::ProxyArchiveRedacted {
             sha256: HashHex(String::new()),
             operator: String::new(),
@@ -4178,6 +4208,9 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::ProxyRequest { .. } => "ProxyRequest",
         SessionEvent::ProxyResponse { .. } => "ProxyResponse",
         SessionEvent::ProxyRefused { .. } => "ProxyRefused",
+        SessionEvent::ProxyToolsListed { .. } => "ProxyToolsListed",
+        SessionEvent::ProxyToolCall { .. } => "ProxyToolCall",
+        SessionEvent::ProxyToolRefused { .. } => "ProxyToolRefused",
         SessionEvent::ProxyArchiveRedacted { .. } => "ProxyArchiveRedacted",
         SessionEvent::LeakRefused { .. } => "LeakRefused",
         SessionEvent::LlmRequestFailed { .. } => "LlmRequestFailed",
@@ -4186,7 +4219,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 99;
+const SESSION_EVENT_VARIANTS: usize = 102;
 
 /// The list covers the enum.
 #[test]

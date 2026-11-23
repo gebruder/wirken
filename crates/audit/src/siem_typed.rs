@@ -82,6 +82,10 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   `ProxyArchiveRedacted`: each call a client made through the proxy
 ///   listener, forwarded or refused, and an archived body made
 ///   unreadable. Hashes and counts, never a body.
+/// - `ProxyToolsListed`, `ProxyToolCall`, `ProxyToolRefused`: the tools
+///   a client was shown at the proxy's MCP endpoint, each call it made
+///   and each request refused before the gate. Names, hashes and
+///   counts.
 /// - `McpCredentialInjected`, `McpInjectRefused`: each request on a
 ///   contained server's injected route, made with the credential or
 ///   refused.
@@ -165,6 +169,10 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::ProxyRequest { .. } => true,
         SessionEvent::ProxyResponse { .. } => true,
         SessionEvent::ProxyRefused { .. } => true,
+        // Tools a client outside Wirken reached through it.
+        SessionEvent::ProxyToolsListed { .. } => true,
+        SessionEvent::ProxyToolCall { .. } => true,
+        SessionEvent::ProxyToolRefused { .. } => true,
         SessionEvent::ProxyArchiveRedacted { .. } => true,
         // A refresh that lost to a removal or a new sign-in.
         SessionEvent::McpCredentialRefreshDiscarded { .. } => true,
@@ -386,6 +394,9 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::ProxyRequest { .. } => "proxy_request",
         SessionEvent::ProxyResponse { .. } => "proxy_response",
         SessionEvent::ProxyRefused { .. } => "proxy_refused",
+        SessionEvent::ProxyToolsListed { .. } => "proxy_tools_listed",
+        SessionEvent::ProxyToolCall { .. } => "proxy_tool_call",
+        SessionEvent::ProxyToolRefused { .. } => "proxy_tool_refused",
         SessionEvent::ProxyArchiveRedacted { .. } => "proxy_archive_redacted",
         SessionEvent::McpCredentialRefreshDiscarded { .. } => "mcp_credential_refresh_discarded",
         SessionEvent::CredentialDestinationRefused { .. } => "credential_destination_refused",

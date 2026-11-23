@@ -957,6 +957,21 @@ fn extract_identity_for_sentinel(
         SessionEvent::ProxyRefused { token_id, .. } => {
             (None, token_id.as_deref().map(proxy_token_actor), None)
         }
+        // A client's tool call: the token is the sender, and the agent
+        // is the one whose servers and gate the token was granted.
+        SessionEvent::ProxyToolsListed {
+            token_id, agent_id, ..
+        }
+        | SessionEvent::ProxyToolCall {
+            token_id, agent_id, ..
+        } => (
+            None,
+            Some(proxy_token_actor(token_id)),
+            Some(agent_id.clone()),
+        ),
+        SessionEvent::ProxyToolRefused {
+            token_id, agent_id, ..
+        } => (None, Some(proxy_token_actor(token_id)), agent_id.clone()),
         // A body hash and an operator; none of the three.
         SessionEvent::ProxyArchiveRedacted { .. } => (None, None, None),
         // A credential name; none of the three.
@@ -1411,6 +1426,38 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         } => format!(
             "proxy_refused token={} reason={}",
             token_id.as_deref().unwrap_or("none"),
+            reason.as_str()
+        ),
+        SessionEvent::ProxyToolsListed {
+            token_id,
+            agent_id,
+            mcp_session,
+            tools,
+            ..
+        } => format!(
+            "proxy_tools_listed token={token_id} agent={agent_id} mcp_session={mcp_session} \
+             tools={}",
+            tools.len()
+        ),
+        SessionEvent::ProxyToolCall {
+            token_id,
+            agent_id,
+            tool,
+            success,
+            latency_ms,
+            ..
+        } => format!(
+            "proxy_tool_call token={token_id} agent={agent_id} tool={tool} success={success} \
+             latency_ms={latency_ms}"
+        ),
+        SessionEvent::ProxyToolRefused {
+            token_id,
+            tool,
+            reason,
+            ..
+        } => format!(
+            "proxy_tool_refused token={token_id} tool={} reason={}",
+            tool.as_deref().unwrap_or("none"),
             reason.as_str()
         ),
         SessionEvent::ProxyArchiveRedacted {
@@ -2833,6 +2880,37 @@ mod identity_tests {
                 },
                 None,
                 None,
+                None,
+            ),
+            (
+                SessionEvent::ProxyToolCall {
+                    call_id: "c1".into(),
+                    token_id: "tok1".into(),
+                    agent_id: "default".into(),
+                    mcp_session: "m1".into(),
+                    tool: "mcp_files_read".into(),
+                    success: true,
+                    latency_ms: 1,
+                    request_sha256: crate::HashHex("00".repeat(32)),
+                    request_bytes: 2,
+                    response_sha256: crate::HashHex("00".repeat(32)),
+                    response_bytes: 2,
+                    archived: false,
+                },
+                None,
+                Some("proxy-token:tok1"),
+                Some("default"),
+            ),
+            (
+                SessionEvent::ProxyToolRefused {
+                    token_id: "tok1".into(),
+                    agent_id: None,
+                    mcp_session: None,
+                    tool: None,
+                    reason: crate::ProxyToolRefusal::NoMcpGrant,
+                },
+                None,
+                Some("proxy-token:tok1"),
                 None,
             ),
             (

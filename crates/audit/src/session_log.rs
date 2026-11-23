@@ -2398,6 +2398,58 @@ pub enum SessionEvent {
         model: Option<String>,
         reason: ProxyRefusal,
     },
+    /// The tools a client was shown at the proxy's MCP endpoint, written
+    /// when its MCP session opens. `tools` are their names;
+    /// `tools_sha256` is the SHA-256 of the definitions as the client
+    /// gets them, the body [`ProxyToolsListed::archived`] names. A
+    /// session's tools are these for as long as it lasts.
+    ///
+    /// [`ProxyToolsListed::archived`]: SessionEvent::ProxyToolsListed
+    ProxyToolsListed {
+        token_id: String,
+        /// The agent whose MCP servers and permission gate the token
+        /// was granted.
+        agent_id: String,
+        mcp_session: String,
+        servers: Vec<String>,
+        tools: Vec<String>,
+        tools_sha256: HashHex,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        archived: bool,
+    },
+    /// One `tools/call` a client made at the proxy's MCP endpoint, after
+    /// it ran or the gate refused it. `call_id` is the id on the
+    /// `assistant_tool_calls` and `tool_result` rows of the same call,
+    /// which carry the arguments and the output. The hashes are of the
+    /// request and the answer as exchanged with the client.
+    ProxyToolCall {
+        call_id: String,
+        token_id: String,
+        agent_id: String,
+        mcp_session: String,
+        tool: String,
+        success: bool,
+        latency_ms: u64,
+        request_sha256: HashHex,
+        request_bytes: u64,
+        response_sha256: HashHex,
+        response_bytes: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        archived: bool,
+    },
+    /// A request at the proxy's MCP endpoint was refused before the
+    /// permission gate, and no tool ran. A refusal by the gate is a
+    /// `permission_denied` row.
+    ProxyToolRefused {
+        token_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        reason: ProxyToolRefusal,
+    },
     /// The key an archived body was encrypted under was destroyed. The
     /// object stays in the bucket for its retention period and can no
     /// longer be read. `sha256` is the body's hash, as on the
@@ -3000,6 +3052,42 @@ impl ProxyRefusal {
             Self::BudgetExceeded => "budget_exceeded",
             Self::LeakRefused => "leak_refused",
             Self::CredentialRefused => "credential_refused",
+            Self::RecordFailed => "record_failed",
+            Self::ArchiveFailed => "archive_failed",
+        }
+    }
+}
+
+/// Why the proxy's MCP endpoint refused a request before the
+/// permission gate. A closed set.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyToolRefusal {
+    /// The token was granted no MCP server.
+    NoMcpGrant,
+    /// The tool is not one the session was shown.
+    NotGranted,
+    /// The tool's definition is not the one the session was shown.
+    DefinitionChanged,
+    /// Not a JSON-RPC request this endpoint serves, or over the size
+    /// limit.
+    Malformed,
+    /// The agent's tools could not be reached.
+    Unavailable,
+    /// A row could not be written, so nothing ran.
+    RecordFailed,
+    /// A body could not be written to the archive, so nothing ran.
+    ArchiveFailed,
+}
+
+impl ProxyToolRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoMcpGrant => "no_mcp_grant",
+            Self::NotGranted => "not_granted",
+            Self::DefinitionChanged => "definition_changed",
+            Self::Malformed => "malformed",
+            Self::Unavailable => "unavailable",
             Self::RecordFailed => "record_failed",
             Self::ArchiveFailed => "archive_failed",
         }
