@@ -79,8 +79,9 @@ impl BodyKind {
 #[async_trait::async_trait]
 pub trait BodySink: Send + Sync {
     /// Keep `body`, whose SHA-256 is `sha256`, so the row carrying that
-    /// hash finds it.
-    async fn put(&self, kind: BodyKind, sha256: &str, body: &[u8]) -> Result<(), String>;
+    /// hash finds it. Returns whether a readable copy is kept: `false`
+    /// for a body that was redacted, which is not kept again.
+    async fn put(&self, kind: BodyKind, sha256: &str, body: &[u8]) -> Result<bool, String>;
 }
 
 /// One configured upstream, ready to forward to.
@@ -358,7 +359,7 @@ impl Exchange {
         let mut archived = false;
         if let (Some(archive), Some(body)) = (&self.state.archive, &self.body) {
             match archive.put(BodyKind::Response, &sha256, body).await {
-                Ok(()) => archived = true,
+                Ok(kept) => archived = kept,
                 Err(e) => tracing::error!(
                     token = %self.token.id,
                     request_id = %self.request_id,
@@ -760,18 +761,20 @@ impl ProxyState {
         let request_sha256 = sha256_hex(&body);
         let mut archived = false;
         if let Some(archive) = &self.archive {
-            if let Err(e) = archive.put(BodyKind::Request, &request_sha256, &body).await {
-                return self.refuse(
-                    &session,
-                    Some(&token),
-                    Some(shape),
-                    Some(&model),
-                    ProxyRefusal::ArchiveFailed,
-                    StatusCode::BAD_GATEWAY,
-                    &format!("the request could not be archived, so it was not sent: {e}"),
-                );
+            match archive.put(BodyKind::Request, &request_sha256, &body).await {
+                Ok(kept) => archived = kept,
+                Err(e) => {
+                    return self.refuse(
+                        &session,
+                        Some(&token),
+                        Some(shape),
+                        Some(&model),
+                        ProxyRefusal::ArchiveFailed,
+                        StatusCode::BAD_GATEWAY,
+                        &format!("the request could not be archived, so it was not sent: {e}"),
+                    );
+                }
             }
-            archived = true;
         }
 
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -1798,19 +1801,24 @@ mod tests {
     struct TestSink {
         fails: Option<BodyKind>,
         kept: Mutex<Vec<(BodyKind, String, Vec<u8>)>>,
+        /// Hashes of bodies whose key was destroyed.
+        redacted: Mutex<std::collections::HashSet<String>>,
     }
 
     #[async_trait::async_trait]
     impl BodySink for TestSink {
-        async fn put(&self, kind: BodyKind, sha256: &str, body: &[u8]) -> Result<(), String> {
+        async fn put(&self, kind: BodyKind, sha256: &str, body: &[u8]) -> Result<bool, String> {
             if self.fails == Some(kind) {
                 return Err("the bucket is unreachable".into());
+            }
+            if self.redacted.lock().unwrap().contains(sha256) {
+                return Ok(false);
             }
             self.kept
                 .lock()
                 .unwrap()
                 .push((kind, sha256.to_string(), body.to_vec()));
-            Ok(())
+            Ok(true)
         }
     }
 
@@ -1918,6 +1926,45 @@ mod tests {
             ),
             "{rows:?}"
         );
+    }
+
+    /// A body that was redacted and is sent again is forwarded, and its
+    /// row says it is not archived: nothing readable is kept of it.
+    #[tokio::test]
+    async fn a_redacted_body_sent_again_is_recorded_as_not_archived() {
+        const BODY: &str = "{\"model\":\"m\"}";
+        let (upstream, got) = provider(json_reply("{}")).await;
+        let sink = Arc::new(TestSink::default());
+        sink.redacted
+            .lock()
+            .unwrap()
+            .insert(sha256_hex(BODY.as_bytes()));
+        let rig = rig_with(
+            vec![("local", "custom", upstream, None)],
+            None,
+            Some(sink.clone()),
+        )
+        .await;
+        let (token, value) = rig.issue("laptop", &["local"]);
+        let response = rig.post(CHAT, &value, BODY).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(got.lock().unwrap().len(), 1);
+        let rows = rig.calls(&token);
+        assert!(
+            matches!(
+                rows.as_slice(),
+                [
+                    SessionEvent::ProxyRequest {
+                        archived: false,
+                        ..
+                    },
+                    SessionEvent::ProxyResponse { archived: true, .. }
+                ]
+            ),
+            "{rows:?}"
+        );
+        let kept = sink.kept.lock().unwrap();
+        assert!(kept.iter().all(|(kind, _, _)| *kind == BodyKind::Response));
     }
 
     /// A provider that sends the start of a stream and then nothing:

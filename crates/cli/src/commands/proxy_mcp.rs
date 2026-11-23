@@ -493,23 +493,25 @@ impl ProxyState {
         let tools_sha256 = sha256_hex(&listing_bytes);
         let mut archived = false;
         if let Some(archive) = &self.archive {
-            if let Err(e) = archive
+            match archive
                 .put(BodyKind::Response, &tools_sha256, &listing_bytes)
                 .await
             {
-                return self.refuse_tool(
-                    &token_lane,
-                    token,
-                    None,
-                    None,
-                    ProxyToolRefusal::ArchiveFailed,
-                    StatusCode::BAD_GATEWAY,
-                    id,
-                    -32603,
-                    &format!("the tool list could not be archived: {e}"),
-                );
+                Ok(kept) => archived = kept,
+                Err(e) => {
+                    return self.refuse_tool(
+                        &token_lane,
+                        token,
+                        None,
+                        None,
+                        ProxyToolRefusal::ArchiveFailed,
+                        StatusCode::BAD_GATEWAY,
+                        id,
+                        -32603,
+                        &format!("the tool list could not be archived: {e}"),
+                    );
+                }
             }
-            archived = true;
         }
         if let Err(e) = self.record(
             &lane,
@@ -683,17 +685,19 @@ impl ProxyState {
         let request_sha256 = sha256_hex(body);
         let mut archived = false;
         if let Some(archive) = &self.archive {
-            if let Err(e) = archive.put(BodyKind::Request, &request_sha256, body).await {
-                return refuse(
-                    self,
-                    Some(&tool),
-                    ProxyToolRefusal::ArchiveFailed,
-                    StatusCode::OK,
-                    -32603,
-                    &format!("the call could not be archived: {e}"),
-                );
+            match archive.put(BodyKind::Request, &request_sha256, body).await {
+                Ok(kept) => archived = kept,
+                Err(e) => {
+                    return refuse(
+                        self,
+                        Some(&tool),
+                        ProxyToolRefusal::ArchiveFailed,
+                        StatusCode::OK,
+                        -32603,
+                        &format!("the call could not be archived: {e}"),
+                    );
+                }
             }
-            archived = true;
         }
 
         let call_id = tool_use_id(params).unwrap_or_else(|| format!("mcp-{}", random_hex(12)));
@@ -739,12 +743,17 @@ impl ProxyState {
         let response_sha256 = sha256_hex(&answer_bytes);
         if let Some(archive) = &self.archive
             && archived
-            && let Err(e) = archive
+        {
+            archived = match archive
                 .put(BodyKind::Response, &response_sha256, &answer_bytes)
                 .await
-        {
-            tracing::error!("proxy: MCP answer not archived: {e}");
-            archived = false;
+            {
+                Ok(kept) => kept,
+                Err(e) => {
+                    tracing::error!("proxy: MCP answer not archived: {e}");
+                    false
+                }
+            };
         }
         if let Err(e) = self.record(
             &session.lane,
@@ -835,12 +844,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BodySink for MemorySink {
-        async fn put(&self, kind: BodyKind, sha256: &str, body: &[u8]) -> Result<(), String> {
+        async fn put(&self, kind: BodyKind, sha256: &str, body: &[u8]) -> Result<bool, String> {
             self.0
                 .lock()
                 .unwrap()
                 .push((kind, sha256.to_string(), body.to_vec()));
-            Ok(())
+            Ok(true)
         }
     }
 
@@ -1352,7 +1361,7 @@ mod tests {
         struct Refusing;
         #[async_trait::async_trait]
         impl BodySink for Refusing {
-            async fn put(&self, _: BodyKind, _: &str, _: &[u8]) -> Result<(), String> {
+            async fn put(&self, _: BodyKind, _: &str, _: &[u8]) -> Result<bool, String> {
                 Err("the bucket is gone".into())
             }
         }

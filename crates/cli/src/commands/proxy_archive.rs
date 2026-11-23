@@ -518,10 +518,12 @@ impl Archive {
 impl BodySink for Archive {
     /// Encrypt `body` under a new key and write it, locked, under its
     /// hash. A body this archive already holds a key for is there
-    /// already. One whose key was destroyed is not written again.
-    async fn put(&self, kind: BodyKind, sha256: &str, body: &[u8]) -> Result<(), String> {
+    /// already. One whose key was destroyed is not written again, and
+    /// the answer says no readable copy is kept.
+    async fn put(&self, kind: BodyKind, sha256: &str, body: &[u8]) -> Result<bool, String> {
         match self.keys.get(kind, sha256)? {
-            BodyKey::Held(_) | BodyKey::Destroyed => return Ok(()),
+            BodyKey::Held(_) => return Ok(true),
+            BodyKey::Destroyed => return Ok(false),
             BodyKey::Absent => {}
         }
         let key = Zeroizing::new(random::<32>());
@@ -566,7 +568,8 @@ impl BodySink for Archive {
         }
         // The key is kept only once the object is in the bucket.
         self.keys
-            .put(kind, sha256, &seal(&self.master, &bound, key.as_slice())?)
+            .put(kind, sha256, &seal(&self.master, &bound, key.as_slice())?)?;
+        Ok(true)
     }
 }
 
@@ -1043,6 +1046,23 @@ mod tests {
         // store's file.
         let key = vault.retrieve("proxy-archive-key").unwrap().0;
         assert_eq!(key.expose().len(), 64);
+    }
+
+    /// A body whose key was destroyed is not written again, and the
+    /// archive says no readable copy is kept. Nothing is sent.
+    #[tokio::test]
+    async fn a_redacted_body_sent_again_is_not_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = vault(tmp.path());
+        store_credentials(&vault, "s3.example.com", "AKIA:secret");
+        // An endpoint nothing answers at: a request to it would fail.
+        let archive =
+            Archive::open(&config("https://s3.example.com", "b"), &vault, tmp.path()).unwrap();
+        archive.keys().destroy(HASH).unwrap();
+        for kind in [BodyKind::Request, BodyKind::Response] {
+            assert_eq!(archive.put(kind, HASH, b"the same body").await, Ok(false));
+            assert_eq!(archive.keys().get(kind, HASH).unwrap(), BodyKey::Destroyed);
+        }
     }
 
     #[test]

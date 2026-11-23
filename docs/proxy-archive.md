@@ -87,7 +87,7 @@ in `proxy_archive_keys.db`, overwrites the freed pages, and writes a
 `proxy_archive_redacted` row with the hash, the operator, the reason and,
 for the first form, the session. The object stays in the bucket until its retention
 ends and nothing can decrypt it. A hash that is redacted takes no new key: the
-same body sent again is not archived readable. It cannot be undone. The
+same body sent again is not archived, and its row says `archived: false`. It cannot be undone. The
 [search text](#search-text-at-rest) kept for the body is deleted with it.
 
 What it does not do:
