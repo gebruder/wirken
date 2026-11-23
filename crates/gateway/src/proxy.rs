@@ -556,6 +556,12 @@ impl ProxyTokenStore {
     pub fn conversation(&self, token_id: &str, chain: &[String]) -> Result<String, GatewayError> {
         let now = crate::budget::now_unix_secs();
         let conn = self.conn();
+        // Hashes past their time are forgotten before this request is
+        // matched against what is kept.
+        conn.execute(
+            "DELETE FROM proxy_conversations WHERE updated_at < ?1",
+            params![now - CONVERSATION_MEMORY_SECS],
+        )?;
         let mut found: Option<String> = None;
         // The longest prefix an earlier request ended on.
         for tail in chain.iter().rev() {
@@ -580,10 +586,6 @@ impl ProxyTokenStore {
                 params![token_id, tail, conversation, now],
             )?;
         }
-        conn.execute(
-            "DELETE FROM proxy_conversations WHERE updated_at < ?1",
-            params![now - CONVERSATION_MEMORY_SECS],
-        )?;
         Ok(conversation)
     }
 
@@ -657,6 +659,30 @@ impl ProxyTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hash of a request's message list is kept for thirty days. A
+    /// request that extends one older than that starts a new
+    /// conversation.
+    #[test]
+    fn a_conversation_is_remembered_for_thirty_days() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(PROXY_TOKENS_FILE);
+        let store = ProxyTokenStore::open(&path).unwrap();
+        let first = store.conversation("0a0a0a0a", &["h1".to_string()]).unwrap();
+        let chain = ["h1".to_string(), "h2".to_string()];
+        assert_eq!(store.conversation("0a0a0a0a", &chain).unwrap(), first);
+
+        // The same history, last seen thirty-one days ago.
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE proxy_conversations SET updated_at = updated_at - ?1",
+                params![CONVERSATION_MEMORY_SECS + 86_400],
+            )
+            .unwrap();
+        let chain = ["h1".to_string(), "h2".to_string(), "h3".to_string()];
+        assert_ne!(store.conversation("0a0a0a0a", &chain).unwrap(), first);
+    }
 
     #[test]
     fn a_token_carries_its_mcp_grant_and_an_older_store_gains_the_columns() {
