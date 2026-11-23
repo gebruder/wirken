@@ -6,8 +6,9 @@ All four read the same source events. The chain itself is owned by
 [audit-cli.md](audit-cli.md).
 
 The local hash-chained log stays primary. Every surface here is additive to
-it, not a replacement: `wirken sessions verify` verifies the chain and the
-Ed25519 attestation offline, independent of any consumer.
+it, not a replacement: `wirken audit verify` checks the chain and the
+chain-head signatures offline, and `wirken audit verify-attestations` the
+attestations, independent of any consumer.
 
 ## Choosing a surface
 
@@ -197,7 +198,9 @@ expiry.
 
 `AgentId`, `AdapterId` and `SenderId` hold the field each is named after
 and nothing else. `SenderId` in particular is a platform sender id (a
-Slack uid, a Telegram user id, the literal `webchat-user`) or null. An
+Slack uid, a Telegram user id, the literal `webchat-user`),
+`proxy-token:<token id>` on a row of a proxied call or a proxy client's tool
+call, or null. An
 operator or role label never goes there: a column that sometimes holds a
 platform id and sometimes a human-readable role cannot be joined on
 either. The labels this keeps out are the `caller` on a refused approval,

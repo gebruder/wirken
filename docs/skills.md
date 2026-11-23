@@ -116,7 +116,9 @@ operator opts into by writing the block.
 When present it must conform to `PermissionProfile`
 (`PermissionProfile` in `crates/agent/src/skill_perms.rs`). Axes: `tools`, `egress`,
 `filesystem`, `inference`, plus `credentials` and `http` for
-[`http_request`](egress.md#the-http_request-gate). Wildcard `"*"` is supported
+[`http_request`](egress.md#the-http_request-gate), for which a host in
+`egress.domains` means port 443 and another port is written `host:port`.
+Wildcard `"*"` is supported
 on `tools`, `egress.domains` and `inference.allow`; filesystem wildcards are
 rejected, because cap-std workspace confinement is the outer bound and `"*"`
 for paths is meaningless inside it.

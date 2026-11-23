@@ -6,6 +6,8 @@ Wirken records the cost of every large language model (LLM) call on the audit ch
 
 Every LLM call appends an `llm_response` row (`SessionEvent::LlmResponse`) to the session's audit chain. The row carries token counts, latency, and per-call cost, keyed by the agent and the credential that made the call. No prompt or completion text is on the row; cost monitoring reads accounting fields only.
 
+A call a client makes through the [inference proxy](inference-proxy.md) is not an `llm_response`. Its cost is `total_cost_usd_micros` on the `proxy_response` row, keyed by `token_id`, and the queries below do not include it. Agent budgets do not count it; a token has its own ceilings ([inference-proxy.md](inference-proxy.md#limits-per-token)).
+
 Fields on each `llm_response` row (`crates/audit/src/session_log.rs:857-904`):
 
 | Field | Meaning |
@@ -190,7 +192,7 @@ At gateway start the posture is the same. If `budget.db` cannot be opened while 
 
 A call whose (provider, model) pair is absent from the pricing table records no cost, so it does not advance the USD ledger. The USD ceiling is blind to it: a USD block plus a costless provider is no protection. Set `ceiling_model_seconds` for such an agent; that ceiling does not depend on a price. The first uncosted call in a session whose budget sets a USD ceiling logs a warning that the USD ceiling is pass-through for that provider, and says whether a model-time ceiling still applies or names the key to set. Keep the pricing table current for the models you meter in USD.
 
-An agent in plan mode (`"auth": "plan"`, see [configuration.md](configuration.md#providerjson)) is never billed by the token: its `llm_response` rows carry token counts and null cost fields. Where the pricing table lists the model, the row also carries `estimated_cost_usd_micros`, what the same tokens would have cost at the API, which no budget reads. A block-mode budget with a USD ceiling therefore refuses each of its calls before the request row, writes a `budget_exceeded` row with action `blocked`, and returns an error that names the budget (`budget.json` `agents.<id>` or the default) and says plan requests cannot be priced. An alert-mode budget does not refuse it, and neither does a block-mode budget that sets only `ceiling_model_seconds`. The plan's own usage limits are set and shown at https://chatgpt.com/settings/usage.
+An agent in plan mode (`"auth": "plan"`, see [configuration.md](configuration.md#providerjson)) is never billed by the token: its `llm_response` rows carry token counts and null cost fields. Where the pricing table lists the model, the row also carries `estimated_cost_usd_micros`, what the same tokens would have cost at the API, which no `budget.json` budget reads. A block-mode budget with a USD ceiling therefore refuses each of its calls before the request row, writes a `budget_exceeded` row with action `blocked`, and returns an error that names the budget (`budget.json` `agents.<id>` or the default) and says plan requests cannot be priced. An alert-mode budget does not refuse it, and neither does a block-mode budget that sets only `ceiling_model_seconds`. The plan's own usage limits are set and shown at https://chatgpt.com/settings/usage.
 
 ## Boundary
 

@@ -486,7 +486,7 @@ What `verify` replays and what a `tools_hash` attests:
 [audit-cli.md](audit-cli.md#wirken-sessions-verify). A proxy session
 (`wirken proxy sessions` lists them) is verified against its chain and its archived bodies,
 and `export` writes a session as a trajectory file:
-[inference-proxy.md](inference-proxy.md#verifying-a-proxy-session).
+[proxy-archive.md](proxy-archive.md#verifying-a-proxy-session).
 `search` finds text in the rows of every session and in archived proxied
 bodies, cites each hit by session, row and chain hash, and refuses inside a
 Wirken `exec`: [audit-cli.md](audit-cli.md#wirken-sessions-search).

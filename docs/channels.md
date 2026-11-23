@@ -231,8 +231,8 @@ but not yet written is lost instead.
 
 Tool calls that need approval on a Slack session prompt on the CLI, not in
 Slack. The request appears in `wirken permissions pending list` and is
-decided with `wirken permissions approve <id>` or `wirken permissions deny
-<id>`. Nothing is posted in the channel, the agent's turn waits, and a request
+decided with `wirken permissions pending approve <id>` or
+`wirken permissions pending deny <id>`. Nothing is posted in the channel, the agent's turn waits, and a request
 nobody decides within the CLI gate's timeout (`WIRKEN_CLI_APPROVAL_TIMEOUT_S`,
 300 seconds by default) resolves to deny.
 
@@ -312,8 +312,8 @@ in without a device id, which creates a new device on the homeserver.
 
 **Approvals.** Tool calls that need approval on a Matrix session prompt on
 the CLI, not in the room. The request appears in `wirken permissions pending
-list` and is decided with `wirken permissions approve <id>` or `wirken
-permissions deny <id>`. `wirken run` attaches no Matrix approval gate, so the
+list` and is decided with `wirken permissions pending approve <id>` or `wirken
+permissions pending deny <id>`. `wirken run` attaches no Matrix approval gate, so the
 adapter's reaction handling is never reached; a request nobody decides within
 the CLI gate's timeout resolves to deny.
 
@@ -611,8 +611,8 @@ retried and forwarded again.
 
 **Approvals.** Tool calls that need approval on an iMessage session prompt on
 the CLI, not in the chat. The request appears in `wirken permissions pending
-list` and is decided with `wirken permissions approve <id>` or `wirken
-permissions deny <id>`. `wirken run` attaches no iMessage approval gate, so
+list` and is decided with `wirken permissions pending approve <id>` or `wirken
+permissions pending deny <id>`. `wirken run` attaches no iMessage approval gate, so
 the adapter's `!approve <prefix>` parsing is never reached; a request nobody
 decides within the CLI gate's timeout resolves to deny.
 

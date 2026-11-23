@@ -237,10 +237,11 @@ tries to reach the network after the session has read an archive
 prompts you for the destination. The prompt names the basis. The
 decision is recorded with the basis on it.
 
-That mark does not restrict the `http_request` tool, the `web_search`
-tool, or what your agent writes back to you in chat. An agent that has
-read an archive can repeat its contents in a reply, and nothing here
-stops that. Issue #230 tracks `http_request`.
+The mark also sends the session's later `http_request` calls to you for
+approval, one call at a time ([egress.md](egress.md#the-http_request-gate)).
+It does not restrict the `web_search` tool or what your agent writes back to
+you in chat. An agent that has read an archive can repeat its contents in a
+reply, and nothing here stops that.
 
 ## Operational notes
 

@@ -3,7 +3,7 @@
 Wirken's audit surface is a per-session, hash-chained SQLite table of typed
 `SessionEvent` rows at `<data_dir>/audit.db`. A request row (a tool call, a
 model request) is appended before the action it records runs, and an outcome
-row (`tool_result`, `llm_response`, `http_request`) after it. Every row's
+row (`tool_result`, `llm_response`, `http_request`, `proxy_response`) after it. Every row's
 payload is SHA-256-hashed, and the
 integrity of any one session is provable independently of every other.
 
@@ -66,9 +66,9 @@ the same detail, targeting the job id; the firing is not deferred.
 | `leak_refused` | `credential`, `surface`, `agent_id`, `adapter_id`, `sender_id`, `tool_name`, `server_name`, `skill_name` | Content carrying a stored secret was refused at `surface`: `tool_output`, `tool_arguments`, `provider_request`, `reply`, `user_message` or `skill_load`. Names the credential, never the value. Forwarded at `error`. See [architecture](architecture.md#2-credential-lifecycle). |
 | `mcp_credential_refetched` | `credential` | The gateway sent the MCP proxy a credential's current vault value after an HTTP server refused it, on the `gateway-mcp-credentials` lane. Never the value. See [mcp](mcp.md#supported-transports). |
 | `mcp_credential_injected` / `mcp_inject_refused` | `server_name`, `agent_id` | One request a contained MCP server sent to the host its injected credential is bound to: made with the credential set, or refused with a `reason`. Carries the credential's name, the host, the method and the path without its query, on the `gateway-mcp` sentinel session. Never the value. See [mcp](mcp.md#injecting-a-credential). |
-| `proxy_request` / `proxy_response` / `proxy_refused` | `token_id` | One call a client made through the inference proxy: forwarded, answered, or refused with a `reason`. Carries the token's id, the upstream, provider and model, timing, the provider's token counts, and the SHA-256 of the request and response bodies as exchanged, on the session's lane, or for a refusal on the token's, `proxy-<token id>`. Never a token, a key or a body. See [inference proxy](inference-proxy.md#what-is-recorded). |
+| `proxy_request` / `proxy_response` / `proxy_refused` | `token_id` | One call a client made through the inference proxy: forwarded, answered, or refused with a `reason`. Carries the token's id, the upstream, provider and model, timing, the provider's token counts, and the SHA-256 of the request and response bodies as exchanged, on the session's lane, or for a refusal on the token's, `proxy-<token id>`, or on `gateway-proxy` when no known token was presented. Never a token, a key or a body. See [inference proxy](inference-proxy.md#what-is-recorded). |
 | `proxy_tools_listed` / `proxy_tool_call` / `proxy_tool_refused` | `token_id`, `agent_id` | At the proxy's MCP endpoint: the tools a client's session was shown, one tool call it made, or a request refused before the gate with a `reason`. Names, hashes and sizes; the call's arguments and output are on the `assistant_tool_calls` and `tool_result` rows with the same call id. See [MCP endpoint](proxy-mcp.md#what-is-recorded). |
-| `proxy_archive_redacted` | none | The key of an archived body was destroyed, with the body's hash, the operator and the reason, on the `gateway-proxy` lane. See [inference proxy](inference-proxy.md#redacting-an-archived-body). |
+| `proxy_archive_redacted` | none | The key of an archived body was destroyed, with the body's hash, the operator and the reason, on the `gateway-proxy` lane. See [inference proxy](proxy-archive.md#redacting-an-archived-body). |
 | `mcp_credential_refresh_discarded` | `credential` | The gateway refreshed an MCP OAuth credential and did not write the result, because the vault entry no longer held the refresh token the refresh started from, on the `gateway-mcp-credentials` lane. `reason` is `removed` (the entry stays removed), `reauthorized` (the new sign-in stays and is what the proxy gets) or `unreadable`. Never a value. Forwarded by default, at `warn`. |
 | `memory_entry_written` / `cross_channel_memory_read` | `agent_id` | Memory provenance and trust-zone crossings. |
 | `import_started` / `import_completed` / `imported_chat_read` / `imported_chat_searched` | `agent_id` | Archive imports and gated reads. See [imported archives](imported-archives.md). |
@@ -83,7 +83,7 @@ the same detail, targeting the job id; the firing is not deferred.
 | `approver_added` / `approver_removed` | none | `wirken approvers add` or `remove` changed the approver allowlist, on the `gateway-approvers` lane, sealed by a chain head right after it. Carries `adapter_id`, `user_id`, and `display_name` with `added_by`, or `removed_by`, the local operator. An add whose row cannot be written is undone; a remove stands. Forwarded by default. |
 | `approval_chat_set` | none | `wirken approvers set-chat` changed where an adapter's approval prompts are sent, on the `gateway-approvers` lane, sealed by a chain head right after it. Carries `adapter_id`, `conversation_id`, `previous_conversation_id` (absent when none was set) and `set_by`, the local operator. A change whose row cannot be written is put back. Forwarded by default. |
 | `authority_reloaded` | none | A change another process made took effect in the running gateway without a restart, on the `gateway-reloads` lane. `subject_kind` is `credential`, `adapter` or `hook`, `subject` its name, `change` is `rotated`, `rebound`, `removed`, `added` or `rekeyed`, and `reloaded` names what took it up: a model key read per call, an adapter respawned or stopped, the MCP proxy, a connection dropped. Forwarded by default. See [credentials](credentials.md#changes-while-the-gateway-runs). |
-| `operator_command` | none | A command that changes what the gateway trusts or runs completed, on the `gateway-operator` lane, sealed by a chain head right after it: `credentials add`, `rotate`, `remove`, `rescope`, `authorize`, `sign-out` and `import-plan`; `channel add` and `remove`; `hooks register` and `unregister`; `agents add`, `remove`, `bind`, `set`, `set-egress`, `allow-subagent` and `deny-subagent`; `persona create`, `edit` and `delete`; `mcp sign` and `authorize`; `skills trust-root`; `cron create`, `delete`, `pause` and `resume`. Carries `command`, `target`, `detail` (what changed, never a secret) and `run_by`. A change whose row cannot be written stands, and the command says so. Forwarded by default. `credentials grant` and `revoke` write `credential_destination_granted` and `credential_destination_revoked` instead. |
+| `operator_command` | none | A command that changes what the gateway trusts or runs completed, on the `gateway-operator` lane, sealed by a chain head right after it: `proxy token issue` and `revoke`; `credentials add`, `rotate`, `remove`, `rescope`, `authorize`, `sign-out` and `import-plan`; `channel add` and `remove`; `hooks register` and `unregister`; `agents add`, `remove`, `bind`, `set`, `set-egress`, `allow-subagent` and `deny-subagent`; `persona create`, `edit` and `delete`; `mcp sign` and `authorize`; `skills trust-root`; `cron create`, `delete`, `pause` and `resume`. Carries `command`, `target`, `detail` (what changed, never a secret) and `run_by`. A change whose row cannot be written stands, and the command says so. Forwarded by default. `credentials grant` and `revoke` write `credential_destination_granted` and `credential_destination_revoked` instead. |
 | `operator_command_refused` | none | An operator command ran inside a Wirken `exec` and was refused before it opened anything, on its lane (`gateway-senders` for `wirken senders`, `gateway-approvers` for `wirken approvers`, `gateway-operator` for the authority-changing subcommands listed in [cli.md](cli.md)), sealed by a chain head right after it. Carries `command`, `invocation` (the subcommand, empty for `setup` and `import`) and `reason` (`inside_exec`). Forwarded by default, at `warn`. |
 | `session_liveness_unavailable` | none | `wirken run` could not open the session store it asks whether a session is live, so no session-scoped grant is served until it restarts. On the `gateway-permissions` lane, sealed by a chain head right after it, and printed at startup. Carries `error`. Forwarded by default, at `warn`. |
 | `agent_stopped` | `agent_id` | `wirken agents stop`, on the `gateway-operator` lane, sealed by a chain head. Carries `stopped_by`, `grants_revoked` (persisted grants `--revoke-all` removed) and `session_grants_cleared`. Forwarded by default, at `warn`. |
@@ -370,7 +370,7 @@ With `--session <id>` the human output decomposes the id:
     ID:      abc123
 ```
 
-A non-canonical id (system sentinel sessions, zirkel runs keyed by UUID) shows
+A non-canonical id (system sentinel sessions, proxy lanes, zirkel runs keyed by UUID) shows
 only the `Session:` line.
 
 The human table does not carry the detail payload; `--format json` does.
@@ -448,10 +448,11 @@ failure, which exits `1`.
 
 ### `wirken sessions verify`
 
-For a proxy session (`proxy-<token id>-<label>`) there is no agent to replay: the chain
-is checked, and with an archive configured each archived body against its
-row ([inference-proxy.md](inference-proxy.md#verifying-a-proxy-session)). The
-rest of this section is about a session an agent ran.
+For a proxy lane (`proxy-<token id>-<label>`, a token's own `proxy-<token
+id>`, or `gateway-proxy`) there is no agent to replay: the chain is checked,
+and with an archive configured each archived body against its row
+([proxy-archive.md](proxy-archive.md#verifying-a-proxy-session)). The rest of
+this section is about a session an agent ran.
 
 Replays one session log, re-checks per-session chain integrity, recomputes
 message hashes at each `LlmRequest`, and re-executes deterministic tools
@@ -496,7 +497,7 @@ nothing new. The SIEM forwarder sends these rows by default; see
 Exit codes: `3` broken chain, `1` divergences, `6` a `tools_hash` that could
 not be recomputed, `2` unverifiable under `--strict`, `5` cross-check
 disagreement in either direction (`--with-parent` or `--with-children`), `4` no such
-agent or no events.
+agent or no events, `7` an archived body of a proxy session failed its check.
 
 #### Agents with MCP servers
 
@@ -616,7 +617,7 @@ What is searched:
   search matches what was said and not how it was escaped. Chain heads and
   attestations hold hashes and are not searched.
 - **Archived proxied bodies**, when `proxy.json` has an
-  [archive](inference-proxy.md#write-once-archive): the request and response
+  [archive](proxy-archive.md#write-once-archive): the request and response
   of each proxied call, the tool list of an MCP session and both bodies of
   its tool calls. A streamed answer is searched as the text its events add up
   to.
@@ -629,7 +630,7 @@ body. Sessions are read in order of their ids and rows in chain order.
 | `--agent` | Rows of that agent's sessions, and rows that name it. |
 | `--token` | Rows of that proxy token's lanes, by its id or name. |
 | `--channel` | Rows of sessions on that channel. |
-| `--tool` | Rows that name that tool: its call, its result, a proxied tool call. |
+| `--tool` | Rows that name that tool: its call, its result, a proxied tool call. An MCP tool is named `mcp_<server>_<tool>`. |
 | `--session` | Rows of that one session. |
 | `--since`, `--until` | Rows at or after, at or before, an RFC 3339 time. |
 | `-n`, `--limit` | The most hits returned, 50 unless set. More is reported as `truncated`. |
@@ -656,40 +657,37 @@ is on, and for a proxied session each archived body against its row.
 `seq`, `ts`, `kind`, `chain_hash`, `found_in` as `row`, `request_body` or
 `response_body`, `body_sha256` for a body, and `snippet`), `truncated`,
 `sessions_searched`, `rows_searched`, `archive` (`configured`,
-`not_configured` or `skipped`), `bodies_searched` and `bodies_unavailable`.
+`not_configured` or `skipped`), `bodies_searched` and `bodies_unavailable`,
+the archived bodies that could not be read here. An empty query and an
+unknown `--token` are errors.
 
 **Redaction.** A row a [redaction](#redaction) rewrote is not searched: what
 it held is gone, and its replacement is not what happened. An archived body
 whose key was destroyed is found by no search and is not counted as
 unavailable.
 
-**The search text of archived bodies.** A body is fetched from the bucket and
-decrypted with its own key, the one the archive made for it. The first search
-that reads a body keeps the text it extracted in `proxy_archive_keys.db`,
-encrypted under that same key and bound to the body's kind and hash, so later
-searches do not fetch it again. Two properties follow from where the key is:
-
-- The file holds no text in the clear. What is kept opens only with the
-  body's key, which is itself wrapped under the archive key in the vault.
-- Redacting a body destroys that key and deletes the entry, with the freed
-  pages overwritten. Nothing kept for the body can be read afterwards, by
-  this command or from the file.
-
-Reading archived bodies needs the vault, as `sessions verify` does.
+**The search text of archived bodies.** What a search keeps of a body it
+read is encrypted under that body's own key and goes with it when the body is
+redacted ([proxy-archive.md](proxy-archive.md#search-text-at-rest)). With an
+archive configured, a search opens the vault and the archive before it reads
+any row, whatever the filters; `--skip-archive` avoids both.
 
 **Who can run it.** An operator, from a shell. It is not a tool an agent has
 and no channel reaches it. Inside a Wirken `exec` it refuses, with an
 `operator_command_refused` row, before it opens anything: a search there
 would read every session to the agent that ran it.
 
-Not done: the search reads every row each time and keeps no index of rows;
-the query is not recorded on the chain; a proxied conversation with no
-archive has only hashes on its rows, so its text is not found.
+Not done: the search reads every row each time and keeps no index of rows. A
+proxied model call with no archive has only hashes on its rows, so its text
+is not found; a proxied tool call's arguments and output are on its rows and
+are found.
 
 ## JSON schema
 
-Every JSON document carries `schema_version` and `wirken_version` at the top
-level. `schema_version` is the contract: within a major version, fields may be
+Every JSON document `wirken audit` prints carries `schema_version` and
+`wirken_version` at the top level. `wirken sessions search --format json`
+carries neither, and its `session` is the id as a string; `wirken sessions
+export` writes ATIF, whose `schema_version` is the format's. `schema_version` is the contract: within a major version, fields may be
 added but existing fields will not be removed or change meaning. Consumers
 should ignore unknown fields and fall over loudly on a greater
 `schema_version`. As of this release it is `2`, the first version with
@@ -740,8 +738,9 @@ enabling the flag.
 3. Cite the session by its `full` id. The `wirken_version` and
    `schema_version` fields let a future reader reproduce the output format.
 
-Session ids encode `{agent_id}/{channel}/{conversation_id}`, so citations
-reveal the agent name and channel. Keep that in mind for privacy-sensitive
+An agent's session id encodes `{agent_id}/{channel}/{conversation_id}`, and a
+proxy lane is `proxy-<token id>-<label>`, so a citation reveals the agent
+name and channel, or the token id and the client's label. Keep that in mind for privacy-sensitive
 contexts.
 
 ## Source references

@@ -110,14 +110,14 @@ The inference proxy is off unless the data directory has a `proxy.json`.
   a mismatch; `--skip-archive` checks the chain alone
   (`an_archived_body_is_encrypted_locked_and_found_by_its_hash`,
   `crates/cli/src/commands/proxy_archive.rs`;
-  [docs/inference-proxy.md](docs/inference-proxy.md#write-once-archive)).
+  [docs/proxy-archive.md](docs/proxy-archive.md#write-once-archive)).
 
 - `wirken sessions export <id> --format atif` writes a session, agent-run or
   proxied, as an ATIF v1.8 trajectory, checked against the format before it
   is written. Rewritten rows, replaced tool output and redacted bodies are
   exported as they stand now (`an_agent_session_exports_as_a_valid_trajectory`,
   `crates/audit/src/atif.rs`; `crates/cli/tests/sessions_export_atif.rs`;
-  [docs/inference-proxy.md](docs/inference-proxy.md#exporting-a-session)).
+  [docs/proxy-archive.md](docs/proxy-archive.md#exporting-a-session)).
 
 - `inject` in a stdio MCP entry's `sandbox` block: one `vault:` credential the
   server never holds. Its container gets a placeholder and a plain-HTTP base
