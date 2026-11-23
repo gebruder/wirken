@@ -332,8 +332,42 @@ pub fn archive_redact(sha256: Option<&str>, session: Option<&str>, reason: &str)
 /// List the proxy sessions: one line for each conversation, with its
 /// token, when it started, its calls and its model. `token` is an id
 /// or a name to list one token's sessions.
+/// What a lane holds, for the session listing: its model calls and the
+/// model they asked for, and its tool calls. `None` for a lane that is
+/// not a session, such as a token's lane of refusals.
+fn session_summary(rows: &[wirken_audit::StoredSessionEvent]) -> Option<String> {
+    use wirken_audit::SessionEvent;
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let models: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| match &r.event {
+            SessionEvent::ProxyRequest { model, .. } => Some(model.as_str()),
+            _ => None,
+        })
+        .collect();
+    let opened = rows
+        .iter()
+        .any(|r| matches!(r.event, SessionEvent::ProxyToolsListed { .. }));
+    let tools = rows
+        .iter()
+        .filter(|r| matches!(r.event, SessionEvent::ProxyToolCall { .. }))
+        .count();
+    let mut parts = Vec::new();
+    if let Some(model) = models.first() {
+        parts.push(format!(
+            "{} call{}  {model}",
+            models.len(),
+            plural(models.len())
+        ));
+    }
+    if opened {
+        parts.push(format!("{tools} tool call{}", plural(tools)));
+    }
+    (!parts.is_empty()).then(|| parts.join("  "))
+}
+
 pub fn sessions(token: Option<&str>) -> Result<()> {
-    use wirken_audit::{SessionEvent, SessionLog as _};
+    use wirken_audit::SessionLog as _;
     use wirken_time::TimestampExt as _;
     let cfg = config();
     let tokens = open_store(&cfg.data_dir)?
@@ -367,26 +401,14 @@ pub fn sessions(token: Option<&str>) -> Result<()> {
         let rows = log
             .get_since(&handle, 0)
             .context("session log query failed")?;
-        let calls: Vec<&str> = rows
-            .iter()
-            .filter_map(|r| match &r.event {
-                SessionEvent::ProxyRequest { model, .. } => Some(model.as_str()),
-                _ => None,
-            })
-            .collect();
-        let (Some(first), Some(model)) = (rows.first(), calls.first()) else {
+        let Some(what) = session_summary(&rows) else {
             continue;
         };
         let name = tokens
             .iter()
             .find(|k| k.id == token_id)
             .map_or("?", |k| k.name.as_str());
-        println!(
-            "  {lane}  {name}  {}  {} call{}  {model}",
-            first.ts.to_rfc3339_z(),
-            calls.len(),
-            if calls.len() == 1 { "" } else { "s" }
-        );
+        println!("  {lane}  {name}  {}  {what}", rows[0].ts.to_rfc3339_z());
         listed += 1;
     }
     if listed == 0 {
@@ -468,6 +490,84 @@ mod tests {
         let err = issue_recorded(tmp.path(), &grant).unwrap_err().to_string();
         assert!(err.contains("no signed MCP server named files"), "{err}");
         assert!(open_store(tmp.path()).unwrap().list().unwrap().is_empty());
+    }
+
+    /// A lane of tool calls alone is a session in the listing, and a
+    /// lane with both names both.
+    #[test]
+    fn a_session_is_listed_by_its_model_calls_and_its_tool_calls() {
+        use wirken_audit::{HashHex, SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let tmp = tempfile::tempdir().unwrap();
+        let log = SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap();
+        let hash = || HashHex("0".repeat(64));
+        let listed = SessionEvent::ProxyToolsListed {
+            token_id: "t".into(),
+            agent_id: "default".into(),
+            mcp_session: "s".into(),
+            servers: vec![],
+            tools: vec![],
+            tools_sha256: hash(),
+            archived: false,
+        };
+        let tool_call = SessionEvent::ProxyToolCall {
+            call_id: "c".into(),
+            token_id: "t".into(),
+            agent_id: "default".into(),
+            mcp_session: "s".into(),
+            tool: "mcp_files_read".into(),
+            success: true,
+            latency_ms: 1,
+            request_sha256: hash(),
+            request_bytes: 1,
+            response_sha256: hash(),
+            response_bytes: 1,
+            archived: false,
+        };
+        let request = SessionEvent::ProxyRequest {
+            request_id: "r".into(),
+            token_id: "t".into(),
+            token_name: "laptop".into(),
+            upstream: "local".into(),
+            provider: "ollama".into(),
+            model: "m1".into(),
+            shape: wirken_audit::ProxyShape::OpenaiChat,
+            stream: false,
+            request_sha256: hash(),
+            request_bytes: 1,
+            credential_id: None,
+            archived: false,
+        };
+        let refused = SessionEvent::ProxyRefused {
+            token_id: Some("t".into()),
+            shape: None,
+            model: None,
+            reason: wirken_audit::ProxyRefusal::Malformed,
+        };
+        let summary = |lane: &str, events: Vec<SessionEvent>| {
+            let handle = log.handle_for(SessionId::new(lane.to_string()));
+            for event in events {
+                log.append(&handle, wirken_audit::TrustLevel::System, event)
+                    .unwrap();
+            }
+            session_summary(&log.get_since(&handle, 0).unwrap())
+        };
+        assert_eq!(
+            summary("proxy-t-m1", vec![listed.clone(), tool_call.clone()]).as_deref(),
+            Some("1 tool call")
+        );
+        assert_eq!(
+            summary(
+                "proxy-t-work",
+                vec![listed, request.clone(), tool_call.clone(), tool_call]
+            )
+            .as_deref(),
+            Some("1 call  m1  2 tool calls")
+        );
+        assert_eq!(
+            summary("proxy-t-c1", vec![request]).as_deref(),
+            Some("1 call  m1")
+        );
+        assert_eq!(summary("proxy-t-x", vec![refused]), None);
     }
 
     #[test]
