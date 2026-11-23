@@ -93,14 +93,17 @@ fn run_pinned(
     )
     .unwrap();
 
-    let scenario_file = tmp.join("scenario.json");
+    // The child gets no variable naming these: it finds them under the
+    // home directory it is started with.
+    let scenario_file = home.join("stub-scenario.json");
     std::fs::write(&scenario_file, scenario.to_string()).unwrap();
-    let log = tmp.join("children.jsonl");
+    let log = home.join("stub-children.jsonl");
     let started = std::time::Instant::now();
     let out = wirken(&data)
         .env("HOME", &home)
-        .env("STUB_CHILD_SCENARIO", &scenario_file)
-        .env("STUB_CHILD_LOG", &log)
+        // Something the gateway's environment holds and the child has
+        // no use for.
+        .env("OPERATOR_SERVICE_TOKEN", "not-for-the-child")
         // What a metered key and the vault passphrase look like in the
         // environment a run is started from.
         .env("ANTHROPIC_API_KEY", "sk-test-not-a-key")
@@ -221,6 +224,11 @@ fn a_walk_runs_as_a_child_whose_tool_calls_pass_the_gate() {
             .collect();
         assert!(!env.contains(&"ANTHROPIC_API_KEY"), "{env:?}");
         assert!(!env.contains(&"WIRKEN_VAULT_PASSPHRASE"), "{env:?}");
+        // The child starts from a cleared environment and what is
+        // named for it: nothing else of the gateway's reaches it.
+        assert!(!env.contains(&"WIRKEN_DATA_DIR"), "{env:?}");
+        assert!(!env.contains(&"OPERATOR_SERVICE_TOKEN"), "{env:?}");
+        assert!(env.contains(&"HOME") && env.contains(&"PATH"), "{env:?}");
 
         // The run's tools, served to it; the walk's skill in the
         // system prompt it was handed.

@@ -145,7 +145,41 @@ pub fn child_args(
     args
 }
 
-/// Whether an inherited environment variable is withheld from the
+/// What the child is given beyond the base set and the network
+/// client's variables: where a program finds the operator's own
+/// sign-in and settings, by directory or through the session's
+/// keyring. Nothing else of the parent's environment reaches it.
+pub const CHILD_ENV: &[&str] = &[
+    "LC_CTYPE",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+
+/// The child's whole environment, read from `parent`: the base set
+/// every host-side child starts from, what an HTTP client needs, and
+/// [`CHILD_ENV`]. A name on those lists that would move the child's
+/// calls to a key is still withheld.
+pub fn child_env<I>(parent: I) -> Vec<(String, std::ffi::OsString)>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    let parent: Vec<_> = parent.into_iter().collect();
+    [
+        crate::child_env::BASE,
+        crate::child_env::NETWORK_CLIENT,
+        CHILD_ENV,
+    ]
+    .into_iter()
+    .flat_map(|names| crate::child_env::inherit_from(names, parent.clone()))
+    .filter(|(name, _)| !withheld_from_child(name))
+    .collect()
+}
+
+/// Whether an environment variable is withheld from the
 /// child: one that would put its calls on an API key or another
 /// provider's account, and the vault passphrase.
 pub fn withheld_from_child(name: &str) -> bool {
@@ -1212,12 +1246,11 @@ impl Agent {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        for (name, _) in std::env::vars_os() {
-            if name.to_str().is_some_and(withheld_from_child) {
-                command.env_remove(&name);
-            }
-        }
+            .kill_on_drop(true)
+            // A cleared environment, then what is named: nothing the
+            // gateway holds in its own reaches the child by default.
+            .env_clear()
+            .envs(child_env(std::env::vars_os()));
         let mut process = command.spawn().map_err(|e| {
             AgentError::Tool(format!(
                 "start the child process {}: {e}",
@@ -1608,6 +1641,33 @@ mod tests {
         for name in ["PATH", "HOME", "XDG_CONFIG_HOME", "WIRKEN_DATA_DIR"] {
             assert!(!withheld_from_child(name), "{name}");
         }
+    }
+
+    /// The child starts from the base set and what is named for it.
+    /// The vault passphrase, the data directory and anything else the
+    /// gateway's environment holds do not reach it.
+    #[test]
+    fn the_child_gets_a_named_environment_and_nothing_else() {
+        let parent = [
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/o"),
+            ("XDG_CONFIG_HOME", "/home/o/.config"),
+            ("HTTPS_PROXY", "http://proxy.example:3128"),
+            ("LANG", "C.UTF-8"),
+            ("WIRKEN_VAULT_PASSPHRASE", "secret"),
+            ("WIRKEN_DATA_DIR", "/home/o/.wirken"),
+            ("WIRKEN_EXEC", "1"),
+            ("AWS_SECRET_ACCESS_KEY", "k"),
+            ("SOME_SERVICE_TOKEN", "t"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v)));
+        let mut names: Vec<String> = child_env(parent).into_iter().map(|(k, _)| k).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["HOME", "HTTPS_PROXY", "LANG", "PATH", "XDG_CONFIG_HOME"]
+        );
     }
 
     #[test]

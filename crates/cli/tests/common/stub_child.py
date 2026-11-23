@@ -44,7 +44,7 @@ def main():
     if "--version" in sys.argv:
         print("0.0.0 (stub child)")
         return
-    scenario = json.load(open(os.environ["STUB_CHILD_SCENARIO"]))
+    scenario = json.load(open(os.path.join(os.environ["HOME"], "stub-scenario.json")))
     prompt = sys.stdin.read()
     config = json.load(open(flag("--mcp-config")))
     (server_name, server), = config["mcpServers"].items()
@@ -86,7 +86,7 @@ def main():
     }
 
     def log():
-        with open(os.environ["STUB_CHILD_LOG"], "a") as f:
+        with open(os.path.join(os.environ["HOME"], "stub-children.jsonl"), "a") as f:
             f.write(json.dumps(record) + "\n")
 
     pin = flag("--model")
