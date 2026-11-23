@@ -75,6 +75,10 @@ pub struct ProxyConfig {
     /// means bodies are kept nowhere: the chain holds their hashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<ArchiveConfig>,
+    /// The identity provider whose JWTs a client may present in place
+    /// of a token. Absent means only tokens issued here are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcConfig>,
 }
 
 fn default_bind() -> String {
@@ -111,6 +115,136 @@ pub struct Upstream {
     /// provider that takes none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+}
+
+/// The identity provider whose JWTs the listener verifies. Wirken
+/// issues none of them: it checks the signature against the issuer's
+/// keys and the claims against what is set here, and gives the caller
+/// the grant set the operator mapped it to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OidcConfig {
+    /// The issuer, exactly as it is in a JWT's `iss`: `https://...`.
+    /// Plain HTTP is accepted for loopback only.
+    pub issuer: String,
+    /// The audience a JWT must name in its `aud`.
+    pub audience: String,
+    /// A file holding the issuer's keys as a JWK set, read once at
+    /// start. With it the issuer is never asked for keys. Without it
+    /// they are fetched from the issuer's discovery document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_file: Option<String>,
+    /// The claim whose value selects a grant set: a string, or a list
+    /// of strings. Without it, and for a JWT whose value selects none,
+    /// the subject does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_claim: Option<String>,
+    /// The longest a JWT is accepted after its `iat`, whatever its
+    /// `exp` says. What a grant taken away at the identity provider
+    /// outlives is at most this.
+    pub max_token_lifetime_secs: u64,
+    /// How far the issuer's clock may be from this host's.
+    #[serde(default = "default_clock_skew")]
+    pub clock_skew_secs: u64,
+    /// How long fetched keys are used before they are fetched again.
+    #[serde(default = "default_jwks_cache")]
+    pub jwks_cache_secs: u64,
+    /// The signature algorithms accepted. Empty accepts each of
+    /// [`crate::proxy_identity::ALGORITHMS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub algorithms: Vec<String>,
+    /// Record the subject on each row as the issuer gave it. Without
+    /// it a row carries a keyed hash of the subject.
+    #[serde(default)]
+    pub record_subject: bool,
+    /// The vault entry holding the key subjects are hashed under.
+    #[serde(default = "default_subject_key")]
+    pub subject_key: String,
+}
+
+fn default_clock_skew() -> u64 {
+    60
+}
+
+fn default_jwks_cache() -> u64 {
+    3600
+}
+
+fn default_subject_key() -> String {
+    "proxy-subject-key".to_string()
+}
+
+/// The most `clock_skew_secs` may be.
+pub const MAX_CLOCK_SKEW_SECS: u64 = 300;
+
+impl OidcConfig {
+    /// Whether `alg` is an algorithm this configuration accepts.
+    pub fn accepts(&self, alg: &str) -> bool {
+        crate::proxy_identity::ALGORITHMS.contains(&alg)
+            && (self.algorithms.is_empty() || self.algorithms.iter().any(|a| a == alg))
+    }
+
+    /// [`Self::validate`]'s verdict, as its message.
+    #[cfg(test)]
+    pub(crate) fn validate_for_test(&self) -> Result<(), String> {
+        self.validate().map_err(|e| e.to_string())
+    }
+
+    fn validate(&self) -> Result<(), GatewayError> {
+        let bad = |why: String| Err(GatewayError::Config(format!("proxy.json: oidc: {why}")));
+        let url = match reqwest::Url::parse(&self.issuer) {
+            Ok(url) => url,
+            Err(e) => return bad(format!("issuer {:?}: {e}", self.issuer)),
+        };
+        let loopback = url.scheme() == "http"
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        if url.scheme() != "https" && !loopback {
+            return bad(format!(
+                "issuer {} is not https; plain http is accepted for loopback only",
+                self.issuer
+            ));
+        }
+        if url.query().is_some() || url.fragment().is_some() || !url.username().is_empty() {
+            return bad(format!(
+                "issuer {} carries a query, a fragment or credentials",
+                self.issuer
+            ));
+        }
+        if self.audience.is_empty() {
+            return bad("audience is empty".into());
+        }
+        if self.max_token_lifetime_secs == 0 {
+            return bad("max_token_lifetime_secs must be above zero".into());
+        }
+        if self.clock_skew_secs > MAX_CLOCK_SKEW_SECS {
+            return bad(format!("clock_skew_secs is above {MAX_CLOCK_SKEW_SECS}"));
+        }
+        if self.jwks_cache_secs == 0 {
+            return bad("jwks_cache_secs must be above zero".into());
+        }
+        for alg in &self.algorithms {
+            if !crate::proxy_identity::ALGORITHMS.contains(&alg.as_str()) {
+                return bad(format!(
+                    "algorithm {alg:?} is not accepted. A JWT is verified with a public key: \
+                     one of {}",
+                    crate::proxy_identity::ALGORITHMS.join(", ")
+                ));
+            }
+        }
+        if self.grant_claim.as_deref() == Some("") {
+            return bad("grant_claim is empty".into());
+        }
+        if self.jwks_file.as_deref() == Some("") {
+            return bad("jwks_file is empty".into());
+        }
+        if !is_name(&self.subject_key) {
+            return bad(format!(
+                "subject_key {:?} is not letters, digits, - or _",
+                self.subject_key
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// An S3-compatible bucket with Object Lock that full bodies are
@@ -227,6 +361,9 @@ impl ProxyConfig {
                     "proxy.json: upstream {name} needs a provider and a base_url"
                 )));
             }
+        }
+        if let Some(oidc) = &self.oidc {
+            oidc.validate()?;
         }
         if let Some(archive) = &self.archive {
             if archive.retention_days == 0 {
@@ -907,6 +1044,89 @@ mod tests {
     fn no_file_means_the_listener_is_off() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(ProxyConfig::load(tmp.path()).unwrap(), None);
+    }
+
+    /// The `oidc` block: off unless written, an https issuer or a
+    /// loopback one, a maximum lifetime the operator states, and no
+    /// algorithm that is not a public-key one.
+    #[test]
+    fn the_oidc_block_is_held_to_its_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let load = |oidc: serde_json::Value| {
+            let mut config = serde_json::json!({
+                "upstreams": {"local": {"provider": "ollama", "base_url": "http://localhost:1/v1"}},
+            });
+            if !oidc.is_null() {
+                config["oidc"] = oidc;
+            }
+            write(tmp.path(), &config.to_string());
+            ProxyConfig::load(tmp.path()).map(|c| c.unwrap().oidc)
+        };
+        assert_eq!(load(serde_json::Value::Null).unwrap(), None);
+
+        let good = serde_json::json!({
+            "issuer": "https://idp.example.com/realms/acme",
+            "audience": "wirken-proxy",
+            "max_token_lifetime_secs": 900,
+        });
+        let oidc = load(good.clone()).unwrap().unwrap();
+        assert_eq!(
+            (
+                oidc.clock_skew_secs,
+                oidc.jwks_cache_secs,
+                oidc.record_subject
+            ),
+            (60, 3600, false)
+        );
+        assert_eq!(oidc.subject_key, "proxy-subject-key");
+        assert!(oidc.jwks_file.is_none() && oidc.grant_claim.is_none());
+        assert!(oidc.accepts("RS256") && oidc.accepts("EdDSA"));
+        assert!(!oidc.accepts("HS256") && !oidc.accepts("none"));
+
+        let with = |name: &str, value: serde_json::Value| {
+            let mut oidc = good.clone();
+            oidc[name] = value;
+            load(oidc).map(|_| ()).map_err(|e| e.to_string())
+        };
+        assert!(with("issuer", "http://127.0.0.1:8080/realms/acme".into()).is_ok());
+        for (name, value, why) in [
+            ("issuer", "http://idp.example.com".into(), "not https"),
+            ("issuer", "http://localhost.example.com".into(), "not https"),
+            ("issuer", "https://idp.example.com/?a=1".into(), "query"),
+            (
+                "issuer",
+                "https://u:p@idp.example.com".into(),
+                "credentials",
+            ),
+            ("audience", "".into(), "audience is empty"),
+            ("max_token_lifetime_secs", 0.into(), "above zero"),
+            ("clock_skew_secs", 301.into(), "above 300"),
+            ("jwks_cache_secs", 0.into(), "above zero"),
+            (
+                "algorithms",
+                serde_json::json!(["RS256", "HS256"]),
+                "is not accepted",
+            ),
+            ("grant_claim", "".into(), "grant_claim is empty"),
+            ("subject_key", "a b".into(), "subject_key"),
+            (
+                "jwks_uri",
+                "https://idp.example.com/keys".into(),
+                "unknown field",
+            ),
+        ] {
+            let err = with(name, value).unwrap_err();
+            assert!(err.contains(why), "{name}: {err}");
+        }
+        // The maximum lifetime has no default: it is the operator's
+        // statement of how long a withdrawn grant lasts.
+        let mut no_lifetime = good.clone();
+        no_lifetime
+            .as_object_mut()
+            .unwrap()
+            .remove("max_token_lifetime_secs");
+        let err = load(no_lifetime).unwrap_err().to_string();
+        assert!(err.contains("max_token_lifetime_secs"), "{err}");
     }
 
     /// The listener binds loopback unless the file names another

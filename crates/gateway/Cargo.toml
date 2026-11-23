@@ -30,6 +30,9 @@ cron = { workspace = true }
 chrono = { version = "0.4", default-features = false }
 reqwest = { workspace = true }
 base64 = "0.23"
+# Signature verification of a JWT presented at the proxy listener.
+ring = { workspace = true }
+hmac = { workspace = true }
 async-trait = { workspace = true }
 capnp = { workspace = true }
 aho-corasick = { workspace = true }
