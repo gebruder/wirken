@@ -271,6 +271,12 @@ pub struct ProxyToken {
     pub window: BudgetWindow,
     pub created_at: String,
     pub revoked_at: Option<String>,
+    /// The agent whose MCP servers the token may be granted, and under
+    /// whose gate its tool calls run. Empty when it has no MCP grant.
+    pub mcp_agent: String,
+    /// The MCP servers of that agent whose tools the token may list
+    /// and call.
+    pub mcp_servers: Vec<String>,
 }
 
 impl ProxyToken {
@@ -302,6 +308,10 @@ pub struct TokenGrant {
     pub ceiling_usd_micros: Option<u64>,
     pub ceiling_calls: Option<u64>,
     pub window: BudgetWindow,
+    /// The agent whose MCP servers are granted. Needed with
+    /// `mcp_servers`.
+    pub mcp_agent: String,
+    pub mcp_servers: Vec<String>,
 }
 
 /// The token store.
@@ -374,6 +384,19 @@ impl ProxyTokenStore {
                  PRIMARY KEY (token_id, window_start)
              );",
         )?;
+        // Columns a store made before tokens carried an MCP grant lacks.
+        for column in ["mcp_agent", "mcp_servers"] {
+            let has: bool = conn.query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('proxy_tokens') WHERE name = ?1",
+                params![column],
+                |r| r.get(0),
+            )?;
+            if !has {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE proxy_tokens ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                ))?;
+            }
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -392,21 +415,32 @@ impl ProxyTokenStore {
                 grant.name
             )));
         }
-        if grant.upstreams.is_empty() {
+        if grant.upstreams.is_empty() && grant.mcp_servers.is_empty() {
             return Err(GatewayError::Config(
-                "a token needs at least one upstream".into(),
+                "a token needs at least one upstream or one MCP server".into(),
             ));
         }
         if grant
             .upstreams
             .iter()
             .chain(&grant.models)
+            .chain(&grant.mcp_servers)
             .any(|s| s.is_empty() || s.contains(','))
         {
             return Err(GatewayError::Config(
-                "an upstream or model name is empty or contains a comma".into(),
+                "an upstream, model or MCP server name is empty or contains a comma".into(),
             ));
         }
+        if !grant.mcp_servers.is_empty() && !is_name(&grant.mcp_agent) {
+            return Err(GatewayError::Config(
+                "a token with MCP servers names the agent they belong to".into(),
+            ));
+        }
+        let mcp_agent = if grant.mcp_servers.is_empty() {
+            String::new()
+        } else {
+            grant.mcp_agent.clone()
+        };
         let id = random_hex(4);
         let token = format!("{TOKEN_PREFIX}{id}_{}", random_hex(32));
         let created_at = wirken_time::Timestamp::now().to_rfc3339();
@@ -415,8 +449,8 @@ impl ProxyTokenStore {
             .execute(
                 "INSERT INTO proxy_tokens
                  (id, name, digest, upstreams, models, ceiling_usd_micros, ceiling_calls,
-                  window, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  window, created_at, mcp_agent, mcp_servers)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     id,
                     grant.name,
@@ -427,6 +461,8 @@ impl ProxyTokenStore {
                     grant.ceiling_calls.map(|v| v as i64),
                     window,
                     created_at,
+                    mcp_agent,
+                    grant.mcp_servers.join(","),
                 ],
             )
             .map_err(|e| match e {
@@ -448,6 +484,8 @@ impl ProxyTokenStore {
                 window: grant.window,
                 created_at,
                 revoked_at: None,
+                mcp_agent,
+                mcp_servers: grant.mcp_servers.clone(),
             },
             token,
         ))
@@ -474,7 +512,7 @@ impl ProxyTokenStore {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, name, upstreams, models, ceiling_usd_micros, ceiling_calls, window,
-                    created_at, revoked_at, digest
+                    created_at, revoked_at, digest, mcp_agent, mcp_servers
              FROM proxy_tokens ORDER BY created_at DESC, id",
         )?;
         let rows = stmt.query_map([], Self::row)?;
@@ -582,7 +620,7 @@ impl ProxyTokenStore {
             .query_row(
                 &format!(
                     "SELECT id, name, upstreams, models, ceiling_usd_micros, ceiling_calls,
-                            window, created_at, revoked_at, digest
+                            window, created_at, revoked_at, digest, mcp_agent, mcp_servers
                      FROM proxy_tokens WHERE {filter}"
                 ),
                 params![value],
@@ -608,6 +646,8 @@ impl ProxyTokenStore {
                 },
                 created_at: r.get(7)?,
                 revoked_at: r.get(8)?,
+                mcp_agent: r.get(10)?,
+                mcp_servers: split(&r.get::<_, String>(11)?),
             },
             r.get(9)?,
         ))
@@ -617,6 +657,63 @@ impl ProxyTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_token_carries_its_mcp_grant_and_an_older_store_gains_the_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(PROXY_TOKENS_FILE);
+        // A store as it was before tokens carried an MCP grant.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE proxy_tokens (
+                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, digest TEXT NOT NULL,
+                     upstreams TEXT NOT NULL, models TEXT NOT NULL,
+                     ceiling_usd_micros INTEGER, ceiling_calls INTEGER,
+                     window TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT);
+                 INSERT INTO proxy_tokens VALUES
+                     ('0a0a0a0a', 'old', 'x', 'local', '', NULL, NULL, 'day', 't', NULL);",
+            )
+            .unwrap();
+        }
+        let store = ProxyTokenStore::open(&path).unwrap();
+        let old = &store.list().unwrap()[0];
+        assert_eq!((old.mcp_agent.as_str(), old.mcp_servers.len()), ("", 0));
+
+        let (token, value) = store
+            .issue(&TokenGrant {
+                name: "tools".into(),
+                mcp_agent: "default".into(),
+                mcp_servers: vec!["files".into(), "notes".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(token.upstreams.is_empty());
+        let TokenCheck::Valid(read) = store.check(&value).unwrap() else {
+            panic!("the token is valid");
+        };
+        assert_eq!(read.mcp_agent, "default");
+        assert_eq!(read.mcp_servers, vec!["files", "notes"]);
+
+        // Servers with no agent, and nothing at all, are refused.
+        assert!(
+            store
+                .issue(&TokenGrant {
+                    name: "no-agent".into(),
+                    mcp_servers: vec!["files".into()],
+                    ..Default::default()
+                })
+                .is_err()
+        );
+        assert!(
+            store
+                .issue(&TokenGrant {
+                    name: "nothing".into(),
+                    ..Default::default()
+                })
+                .is_err()
+        );
+    }
 
     fn store() -> (tempfile::TempDir, ProxyTokenStore) {
         let tmp = tempfile::tempdir().unwrap();
@@ -632,6 +729,7 @@ mod tests {
             ceiling_usd_micros: Some(5_000_000),
             ceiling_calls: Some(10),
             window: BudgetWindow::Hour,
+            ..Default::default()
         }
     }
 

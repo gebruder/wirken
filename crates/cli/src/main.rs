@@ -1455,7 +1455,7 @@ enum ProxyTokenCommands {
         name: String,
         /// An upstream from proxy.json the token may reach. Repeat for
         /// more; they are tried in the order given.
-        #[arg(long = "upstream", required = true)]
+        #[arg(long = "upstream")]
         upstreams: Vec<String>,
         /// A model the token may ask for. Repeat for more. Without it
         /// the token may ask for any model.
@@ -1471,6 +1471,15 @@ enum ProxyTokenCommands {
         /// The window the ceilings apply over: hour, day or week.
         #[arg(long, default_value = "day")]
         window: String,
+        /// An MCP server whose tools the token may list and call at
+        /// the proxy's MCP endpoint. Its entry must be signed. Repeat
+        /// for more.
+        #[arg(long = "mcp-server")]
+        mcp_servers: Vec<String>,
+        /// The agent whose MCP servers --mcp-server names, and whose
+        /// permission gate the token's tool calls run under.
+        #[arg(long, default_value = "default")]
+        agent: String,
     },
     /// Revoke a token by its id or name. Run at a terminal.
     Revoke {
@@ -2204,6 +2213,8 @@ async fn main() -> Result<()> {
                 ceiling_usd,
                 ceiling_calls,
                 window,
+                mcp_servers,
+                agent,
             } => commands::proxy::token_issue(
                 &name,
                 &upstreams,
@@ -2211,6 +2222,8 @@ async fn main() -> Result<()> {
                 ceiling_usd,
                 ceiling_calls,
                 &window,
+                &mcp_servers,
+                &agent,
             ),
             ProxyTokenCommands::Revoke { token } => commands::proxy::token_revoke(&token),
             ProxyTokenCommands::List => commands::proxy::token_list(),

@@ -44,14 +44,49 @@ fn parse_window(window: &str) -> Result<BudgetWindow> {
     })
 }
 
+/// The MCP servers `agent` is configured with whose entries are
+/// signed, each with its entry digest. Read from the file the MCP
+/// proxy loads for that agent: `agents/<agent>/mcp.json` when it
+/// exists, the shared `mcp.json` otherwise.
+pub(crate) fn signed_mcp_servers(
+    data_dir: &std::path::Path,
+    agent: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let per_agent = data_dir.join("agents").join(agent).join("mcp.json");
+    let path = if per_agent.exists() {
+        per_agent
+    } else {
+        data_dir.join("mcp.json")
+    };
+    let config = wirken_mcp_proxy::McpConfig::load(&path).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(config
+        .servers
+        .iter()
+        .filter_map(|(name, server)| {
+            wirken_mcp_proxy::mcp_signing::verified_entry_digest(name, server)
+                .map(|digest| (name.clone(), digest))
+        })
+        .collect())
+}
+
 /// What a token is allowed, as one line for a row or a listing.
 fn describe(token: &ProxyToken) -> String {
-    let mut parts = vec![format!("upstreams {}", token.upstreams.join(","))];
-    parts.push(if token.models.is_empty() {
-        "any model".to_string()
-    } else {
-        format!("models {}", token.models.join(","))
-    });
+    let mut parts = Vec::new();
+    if !token.upstreams.is_empty() {
+        parts.push(format!("upstreams {}", token.upstreams.join(",")));
+        parts.push(if token.models.is_empty() {
+            "any model".to_string()
+        } else {
+            format!("models {}", token.models.join(","))
+        });
+    }
+    if !token.mcp_servers.is_empty() {
+        parts.push(format!(
+            "MCP servers {} of agent {}",
+            token.mcp_servers.join(","),
+            token.mcp_agent
+        ));
+    }
     if let Some(micros) = token.ceiling_usd_micros {
         parts.push(format!(
             "${:.2} a {}",
@@ -82,6 +117,18 @@ pub(crate) fn issue_recorded(
                         .cloned()
                         .collect::<Vec<_>>()
                         .join(", ")
+                );
+            }
+        }
+    }
+    if !grant.mcp_servers.is_empty() {
+        let signed = signed_mcp_servers(data_dir, &grant.mcp_agent)?;
+        for server in &grant.mcp_servers {
+            if !signed.contains_key(server) {
+                bail!(
+                    "agent {} has no signed MCP server named {server}; sign its entry with \
+                     `wirken mcp sign {server}`",
+                    grant.mcp_agent
                 );
             }
         }
@@ -128,8 +175,13 @@ pub fn token_issue(
     ceiling_usd: Option<f64>,
     ceiling_calls: Option<u64>,
     window: &str,
+    mcp_servers: &[String],
+    mcp_agent: &str,
 ) -> Result<()> {
     require_terminal("token issue")?;
+    if upstreams.is_empty() && mcp_servers.is_empty() {
+        bail!("a token needs --upstream, --mcp-server or both");
+    }
     let ceiling_usd_micros = match ceiling_usd {
         Some(usd) if !(usd.is_finite() && usd > 0.0) => {
             bail!("--ceiling-usd must be a positive number")
@@ -147,6 +199,8 @@ pub fn token_issue(
         ceiling_usd_micros,
         ceiling_calls,
         window: parse_window(window)?,
+        mcp_agent: mcp_agent.to_string(),
+        mcp_servers: mcp_servers.to_vec(),
     };
     let (token, value) = issue_recorded(&config().data_dir, &grant)?;
     println!(
@@ -380,11 +434,40 @@ mod tests {
             window: BudgetWindow::Day,
             created_at: String::new(),
             revoked_at: None,
+            mcp_agent: "default".into(),
+            mcp_servers: vec!["files".into()],
         };
         assert_eq!(
             describe(&token),
-            "upstreams local,cloud; any model; $2.50 a day; 100 calls a day"
+            "upstreams local,cloud; any model; MCP servers files of agent default; \
+             $2.50 a day; 100 calls a day"
         );
+    }
+
+    #[test]
+    fn a_token_is_granted_signed_mcp_servers_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("mcp.json"),
+            r#"{"servers":{"files":{"command":"files-server","args":[]}}}"#,
+        )
+        .unwrap();
+        let config = wirken_mcp_proxy::McpConfig::load(&tmp.path().join("mcp.json")).unwrap();
+        assert!(config.servers.contains_key("files"), "the entry is read");
+        assert!(
+            signed_mcp_servers(tmp.path(), "default")
+                .unwrap()
+                .is_empty()
+        );
+        let grant = TokenGrant {
+            name: "tools".into(),
+            mcp_agent: "default".into(),
+            mcp_servers: vec!["files".into()],
+            ..Default::default()
+        };
+        let err = issue_recorded(tmp.path(), &grant).unwrap_err().to_string();
+        assert!(err.contains("no signed MCP server named files"), "{err}");
+        assert!(open_store(tmp.path()).unwrap().list().unwrap().is_empty());
     }
 
     #[test]
