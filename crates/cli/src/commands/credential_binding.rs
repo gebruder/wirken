@@ -19,6 +19,7 @@ pub struct Destinations {
     pub base_url: Option<String>,
     pub adapters: Vec<String>,
     pub plan: bool,
+    pub archives: Vec<String>,
 }
 
 impl Destinations {
@@ -28,6 +29,7 @@ impl Destinations {
             && self.provider.is_none()
             && self.adapters.is_empty()
             && !self.plan
+            && self.archives.is_empty()
     }
 
     /// Resolve against the current configuration. An MCP server pins its
@@ -81,6 +83,11 @@ impl Destinations {
         }
         if self.plan {
             out.push(Destination::Plan);
+        }
+        for host in &self.archives {
+            out.push(Destination::Archive(super::credential::normalize_host(
+                host,
+            )?));
         }
         Ok(out)
     }
@@ -207,6 +214,11 @@ pub fn revoke(name: &str, wanted: &Destinations) -> Result<()> {
     destinations.extend(wanted.adapters.iter().cloned().map(Destination::Adapter));
     if wanted.plan {
         destinations.push(Destination::Plan);
+    }
+    for host in &wanted.archives {
+        destinations.push(Destination::Archive(super::credential::normalize_host(
+            host,
+        )?));
     }
     let store = open_at_terminal()?;
     let mut removed = Vec::new();

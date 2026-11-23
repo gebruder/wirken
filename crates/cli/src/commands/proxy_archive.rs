@@ -303,11 +303,11 @@ impl Archive {
     ) -> Result<Self, String> {
         let (endpoint, host) = endpoint_host(&config.endpoint)?;
         let (credentials, _) = vault
-            .retrieve_for(&config.credential, &Destination::Host(host.clone()))
+            .retrieve_for(&config.credential, &Destination::Archive(host.clone()))
             .map_err(|e| {
                 format!(
                     "the bucket credentials '{}' for {host}: {e}. Store them with `wirken \
-                     credentials add {} --host {host}`",
+                     credentials add {} --archive {host}`",
                     config.credential, config.credential
                 )
             })?;
@@ -743,7 +743,7 @@ mod tests {
 
     fn store_credentials(vault: &CredentialStore, host: &str, value: &str) {
         let mut binding = wirken_vault::Binding::default();
-        binding.grant(Destination::Host(host.to_string()));
+        binding.grant(Destination::Archive(host.to_string()));
         vault
             .store_bound(
                 "proxy-archive-credentials",

@@ -10,6 +10,13 @@ tagged.
 
 ## [Unreleased]
 
+### Operator notes
+
+- A proxy archive's bucket credentials need an `--archive` binding to the
+  endpoint's host. One stored with `--host` no longer opens the archive, and
+  `wirken run` stops naming the command: `wirken credentials grant <NAME>
+  --archive <host>`, then `wirken credentials revoke <NAME> --host <host>`.
+
 ### Added
 
 - `wirken sessions search <text>` finds text across sessions: in the rows of

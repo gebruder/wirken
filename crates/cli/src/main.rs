@@ -1198,6 +1198,11 @@ enum CredentialCommands {
         /// The plan sign-in endpoints
         #[arg(long)]
         plan: bool,
+        /// Host of a proxy archive's bucket endpoint whose requests it
+        /// signs: `host` for port 443, or `host:port` (repeatable). Not
+        /// a host `http_request` may send it to.
+        #[arg(long = "archive")]
+        archive: Vec<String>,
         /// Store the value as an identifier (an address, a number, a
         /// URL) rather than a secret. Leak detection refuses
         /// model-authored content that contains a stored secret; an
@@ -1293,6 +1298,11 @@ enum CredentialCommands {
         /// The plan sign-in endpoints
         #[arg(long)]
         plan: bool,
+        /// Host of a proxy archive's bucket endpoint whose requests it
+        /// signs: `host` for port 443, or `host:port` (repeatable). Not
+        /// a host `http_request` may send it to.
+        #[arg(long = "archive")]
+        archive: Vec<String>,
     },
     /// Remove a destination from a credential. Takes the vault
     /// passphrase at a terminal; refuses inside a Wirken `exec`.
@@ -1318,6 +1328,11 @@ enum CredentialCommands {
         /// The plan sign-in endpoints
         #[arg(long)]
         plan: bool,
+        /// Host of a proxy archive's bucket endpoint whose requests it
+        /// signs: `host` for port 443, or `host:port` (repeatable). Not
+        /// a host `http_request` may send it to.
+        #[arg(long = "archive")]
+        archive: Vec<String>,
     },
     /// Show one credential's non-secret metadata (provider, granted
     /// scopes for OAuth, timestamps). The secret value is never
@@ -2147,6 +2162,7 @@ async fn main() -> Result<()> {
                 base_url,
                 adapter,
                 plan,
+                archive,
                 identifier,
             } => {
                 commands::credential::add(
@@ -2160,6 +2176,7 @@ async fn main() -> Result<()> {
                         base_url,
                         adapters: adapter,
                         plan,
+                        archives: archive,
                     },
                     if identifier {
                         wirken_vault::CredentialKind::Identifier
@@ -2201,6 +2218,7 @@ async fn main() -> Result<()> {
                 base_url,
                 adapter,
                 plan,
+                archive,
             } => commands::credential_binding::grant(
                 &name,
                 &commands::credential_binding::Destinations {
@@ -2210,6 +2228,7 @@ async fn main() -> Result<()> {
                     base_url,
                     adapters: adapter,
                     plan,
+                    archives: archive,
                 },
             ),
             CredentialCommands::Revoke {
@@ -2220,6 +2239,7 @@ async fn main() -> Result<()> {
                 base_url,
                 adapter,
                 plan,
+                archive,
             } => commands::credential_binding::revoke(
                 &name,
                 &commands::credential_binding::Destinations {
@@ -2229,6 +2249,7 @@ async fn main() -> Result<()> {
                     base_url,
                     adapters: adapter,
                     plan,
+                    archives: archive,
                 },
             ),
             CredentialCommands::Show { name } => commands::credential::show(&name).await,

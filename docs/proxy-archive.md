@@ -33,14 +33,17 @@ under Object Lock:
 | `credential` | required | The vault entry holding `access_key_id:secret_access_key`. |
 | `key` | `proxy-archive-key` | The vault entry holding the archive key. |
 
-The bucket credentials are bound to the endpoint's host like any other
-destination, and are not read for another:
+The bucket credentials are bound to the endpoint's host as an archive, and
+are not read for another host:
 
 ```bash
-wirken credentials add proxy-archive-credentials --host s3.eu-central-1.amazonaws.com
+wirken credentials add proxy-archive-credentials --archive s3.eu-central-1.amazonaws.com
 ```
 
-A host on a port other than 443 is named with it (`--host 127.0.0.1:9000`).
+`--archive` is a destination of its own. A `--host` binding does not open an
+archive, and an `--archive` binding does not let `http_request` send the
+credentials anywhere, that host included. A host on a port other than 443 is
+named with it (`--archive 127.0.0.1:9000`).
 An archive that is configured and cannot be opened stops `wirken run`.
 
 **Keys.** A request body is stored at `<prefix>request/<sha256>` and a

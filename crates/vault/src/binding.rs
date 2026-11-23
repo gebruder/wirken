@@ -35,6 +35,11 @@ pub struct Binding {
     pub adapters: Vec<String>,
     #[serde(default)]
     pub plan: bool,
+    /// Hosts of a proxy archive's bucket endpoint the credential may
+    /// sign requests to. Left out of the stored form when empty, so a
+    /// row sealed before this list existed opens as it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archives: Vec<String>,
 }
 
 fn version() -> u32 {
@@ -52,6 +57,9 @@ pub enum Destination {
     Adapter(String),
     /// The pinned plan sign-in endpoints.
     Plan,
+    /// The bucket endpoint of a proxy archive, by host: the credential
+    /// signs requests to it. Not a host `http_request` may send to.
+    Archive(String),
 }
 
 impl Destination {
@@ -63,6 +71,7 @@ impl Destination {
             Self::Provider(_) => "provider",
             Self::Adapter(_) => "adapter",
             Self::Plan => "plan",
+            Self::Archive(_) => "archive",
         }
     }
 
@@ -74,6 +83,7 @@ impl Destination {
             Self::Provider(p) => format!("{} at {}", p.provider, p.origin),
             Self::Adapter(a) => a.clone(),
             Self::Plan => "plan sign-in endpoints".into(),
+            Self::Archive(h) => format!("archive at {h}"),
         }
     }
 
@@ -85,6 +95,7 @@ impl Destination {
             Self::Provider(p) => format!("--provider {} --base-url {}", p.provider, p.origin),
             Self::Adapter(a) => format!("--adapter {a}"),
             Self::Plan => "--plan".into(),
+            Self::Archive(h) => format!("--archive {h}"),
         }
     }
 }
@@ -117,6 +128,7 @@ impl Binding {
             && self.providers.is_empty()
             && self.adapters.is_empty()
             && !self.plan
+            && self.archives.is_empty()
     }
 
     /// Whether `destination` is allowed. Hosts compare case-insensitively.
@@ -129,6 +141,7 @@ impl Binding {
             Destination::Provider(p) => !p.origin.is_empty() && self.providers.contains(p),
             Destination::Adapter(a) => self.adapters.iter().any(|x| x == a),
             Destination::Plan => self.plan,
+            Destination::Archive(h) => self.archives.iter().any(|x| x.eq_ignore_ascii_case(h)),
         }
     }
 
@@ -148,6 +161,7 @@ impl Binding {
             Destination::Provider(p) => self.providers.push(p),
             Destination::Adapter(a) => self.adapters.push(a),
             Destination::Plan => self.plan = true,
+            Destination::Archive(h) => self.archives.push(h),
         }
         self.normalize();
         true
@@ -163,6 +177,7 @@ impl Binding {
             Destination::Provider(p) => self.providers.retain(|x| x != p),
             Destination::Adapter(a) => self.adapters.retain(|x| x != a),
             Destination::Plan => self.plan = false,
+            Destination::Archive(h) => self.archives.retain(|x| !x.eq_ignore_ascii_case(h)),
         }
         *self != before
     }
@@ -177,6 +192,7 @@ impl Binding {
         if self.plan {
             out.push(Destination::Plan);
         }
+        out.extend(self.archives.iter().cloned().map(Destination::Archive));
         out
     }
 
@@ -195,6 +211,12 @@ impl Binding {
         self.providers.dedup();
         self.adapters.sort();
         self.adapters.dedup();
+        for h in &mut self.archives {
+            *h = h.trim().to_ascii_lowercase();
+        }
+        self.archives.retain(|h| !h.is_empty());
+        self.archives.sort();
+        self.archives.dedup();
     }
 
     /// The bytes stored in the `binding` column and sealed into the
@@ -242,6 +264,34 @@ pub fn origin_of(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bucket credential's destination is its own kind: a binding
+    /// to an archive host does not let `http_request` send the
+    /// credential to that host, and a host binding does not open an
+    /// archive.
+    #[test]
+    fn an_archive_grant_is_not_a_host_grant() {
+        let mut b = Binding::default();
+        assert!(b.grant(Destination::Archive("S3.Example.com".into())));
+        assert!(b.permits(&Destination::Archive("s3.example.com".into())));
+        assert!(!b.permits(&Destination::Host("s3.example.com".into())));
+        assert!(!b.is_empty());
+        assert_eq!(
+            b.destinations(),
+            vec![Destination::Archive("s3.example.com".into())]
+        );
+        let stored = b.canonical();
+        assert_eq!(Binding::parse(&stored).unwrap(), b);
+
+        let hosts = Binding::hosts(&["s3.example.com".to_string()]);
+        assert!(!hosts.permits(&Destination::Archive("s3.example.com".into())));
+        // A binding with no archive is stored as it was before the
+        // list existed, so its row still opens.
+        assert!(!hosts.canonical().contains("archives"));
+
+        assert!(b.revoke(&Destination::Archive("s3.example.com".into())));
+        assert!(b.is_empty());
+    }
 
     #[test]
     fn an_empty_binding_permits_nothing() {

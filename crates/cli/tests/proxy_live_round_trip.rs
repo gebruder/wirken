@@ -182,7 +182,7 @@ async fn real_clients_go_through_the_proxy_and_the_archive_matches_the_chain() {
             "add",
             "proxy-archive-credentials",
             "--stdin",
-            "--host",
+            "--archive",
             &s3_host,
         ])
         .stdin(Stdio::piped())

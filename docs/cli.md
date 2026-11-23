@@ -538,8 +538,8 @@ Every verb takes the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` when set
 and prompts only when it is not, so `add` and `rotate` complete with no
 terminal, except `grant` and `revoke`, which take it at a terminal only.
 DESTINATIONS are `--host HOST` (port 443) or `--host HOST:PORT`, `--mcp-server NAME`, `--provider P --base-url
-URL`, `--adapter ID` and `--plan`; `--host`, `--mcp-server` and `--adapter`
-repeat. See
+URL`, `--adapter ID`, `--plan` and `--archive HOST` (a proxy archive's bucket
+endpoint); `--host`, `--mcp-server`, `--adapter` and `--archive` repeat. See
 [credentials.md](credentials.md#where-a-credential-may-go). Scopes and
 redaction: [credentials.md](credentials.md).
 

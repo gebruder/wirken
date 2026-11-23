@@ -514,7 +514,7 @@ async fn two_conversations_are_two_sessions_and_one_is_redacted_whole() {
             "add",
             "proxy-archive-credentials",
             "--stdin",
-            "--host",
+            "--archive",
             &s3_host,
         ])
         .stdin(Stdio::piped())

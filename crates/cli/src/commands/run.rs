@@ -8720,6 +8720,52 @@ mod resolver_tests {
         );
     }
 
+    /// The bucket credentials of a proxy archive are bound to the
+    /// archive's host as an archive, not as a host `http_request` may
+    /// send to: a request to that host asking for them gets no secret.
+    #[test]
+    fn an_archive_credential_is_not_handed_to_http_request() {
+        use wirken_agent::http_tool::CredentialError;
+        use wirken_vault::{Binding, CredentialKind, Destination};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &tmp.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        let mut binding = Binding::default();
+        binding.grant(Destination::Archive("s3.example.com".into()));
+        store
+            .store_bound(
+                "proxy-archive-credentials",
+                "",
+                &VaultSecret::new("AKIAEXAMPLE:secret-access-key-01".into()),
+                None,
+                None,
+                &binding,
+                CredentialKind::Secret,
+            )
+            .unwrap();
+        // The archive reads them.
+        assert!(
+            store
+                .retrieve_for(
+                    "proxy-archive-credentials",
+                    &Destination::Archive("s3.example.com".into())
+                )
+                .is_ok()
+        );
+        let resolver = VaultCredentialResolver {
+            store: std::sync::Mutex::new(store),
+            leak: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+        };
+        assert!(matches!(
+            resolver.resolve("proxy-archive-credentials", "s3.example.com"),
+            Err(CredentialError::HostNotPermitted { .. })
+        ));
+    }
+
     /// A credential bound to a host is bound to it on port 443. A
     /// request to another port of that host asks for `host:port`,
     /// which the binding does not name, and gets no secret.
