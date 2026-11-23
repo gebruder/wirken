@@ -23,8 +23,13 @@
 # target and the MinGW C compiler, and fails naming whichever is
 # missing; it is never skipped.
 #
-# Not run here: Fuzz, Miri, MSRV and the Windows-target clippy, which
-# need toolchains this script does not install. CI runs them.
+# The fuzz crate is outside the workspace, so no step above compiles
+# it. Its targets are checked here, so a change that no longer compiles
+# under them fails before the push and not in the Fuzz job after it.
+#
+# Not run here: the fuzzing itself, Miri, MSRV and the Windows-target
+# clippy, which need toolchains this script does not install. CI runs
+# them.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
@@ -83,6 +88,13 @@ windows_check() {
 		return 1
 	}
 	RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --target "$WINDOWS_TARGET"
+}
+
+# Every fuzz target compiled, on the toolchain the workspace is built
+# with: `cargo fuzz` needs nightly to run a target, not to type-check
+# one. --locked, so a fuzz/Cargo.lock the change left behind fails too.
+fuzz_check() {
+	cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 }
 
 # Documentation: a Markdown file at the root or under docs/ that no
@@ -146,6 +158,7 @@ else
 	step unsafe cargo clippy --workspace --all-targets -- -D clippy::undocumented_unsafe_blocks
 	step test cargo test --workspace
 	step windows windows_check
+	step fuzz fuzz_check
 fi
 step lints python3 -W error::ResourceWarning scripts/source_lints.py
 step names scripts/check-names.sh
