@@ -95,6 +95,7 @@ fuzz_target!(|data: &[u8]| {
                 request_bytes: request.len() as u64,
                 credential_id: None,
                 archived: true,
+                identity: None,
             },
         ));
         rows.push(row(
@@ -113,6 +114,7 @@ fuzz_target!(|data: &[u8]| {
                 response_bytes: response.len() as u64,
                 complete: true,
                 archived: true,
+                identity: None,
             },
         ));
     }
