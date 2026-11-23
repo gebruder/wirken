@@ -387,6 +387,28 @@ fn proxy_state(
         .with_context(|| format!("proxy.json: upstream {name}"))?;
         upstreams.insert(name.clone(), client);
     }
+    // An identity provider that is configured and cannot be set up
+    // stops the start: the listener does not run accepting JWTs it has
+    // no key to hash a subject under, or no pinned keys to check.
+    let identity = match (&proxy_config.oidc, &vault) {
+        (Some(oidc), Some(store)) => {
+            let key = {
+                let store = store
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("vault mutex poisoned"))?;
+                super::proxy_oidc::subject_key(&store, &oidc.subject_key)
+                    .map_err(|e| anyhow::anyhow!("proxy.json: oidc: {e}"))?
+            };
+            Some(
+                super::proxy_oidc::IdentityVerifier::new(oidc, &cfg.data_dir, key)
+                    .map_err(|e| anyhow::anyhow!("proxy.json: oidc: {e}"))?,
+            )
+        }
+        (Some(_), None) => {
+            anyhow::bail!("proxy.json: oidc: the vault is not open, so there is no subject key")
+        }
+        (None, _) => None,
+    };
     let budget = match wirken_gateway::budget::BudgetStore::open(&cfg.budget_db_path()) {
         Ok(store) => Some(Arc::new(std::sync::Mutex::new(store))),
         Err(e) => {
@@ -412,6 +434,7 @@ fn proxy_state(
                 data_dir: cfg.data_dir.clone(),
             },
         ))),
+        identity,
     }))
 }
 
@@ -2301,6 +2324,7 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                 .values()
                 .any(|u| u.credential.is_some())
                 || proxy_config.archive.is_some()
+                || proxy_config.oidc.is_some()
             {
                 let keychain = probe_keychain(&cfg.data_dir, || {
                     prompt_vault_passphrase(&mut vault_passphrase)
@@ -2320,6 +2344,33 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                 leak_matcher.clone(),
                 factory.clone(),
             )?;
+            if let (Some(oidc), Some(identity)) = (&proxy_config.oidc, &state.identity) {
+                // Asked now, so an issuer that cannot be reached is
+                // said at the start and not at the first JWT. The
+                // listener runs either way: tokens issued here do not
+                // depend on the issuer, and a JWT is refused until its
+                // keys can be had.
+                match identity.warm().await {
+                    Ok(keys) => println!(
+                        "  Proxy identity: JWTs of {} for audience {} ({keys} {} key{})",
+                        oidc.issuer,
+                        oidc.audience,
+                        if identity.pinned() {
+                            "pinned"
+                        } else {
+                            "fetched"
+                        },
+                        if keys == 1 { "" } else { "s" },
+                    ),
+                    Err(e) => {
+                        println!(
+                            "  Proxy identity: JWTs of {} are refused until its keys can be \
+                             fetched: {e}",
+                            oidc.issuer
+                        );
+                    }
+                }
+            }
             let addr = proxy_config
                 .bind_addr()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;

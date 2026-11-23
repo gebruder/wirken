@@ -86,4 +86,6 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 
 [dev-dependencies]
+# Signs the JWTs the proxy identity tests present.
+ring = { workspace = true }
 tempfile = { workspace = true }

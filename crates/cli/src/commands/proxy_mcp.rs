@@ -27,14 +27,10 @@ use hyper::body::Incoming;
 use hyper::header::{self, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use wirken_agent::tool::{ToolDef, ToolResult};
-use wirken_audit::{
-    HashHex, PROXY_SESSION, ProxyRefusal, ProxyToolRefusal, SessionEvent, proxy_session,
-};
-use wirken_gateway::proxy::{ProxyToken, TokenCheck, is_name};
+use wirken_audit::{HashHex, ProxyRefusal, ProxyToolRefusal, SessionEvent, proxy_session};
+use wirken_gateway::proxy::{ProxyToken, is_name};
 
-use super::proxy_server::{
-    BodyKind, ProxyState, ReplyBody, SESSION_HEADER, presented_token, sha256_hex,
-};
+use super::proxy_server::{BodyKind, Caller, ProxyState, ReplyBody, SESSION_HEADER, sha256_hex};
 
 /// The path the endpoint is served at.
 pub const MCP_PATH: &str = "/mcp";
@@ -257,7 +253,7 @@ impl ProxyState {
                 mcp_session: session.map(str::to_string),
                 tool: tool.map(str::to_string),
                 reason,
-                identity: None,
+                identity: token.identity.clone(),
             },
         ) {
             tracing::error!("proxy: MCP refusal not recorded: {e}");
@@ -285,9 +281,9 @@ impl ProxyState {
             return reply;
         }
 
-        let token = match presented_token(req.headers()).map(|t| self.tokens.check(&t)) {
-            Some(Ok(TokenCheck::Valid(token))) => token,
-            Some(Ok(TokenCheck::Revoked(token))) => {
+        let token = match self.caller(req.headers()).await {
+            Caller::Valid(token) => *token,
+            Caller::Revoked(token) => {
                 return self.refuse(
                     &proxy_session(&token.id, None),
                     Some(&token),
@@ -298,22 +294,25 @@ impl ProxyState {
                     "this token was revoked",
                 );
             }
-            Some(Err(e)) => {
-                tracing::error!("proxy: token store: {e}");
+            Caller::StoreUnreadable => {
                 return json_reply(
                     StatusCode::SERVICE_UNAVAILABLE,
                     &serde_json::json!({"error": "the token store could not be read"}),
                 );
             }
-            Some(Ok(TokenCheck::Unknown)) | None => {
-                return self.refuse(
-                    PROXY_SESSION,
-                    None,
-                    None,
+            Caller::JwtRefused {
+                reason,
+                status,
+                message,
+                identity,
+            } => return self.refuse_stranger(None, reason, status, &message, identity),
+            Caller::Unknown => {
+                return self.refuse_stranger(
                     None,
                     ProxyRefusal::UnknownToken,
                     StatusCode::UNAUTHORIZED,
-                    "no valid Wirken proxy token: send one as a bearer token or as x-api-key",
+                    self.no_credential(),
+                    None,
                 );
             }
         };
@@ -524,7 +523,7 @@ impl ProxyState {
                 tools: granted.iter().map(|def| def.name.clone()).collect(),
                 tools_sha256: HashHex(tools_sha256),
                 archived,
-                identity: None,
+                identity: token.identity.clone(),
             },
         ) {
             return self.refuse_tool(
@@ -704,7 +703,7 @@ impl ProxyState {
 
         let call_id = tool_use_id(params).unwrap_or_else(|| format!("mcp-{}", random_hex(12)));
         let allowed: BTreeSet<String> = session.shown.keys().cloned().collect();
-        let sender = format!("proxy-token:{}", token.id);
+        let sender = token.principal();
         let started = Instant::now();
         let result = match endpoint
             .host
@@ -772,7 +771,7 @@ impl ProxyState {
                 response_sha256: HashHex(response_sha256),
                 response_bytes: answer_bytes.len() as u64,
                 archived,
-                identity: None,
+                identity: token.identity.clone(),
             },
         ) {
             tracing::error!("proxy: MCP call row not written: {e}");
@@ -866,7 +865,13 @@ mod tests {
     }
 
     async fn rig() -> Rig {
+        rig_for(None).await
+    }
+
+    /// A rig that also verifies `issuer`'s JWTs, where one is given.
+    async fn rig_for(issuer: Option<&crate::commands::proxy_oidc::tests::TestIssuer>) -> Rig {
         let tmp = tempfile::tempdir().unwrap();
+        let identity = issuer.map(|issuer| issuer.verifier(tmp.path(), |_| {}));
         let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
         let host = Arc::new(FakeHost {
             tools: Mutex::new(vec![
@@ -888,6 +893,7 @@ mod tests {
             archive: Some(sink.clone() as Arc<dyn BodySink>),
             last_unknown_row: std::sync::Mutex::new(None),
             mcp: Some(McpEndpoint::new(host.clone() as Arc<dyn ToolHost>)),
+            identity,
         });
         let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1085,6 +1091,87 @@ mod tests {
         );
     }
 
+    /// A JWT mapped to a grant set with MCP servers opens a session and
+    /// calls a tool as a token granted them does. The agent is handed
+    /// the subject as the sender, and the session's rows carry who
+    /// called. A JWT that fails is refused before any session.
+    #[tokio::test]
+    async fn a_jwts_caller_lists_and_calls_the_tools_of_its_grant_set() {
+        use crate::commands::proxy_oidc::tests::{ISSUER, TestIssuer, subject_id};
+        let issuer = TestIssuer::new();
+        let rig = rig_for(Some(&issuer)).await;
+        rig.state
+            .tokens
+            .set_grant_set(&TokenGrant {
+                name: "engineers".into(),
+                mcp_agent: "default".into(),
+                mcp_servers: vec!["files".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        rig.state
+            .tokens
+            .map_identity(
+                ISSUER,
+                wirken_gateway::proxy::MappingKind::Claim,
+                "eng",
+                "engineers",
+            )
+            .unwrap();
+        let jwt = issuer.jwt_for("alice", &["eng"]);
+        let id = subject_id("alice");
+
+        let session = rig.open(&jwt, Some("work")).await;
+        let lane = format!("proxy-{id}-work");
+        assert_eq!(rig.call(&jwt, &session, "files_read").await.status, 200);
+        let calls = rig.host.calls.lock().unwrap().clone();
+        let (on, _, _, _, sender) = &calls[0];
+        assert_eq!(on, &lane);
+        assert_eq!(sender, &format!("proxy-subject:{id}"));
+
+        let identities: Vec<Option<wirken_audit::ProxyIdentity>> = rig
+            .rows(&lane)
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::ProxyToolsListed { identity, .. }
+                | SessionEvent::ProxyToolCall { identity, .. } => Some(identity),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(identities.len(), 2);
+        for identity in identities {
+            let identity = identity.expect("who called");
+            assert_eq!(identity.grant_set.as_deref(), Some("engineers"));
+            assert_eq!(identity.subject_hash.as_ref().map(String::len), Some(64));
+        }
+
+        // Another subject cannot use the session.
+        let bob = issuer.jwt_for("bob", &["eng"]);
+        assert_eq!(rig.call(&bob, &session, "files_read").await.status, 404);
+        // A JWT of another key opens nothing.
+        let forged = TestIssuer::new().jwt_for("alice", &["eng"]);
+        let answer = rig
+            .send(
+                &forged,
+                None,
+                None,
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            )
+            .await;
+        assert_eq!(answer.status, 401);
+        assert!(
+            rig.rows(wirken_audit::PROXY_SESSION)
+                .iter()
+                .any(|e| matches!(
+                    e,
+                    SessionEvent::ProxyRefused {
+                        reason: ProxyRefusal::JwtInvalid,
+                        ..
+                    }
+                ))
+        );
+    }
+
     #[tokio::test]
     async fn a_call_runs_under_the_agent_and_is_recorded_with_both_bodies() {
         let rig = rig().await;
@@ -1277,13 +1364,17 @@ mod tests {
 
         let answer = rig.send("wkp_00000000_nope", None, None, init).await;
         assert_eq!(answer.status, 401);
-        assert!(rig.rows(PROXY_SESSION).iter().any(|e| matches!(
-            e,
-            SessionEvent::ProxyRefused {
-                reason: ProxyRefusal::UnknownToken,
-                ..
-            }
-        )));
+        assert!(
+            rig.rows(wirken_audit::PROXY_SESSION)
+                .iter()
+                .any(|e| matches!(
+                    e,
+                    SessionEvent::ProxyRefused {
+                        reason: ProxyRefusal::UnknownToken,
+                        ..
+                    }
+                ))
+        );
 
         let (revoked, revoked_value) = rig.token("gone", &["files"]);
         rig.state.tokens.revoke(&revoked.id).unwrap();
@@ -1393,6 +1484,7 @@ mod tests {
             archive: Some(Arc::new(Refusing) as Arc<dyn BodySink>),
             last_unknown_row: std::sync::Mutex::new(None),
             mcp: Some(McpEndpoint::new(rig.host.clone() as Arc<dyn ToolHost>)),
+            identity: None,
         });
         let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         rig.base = format!("http://{}", listener.local_addr().unwrap());

@@ -138,6 +138,28 @@ pub struct ProxyState {
     pub last_unknown_row: std::sync::Mutex<Option<Instant>>,
     /// The MCP endpoint, when the gateway can run an agent's tools.
     pub mcp: Option<super::proxy_mcp::McpEndpoint>,
+    /// What verifies a JWT of the configured identity provider. `None`
+    /// when `proxy.json` has no `oidc` block: a JWT is then an unknown
+    /// token like any other.
+    pub identity: Option<super::proxy_oidc::IdentityVerifier>,
+}
+
+/// Who a request came from.
+pub(super) enum Caller {
+    /// A live token issued here, or the grant set a verified JWT was
+    /// mapped to.
+    Valid(Box<ProxyToken>),
+    Revoked(Box<ProxyToken>),
+    StoreUnreadable,
+    /// A JWT that was not accepted.
+    JwtRefused {
+        reason: ProxyRefusal,
+        status: StatusCode,
+        message: String,
+        identity: Option<wirken_audit::ProxyIdentity>,
+    },
+    /// Nothing presented, or nothing this gateway knows.
+    Unknown,
 }
 
 pub(super) type ReplyBody = UnsyncBoxBody<Bytes, std::io::Error>;
@@ -397,7 +419,7 @@ impl Exchange {
             response_bytes: self.bytes,
             complete,
             archived,
-            identity: None,
+            identity: self.token.identity.clone(),
         };
         if let Err(e) = self.state.record(&self.session, row) {
             tracing::error!(
@@ -449,21 +471,8 @@ impl ProxyState {
             reason = reason.as_str(),
             "proxy: request refused: {message}"
         );
-        let record = match (token, reason) {
-            // A stranger's requests are rows too, but not one each.
-            (None, _) => {
-                let mut last = self
-                    .last_unknown_row
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                let due = last.is_none_or(|at| at.elapsed().as_secs() >= 1);
-                if due {
-                    *last = Some(Instant::now());
-                }
-                due
-            }
-            _ => true,
-        };
+        // A stranger's requests are rows too, but not one each.
+        let record = token.is_some() || self.stranger_row_due();
         if record
             && let Err(e) = self.record(
                 session,
@@ -472,13 +481,107 @@ impl ProxyState {
                     shape,
                     model: model.map(str::to_string),
                     reason,
-                    identity: None,
+                    identity: token.and_then(|t| t.identity.clone()),
                 },
             )
         {
             tracing::error!("proxy: refusal not recorded: {e}");
         }
         error_reply(status, shape, reason.as_str(), message)
+    }
+
+    /// Whether a refusal of a caller with no grants is recorded now:
+    /// at most one such row a second, whatever was presented.
+    fn stranger_row_due(&self) -> bool {
+        let mut last = self
+            .last_unknown_row
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let due = last.is_none_or(|at| at.elapsed().as_secs() >= 1);
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
+    }
+
+    /// What a caller with nothing usable is told to send.
+    pub(super) fn no_credential(&self) -> &'static str {
+        if self.identity.is_some() {
+            "no valid Wirken proxy token or JWT of the configured issuer: send one as a \
+             bearer token or as x-api-key"
+        } else {
+            "no valid Wirken proxy token: send one as a bearer token or as x-api-key"
+        }
+    }
+
+    /// Refuse a caller that has no grants here: nothing presented, an
+    /// unknown token, or a JWT that was not accepted. The row is on the
+    /// `gateway-proxy` lane and is rate-limited; `identity` says whose
+    /// JWT it was, where it was verified and given nothing.
+    pub(super) fn refuse_stranger(
+        &self,
+        shape: Option<ProxyShape>,
+        reason: ProxyRefusal,
+        status: StatusCode,
+        message: &str,
+        identity: Option<wirken_audit::ProxyIdentity>,
+    ) -> Response<ReplyBody> {
+        tracing::warn!(
+            reason = reason.as_str(),
+            "proxy: request refused: {message}"
+        );
+        if self.stranger_row_due()
+            && let Err(e) = self.record(
+                PROXY_SESSION,
+                SessionEvent::ProxyRefused {
+                    token_id: None,
+                    shape,
+                    model: None,
+                    reason,
+                    identity,
+                },
+            )
+        {
+            tracing::error!("proxy: refusal not recorded: {e}");
+        }
+        error_reply(status, shape, reason.as_str(), message)
+    }
+
+    /// Who sent a request with these headers. A token issued here is
+    /// looked up; anything else that has the outline of a JWT is
+    /// verified, where an identity provider is configured.
+    pub(super) async fn caller(&self, headers: &HeaderMap) -> Caller {
+        let Some(presented) = presented_token(headers) else {
+            return Caller::Unknown;
+        };
+        if let Some(identity) = &self.identity
+            && !presented.starts_with(wirken_gateway::proxy::TOKEN_PREFIX)
+            && wirken_gateway::proxy_identity::looks_like_jwt(&presented)
+        {
+            return match identity.check(&presented, &self.tokens).await {
+                super::proxy_oidc::Presented::Caller(token) => Caller::Valid(token),
+                super::proxy_oidc::Presented::Refused {
+                    reason,
+                    status,
+                    message,
+                    identity,
+                } => Caller::JwtRefused {
+                    reason,
+                    status,
+                    message,
+                    identity,
+                },
+            };
+        }
+        match self.tokens.check(&presented) {
+            Ok(TokenCheck::Valid(token)) => Caller::Valid(Box::new(token)),
+            Ok(TokenCheck::Revoked(token)) => Caller::Revoked(Box::new(token)),
+            Ok(TokenCheck::Unknown) => Caller::Unknown,
+            Err(e) => {
+                tracing::error!("proxy: token store: {e}");
+                Caller::StoreUnreadable
+            }
+        }
     }
 
     /// The first of the token's upstreams that takes `shape`.
@@ -502,8 +605,8 @@ impl ProxyState {
                 Ok(calls) if calls < ceiling => {}
                 Ok(calls) => {
                     return Some(format!(
-                        "token {} has made {calls} of its {ceiling} calls this {}",
-                        token.name,
+                        "{} has made {calls} of its {ceiling} calls this {}",
+                        token.held_by(),
                         token.window.label()
                     ));
                 }
@@ -513,9 +616,9 @@ impl ProxyState {
         if let Some(ceiling) = token.ceiling_usd_micros {
             if !wirken_audit::pricing::is_priced(provider, model) {
                 return Some(format!(
-                    "token {} has a spend ceiling and {provider}/{model} has no price, so its \
+                    "{} has a spend ceiling and {provider}/{model} has no price, so its \
                      calls cannot be counted against it",
-                    token.name
+                    token.held_by()
                 ));
             }
             let spent = self
@@ -532,8 +635,8 @@ impl ProxyState {
                 Ok(spent) if spent < ceiling => {}
                 Ok(spent) => {
                     return Some(format!(
-                        "token {} has spent ${:.2} of its ${:.2} this {}",
-                        token.name,
+                        "{} has spent ${:.2} of its ${:.2} this {}",
+                        token.held_by(),
                         spent as f64 / 1e6,
                         ceiling as f64 / 1e6,
                         token.window.label()
@@ -563,9 +666,9 @@ impl ProxyState {
             }
         };
 
-        let token = match presented_token(req.headers()).map(|t| self.tokens.check(&t)) {
-            Some(Ok(TokenCheck::Valid(token))) => token,
-            Some(Ok(TokenCheck::Revoked(token))) => {
+        let token = match self.caller(req.headers()).await {
+            Caller::Valid(token) => *token,
+            Caller::Revoked(token) => {
                 return self.refuse(
                     &proxy_session(&token.id, None),
                     Some(&token),
@@ -576,8 +679,7 @@ impl ProxyState {
                     "this token was revoked",
                 );
             }
-            Some(Err(e)) => {
-                tracing::error!("proxy: token store: {e}");
+            Caller::StoreUnreadable => {
                 return error_reply(
                     StatusCode::SERVICE_UNAVAILABLE,
                     Some(shape),
@@ -585,15 +687,21 @@ impl ProxyState {
                     "the token store could not be read",
                 );
             }
-            Some(Ok(TokenCheck::Unknown)) | None => {
-                return self.refuse(
-                    PROXY_SESSION,
-                    None,
+            Caller::JwtRefused {
+                reason,
+                status,
+                message,
+                identity,
+            } => {
+                return self.refuse_stranger(Some(shape), reason, status, &message, identity);
+            }
+            Caller::Unknown => {
+                return self.refuse_stranger(
                     Some(shape),
-                    None,
                     ProxyRefusal::UnknownToken,
                     StatusCode::UNAUTHORIZED,
-                    "no valid Wirken proxy token: send one as a bearer token or as x-api-key",
+                    self.no_credential(),
+                    None,
                 );
             }
         };
@@ -672,9 +780,9 @@ impl ProxyState {
                 ProxyRefusal::ShapeNotSpoken,
                 StatusCode::BAD_REQUEST,
                 &format!(
-                    "no upstream of token {} takes {} requests: {}. A request is forwarded in \
+                    "no upstream of {} takes {} requests: {}. A request is forwarded in \
                      the shape it arrives in and is not translated",
-                    token.name,
+                    token.held_by(),
                     shape.as_str(),
                     if providers.is_empty() {
                         "none of its upstreams is configured".to_string()
@@ -694,7 +802,7 @@ impl ProxyState {
                 Some(&model),
                 ProxyRefusal::ModelNotAllowed,
                 StatusCode::FORBIDDEN,
-                &format!("token {} may not ask for model {model}", token.name),
+                &format!("{} may not ask for model {model}", token.held_by()),
             );
         }
         if let Some(why) = self.over_budget(&token, &provider, &model) {
@@ -797,7 +905,7 @@ impl ProxyState {
                 request_bytes: body.len() as u64,
                 credential_id: upstream.key.as_ref().map(|k| k.credential().to_string()),
                 archived,
-                identity: None,
+                identity: token.identity.clone(),
             },
         ) {
             return self.refuse(
@@ -999,10 +1107,13 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::proxy_oidc::IdentityVerifier;
+    use crate::commands::proxy_oidc::tests::{ISSUER, TestIssuer, claims, jti, subject_id};
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use wirken_audit::SqliteSessionLog;
     use wirken_gateway::budget::BudgetWindow;
+    use wirken_gateway::proxy::MappingKind;
     use wirken_gateway::proxy::{PROXY_TOKENS_FILE, TokenGrant};
 
     const PROVIDER_KEY: &str = "sk-provider-key-0123456789";
@@ -1106,7 +1217,36 @@ mod tests {
         log: Option<Arc<dyn SessionLog>>,
         archive: Option<Arc<dyn BodySink>>,
     ) -> Rig {
+        rig_full(upstreams, log, archive, None).await
+    }
+
+    /// What makes a rig's verifier, given the rig's directory.
+    type MakeVerifier<'a> = Box<dyn FnOnce(&std::path::Path) -> IdentityVerifier + 'a>;
+
+    /// A listener over one upstream, `local`, that verifies `issuer`'s
+    /// JWTs with its keys pinned, configured as `change` leaves it.
+    async fn rig_identity(
+        upstream: String,
+        issuer: &TestIssuer,
+        change: impl FnOnce(&mut wirken_gateway::proxy::OidcConfig),
+    ) -> Rig {
+        rig_full(
+            vec![("local", "custom", upstream, None)],
+            None,
+            None,
+            Some(Box::new(|dir| issuer.verifier(dir, change))),
+        )
+        .await
+    }
+
+    async fn rig_full(
+        upstreams: Vec<TestUpstream<'_>>,
+        log: Option<Arc<dyn SessionLog>>,
+        archive: Option<Arc<dyn BodySink>>,
+        identity: Option<MakeVerifier<'_>>,
+    ) -> Rig {
         let tmp = tempfile::tempdir().unwrap();
+        let identity = identity.map(|make| make(tmp.path()));
         let sqlite = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
         let leak = Arc::new(LeakMatcher::new());
         leak.learn(
@@ -1144,6 +1284,7 @@ mod tests {
             archive,
             last_unknown_row: std::sync::Mutex::new(None),
             mcp: None,
+            identity,
         });
         let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1230,6 +1371,332 @@ mod tests {
 
     const CHAT: &str = "/v1/chat/completions";
     const MESSAGES: &str = "/v1/messages";
+
+    impl Rig {
+        /// Write a grant set over the upstream `local` and map the
+        /// claim value `group` to it.
+        fn grant_set(&self, name: &str, group: &str, change: impl FnOnce(&mut TokenGrant)) {
+            let mut grant = TokenGrant {
+                name: name.into(),
+                upstreams: vec!["local".into()],
+                ..Default::default()
+            };
+            change(&mut grant);
+            self.state.tokens.set_grant_set(&grant).unwrap();
+            self.state
+                .tokens
+                .map_identity(ISSUER, MappingKind::Claim, group, name)
+                .unwrap();
+        }
+
+        /// Let the next refusal of a stranger be recorded: the rows
+        /// are limited to one a second.
+        fn let_a_stranger_row_through(&self) {
+            *self.state.last_unknown_row.lock().unwrap() = None;
+        }
+
+        /// The refusals on the `gateway-proxy` lane, each with the
+        /// identity on its row.
+        fn stranger_refusals(&self) -> Vec<(ProxyRefusal, Option<wirken_audit::ProxyIdentity>)> {
+            self.rows(PROXY_SESSION)
+                .into_iter()
+                .filter_map(|e| match e {
+                    SessionEvent::ProxyRefused {
+                        reason,
+                        identity,
+                        token_id: None,
+                        ..
+                    } => Some((reason, identity)),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    const BODY: &str = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+
+    /// A JWT of the configured issuer is given the grant set its claim
+    /// is mapped to. Its call is forwarded, and both rows say who made
+    /// it: the issuer, the grant set, the `jti` and a keyed hash of
+    /// the subject, on a lane named by that hash. Neither the JWT nor
+    /// the subject as issued is on any row. A token issued here works
+    /// beside it as before.
+    #[tokio::test]
+    async fn a_jwt_is_given_its_grant_set_and_its_rows_say_who_called() {
+        let (upstream, got) = provider(json_reply("{\"usage\":{}}")).await;
+        let issuer = TestIssuer::new();
+        let rig = rig_identity(upstream, &issuer, |_| {}).await;
+        rig.grant_set("engineers", "eng", |_| {});
+        let jwt = issuer.jwt_for("alice@example.com", &["visitors", "eng"]);
+
+        assert_eq!(rig.post(CHAT, &jwt, BODY).await.status(), 200);
+        // As an API key, where a client's SDK sends it there.
+        let as_key = reqwest::Client::new()
+            .post(format!("{}{CHAT}", rig.base))
+            .header("x-api-key", &jwt)
+            .body(BODY)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(as_key.status(), 200);
+        // The JWT is the client's credential here, and is not sent on.
+        assert!(got.lock().unwrap().iter().all(|r| !r.contains(&jwt)));
+
+        let id = subject_id("alice@example.com");
+        let lanes: Vec<String> = rig
+            .log
+            .list_session_ids()
+            .unwrap()
+            .into_iter()
+            .filter(|l| l.starts_with(&format!("proxy-{id}-")))
+            .collect();
+        assert_eq!(lanes.len(), 1, "{lanes:?}");
+        let rows = rig.rows(&lanes[0]);
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        let expected = wirken_audit::ProxyIdentity {
+            issuer: ISSUER.into(),
+            grant_set: Some("engineers".into()),
+            jti: Some(jti("alice@example.com")),
+            subject_hash: Some(wirken_gateway::proxy_identity::subject_hash(
+                &[7; 32],
+                ISSUER,
+                "alice@example.com",
+            )),
+            subject: None,
+        };
+        let SessionEvent::ProxyRequest {
+            token_id,
+            token_name,
+            identity,
+            ..
+        } = &rows[0]
+        else {
+            panic!("{:?}", rows[0]);
+        };
+        assert_eq!((token_id, token_name.as_str()), (&id, "engineers"));
+        assert_eq!(identity.as_ref(), Some(&expected));
+        let SessionEvent::ProxyResponse {
+            token_id, identity, ..
+        } = &rows[1]
+        else {
+            panic!("{:?}", rows[1]);
+        };
+        assert_eq!(token_id, &id);
+        assert_eq!(identity.as_ref(), Some(&expected));
+
+        // Nothing written anywhere holds the JWT, any part of it, or
+        // the subject as issued.
+        let signature = jwt.rsplit('.').next().unwrap();
+        for lane in rig.log.list_session_ids().unwrap() {
+            for row in rig.rows(&lane) {
+                let text = serde_json::to_string(&row).unwrap();
+                assert!(!text.contains(signature), "{text}");
+                assert!(!text.contains("alice"), "{text}");
+            }
+        }
+
+        // A token issued here is checked as it was.
+        let (token, value) = rig.issue("laptop", &["local"]);
+        assert_eq!(rig.post(CHAT, &value, BODY).await.status(), 200);
+        let SessionEvent::ProxyRequest { identity, .. } = &rig.calls(&token)[0] else {
+            panic!("a request row");
+        };
+        assert!(identity.is_none());
+    }
+
+    /// With `record_subject` the rows carry the subject as the issuer
+    /// gave it, and no hash. The lane is still named by the hash.
+    #[tokio::test]
+    async fn the_subject_is_recorded_as_issued_only_where_the_operator_set_it() {
+        let (upstream, _) = provider(json_reply("{}")).await;
+        let issuer = TestIssuer::new();
+        let rig = rig_identity(upstream, &issuer, |c| c.record_subject = true).await;
+        rig.grant_set("engineers", "eng", |_| {});
+        let jwt = issuer.jwt_for("alice@example.com", &["eng"]);
+        assert_eq!(rig.post(CHAT, &jwt, BODY).await.status(), 200);
+        let lane = rig
+            .log
+            .list_session_ids()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.starts_with(&format!("proxy-{}-", subject_id("alice@example.com"))))
+            .unwrap();
+        let SessionEvent::ProxyRequest { identity, .. } = &rig.rows(&lane)[0] else {
+            panic!("a request row");
+        };
+        let identity = identity.as_ref().unwrap();
+        assert_eq!(identity.subject.as_deref(), Some("alice@example.com"));
+        assert!(identity.subject_hash.is_none());
+    }
+
+    /// A grant set's ceiling is each subject's own: one subject at its
+    /// ceiling is refused, on its own lane and with its identity, and
+    /// another under the same grant set is not.
+    #[tokio::test]
+    async fn a_grant_sets_ceiling_is_counted_per_subject() {
+        let (upstream, got) = provider(json_reply("{}")).await;
+        let issuer = TestIssuer::new();
+        let rig = rig_identity(upstream, &issuer, |_| {}).await;
+        rig.grant_set("engineers", "eng", |g| g.ceiling_calls = Some(1));
+        let alice = issuer.jwt_for("alice", &["eng"]);
+        let bob = issuer.jwt_for("bob", &["eng"]);
+
+        assert_eq!(rig.post(CHAT, &alice, BODY).await.status(), 200);
+        let refused = rig.post(CHAT, &alice, BODY).await;
+        assert_eq!(refused.status(), 429);
+        let message = refused.text().await.unwrap();
+        assert!(
+            message.contains("grant set engineers has made 1 of its 1 calls"),
+            "{message}"
+        );
+        assert_eq!(rig.post(CHAT, &bob, BODY).await.status(), 200);
+        assert_eq!(got.lock().unwrap().len(), 2);
+
+        let lane = proxy_session(&subject_id("alice"), None);
+        let rows = rig.rows(&lane);
+        let [
+            SessionEvent::ProxyRefused {
+                token_id,
+                reason,
+                identity,
+                ..
+            },
+        ] = rows.as_slice()
+        else {
+            panic!("{rows:?}");
+        };
+        assert_eq!(token_id.as_deref(), Some(subject_id("alice").as_str()));
+        assert_eq!(*reason, ProxyRefusal::BudgetExceeded);
+        assert_eq!(
+            identity.as_ref().unwrap().grant_set.as_deref(),
+            Some("engineers")
+        );
+        assert!(
+            rig.rows(&proxy_session(&subject_id("bob"), None))
+                .is_empty()
+        );
+    }
+
+    /// A JWT that is not valid, is for another audience or issuer, has
+    /// expired, or is signed by another key is refused with its own
+    /// reason and no identity: nothing of it was verified. One that is
+    /// valid and mapped to nothing, or to two grant sets, is refused
+    /// with whose it was. Nothing is forwarded for any of them.
+    #[tokio::test]
+    async fn a_jwt_that_fails_or_selects_no_one_grant_set_is_refused_with_its_own_reason() {
+        let (upstream, got) = provider(json_reply("{}")).await;
+        let issuer = TestIssuer::new();
+        let stranger = TestIssuer::new();
+        let rig = rig_identity(upstream, &issuer, |_| {}).await;
+        rig.grant_set("engineers", "eng", |_| {});
+        rig.grant_set("oncall", "sre", |_| {});
+
+        let with = |name: &str, value: serde_json::Value| {
+            let mut c = claims("alice", &["eng"]);
+            c[name] = value;
+            issuer.jwt(&c)
+        };
+        let now = wirken_time::now().as_second();
+        let cases = [
+            (
+                with("exp", (now - 120).into()),
+                401,
+                ProxyRefusal::JwtExpired,
+            ),
+            (
+                with("iat", (now - 700).into()),
+                401,
+                ProxyRefusal::JwtExpired,
+            ),
+            (
+                with("aud", "another-service".into()),
+                401,
+                ProxyRefusal::JwtWrongAudience,
+            ),
+            (
+                with("iss", "https://other.example".into()),
+                401,
+                ProxyRefusal::JwtWrongIssuer,
+            ),
+            (
+                stranger.jwt_for("alice", &["eng"]),
+                401,
+                ProxyRefusal::JwtInvalid,
+            ),
+        ];
+        for (jwt, status, reason) in &cases {
+            rig.let_a_stranger_row_through();
+            let response = rig.post(CHAT, jwt, BODY).await;
+            assert_eq!(response.status().as_u16(), *status, "{reason:?}");
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(body["error"]["code"], reason.as_str());
+            assert_eq!(rig.stranger_refusals().last().unwrap(), &(*reason, None));
+        }
+
+        for (groups, reason) in [
+            (vec!["visitors"], ProxyRefusal::JwtNoGrant),
+            (vec![], ProxyRefusal::JwtNoGrant),
+            (vec!["eng", "sre"], ProxyRefusal::JwtAmbiguousGrant),
+        ] {
+            rig.let_a_stranger_row_through();
+            let response = rig
+                .post(CHAT, &issuer.jwt_for("carol", &groups), BODY)
+                .await;
+            assert_eq!(response.status(), 403, "{groups:?}");
+            let (recorded, identity) = rig.stranger_refusals().pop().unwrap();
+            assert_eq!(recorded, reason);
+            let identity = identity.unwrap();
+            assert_eq!(identity.issuer, ISSUER);
+            assert_eq!(identity.grant_set, None);
+            assert_eq!(identity.jti, Some(jti("carol")));
+            assert_eq!(identity.subject_hash.as_ref().map(String::len), Some(64));
+        }
+        assert!(got.lock().unwrap().is_empty());
+        // A subject given nothing has no lane of its own.
+        assert!(
+            rig.log
+                .list_session_ids()
+                .unwrap()
+                .iter()
+                .all(|l| !l.starts_with("proxy-u"))
+        );
+    }
+
+    /// JWTs that fail are rows as an unknown token's requests are: at
+    /// most one a second, whoever sends them.
+    #[tokio::test]
+    async fn refused_jwts_are_rate_limited_as_unknown_tokens_are() {
+        let (upstream, _) = provider(json_reply("{}")).await;
+        let issuer = TestIssuer::new();
+        let stranger = TestIssuer::new();
+        let rig = rig_identity(upstream, &issuer, |_| {}).await;
+        for i in 0..6 {
+            let jwt = stranger.jwt_for(&format!("s{i}"), &[]);
+            assert_eq!(rig.post(CHAT, &jwt, BODY).await.status(), 401);
+            assert_eq!(rig.post(CHAT, "wkp_00000000_ff", BODY).await.status(), 401);
+            assert_eq!(
+                rig.post(CHAT, &issuer.jwt_for("nobody", &[]), BODY)
+                    .await
+                    .status(),
+                403
+            );
+        }
+        let rows = rig.stranger_refusals();
+        assert!(!rows.is_empty() && rows.len() <= 3, "{rows:?}");
+    }
+
+    /// With no `oidc` block a JWT is no credential here: it is an
+    /// unknown token, and no key is looked for.
+    #[tokio::test]
+    async fn without_an_oidc_block_a_jwt_is_an_unknown_token() {
+        let (upstream, got) = provider(json_reply("{}")).await;
+        let rig = rig(vec![("local", "custom", upstream, None)]).await;
+        let jwt = TestIssuer::new().jwt_for("alice", &["eng"]);
+        let response = rig.post(CHAT, &jwt, BODY).await;
+        assert_eq!(response.status(), 401);
+        assert_eq!(rig.refusals(PROXY_SESSION), [ProxyRefusal::UnknownToken]);
+        assert!(got.lock().unwrap().is_empty());
+    }
 
     /// An OpenAI-shaped call is forwarded byte for byte with the
     /// provider's key, the answer comes back byte for byte, and the two
