@@ -34,8 +34,9 @@ What the controls protect, in the order a loss matters:
 - **The operator's host and the wirken OS user's principal.** Every process
   wirken starts runs as that user; code running as it is the end of the model.
 - **Vault contents and the passphrase or device key that opens them:** channel
-  tokens, model-provider credentials, MCP credentials, signing seeds. Only the
-  gateway opens the vault; each adapter receives its own channel's credentials
+  tokens, model-provider credentials, MCP credentials, signing seeds, and with
+  a proxy archive the bucket credentials and the archive key. Of the
+  processes `wirken run` starts, only the gateway opens the vault; each adapter receives its own channel's credentials
   on stdin and the MCP proxy only the credentials its configs reference,
   without refresh tokens.
 - **The permission decision.** The tier a call is classified at, the stored
@@ -242,6 +243,33 @@ What the controls protect, in the order a loss matters:
     call passing while a registered hook is not connected, and a veto `Deny`
     that does not stop dispatch.
 
+15. **Proxy clients.** With a `proxy.json`, the gateway serves a TCP
+    listener (`crates/cli/src/commands/proxy_server.rs`, `proxy_mcp.rs`) to
+    programs Wirken does not run: model calls at `/v1/chat/completions` and
+    `/v1/messages`, MCP tools at `/mcp` ([proxy.md](proxy.md)). The token is
+    the only check; there is no peer check and, without `tls`, no transport
+    protection. A request with no valid token is answered 401 before its
+    body is read. A request body is matched for stored secrets and is not
+    scanned for injection; a response is passed back as received. A client's
+    tool call must name a tool its session was shown, with the definition it
+    was shown, and then takes the gate an agent's call takes. In scope: a
+    request forwarded with no valid token; a token reaching an upstream,
+    model or MCP server it was not issued for; a client's tool call that runs
+    without the gate or outside the tools its session was shown; a provider
+    key or an MCP credential returned to a client; a client reading another
+    token's session or any row.
+
+16. **The proxy archive and its keys.** With `archive` set, each body is
+    encrypted under its own key before upload and written to a bucket under
+    Object Lock; the body keys are in `proxy_archive_keys.db`, wrapped under
+    an archive key in the vault
+    (`crates/cli/src/commands/proxy_archive.rs`,
+    [proxy-archive.md](proxy-archive.md)). The same file holds the text
+    `wirken sessions search` extracted from each body it read, encrypted
+    under that body's key. In scope: plaintext in the bucket; a body or its
+    search text readable after its key was destroyed; search text in the
+    clear at rest; an object that opens under another body's key.
+
 ## Access controls
 
 Who holds what, so a precondition can be compared with an impact:
@@ -253,7 +281,15 @@ Who holds what, so a precondition can be compared with an impact:
   dropped. The operator is the approver: an operator approving a prompt that
   described the call accurately is not a finding.
 - **Another OS user** holds nothing. The sockets are mode 0600 and every
-  connection takes a signed handshake.
+  connection takes a signed handshake. WebChat and the proxy listener are TCP
+  on loopback and answer such a user only with a login or a token.
+- **A proxy client** holds a token from `wirken proxy token issue`. It can
+  send model calls to the upstreams and models the token names, up to its
+  ceilings, and, where the token was granted MCP servers of an agent, list
+  and call those servers' tools. Each tool call is Tier 3 under that agent's
+  gate and is answered by the operator in `wirken permissions pending`, an
+  unanswered one denied. It holds no provider key, no MCP credential and no
+  permission authority, and reads no session.
 - **A chat user** reaches the agent only when the sender allowlist admits
   them, by their own platform id or by a group entry for the conversation they
   write in; anyone else's messages are dropped at the gateway before they
@@ -295,7 +331,8 @@ What each control leaves outside it, stated once. Other pages link here.
 
 ### Processes
 
-- Agents, sub-agents, WebChat and the terminal channel run in the gateway
+- Agents, sub-agents, WebChat, the terminal channel and the proxy listener
+  with its MCP endpoint run in the gateway
   process and share its address space, the vault, the audit writer, the
   permission store and the MCP proxy.
 - Channel adapters and the MCP proxy are separate processes. They are not
@@ -382,9 +419,16 @@ What each control leaves outside it, stated once. Other pages link here.
 
 - Bounded by egress policy: sandboxed `exec` and contained stdio MCP
   servers.
-- Not bounded by egress policy: the model-provider client, HTTP MCP servers,
+- Not bounded by egress policy: the model-provider client, the proxy
+  listener's forwarding to its upstreams, the archive's requests to its
+  bucket, HTTP MCP servers, the MCP proxy's request on an injected route,
   a stdio MCP server with `"sandbox": "off"`, and `exec` under `mode: off`.
   These connect from the gateway process, the proxy process or the host.
+- No model provider request and no HTTP MCP call follows a redirect. A
+  provider key is sent only to the origin its vault entry allows.
+- `http_request` matches the port: 443 unless an entry names `host:port`.
+- The proxy listener serves plain HTTP unless `proxy.json` has `tls`. It
+  binds loopback unless `tls` or `bind_beyond_loopback` is set.
 - A skill's `egress.domains` governs `http_request`, `web_search` and the
   Zirkel fetch. `http_request` reaches no host without it and refuses a host
   that resolves to no global address. `web_search` is not restricted without
@@ -394,7 +438,7 @@ What each control leaves outside it, stated once. Other pages link here.
 - MCP server egress does not depend on what the session has read.
 - Plain `http://` is accepted only for a URL whose host is exactly
   `localhost`, `127.0.0.1` or `[::1]`, for an MCP endpoint, a Matrix
-  homeserver, a SIEM endpoint and a model provider.
+  homeserver, a SIEM endpoint, a model provider and an archive endpoint.
 
 ### MCP servers
 
@@ -416,8 +460,44 @@ What each control leaves outside it, stated once. Other pages link here.
   ([mcp.md](mcp.md#what-containment-does-not-cover)).
 - A credential an entry's `inject` block names is not in the server's
   container. The server can still use it: every request it sends to a mapped
-  path on the bound host is authenticated. A response body from that host is
+  path on the bound host is authenticated, each one a row before it is made.
+  It has no other route to that host. A response body from that host is
   not checked for the value ([mcp.md](mcp.md#injecting-a-credential)).
+- An HTTP server's calls follow no redirect.
+
+### Proxy clients
+
+- A proxy token is a bearer secret with no expiry and no binding to a client
+  address. Whoever holds it is that client until `wirken proxy token revoke`,
+  which takes effect at the next request; a call already in flight completes.
+- A token with no ceiling is unbounded. A ceiling is checked before a call
+  and charged after it, so calls in flight at once can pass it. A ceiling
+  counts model calls, not tool calls, and a streamed call whose provider
+  reports no token counts costs nothing against a spend ceiling.
+- The token check is not rate-limited. A stranger's refusals are recorded at
+  most once a second.
+- Without `tls` the listener speaks plain HTTP: on a loopback bind any local
+  process that can read the client's traffic reads its token, and on a wider
+  bind the network does.
+- Only what goes through the listener is recorded and gated. A client's own
+  tools, shell and files are outside Wirken.
+- The approver of a client's tool call is the operator, who is not the person
+  at the client and sees no message that led to the call.
+- The archive bucket holds no plaintext. Without any key it shows, for each
+  object, whether it is a request or a response, the SHA-256 of its
+  plaintext as its name, its size, its write time and its lock; the name
+  lets a holder of the bucket confirm a guessed body.
+- Reading an archived body takes the bucket, the vault and
+  `proxy_archive_keys.db`. Once a search has read a body, its text is
+  readable from the data directory and the vault alone, and is kept until the
+  body is redacted, past the object's retention.
+- Redaction destroys a key. It does not remove the object, any row, a copy of
+  `proxy_archive_keys.db` made earlier, rows already forwarded to a SIEM, or
+  what the provider and the client hold. Two sessions that exchanged the same
+  bytes share one object and one key.
+- A holder of the bucket credentials can write a new version under an
+  object's key. `sessions verify` reads the current version and reports the
+  mismatch.
 
 ### Skills
 
@@ -442,6 +522,16 @@ What each control leaves outside it, stated once. Other pages link here.
   against the current workspace.
 - The audit library can redact a row: it rewrites the payload and signs a
   head recording the superseded one. No `wirken` command performs it.
+  `wirken proxy archive redact` is a different operation: it destroys an
+  archived body's key and leaves the rows.
+- A proxied model call's rows hold the SHA-256 and size of each body, not
+  the body. With no archive the bodies are kept nowhere. With one they are in
+  the bucket, encrypted, and their keys in `proxy_archive_keys.db`. A proxy
+  client's tool call is recorded as an agent's is: its arguments and output
+  are on the chain, and redacting the archive does not remove them.
+- A `proxy_response` row is written after the answer is sent.
+- `wirken sessions search` writes no row for a search. A search refused
+  inside an `exec` is a row.
 - A SIEM batch the endpoint answers with a non-success status is not
   delivered. The legacy forwarder drops it; the typed forwarder sends it
   again on its next pass. The typed forwarder's position is not persisted,
@@ -535,11 +625,14 @@ Severity is rated on the default configuration. What that is:
   With no container runtime `exec` is refused.
 - **Escape hatches unset.** Every `WIRKEN_ALLOW_*` variable,
   `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN`, `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES` and
-  `WIRKEN_LIVE_RELOAD_INTERVAL_S` absent, and no `mcp.json` entry with `"sandbox": "off"`.
+  `WIRKEN_LIVE_RELOAD_INTERVAL_S` absent, no `mcp.json` entry with `"sandbox": "off"`,
+  and no `proxy.json` with `"bind_beyond_loopback": true`.
 - **One gateway per data dir, one operator.** Many chat users reach it through
   channels; there are no roles and no per-user permissions
   ([enterprise.md](enterprise.md)). Webhook adapters listen on 127.0.0.1
-  behind the operator's ingress; webchat is served on 127.0.0.1.
+  behind the operator's ingress; webchat is served on 127.0.0.1. The proxy
+  listener is off unless the data directory has a `proxy.json`; with one, the
+  default is a loopback bind with no archive.
 - **Signed artifacts verified:** skills against the registry root, the
   org-config bundle against its anchor, and a signed MCP entry against the
   key it carries.
@@ -555,13 +648,16 @@ hatch is a Tier B step and is reported as such.
   `crates/agent/src/sandbox.rs`, `crates/sandbox`, `crates/ipc`,
   `crates/vault`, `crates/audit/src/session_log.rs` and `signing.rs`,
   `message_loop` and adapter spawning in `crates/cli/src/commands/run.rs`,
-  `adapter_handoff.rs`, `crates/mcp-proxy`, skill and org-config verification,
+  `adapter_handoff.rs`, `crates/mcp-proxy`, `crates/gateway/src/proxy.rs`,
+  `proxy_server.rs`, `proxy_mcp.rs` and `proxy_archive.rs` in
+  `crates/cli/src/commands`, skill and org-config verification,
   and the webhook authentication in the Teams, Google Chat and WhatsApp
   adapters.
 - **Also in scope:** the other adapters, the rest of `crates/gateway` (memory,
   imported archives, hook dispatch, approvers, rate limits, injection
   detection), `crates/agent/src/egress.rs` and `http_tool.rs`, webchat,
-  `crates/skill-store`, SIEM and OTel forwarding.
+  `crates/skill-store`, SIEM and OTel forwarding, `session_search.rs`, and
+  `atif.rs` and `search.rs` in `crates/audit/src`.
 - **Lower:** `crates/zirkel`, the `lyrik` commands
   (`crates/cli/src/commands/lyrik*.rs`), pricing and cost reporting, setup and
   `doctor`, `install.sh`.
@@ -596,7 +692,8 @@ hatch is a Tier B step and is reported as such.
 - `target/debug/wirken` is built. `WIRKEN_DATA_DIR` points it at a scratch
   data dir. No LLM provider and no chat platform is reachable.
 - `fuzz/fuzz_targets/` names the parsers worth fuzzing: `exec_classifier`,
-  `skill_frontmatter`, `injection_scan`, `ipc_frame_decode`. They need nightly
+  `skill_frontmatter`, `injection_scan`, `ipc_frame_decode`, `proxy_bodies`,
+  `sshsig_verify`. They need nightly
   and `cargo-fuzz`, which that image does not have; replay an input as a unit
   test instead.
 
@@ -664,9 +761,11 @@ inputs above.
     from a chat message, model output, an `exec` command, a tool result, an
     MCP server or an imported archive. This includes `exec` reaching a gateway
     socket, the data dir or a key, and `exec` running on the host.
-  - A vault secret disclosed anywhere listed in boundary 11.
+  - A vault secret disclosed anywhere listed in boundary 11, a provider key
+    or an MCP credential returned to a proxy client, or an injected
+    credential's value inside its server's container.
   - A tool call that runs without the gate deciding it, or before its row is
-    on the chain.
+    on the chain, a proxy client's call included.
   - A skill or org-config bundle the anchor did not sign, accepted with no
     bypass set; an MCP entry the anchor did not sign, accepted in a build
     that has an MCP anchor.
@@ -687,6 +786,12 @@ inputs above.
   - `exec`, `http_request` or an MCP server reaching a host its grant or
     signed entry does not list.
   - A webhook accepted without a valid platform signature or JWT.
+  - A proxy request forwarded with no valid token; a token reaching an
+    upstream, model or MCP server it was not issued for; a client's tool call
+    for a tool its session was not shown.
+  - Plaintext in the archive bucket; an archived body or its search text
+    readable after its key was destroyed; search text in the clear in
+    `proxy_archive_keys.db`.
   - An escape hatch that engages without being set, or without its
     documented warning and audit row.
   - Undefined behaviour in an `unsafe` block reachable from untrusted input.
