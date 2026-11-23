@@ -12,6 +12,21 @@ tagged.
 
 ### Added
 
+- `wirken sessions search <text>` finds text across sessions: in the rows of
+  agent-run and proxied sessions, and with an archive in the archived
+  proxied bodies. Filters for agent, token, channel, tool, session and time;
+  output as text or JSON. Each hit cites its session, row and chain hash. A
+  row a redaction rewrote and a body whose key was destroyed are found by no
+  search. The text kept for a body is encrypted under the body's own key in
+  `proxy_archive_keys.db` and deleted with it. Operator only: it refuses
+  inside a Wirken `exec`
+  (`crates/cli/tests/sessions_search.rs`;
+  `a_bodys_search_text_is_sealed_under_its_key_and_goes_with_it`,
+  `crates/cli/src/commands/proxy_archive.rs`;
+  `two_conversations_are_two_sessions_and_one_is_redacted_whole`,
+  `crates/cli/tests/proxy_forwards_through_the_gateway.rs`;
+  [docs/audit-cli.md](docs/audit-cli.md#wirken-sessions-search)).
+
 - MCP endpoint on the proxy listener. A client Wirken does not run reaches
   MCP tools at `POST /mcp`, MCP over Streamable HTTP, with the proxy token it
   uses for inference. `wirken proxy token issue --mcp-server <server> --agent

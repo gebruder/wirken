@@ -466,6 +466,8 @@ wirken sessions list [--channel C] [--parent SESSION_ID]
 wirken sessions close <SESSION-ID>
 wirken sessions verify <SESSION-ID> [--strict] [--with-parent] [--with-children] [--skip-archive]
 wirken sessions export <SESSION-ID> --format atif [--output FILE] [--skip-archive]
+wirken sessions search <TEXT> [--agent A] [--token T] [--channel C] [--tool T] [--session ID]
+                              [--since TS] [--until TS] [-n LIMIT] [--format text|json] [--skip-archive]
 ```
 
 What `verify` replays and what a `tools_hash` attests:
@@ -473,6 +475,9 @@ What `verify` replays and what a `tools_hash` attests:
 (`wirken proxy sessions` lists them) is verified against its chain and its archived bodies,
 and `export` writes a session as a trajectory file:
 [inference-proxy.md](inference-proxy.md#verifying-a-proxy-session).
+`search` finds text in the rows of every session and in archived proxied
+bodies, cites each hit by session, row and chain hash, and refuses inside a
+Wirken `exec`: [audit-cli.md](audit-cli.md#wirken-sessions-search).
 
 ## wirken permissions
 

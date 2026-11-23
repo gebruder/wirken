@@ -316,7 +316,9 @@ in `proxy_archive_keys.db`, overwrites the freed pages, and writes a
 `proxy_archive_redacted` row with the hash, the operator, the reason and,
 for the first form, the session. The object stays in the bucket until its retention
 ends and nothing can decrypt it. A hash that is redacted takes no new key: the
-same body sent again is not archived readable. It cannot be undone.
+same body sent again is not archived readable. It cannot be undone. The text
+`wirken sessions search` kept for the body, encrypted under that key, is
+deleted with it ([audit-cli.md](audit-cli.md#wirken-sessions-search)).
 
 What it does not do:
 

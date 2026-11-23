@@ -596,6 +596,96 @@ a `tools not attestable` count. Everything else about the session still
 verifies. A clean report carrying a non-zero `tools not attestable` count says
 nothing about which tools that session offered.
 
+### `wirken sessions search`
+
+```bash
+wirken sessions search <TEXT> [--agent A] [--token T] [--channel C] [--tool T]
+                              [--session ID] [--since TS] [--until TS]
+                              [-n LIMIT] [--format text|json] [--skip-archive]
+```
+
+Finds text across sessions, agent-run and proxied. Retrieval only: no model
+reads anything, and nothing is ranked or summarized. A row holds the text or
+it does not.
+
+What is searched:
+
+- **Rows.** Every string in a row's payload: a message, a tool call's name
+  and arguments, a tool's output, a refusal's reason. A string that is itself
+  JSON, as a tool call's arguments are, is read as the strings inside it, so a
+  search matches what was said and not how it was escaped. Chain heads and
+  attestations hold hashes and are not searched.
+- **Archived proxied bodies**, when `proxy.json` has an
+  [archive](inference-proxy.md#write-once-archive): the request and response
+  of each proxied call, the tool list of an MCP session and both bodies of
+  its tool calls. A streamed answer is searched as the text its events add up
+  to.
+
+The match is the text as typed, whatever its case, anywhere in a row or a
+body. Sessions are read in order of their ids and rows in chain order.
+
+| Flag | Rows searched |
+|---|---|
+| `--agent` | Rows of that agent's sessions, and rows that name it. |
+| `--token` | Rows of that proxy token's lanes, by its id or name. |
+| `--channel` | Rows of sessions on that channel. |
+| `--tool` | Rows that name that tool: its call, its result, a proxied tool call. |
+| `--session` | Rows of that one session. |
+| `--since`, `--until` | Rows at or after, at or before, an RFC 3339 time. |
+| `-n`, `--limit` | The most hits returned, 50 unless set. More is reported as `truncated`. |
+| `--skip-archive` | Rows only; no archived body is read. |
+
+A body is searched when the row that names it passes the filters.
+
+Each hit cites where it is on the chain:
+
+```text
+  ops/slack/c1  seq 2  2026-11-23T09:14:02Z  tool_result
+    in the row
+    chain 5b1f...e2
+    3: service: heron
+```
+
+`seq` is the row's number in its session and `chain` its chain hash, the
+`hash` column of that row in `audit.db`. A hit in a body says `in the request
+body <sha256>` or `in the response body <sha256>` and cites the row that
+names the body. `wirken sessions verify <session>` checks the chain the hit
+is on, and for a proxied session each archived body against its row.
+
+`--format json` prints one object: `query`, `hits` (each with `session`,
+`seq`, `ts`, `kind`, `chain_hash`, `found_in` as `row`, `request_body` or
+`response_body`, `body_sha256` for a body, and `snippet`), `truncated`,
+`sessions_searched`, `rows_searched`, `archive` (`configured`,
+`not_configured` or `skipped`), `bodies_searched` and `bodies_unavailable`.
+
+**Redaction.** A row a [redaction](#redaction) rewrote is not searched: what
+it held is gone, and its replacement is not what happened. An archived body
+whose key was destroyed is found by no search and is not counted as
+unavailable.
+
+**The search text of archived bodies.** A body is fetched from the bucket and
+decrypted with its own key, the one the archive made for it. The first search
+that reads a body keeps the text it extracted in `proxy_archive_keys.db`,
+encrypted under that same key and bound to the body's kind and hash, so later
+searches do not fetch it again. Two properties follow from where the key is:
+
+- The file holds no text in the clear. What is kept opens only with the
+  body's key, which is itself wrapped under the archive key in the vault.
+- Redacting a body destroys that key and deletes the entry, with the freed
+  pages overwritten. Nothing kept for the body can be read afterwards, by
+  this command or from the file.
+
+Reading archived bodies needs the vault, as `sessions verify` does.
+
+**Who can run it.** An operator, from a shell. It is not a tool an agent has
+and no channel reaches it. Inside a Wirken `exec` it refuses, with an
+`operator_command_refused` row, before it opens anything: a search there
+would read every session to the agent that ran it.
+
+Not done: the search reads every row each time and keeps no index of rows;
+the query is not recorded on the chain; a proxied conversation with no
+archive has only hashes on its rows, so its text is not found.
+
 ## JSON schema
 
 Every JSON document carries `schema_version` and `wirken_version` at the top
