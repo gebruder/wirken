@@ -162,7 +162,10 @@ the variables it reads (`configure_adapter_command` and
 `configure_mcp_proxy_command`, `crates/cli/src/commands/adapter_handoff.rs`;
 `host_exec_env`, `crates/agent/src/tool.rs`; `git_env`, `semgrep_env`,
 `curl_env`, `crontab_env`, `service_env` in `crates/cli/src/commands/`;
-`build_spawn_env`, `crates/mcp-proxy/src/mcp_transport.rs`). A credential rotated
+`build_spawn_env`, `crates/mcp-proxy/src/mcp_transport.rs`). The child a
+Lyrik run starts on its child-process route gets the same base, the network
+client's variables and what a program finds its own sign-in through
+(`child_env`, `crates/agent/src/runtime/plan_child.rs`). A credential rotated
 in the vault reaches an adapter at its next spawn, an HTTP MCP server at the
 first call it refuses, and a stdio MCP server at the next gateway start. See
 [credentials.md](credentials.md).

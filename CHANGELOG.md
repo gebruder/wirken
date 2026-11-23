@@ -21,6 +21,16 @@ tagged.
   `wirken run` stops naming the command: `wirken credentials grant <NAME>
   --archive <host>`, then `wirken credentials revoke <NAME> --host <host>`.
 
+### Changed
+
+- The child process a Lyrik run starts on its child-process route gets a
+  cleared environment: the base set, the proxy and certificate variables, and
+  the directories and session keyring a program finds its own sign-in
+  through. Nothing else of the environment `wirken lyrik` was started from
+  reaches it (`the_child_gets_a_named_environment_and_nothing_else`,
+  `crates/agent/src/runtime/plan_child.rs`;
+  [docs/lyrik.md](docs/lyrik.md#cost-guard)).
+
 ### Added
 
 - `wirken proxy archive redact --session <lane>` rewrites the rows of the

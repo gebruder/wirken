@@ -182,7 +182,7 @@ committed; run state lives under `.lyrik/state/`.
 |---|---|
 | Wirken vault | provider API keys, and a plan sign-in when the pin names one |
 | `<data_dir>/sandbox.json` | sandbox mode |
-| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `walk_tool_rounds`, `fix_tool_rounds`, `walk_continuations`, `transport_retries`, `run_ceiling_usd`, `run_ceiling_model_seconds` and `run_ceiling_model_calls` |
+| `<data_dir>/lyrik.json` | the operator's `walks_dir`, `walk_tool_rounds`, `fix_tool_rounds`, `walk_continuations`, `transport_retries`, `run_ceiling_usd`, `run_ceiling_model_seconds`, `run_ceiling_model_calls` and `plan_child_binary` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
 | `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
@@ -855,6 +855,50 @@ sign-in, and a per-walk entry changes the model only. The `llm_request` and
 `llm_response` rows carry the step, the model and the token counts as on any
 run, with the entry as `credential_id`, null cost fields and, where the model
 has a price entry, an estimate.
+
+**A run on a child process.** A pin with `"auth": "plan"` on the `anthropic`
+provider is not run by Wirken's own model client. Each turn is run by a child
+process: an agent program the operator has installed and signed in to
+themselves, on their own plan. The data directory's `lyrik.json` names it by
+absolute path:
+
+```json
+{ "plan_child_binary": "/usr/local/bin/<agent>" }
+```
+
+```json
+"phases": { "framing": { "provider": "anthropic", "auth": "plan", "model": "<model id>" } }
+```
+
+The pin takes no `base_url` and no `credential`. A target's
+`.lyrik/config.json` cannot set the binary. On this route:
+
+- Wirken makes no model call and holds no credential. The child runs the
+  model loop with the operator's sign-in.
+- The child is served the run's tools and nothing else. Every tool call it
+  makes arrives at Wirken and passes the gate, the sandbox envelope and leak
+  detection as on any route
+  (`a_walk_runs_as_a_child_whose_tool_calls_pass_the_gate`,
+  `crates/cli/tests/lyrik_plan_child.rs`). A child that lists a tool that is
+  not the run's is refused before anything is asked of the model
+  (`a_child_with_a_tool_that_is_not_the_runs_is_refused`).
+- The child starts in an empty directory outside the target, from a cleared
+  environment: the base set every host-side child gets, the proxy and
+  certificate variables an HTTP client reads, and the directories and session
+  keyring a program finds its own sign-in through (`HOME`, the `XDG_*`
+  directories, `DBUS_SESSION_BUS_ADDRESS`). The vault passphrase, the data
+  directory and everything else in the environment `wirken lyrik` was started
+  from do not reach it
+  (`the_child_gets_a_named_environment_and_nothing_else`,
+  `crates/agent/src/runtime/plan_child.rs`).
+- Wirken does not see the model call. Each call the child reports is an
+  `llm_response` row with `reported` set and no `llm_request`, carrying the
+  step, the model and the token counts
+  (`each_reported_step_is_a_marked_row_with_step_model_and_tokens`). A step
+  whose reported model is not the pinned one fails the walk
+  (`a_step_by_another_model_fails_the_walk`).
+- The child runs on the host as the operator, not in a container. What holds
+  it to Wirken's tools is the tool list it reports at its start.
 
 Plan calls are not billed, so they record no cost. Where the price table has
 the model, each `llm_response` row carries `estimated_cost_usd_micros`: what
