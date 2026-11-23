@@ -1,13 +1,12 @@
 # MCP endpoint
 
-The [inference proxy](inference-proxy.md) records what a client's model said.
-The MCP endpoint is for what that client then does: it serves MCP tools on the
-same listener, to the same token, so a tool call of a client Wirken does not
-run goes through the gate and onto the chain like a call of Wirken's own
-agents.
+Tool calls of a client Wirken does not run: how a token is granted tools,
+what a session is shown, the gate each call passes and what is recorded. The
+mode as a whole starts at [proxy.md](proxy.md).
 
-The client holds no credential of any MCP server and runs no server. It is
-shown tools; Wirken runs them.
+The endpoint serves MCP tools on the proxy listener, to the token a client
+uses for inference. The client holds no credential of any MCP server and
+runs no server. It is shown tools; Wirken runs them.
 
 ## Granting a token tools
 
@@ -111,10 +110,6 @@ own call:
 4. The tool runs in its server.
 5. Output carrying a secret the vault holds is replaced with a refusal.
 
-Organization policy, veto and egress hooks, an agent stopped with `wirken
-agents stop` and a tool's declared cost against the agent's budget apply as
-they do to the agent.
-
 The approval route is the operator's pending queue:
 
 ```bash
@@ -135,8 +130,8 @@ text.
 When a session opens, on its lane:
 
 - `proxy_tools_listed`: `token_id`, `agent_id`, `mcp_session`, `servers`,
-  the `tools` by name, and `tools_sha256`, the SHA-256 of the list as the
-  client gets it.
+  the `tools` by name, `tools_sha256`, the SHA-256 of the list as the client
+  gets it, and whether the list was archived.
 
 For each call, in order:
 
@@ -146,48 +141,48 @@ For each call, in order:
   the operator's, or `approval timeout`.
 - `tool_result`, with what the tool returned or the refusal.
 - `proxy_tool_call`: `call_id`, `token_id`, `agent_id`, `mcp_session`,
-  `tool`, `success`, `latency_ms`, and the SHA-256 and size of the request
-  and of the answer as exchanged with the client.
+  `tool`, `success`, `latency_ms`, the SHA-256 and size of the request and
+  of the answer as exchanged with the client, and whether they were archived.
+
+The arguments and the output are on the chain itself, on the
+`assistant_tool_calls` and `tool_result` rows. That is unlike a model call,
+whose rows hold only hashes.
 
 The call id is the id of the model's tool use when the client sends it in the
 call's `_meta` (a key ending in `toolUseId`), which ties the row to the
 model's answer on the same lane. Otherwise it is `mcp-` and a random value.
 
 A request refused before the gate is a `proxy_tool_refused` row with a
-`reason`:
+`reason`. A refusal of a `tools/call` is on the session's lane; one made
+before a session exists is on the token's lane, `proxy-<token id>`.
 
 | `reason` | Refused because |
 |---|---|
-| `no_mcp_grant` | The token was granted no MCP server. On the token's lane, `proxy-<token id>`. |
+| `no_mcp_grant` | The token was granted no MCP server. |
 | `not_granted` | The tool is not one the session was shown. |
 | `definition_changed` | The tool's definition is not the one shown. |
-| `malformed` | The body is not one JSON-RPC message, the call names no tool, or it is over `max_body_bytes`. |
-| `unavailable` | The agent's tools could not be reached, or the tool is not served now. |
-| `record_failed` | A row could not be written. |
-| `archive_failed` | A body could not be written to the archive. |
+| `malformed` | The body is not one JSON-RPC message, the call names no tool, its arguments are not an object, or the body is over `max_body_bytes`. |
+| `unavailable` | The agent's tools could not be reached, the tool is not served now, or the call could not be run. |
+| `record_failed` | The session's `proxy_tools_listed` row could not be written. |
+| `archive_failed` | The tool list, or a call's request, could not be written to the archive. |
 
 A request with no token, or a revoked one, is a `proxy_refused` row as for
-inference.
+inference ([inference-proxy.md](inference-proxy.md#what-is-refused)).
 
 All three rows are forwarded to a SIEM by default, with the token in the
 sender column.
 
-## Archive, verify and export
+## Archive, verify, export and redaction
 
-With an [archive](inference-proxy.md#write-once-archive) configured, the tool
-list a session was shown and the request and answer of each call are written
-to it under their hashes, encrypted, like proxied bodies. A session does not
-open, and a call does not run, when its body cannot be written there.
+With an archive configured, the tool list a session was shown and the request
+and answer of each call are written to it. `sessions verify` checks them,
+`sessions export` includes the calls, and `proxy archive redact --session`
+destroys the keys of those bodies: all in
+[proxy-archive.md](proxy-archive.md).
 
-`wirken sessions verify <lane>` checks those objects against their rows and
-prints the lane's tool calls. `wirken proxy archive redact --session <lane>`
-redacts them with the rest of the session.
-
-`wirken sessions export <lane> --format atif` includes the tool calls. A call
-the model's answer carries, matched by the id of its tool use, gets the result
-the gateway recorded on the model's step, marked `recorded_by: wirken`, beside
-the result the client sent its model. A call with no such id is a step of its
-own.
+Redacting the archive does not redact a tool call. The `assistant_tool_calls`
+and `tool_result` rows keep the arguments and the output, and no command
+removes a row.
 
 ## Limits
 
@@ -195,7 +190,5 @@ own.
   served.
 - A token's call and spend ceilings count its inference calls, not its tool
   calls.
-- Sessions are held in memory, 1024 at most.
-- A long approval wait holds the client's request open; a client that gives
-  up first does not see the answer, and the call is recorded with its
-  outcome.
+- Sessions are held in memory.
+- A long approval wait holds the client's request open.
