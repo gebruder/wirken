@@ -228,6 +228,31 @@ fn a_search_is_narrowed_by_agent_token_channel_tool_session_and_time() {
     }
 }
 
+/// With an archive configured, `--skip-archive` searches the rows and
+/// opens neither the vault nor the bucket.
+#[test]
+fn skip_archive_searches_the_rows_only() {
+    let f = fixture();
+    std::fs::write(
+        f.tmp.path().join("proxy.json"),
+        serde_json::json!({
+            "upstreams": {"local": {"provider": "ollama", "base_url": "http://localhost:11434/v1"}},
+            "archive": {
+                "endpoint": "http://127.0.0.1:9",
+                "bucket": "nowhere",
+                "retention_days": 1,
+                "credential": "not-stored"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let found = f.search(&["heron", "--skip-archive"]);
+    assert_eq!(found["archive"], "skipped");
+    assert_eq!(found["hits"].as_array().unwrap().len(), 4);
+    assert_eq!(found["bodies_searched"], 0);
+}
+
 #[test]
 fn the_text_output_names_the_session_the_row_and_the_chain_hash() {
     let f = fixture();
