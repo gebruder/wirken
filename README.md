@@ -10,6 +10,11 @@ behalf. Your people reach it from a browser or the chat platforms they already
 use, and the agent on the other end reads files, calls APIs, and runs tools
 for them. Each channel gets its own line.
 
+It also stands in front of agents it does not run. A coding agent or a script
+points its model base URL and its MCP client at Wirken and holds a Wirken
+token in place of provider keys and server credentials. Its model calls are
+recorded, and its tool calls pass the same gate an agent's do.
+
 Wirken is built for the security team that has to answer for what those agents
 do. It assumes any agent can be turned against you, and boxes in what a
 compromised one can reach.
@@ -45,10 +50,17 @@ first.
   is boxed by limits you set.
 - **Shell commands run in a sandbox.** By default, anything the agent executes
   runs in an [ephemeral container](docs/sandbox-properties.md) with no network.
-  `wirken agents set-egress` grants a channel's commands
-  [proxied egress](docs/egress.md#sandbox-egress), and `sandbox.json` can turn
-  networking on or the container off. If the sandbox is unavailable, execution
-  is refused rather than run on the host.
+  `wirken agents set-egress` gives a channel's commands a
+  [proxied route](docs/egress.md#sandbox-egress): under `allowlist` each
+  request to a listed host is asked of the operator, and under `open` an
+  agent turn's command is refused every request. `sandbox.json` can turn
+  networking on or the container off. If the sandbox is unavailable,
+  execution is refused rather than run on the host.
+- **Clients Wirken does not run get the same record and the same gate.** In
+  [proxy mode](docs/proxy.md) another agent's model calls go through Wirken
+  with the vault's provider key, each one a row with the hash of what was
+  exchanged, and its MCP tool calls run as one of Wirken's agents: Tier 3,
+  asked of the operator every time.
 
 ## Install
 
@@ -101,8 +113,11 @@ routes messages to the agent, and serves a WebChat UI at
   Wirken running. Press Ctrl+C to stop.
 ```
 
-All local services bind to 127.0.0.1. Wirken never instructs you to bind
-inference servers, WebChat, or any local endpoint to 0.0.0.0.
+WebChat, the adapter webhook listeners and every socket bind to 127.0.0.1.
+The proxy listener is off unless the data directory has a `proxy.json`. It
+binds 127.0.0.1:18791 by default, and beyond loopback only when `proxy.json`
+sets `tls` or `bind_beyond_loopback`
+([docs/inference-proxy.md](docs/inference-proxy.md#tls)).
 
 **Running modes.** Interactive (`wirken run` in the foreground), browser (the
 same command serves WebChat), in the terminal (`wirken chat`, a channel of
@@ -131,8 +146,12 @@ cargo test -p wirken-cli --test lyrik_team_files_stay_locked --test lyrik_run_re
 
 ## Uninstall
 
-Removing the data directory destroys the audit log with it. Export first if
-any retention need applies:
+Removing the data directory destroys the audit log with it. With a proxy
+archive it also destroys `proxy_archive_keys.db` and the archive key in the
+vault: the bodies in the bucket stay locked until their retention ends and
+can no longer be read. Export first if any retention need applies, and keep
+`vault.db`, `keychain/` and `proxy_archive_keys.db` if archived bodies must
+stay readable:
 
 ```bash
 wirken audit log --all --format json > wirken-audit-export.json
@@ -150,7 +169,8 @@ rm -rf ~/.wirken                          # vault, device key, audit chain
 
 Residue those steps do not touch: a `WIRKEN_VAULT_PASSPHRASE` line in your
 shell profile; OS keychain items, if you built with the `keychain-macos` or
-`keychain-linux` feature rather than the default age-file backend; and the
+`keychain-linux` feature rather than the default age-file backend; the
+objects in a proxy archive's bucket; and the
 bots, apps and tokens you created at each platform, which stay live until you
 remove them there. See [docs/channels.md](docs/channels.md#platform-side-state).
 
@@ -158,14 +178,18 @@ remove them there. See [docs/channels.md](docs/channels.md#platform-side-state).
 
 Each channel runs as its own process and starts with only its own
 credentials, which the gateway hands it at spawn. The gateway holds the vault
-and is the only process that opens it: the MCP proxy, too, starts with the
-credentials its MCP configs name handed over at spawn, and asks the gateway to
-refresh OAuth tokens. No process the gateway starts holds the vault passphrase.
-The
-gateway writes the audit log, and the MCP proxy appends its server-verification
-and server-lifecycle rows. Each stdio MCP server runs in its own container,
-started and restarted by the MCP proxy. The agent is stateless: it is woken for each message and rebuilt from its
-session log.
+and is the only long-lived process that opens it: the MCP proxy, too, starts
+with the credentials its MCP configs name handed over at spawn, and asks the
+gateway to refresh OAuth tokens. No process the gateway starts holds the vault
+passphrase. A CLI command that needs a secret opens the vault in its own
+process. The gateway writes the audit log, and the MCP proxy appends its
+server-verification and server-lifecycle rows, each egress verdict of a
+contained server, and each request it set an injected credential on. Each
+stdio MCP server runs in its own container, started and restarted by the MCP
+proxy. The agent is stateless: it is woken for each message and rebuilt from
+its session log. The proxy listener runs in the gateway process: a client's
+model call is forwarded by the client agent calls use, and a client's tool
+call runs as the agent its token names.
 
 The message path, inbound to outbound:
 
@@ -197,6 +221,10 @@ graph TD
 
     Agent --> Outbound["Outbound Dispatch · message_loop writer, OutboundDispatcher"]
     Outbound -- "OutboundMessage · correlation handle" --> Channels
+
+    Clients["Clients Wirken does not run"] -- "HTTP(S) · Wirken token" --> Proxy["Proxy listener · /v1 · /mcp"]
+    Proxy -- "provider key from the vault" --> LLM
+    Proxy -- "tools/call, as the token's agent" --> Agent
 ```
 
 Who approves, who holds secrets, and what reaches the record:
@@ -236,7 +264,13 @@ compile time and which at run time is in
   grant. Every other command and every MCP call prompts each time.
 - **Audit.** Each session is a hash-chained log with signed chain heads.
   `wirken audit verify --require-signed --anchor <key>` checks it against a
-  key kept off the machine.
+  key kept off the machine. `wirken sessions search` finds text across
+  sessions and cites each hit by session, row and chain hash.
+- **Proxy.** A client outside Wirken authenticates with a token the operator
+  issued, which names the providers, models and MCP servers it may use and
+  its ceilings. Request and response bodies can be written, encrypted, to a
+  bucket under Object Lock, and made unreadable again by destroying a key
+  ([proxy.md](docs/proxy.md)).
 
 What is outside these controls, and under which settings, is stated once in
 [docs/threat-model.md](docs/threat-model.md#boundaries). The environment
@@ -275,8 +309,7 @@ In defender mode Lyrik also checks a fix. For each confirmed finding it writes (
 [Multiple agents](docs/multi-agent.md) ·
 [Credentials and OAuth scopes](docs/credentials.md) ·
 [Cost monitoring](docs/cost-monitoring.md) ·
-[Inference proxy](docs/inference-proxy.md) (other clients' model calls through Wirken, write-once archive, trajectory export) ·
-[MCP endpoint](docs/proxy-mcp.md) (other clients' tool calls through Wirken's gate) ·
+[Proxy mode](docs/proxy.md) (other clients' model calls and tool calls through Wirken: [inference](docs/inference-proxy.md), [MCP tools](docs/proxy-mcp.md), [archive, redaction and export](docs/proxy-archive.md)) ·
 [Getting the chain out](docs/siem-forwarder.md) (SIEM, hooks, OpenTelemetry) ·
 [Imported archives](docs/imported-archives.md)
 

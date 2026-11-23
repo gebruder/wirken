@@ -59,8 +59,8 @@ wirken run
 ```
 
 Spawns an adapter process per channel, serves the WebChat UI at
-`http://localhost:18790`, and waits for messages. All local services bind to
-127.0.0.1.
+`http://localhost:18790`, and waits for messages. WebChat, the adapter webhook
+listeners and every socket bind to 127.0.0.1.
 
 Log in to WebChat with `wirken webchat open --browser`, which opens a one-time
 login link, or use a configured channel. A channel admits only
@@ -84,6 +84,25 @@ wirken ask -m "what time is it?"
 Sends a message directly to the agent and prints the response. Run it from a
 terminal: the approval gate attaches only when stdin is a TTY.
 
+## An agent Wirken does not run
+
+A coding agent, a script or a chat client can use Wirken in place of its
+model provider and its MCP servers. Describe the provider in
+`<data_dir>/proxy.json`, issue the client a token, and start `wirken run`:
+
+```json
+{ "upstreams": { "local": { "provider": "ollama", "base_url": "http://localhost:11434/v1" } } }
+```
+
+```bash
+wirken proxy token issue laptop --upstream local
+```
+
+The client sets its model base URL to `http://127.0.0.1:18791/v1` and sends
+the token as its API key. Each call it makes is a row on the audit chain.
+Granting the token MCP servers, archiving what was exchanged, and searching,
+exporting and redacting it are in [proxy.md](proxy.md).
+
 ## Next
 
 ```bash
@@ -94,9 +113,9 @@ wirken doctor                     # verify the install
 ```
 
 Skills that call the `http_request` tool declare the `credentials.allow` and
-`http.post_paths` permission fields, which require Wirken 1.10 or later. An
-older binary refuses to load such a skill, fail-closed, and the failure reads
-as a parse rejection.
+`http.post_paths` permission fields. A host in a skill's `egress.domains` or
+`http.post_paths`, and a credential's `--host`, means port 443; another port
+is written `host:port` ([egress.md](egress.md#the-http_request-gate)).
 
 - [Configuration reference](configuration.md) for every config file and option
 - [Channels](channels.md) for per-channel setup
@@ -115,9 +134,10 @@ files, so re-enter them through `wirken setup`, `wirken channel add
 <channel>`, or `wirken credentials add <name>`. Each is encrypted immediately
 with XChaCha20-Poly1305 into `<data_dir>/vault.db`.
 
-Configuration has no file to edit by hand. OpenClaw keeps
-`~/.openclaw/openclaw.json`; Wirken keeps `provider.json` plus a set of
-SQLite databases, all driven through the CLI. See
+OpenClaw keeps `~/.openclaw/openclaw.json`. In Wirken, setup, channels,
+agents, credentials and grants are driven through the CLI and kept in
+`provider.json` and a set of SQLite databases. MCP servers, budgets, SIEM
+forwarding and the proxy each have a JSON file you write. See
 [configuration.md](configuration.md).
 
 Agent behavior differs in shape. OpenClaw uses bootstrap files (`AGENTS.md`,

@@ -5,7 +5,9 @@
 weaving mill in Wurttemberg, 1862-1937.
 
 A model-agnostic agent switchboard: multi-channel, skill-driven, local-first.
-This page is the shape and the reasoning. Each mechanism has an owning page
+It runs agents of its own, and it stands in front of agents it does not run:
+their model calls and MCP tool calls go through it, under its record and its
+gate ([proxy.md](proxy.md)). This page is the shape and the reasoning. Each mechanism has an owning page
 and is linked, not restated.
 
 Written in Rust because the properties this architecture needs (memory safety,
@@ -192,7 +194,13 @@ value:
   before it can be checked;
 - a user's message, on arrival, before it is recorded or reaches the model;
   the user is told to store credentials with `wirken credentials add`;
-- a skill, as it loads; it is not loaded.
+- a skill, as it loads; it is not loaded;
+- a request a proxy client sends, before it is forwarded; the call is refused
+  with `leak_refused`. A proxy client's tool call is checked as an agent's is,
+  arguments and output.
+
+The placeholder a contained MCP server holds in place of an injected
+credential is known too, as `<credential> (placeholder)`.
 
 What it does not catch: it matches exact raw bytes only, so a secret in an
 encoded form (base64, URL or JSON escaping) passes, and so does one split across
@@ -209,7 +217,7 @@ others with `wirken credentials add --identifier`.
 unrestricted access to all tools, and session IDs get used as routing controls
 rather than authorization boundaries.
 
-A three-tier capability model, keyed on `(action_key, agent_id)`, with
+A three-tier capability model, keyed on `(action_key, agent_id, channel)`, with
 first-use approval, expiry and revocation, plus capability-attenuated
 sub-agents. Owned by
 [permissions-and-identity.md](permissions-and-identity.md) and
@@ -302,21 +310,27 @@ agent B `anthropic/<model-id>` with separate keys.
 
 **Direct calls.** The agent's `LlmClient` calls providers over HTTPS with
 `reqwest` and `rustls`; streaming parses the SSE body from `reqwest`'s byte
-stream in `crates/agent/src/llm_stream.rs`. Keys are
-decrypted from the vault at startup and held in memory for the process
-lifetime.
+stream in `crates/agent/src/llm_stream.rs`. A key is read from the vault for
+each call and sent only to the origin its vault entry allows for that
+provider. No provider request follows a redirect, and a plain-HTTP endpoint
+is accepted on loopback only ([credentials.md](credentials.md#where-a-credential-may-go)).
 
 **Process boundary, current state.** The agent runs as a library inside the
 gateway process. `crates/cli` pulls `wirken-agent` as a path dependency and
 `run.rs` constructs `Agent` values via `AgentFactory::wake` and calls
 `process_message` directly. There is no UDS between agent and gateway: they
-share an address space ([threat-model.md](threat-model.md#processes)). The
-in-memory provider keys are held by the same process that holds the vault
+share an address space ([threat-model.md](threat-model.md#processes)). A
+provider key in use is in the memory of the process that holds the vault
 unwrap key, the audit writer and the session log. The vault's encryption
-protects keys at rest.
+protects keys at rest. The proxy listener runs in the same process: a call
+forwarded for a proxy client uses the client agent calls use, and a proxy
+client's tool call runs as the agent its token names.
 
-**Usage tracking.** Every call logs an `LlmRequest` / `LlmResponse` pair with
-token counts, model ID, latency and cost estimate. Neither row carries prompt
+**Usage tracking.** Every call an agent makes logs an `LlmRequest` /
+`LlmResponse` pair with token counts, model ID, latency and cost estimate. A
+call forwarded for a proxy client is a `proxy_request` / `proxy_response`
+pair with the SHA-256 of each body
+([inference-proxy.md](inference-proxy.md#what-is-recorded)). Neither row carries prompt
 or completion text: `LlmRequest` records hashes of the messages and tools
 sent, which is what makes offline replay verifiable. Message bodies do reach
 the chain, on the separate `UserMessage` and `AssistantMessage` rows.
@@ -341,10 +355,15 @@ global bucket, not per client: webchat's verify route takes
 There is no per-provider LLM rate limiter. Outbound model calls are bounded by
 the per-turn round cap, the per-agent spend budget
 ([cost-monitoring.md](cost-monitoring.md)), and the provider's own limits.
+Calls forwarded for a proxy client are bounded by its token's call and spend
+ceilings. The proxy listener's token check is not rate-limited; a stranger's
+refusals are recorded at most once a second.
 
-The CLI is not a network client and holds no session token. It runs at the
-operator's UID, unlocks the vault, and reaches the gateway over local sockets
-whose 0o600 permissions are the boundary.
+The CLI runs at the operator's UID, unlocks the vault, and reaches the gateway
+over local sockets whose 0o600 permissions are the boundary. Two kinds of
+command use the network: `wirken webchat open` sends the session token from
+`webchat.json` to WebChat on loopback, and the commands that read a proxy
+archive read its bucket.
 
 ## 8. Sessions
 
@@ -361,6 +380,10 @@ writes no log or audit row for creation or expiry
 
 Transcripts are durably logged as typed session events in `audit.db`, and the
 `AgentFactory` reconstructs any session from its log on wake.
+
+A proxy client's sessions are lanes on the chain and not rows in the session
+store. `wirken proxy sessions` lists them
+([inference-proxy.md](inference-proxy.md#sessions)).
 
 ## 9. IPC protocol
 
@@ -394,7 +417,7 @@ Versions are pinned in the workspace `Cargo.toml` and the crate manifests and ar
 | SQLite | `rusqlite` | `bundled` compiles SQLite from source, no system dependency |
 | macOS keychain | `security-framework` | Direct bindings to Security.framework |
 | Linux keychain | `secret-service` | D-Bus to GNOME Keyring or KDE Wallet |
-| Windows Win32 | `windows-sys` | Named-pipe peer-SID extraction for the orchestrator-push boundary |
+| Windows Win32 | `windows-sys` | Named pipes for IPC |
 | AEAD | `chacha20poly1305` | RustCrypto XChaCha20-Poly1305, pure Rust, audited |
 | Secret handling | `secrecy` + `zeroize` | Prevents accidental logging or serialization; zeroes on drop |
 | Ed25519 | `ed25519-dalek` | Pure Rust, audited by Quarkslab |
@@ -405,6 +428,8 @@ Versions are pinned in the workspace `Cargo.toml` and the crate manifests and ar
 | CLI | `clap` | Derive and builder APIs |
 | Prompts | `dialoguer` | Setup wizard |
 | Rate limiting | `governor` | GCRA, lock-free, zero-alloc hot path |
+| HTTP server | `hyper` | Proxy listener and MCP endpoint |
+| TLS server | `tokio-rustls` | Proxy listener with `tls` |
 | Logging | `tracing` | Span-based, async-aware |
 | Channel SDKs | `teloxide`, `serenity`, `slack-morphism` | Per-platform bot APIs |
 
@@ -412,8 +437,21 @@ Versions are pinned in the workspace `Cargo.toml` and the crate manifests and ar
 channel SDKs, configured `vendored` so it compiles from source: no system
 headers at build time and no dynamic linking against the host OpenSSL.
 
-**Single static binary.** Gateway, adapters, MCP proxy and CLI compile to one
-binary with subcommands; one `cargo build --release` produces everything.
+**Single static binary.** Gateway, adapters, MCP proxy, egress sidecar and CLI
+compile to one binary with subcommands; one `cargo build --release` produces everything.
+
+## 11. Proxy listener
+
+**Threat:** an agent Wirken does not run holds provider keys and server
+credentials of its own, and what it sends and does is on nobody's record.
+
+With a `proxy.json`, `wirken run` serves a listener to such clients. A client
+holds a token the operator issued and nothing else. A model call is forwarded
+with the provider key from the vault and recorded with the hash of each body.
+An MCP tool call is run by one of Wirken's agents, through the gate, approval
+route and containers that agent's own calls use. Bodies can be written,
+encrypted, to a bucket under Object Lock. The whole mode is off without the
+file. Owned by [proxy.md](proxy.md).
 
 ## Threat model summary
 
@@ -425,7 +463,7 @@ binary with subcommands; one `cargo build --release` produces everything.
 | Excessive agent privileges | OWASP T3 | Three-tier model with expiring approvals |
 | Unsandboxed code execution | OWASP T11 | Docker and gVisor sandboxes for `exec`, workspace confinement |
 | No audit trail | OWASP T8 | Tamper-evident hash-chained log, SIEM forwarding |
-| Localhost rate limit exemption | CWE-307 | Uniform limiting, no loopback exemption |
+| Localhost rate limit exemption | CWE-307 | WebChat's limits apply to loopback like any source |
 | No session expiry | CWE-613 | 24h inactivity expiry |
 | Runtime memory unsafety | CWE-119 | Rust |
 
