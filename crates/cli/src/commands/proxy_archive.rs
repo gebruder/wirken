@@ -62,6 +62,12 @@ fn aad(kind: BodyKind, sha256: &str) -> Vec<u8> {
     format!("wirken-proxy-archive/v1\0{}\0{sha256}", kind.as_str()).into_bytes()
 }
 
+/// What a body's search text is bound to. Not what the body is bound
+/// to, so neither opens as the other.
+fn text_aad(kind: BodyKind, sha256: &str) -> Vec<u8> {
+    format!("wirken-proxy-archive-text/v1\0{}\0{sha256}", kind.as_str()).into_bytes()
+}
+
 fn seal(key: &[u8], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|e| e.to_string())?;
     let nonce = random::<NONCE_BYTES>();
@@ -126,12 +132,45 @@ impl KeyStore {
                  wrapped BLOB,
                  destroyed_at TEXT,
                  PRIMARY KEY (kind, sha256)
+             );
+             CREATE TABLE IF NOT EXISTS body_text (
+                 kind TEXT NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 sealed BLOB NOT NULL,
+                 PRIMARY KEY (kind, sha256)
              );",
         )
         .map_err(|e| e.to_string())?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// The search text kept for a body, encrypted under the body's own
+    /// key.
+    fn text(&self, kind: BodyKind, sha256: &str) -> Result<Option<Vec<u8>>, String> {
+        self.conn()
+            .query_row(
+                "SELECT sealed FROM body_text WHERE kind = ?1 AND sha256 = ?2",
+                params![kind.as_str(), sha256],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Keep `sealed` as the body's search text, unless its key is gone.
+    fn put_text(&self, kind: BodyKind, sha256: &str, sealed: &[u8]) -> Result<(), String> {
+        self.conn()
+            .execute(
+                "INSERT OR REPLACE INTO body_text (kind, sha256, sealed)
+                 SELECT ?1, ?2, ?3 WHERE EXISTS (
+                     SELECT 1 FROM body_keys
+                     WHERE kind = ?1 AND sha256 = ?2 AND wrapped IS NOT NULL)",
+                params![kind.as_str(), sha256, sealed],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -181,6 +220,9 @@ impl KeyStore {
                  WHERE sha256 = ?2 AND wrapped IS NOT NULL",
                 params![now, sha256],
             )
+            .map_err(|e| e.to_string())?;
+        // The search text was readable only under the key. It goes too.
+        conn.execute("DELETE FROM body_text WHERE sha256 = ?1", params![sha256])
             .map_err(|e| e.to_string())?;
         for kind in [BodyKind::Request, BodyKind::Response] {
             conn.execute(
@@ -401,6 +443,48 @@ impl Archive {
             .map_err(|e| format!("{}: {e}", url.path()))
     }
 
+    /// The text of an archived body, for a search: read from the search
+    /// text kept for it, or from the bucket the first time, when that
+    /// text is made and kept. The kept text is encrypted under the
+    /// body's own key, so it is as readable as the body is: `None` for
+    /// a body whose key was destroyed or never held here, and for one
+    /// that is not what its row says.
+    pub async fn search_text(
+        &self,
+        kind: BodyKind,
+        sha256: &str,
+        shape: Option<wirken_audit::ProxyShape>,
+    ) -> Result<Option<String>, String> {
+        let wrapped = match self.keys.get(kind, sha256)? {
+            BodyKey::Held(wrapped) => wrapped,
+            BodyKey::Destroyed | BodyKey::Absent => return Ok(None),
+        };
+        let key = Zeroizing::new(
+            open(&self.master, &aad(kind, sha256), &wrapped).map_err(|e| {
+                format!("the key of {} {sha256} does not unwrap: {e}", kind.as_str())
+            })?,
+        );
+        let bound = text_aad(kind, sha256);
+        if let Some(sealed) = self.keys.text(kind, sha256)? {
+            let text = open(&key, &bound, &sealed)
+                .map_err(|e| format!("the search text of {} {sha256}: {e}", kind.as_str()))?;
+            return Ok(Some(String::from_utf8_lossy(&text).into_owned()));
+        }
+        let body = match self.get(kind, sha256).await? {
+            Fetched::Body(body) if hex(&Sha256::digest(&body)) == sha256 => body,
+            _ => return Ok(None),
+        };
+        let text = wirken_audit::search::body_text(shape, &body);
+        self.keys
+            .put_text(kind, sha256, &seal(&key, &bound, text.as_bytes())?)?;
+        Ok(Some(text))
+    }
+
+    /// Whether the body's key was destroyed.
+    pub fn redacted(&self, kind: BodyKind, sha256: &str) -> bool {
+        matches!(self.keys.get(kind, sha256), Ok(BodyKey::Destroyed))
+    }
+
     /// What the bucket reports of the object's lock.
     pub async fn lock(&self, kind: BodyKind, sha256: &str) -> Result<Lock, String> {
         let url = self.object_url(kind, sha256)?;
@@ -514,6 +598,70 @@ mod tests {
     /// A destroyed key is gone from the store's files, a destroyed
     /// hash takes no new key, and the other kind under the same hash
     /// goes with it.
+    /// The search text kept for a body is ciphertext under the body's
+    /// own key: the file never holds the text, and once the key is
+    /// destroyed it holds nothing of the entry either.
+    #[test]
+    fn a_bodys_search_text_is_sealed_under_its_key_and_goes_with_it() {
+        const TEXT: &str = "the heron plan, and more words around it";
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(ARCHIVE_KEYS_FILE);
+        let store = KeyStore::open(&path).unwrap();
+        let master = random::<32>();
+        let key = random::<32>();
+        let at_rest = |needle: &[u8]| {
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .flatten()
+                .any(|file| {
+                    std::fs::read(file.path())
+                        .unwrap()
+                        .windows(needle.len())
+                        .any(|w| w == needle)
+                })
+        };
+
+        // No key, no text kept.
+        let sealed = seal(&key, &text_aad(BodyKind::Request, HASH), TEXT.as_bytes()).unwrap();
+        store.put_text(BodyKind::Request, HASH, &sealed).unwrap();
+        assert_eq!(store.text(BodyKind::Request, HASH).unwrap(), None);
+
+        store
+            .put(
+                BodyKind::Request,
+                HASH,
+                &seal(&master, &aad(BodyKind::Request, HASH), &key).unwrap(),
+            )
+            .unwrap();
+        store.put_text(BodyKind::Request, HASH, &sealed).unwrap();
+        let kept = store.text(BodyKind::Request, HASH).unwrap().unwrap();
+        assert_eq!(kept, sealed);
+        // It opens under the body's key and its own binding, and under
+        // nothing else.
+        assert_eq!(
+            open(&key, &text_aad(BodyKind::Request, HASH), &kept).unwrap(),
+            TEXT.as_bytes()
+        );
+        assert!(open(&master, &text_aad(BodyKind::Request, HASH), &kept).is_err());
+        assert!(open(&key, &aad(BodyKind::Request, HASH), &kept).is_err());
+        assert!(open(&key, &text_aad(BodyKind::Response, HASH), &kept).is_err());
+        // At rest: the ciphertext, and no word of the text.
+        let _ = store
+            .conn()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        assert!(at_rest(&sealed));
+        assert!(!at_rest(b"heron"));
+
+        assert_eq!(store.destroy(HASH).unwrap(), 1);
+        assert_eq!(store.text(BodyKind::Request, HASH).unwrap(), None);
+        store.put_text(BodyKind::Request, HASH, &sealed).unwrap();
+        assert_eq!(store.text(BodyKind::Request, HASH).unwrap(), None);
+        drop(store);
+        assert!(!at_rest(&sealed), "the entry is still in the file");
+        assert!(!at_rest(&sealed[NONCE_BYTES..NONCE_BYTES + 16]));
+        assert!(!at_rest(b"heron"));
+    }
+
     #[test]
     fn a_destroyed_key_is_not_in_the_store_and_cannot_be_put_back() {
         let tmp = tempfile::tempdir().unwrap();
@@ -919,10 +1067,10 @@ mod tests {
 }
 
 /// One archived body a session's rows name.
-struct Named {
-    seq: u64,
-    kind: BodyKind,
-    sha256: String,
+pub(crate) struct Named {
+    pub(crate) seq: u64,
+    pub(crate) kind: BodyKind,
+    pub(crate) sha256: String,
 }
 
 /// What checking a proxy session against the archive found.
@@ -942,7 +1090,7 @@ pub struct ArchiveReport {
 }
 
 /// The bodies `rows` say were archived.
-fn named(rows: &[wirken_audit::StoredSessionEvent]) -> Vec<Named> {
+pub(crate) fn named(rows: &[wirken_audit::StoredSessionEvent]) -> Vec<Named> {
     use wirken_audit::SessionEvent;
     let named = |seq, kind, sha256: &wirken_audit::HashHex| Named {
         seq,
