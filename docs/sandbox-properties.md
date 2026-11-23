@@ -170,7 +170,9 @@ the turn has no egress policy and `sandbox.json` does not set `network: true`
 (`build_host_config`, `sandbox.rs:888-893`; a `none` policy sets it whatever
 the flag says). A channel configured for `allowlist` or `open`
 joins a per-exec two-member internal network and reaches the outside only
-through a sidecar proxy container. The topology, the isolation invariant, the
+through a sidecar proxy container. Under `open` every request of an agent
+turn's `exec` is refused, and under `allowlist` each is asked of the operator
+([egress.md](egress.md#after-a-restricting-read)). The topology, the isolation invariant, the
 port and address rules, and the known CONNECT/SNI limit are in
 [egress.md](egress.md#sandbox-egress). Everything else in the hardening table
 above is unchanged on that path.

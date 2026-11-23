@@ -591,7 +591,8 @@ What each control leaves outside it, stated once. Other pages link here.
 ### Lyrik and Zirkel
 
 - Lyrik findings are model output. The citation gate checks that the cited
-  file and line exist, not that the finding is correct.
+  line exists and holds the text the finding quotes, not that the finding is
+  correct.
 - Only `--bench` on the command line skips the Lyrik sign-off. Nothing in
   the assessed repository does.
 - A Lyrik run continues on an unsigned chain when the audit signing key

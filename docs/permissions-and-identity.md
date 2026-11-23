@@ -61,8 +61,7 @@ Each `Action` variant maps to one explicitly:
 | `network:<domain>` | `NetworkRequest` |
 | `workspace_file`, `channel_converse`, `web_search`, `http_request`, `destructive_file_op`, `credential_access`, `cron_create` | The parameterless actions |
 
-Eight of those keyed through the derived `Debug` form until the change
-recorded under Unreleased in the changelog, which made the key a Rust
+Eight of those keyed through the derived `Debug` form until 1.24.0, which made the key a Rust
 identifier: it moved when a variant was renamed, and
 `NetworkRequest` rendered as `NetworkRequest { domain: "x" }`, braces and
 quotes included. None of the eight is storable, so no grant was orphaned by
