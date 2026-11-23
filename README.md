@@ -227,7 +227,7 @@ graph TD
     Proxy -- "tools/call, as the token's agent" --> Agent
 ```
 
-Who approves, who holds secrets, and what reaches the record:
+Approval flow, secrets management and audit logging:
 
 ```mermaid
 graph TD
