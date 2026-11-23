@@ -32,6 +32,41 @@ const INVOCATIONS: &[(&str, &str, &[&str])] = &[
         ],
     ),
     (
+        "proxy",
+        "identity grant-set set",
+        &[
+            "proxy",
+            "identity",
+            "grant-set",
+            "set",
+            "engineers",
+            "--upstream",
+            "local",
+        ],
+    ),
+    (
+        "proxy",
+        "identity grant-set remove",
+        &["proxy", "identity", "grant-set", "remove", "engineers"],
+    ),
+    (
+        "proxy",
+        "identity map",
+        &[
+            "proxy",
+            "identity",
+            "map",
+            "engineers",
+            "--claim-value",
+            "eng",
+        ],
+    ),
+    (
+        "proxy",
+        "identity unmap",
+        &["proxy", "identity", "unmap", "--subject", "alice"],
+    ),
+    (
         "permissions",
         "approve",
         &[

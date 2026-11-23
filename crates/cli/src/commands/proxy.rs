@@ -16,7 +16,7 @@ use super::config;
 
 /// Refuse without a terminal. The exec marker is refused, with a row,
 /// before any command here is dispatched.
-fn require_terminal(command: &str) -> Result<()> {
+pub(super) fn require_terminal(command: &str) -> Result<()> {
     if std::env::var_os(wirken_agent::tool::EXEC_MARKER_ENV).is_some() {
         bail!(
             "wirken proxy {command} refuses to run inside a Wirken exec ({} is set); \
@@ -71,41 +71,54 @@ pub(crate) fn signed_mcp_servers(
 
 /// What a token is allowed, as one line for a row or a listing.
 fn describe(token: &ProxyToken) -> String {
+    describe_grants(
+        &token.upstreams,
+        &token.models,
+        &token.mcp_servers,
+        &token.mcp_agent,
+        token.ceiling_usd_micros,
+        token.ceiling_calls,
+        token.window,
+    )
+}
+
+/// A set of grants, as one line for a row or a listing.
+pub(super) fn describe_grants(
+    upstreams: &[String],
+    models: &[String],
+    mcp_servers: &[String],
+    mcp_agent: &str,
+    ceiling_usd_micros: Option<u64>,
+    ceiling_calls: Option<u64>,
+    window: BudgetWindow,
+) -> String {
     let mut parts = Vec::new();
-    if !token.upstreams.is_empty() {
-        parts.push(format!("upstreams {}", token.upstreams.join(",")));
-        parts.push(if token.models.is_empty() {
+    if !upstreams.is_empty() {
+        parts.push(format!("upstreams {}", upstreams.join(",")));
+        parts.push(if models.is_empty() {
             "any model".to_string()
         } else {
-            format!("models {}", token.models.join(","))
+            format!("models {}", models.join(","))
         });
     }
-    if !token.mcp_servers.is_empty() {
+    if !mcp_servers.is_empty() {
         parts.push(format!(
-            "MCP servers {} of agent {}",
-            token.mcp_servers.join(","),
-            token.mcp_agent
+            "MCP servers {} of agent {mcp_agent}",
+            mcp_servers.join(",")
         ));
     }
-    if let Some(micros) = token.ceiling_usd_micros {
-        parts.push(format!(
-            "${:.2} a {}",
-            micros as f64 / 1e6,
-            token.window.label()
-        ));
+    if let Some(micros) = ceiling_usd_micros {
+        parts.push(format!("${:.2} a {}", micros as f64 / 1e6, window.label()));
     }
-    if let Some(calls) = token.ceiling_calls {
-        parts.push(format!("{calls} calls a {}", token.window.label()));
+    if let Some(calls) = ceiling_calls {
+        parts.push(format!("{calls} calls a {}", window.label()));
     }
     parts.join("; ")
 }
 
-/// Issue a token in `data_dir` and record it. The token is taken back
-/// if its row cannot be written. Returns the record and the token.
-pub(crate) fn issue_recorded(
-    data_dir: &std::path::Path,
-    grant: &TokenGrant,
-) -> Result<(ProxyToken, String)> {
+/// Whether what `grant` names exists in `data_dir`: each upstream in
+/// `proxy.json`, each MCP server as a signed entry of its agent.
+pub(super) fn check_grant(data_dir: &std::path::Path, grant: &TokenGrant) -> Result<()> {
     if let Some(config) = ProxyConfig::load(data_dir).map_err(|e| anyhow::anyhow!("{e}"))? {
         for upstream in &grant.upstreams {
             if !config.upstreams.contains_key(upstream) {
@@ -133,6 +146,55 @@ pub(crate) fn issue_recorded(
             }
         }
     }
+    Ok(())
+}
+
+/// The grants the flags of `token issue` and `identity grant-set set`
+/// describe, for a `what` (a token, a grant set) named `name`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn grant_from_flags(
+    what: &str,
+    name: &str,
+    upstreams: &[String],
+    models: &[String],
+    ceiling_usd: Option<f64>,
+    ceiling_calls: Option<u64>,
+    window: &str,
+    mcp_servers: &[String],
+    mcp_agent: &str,
+) -> Result<TokenGrant> {
+    if upstreams.is_empty() && mcp_servers.is_empty() {
+        bail!("a {what} needs --upstream, --mcp-server or both");
+    }
+    let ceiling_usd_micros = match ceiling_usd {
+        Some(usd) if !(usd.is_finite() && usd > 0.0) => {
+            bail!("--ceiling-usd must be a positive number")
+        }
+        Some(usd) => Some((usd * 1e6) as u64),
+        None => None,
+    };
+    if ceiling_calls == Some(0) {
+        bail!("--ceiling-calls must be above zero");
+    }
+    Ok(TokenGrant {
+        name: name.to_string(),
+        upstreams: upstreams.to_vec(),
+        models: models.to_vec(),
+        ceiling_usd_micros,
+        ceiling_calls,
+        window: parse_window(window)?,
+        mcp_agent: mcp_agent.to_string(),
+        mcp_servers: mcp_servers.to_vec(),
+    })
+}
+
+/// Issue a token in `data_dir` and record it. The token is taken back
+/// if its row cannot be written. Returns the record and the token.
+pub(crate) fn issue_recorded(
+    data_dir: &std::path::Path,
+    grant: &TokenGrant,
+) -> Result<(ProxyToken, String)> {
+    check_grant(data_dir, grant)?;
     let store = open_store(data_dir)?;
     let (token, value) = store.issue(grant).map_err(|e| anyhow::anyhow!("{e}"))?;
     if let Err(e) = super::record_operator_command(
@@ -179,29 +241,17 @@ pub fn token_issue(
     mcp_agent: &str,
 ) -> Result<()> {
     require_terminal("token issue")?;
-    if upstreams.is_empty() && mcp_servers.is_empty() {
-        bail!("a token needs --upstream, --mcp-server or both");
-    }
-    let ceiling_usd_micros = match ceiling_usd {
-        Some(usd) if !(usd.is_finite() && usd > 0.0) => {
-            bail!("--ceiling-usd must be a positive number")
-        }
-        Some(usd) => Some((usd * 1e6) as u64),
-        None => None,
-    };
-    if ceiling_calls == Some(0) {
-        bail!("--ceiling-calls must be above zero");
-    }
-    let grant = TokenGrant {
-        name: name.to_string(),
-        upstreams: upstreams.to_vec(),
-        models: models.to_vec(),
-        ceiling_usd_micros,
+    let grant = grant_from_flags(
+        "token",
+        name,
+        upstreams,
+        models,
+        ceiling_usd,
         ceiling_calls,
-        window: parse_window(window)?,
-        mcp_agent: mcp_agent.to_string(),
-        mcp_servers: mcp_servers.to_vec(),
-    };
+        window,
+        mcp_servers,
+        mcp_agent,
+    )?;
     let (token, value) = issue_recorded(&config().data_dir, &grant)?;
     println!(
         "  Issued token {} ({}): {}",

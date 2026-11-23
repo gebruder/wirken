@@ -1470,6 +1470,10 @@ enum ProxyCommands {
     /// Manage the write-once archive of bodies
     #[command(subcommand)]
     Archive(ProxyArchiveCommands),
+    /// Manage what a JWT of the identity provider in proxy.json is
+    /// given: grant sets, and the mappings that select one
+    #[command(subcommand)]
+    Identity(ProxyIdentityCommands),
     /// List proxy sessions: one conversation each, with its token,
     /// start, calls and model.
     Sessions {
@@ -1496,6 +1500,79 @@ enum ProxyArchiveCommands {
         /// Why, for the row.
         #[arg(long)]
         reason: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProxyIdentityCommands {
+    /// Manage grant sets: what a token carries, given to the JWTs a
+    /// mapping selects
+    #[command(subcommand, name = "grant-set")]
+    GrantSet(ProxyGrantSetCommands),
+    /// Give a grant set to the JWTs whose grant claim holds a value,
+    /// or to one subject. Run at a terminal.
+    Map {
+        /// The grant set.
+        grant_set: String,
+        /// A value of the claim proxy.json names as `grant_claim`.
+        #[arg(long, conflicts_with = "subject")]
+        claim_value: Option<String>,
+        /// A subject, as the issuer's `sub`. Used where no claim value
+        /// of the JWT is mapped.
+        #[arg(long)]
+        subject: Option<String>,
+    },
+    /// Remove a mapping. Run at a terminal.
+    Unmap {
+        #[arg(long, conflicts_with = "subject")]
+        claim_value: Option<String>,
+        #[arg(long)]
+        subject: Option<String>,
+    },
+    /// List the issuer, the grant sets and the mappings.
+    List,
+}
+
+#[derive(Subcommand)]
+enum ProxyGrantSetCommands {
+    /// Write a grant set, in place of any of the same name. Run at a
+    /// terminal.
+    Set {
+        /// A name for the grant set (letters, digits, - and _).
+        name: String,
+        /// An upstream from proxy.json its callers may reach. Repeat
+        /// for more; they are tried in the order given.
+        #[arg(long = "upstream")]
+        upstreams: Vec<String>,
+        /// A model its callers may ask for. Repeat for more. Without
+        /// it they may ask for any model.
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// Spend ceiling over the window, in US dollars, for each
+        /// subject. Calls for a model with no price are refused under
+        /// it.
+        #[arg(long)]
+        ceiling_usd: Option<f64>,
+        /// Call ceiling over the window, for each subject.
+        #[arg(long)]
+        ceiling_calls: Option<u64>,
+        /// The window the ceilings apply over: hour, day or week.
+        #[arg(long, default_value = "day")]
+        window: String,
+        /// An MCP server whose tools its callers may list and call at
+        /// the proxy's MCP endpoint. Its entry must be signed. Repeat
+        /// for more.
+        #[arg(long = "mcp-server")]
+        mcp_servers: Vec<String>,
+        /// The agent whose MCP servers --mcp-server names, and whose
+        /// permission gate the tool calls run under.
+        #[arg(long, default_value = "default")]
+        agent: String,
+    },
+    /// Remove a grant set no mapping names. Run at a terminal.
+    Remove {
+        /// The grant set's name.
+        name: String,
     },
 }
 
@@ -1703,6 +1780,20 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
         Commands::Proxy(ProxyCommands::Archive(ProxyArchiveCommands::Redact { .. })) => {
             ("proxy", "archive redact")
         }
+        Commands::Proxy(ProxyCommands::Identity(cmd)) => (
+            "proxy",
+            match cmd {
+                ProxyIdentityCommands::GrantSet(ProxyGrantSetCommands::Set { .. }) => {
+                    "identity grant-set set"
+                }
+                ProxyIdentityCommands::GrantSet(ProxyGrantSetCommands::Remove { .. }) => {
+                    "identity grant-set remove"
+                }
+                ProxyIdentityCommands::Map { .. } => "identity map",
+                ProxyIdentityCommands::Unmap { .. } => "identity unmap",
+                ProxyIdentityCommands::List => return None,
+            },
+        ),
         Commands::Mcp(cmd) => (
             "mcp",
             match cmd {
@@ -2334,6 +2425,44 @@ async fn main() -> Result<()> {
         Commands::Proxy(ProxyCommands::Sessions { token }) => {
             commands::proxy::sessions(token.as_deref())
         }
+        Commands::Proxy(ProxyCommands::Identity(cmd)) => match cmd {
+            ProxyIdentityCommands::GrantSet(ProxyGrantSetCommands::Set {
+                name,
+                upstreams,
+                models,
+                ceiling_usd,
+                ceiling_calls,
+                window,
+                mcp_servers,
+                agent,
+            }) => commands::proxy_identity::grant_set_set(
+                &name,
+                &upstreams,
+                &models,
+                ceiling_usd,
+                ceiling_calls,
+                &window,
+                &mcp_servers,
+                &agent,
+            ),
+            ProxyIdentityCommands::GrantSet(ProxyGrantSetCommands::Remove { name }) => {
+                commands::proxy_identity::grant_set_remove(&name)
+            }
+            ProxyIdentityCommands::Map {
+                grant_set,
+                claim_value,
+                subject,
+            } => commands::proxy_identity::map(
+                &grant_set,
+                claim_value.as_deref(),
+                subject.as_deref(),
+            ),
+            ProxyIdentityCommands::Unmap {
+                claim_value,
+                subject,
+            } => commands::proxy_identity::unmap(claim_value.as_deref(), subject.as_deref()),
+            ProxyIdentityCommands::List => commands::proxy_identity::list(),
+        },
         Commands::Hooks(cmd) => match cmd {
             HookCommands::Register {
                 hook_id,
