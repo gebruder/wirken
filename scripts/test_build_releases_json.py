@@ -38,7 +38,17 @@ class Changelog(unittest.TestCase):
 
     def test_the_summary_is_the_first_bullets_first_sentence(self):
         sections = module.changelog_sections(self.TEXT)
-        self.assertEqual(module.summary(sections["1.7.2"][1]), "Bump wasmtime.")
+        self.assertEqual(module.summary(sections["1.7.1"][1]), "A thing.")
+
+    def test_a_security_release_is_summarised_by_its_security_bullets(self):
+        sections = module.changelog_sections(self.TEXT)
+        self.assertEqual(module.summary(sections["1.7.2"][1]), "wasmtime closes RUSTSEC-2026-0149.")
+        body = (
+            "### Operator notes\n\n- One gateway serves a directory. More.\n\n"
+            "### Security\n\n- A cannot send B. Detail (`t`).\n- `c` refuses\n  inside d.\n\n"
+            "### Added\n\n- A feature.\n"
+        )
+        self.assertEqual(module.summary(body), "A cannot send B. c refuses inside d.")
 
     def test_a_sentence_that_fits_is_kept_whole(self):
         sentence = "word " * 39 + "end."
@@ -65,6 +75,54 @@ class Changelog(unittest.TestCase):
     def test_one_word_longer_than_the_limit_is_cut_to_fit(self):
         cut = module.fit("x" * 300)
         self.assertEqual(cut, "x" * (module.MAX_SUMMARY - 3) + "...")
+
+
+class SecurityIsStated(unittest.TestCase):
+    """The release being cut says whether it carries security fixes: by
+    its heading, or by the flag. A missing heading alone builds nothing."""
+
+    def build(self, changelog, *flags):
+        import subprocess, sys, tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            (tmp / "CHANGELOG.md").write_text(changelog)
+            (tmp / "checksums.sha256").write_text("0" * 64 + "  wirken-x86_64-unknown-linux-musl\n")
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), "--current", self.TAG, "--offline",
+                 "--checksums", str(tmp / "checksums.sha256"),
+                 "--changelog", str(tmp / "CHANGELOG.md"), *flags],
+                capture_output=True, text=True,
+            )
+
+    # A tag this repository has, for the entry's issued_at.
+    TAG = "v3.5.0"
+    PLAIN = "## [3.5.0] - 2026-11-22\n\n### Operator notes\n\n- A note.\n"
+    FIXES = PLAIN + "\n### Security\n\n- A fix.\n"
+
+    def setUp(self):
+        if module.tag_time("3.5.0") is None:
+            self.skipTest("this checkout has no v3.5.0 tag")
+
+    def test_no_heading_and_no_flag_is_refused(self):
+        out = self.build(self.PLAIN)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("--no-security-fixes", out.stderr)
+
+    def test_no_heading_with_the_flag_is_a_release_without_fixes(self):
+        out = self.build(self.PLAIN, "--no-security-fixes")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        entry = __import__("json").loads(out.stdout)["releases"][0]
+        self.assertEqual((entry["security"], entry["summary"]), (False, "A note."))
+
+    def test_a_heading_is_a_release_with_fixes(self):
+        out = self.build(self.FIXES)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        entry = __import__("json").loads(out.stdout)["releases"][0]
+        self.assertEqual((entry["security"], entry["summary"]), (True, "A fix."))
+
+    def test_the_flag_against_a_heading_is_refused(self):
+        self.assertNotEqual(self.build(self.FIXES, "--no-security-fixes").returncode, 0)
 
 
 if __name__ == "__main__":

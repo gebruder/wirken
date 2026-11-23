@@ -11,8 +11,12 @@ maintainer already has, for the maintainer to read before signing it:
   keeps the `issued_at` the previous manifest gave it, or failing that
   its CHANGELOG date at midnight UTC, and is named on stderr.
 - CHANGELOG.md, for whether each version has a `### Security` section,
-  and a one-line summary (the first sentence of its first bullet; edit
-  it if it reads badly).
+  and a summary: the first sentence of each bullet under `### Security`
+  where the version has that section, of its first bullet where it has
+  not. An older version keeps the summary --previous gave it.
+  The release being cut has the section or is built with
+  --no-security-fixes: a missing heading is never read as "no security
+  fixes" on its own.
 - Each release's published checksums.sha256, for the artifacts. The
   release being cut reads its checksums from a local file (the draft's,
   downloaded in the release runbook); older releases come from
@@ -98,9 +102,9 @@ def has_security(body):
     return any(line.strip() == "### Security" for line in body.splitlines())
 
 
-def summary(body):
-    """The first sentence of the section's first bullet, as plain text."""
-    lines = body.splitlines()
+def first_sentences(lines):
+    """The first sentence of each bullet in `lines`, as plain text."""
+    out = []
     for i, line in enumerate(lines):
         if not line.startswith("- "):
             continue
@@ -112,9 +116,31 @@ def summary(body):
         flat = " ".join(text)
         flat = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", flat)
         flat = flat.replace("**", "").replace("`", "")
-        sentence = re.split(r"(?<=[.!?])\s", flat, maxsplit=1)[0]
-        return fit(sentence)
-    return ""
+        out.append(re.split(r"(?<=[.!?])\s", flat, maxsplit=1)[0])
+    return out
+
+
+def security_lines(body):
+    """The lines under `### Security`, up to the next heading."""
+    lines = body.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "### Security":
+            rest = lines[i + 1 :]
+            end = next((j for j, l in enumerate(rest) if l.startswith("### ")), len(rest))
+            return rest[:end]
+    return []
+
+
+def summary(body):
+    """What the release says of itself in one line. A release with a
+    `### Security` section is summarised by that section, the first
+    sentence of each of its bullets, so the line names what was fixed.
+    Any other release by the first sentence of its first bullet."""
+    fixes = first_sentences(security_lines(body))
+    if fixes:
+        return fit(" ".join(fixes))
+    first = first_sentences(body.splitlines())
+    return fit(first[0]) if first else ""
 
 
 def fit(sentence):
@@ -175,12 +201,27 @@ def main():
     ap.add_argument("--previous", help="the last published releases.json, to reuse its artifacts")
     ap.add_argument("--changelog", default=str(pathlib.Path(__file__).resolve().parent.parent / "CHANGELOG.md"))
     ap.add_argument("--offline", action="store_true", help="never fetch; leave out versions not in --previous")
+    ap.add_argument(
+        "--no-security-fixes",
+        action="store_true",
+        help="the release being cut fixes no security defect; required when its section has no `### Security` heading",
+    )
     args = ap.parse_args()
 
     current = args.current.removeprefix("v")
     sections = changelog_sections(pathlib.Path(args.changelog).read_text())
     if current not in sections:
         sys.exit(f"{args.changelog} has no `## [{current}] - <date>` section")
+
+    stated = has_security(sections[current][1])
+    if not stated and not args.no_security_fixes:
+        sys.exit(
+            f"the {current} section of {args.changelog} has no `### Security` heading. "
+            "Give its security fixes that heading, or pass --no-security-fixes "
+            "to say the release has none"
+        )
+    if stated and args.no_security_fixes:
+        sys.exit(f"--no-security-fixes, but the {current} section of {args.changelog} has a `### Security` heading")
 
     previous = {}
     if args.previous:
@@ -220,7 +261,11 @@ def main():
                 "version": version,
                 "issued_at": issued_at,
                 "security": has_security(body),
-                "summary": summary(body),
+                # A published entry keeps the summary it was signed
+                # with; only the release being cut is written anew.
+                "summary": previous[version]["summary"]
+                if version != current and version in previous
+                else summary(body),
                 "artifacts": dict(sorted(artifacts.items())),
             }
         )

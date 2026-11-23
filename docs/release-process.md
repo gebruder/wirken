@@ -163,7 +163,10 @@ check fails naming the ids. `build-releases-json.py` sets `security` in
 `releases.json` from that heading alone, so a dependency bump that closes an
 advisory without the heading ships a manifest that tells every installed
 binary there is nothing security-related to install. A `### Security` heading
-with no closed advisory is allowed: a fix in this repo's own code counts.
+with no closed advisory is allowed: a fix in this repo's own code counts, and
+goes under that heading, not under the operator notes alone. The script does
+not read a missing heading as "no security fixes": it builds a release
+without the heading only with `--no-security-fixes`.
 
 **`scripts/check-names.sh`** fails on an AI-tool name in any tracked file or
 path, and on a co-author trailer naming the tool or its vendor, or a
@@ -289,6 +292,8 @@ cat checksums.sha256   # five lines, one per binary
 gh release download -R gebruder/wirken --pattern releases.json --dir previous \
     || echo "no published releases.json yet"
 PREV=; [ -f previous/releases.json ] && PREV="--previous previous/releases.json"
+# Add --no-security-fixes when the release's CHANGELOG section has no
+# `### Security` heading; without one or the other the script refuses.
 "$REPO"/scripts/build-releases-json.py --current vX.Y.Z \
     --checksums checksums.sha256 $PREV > releases.json
 
@@ -307,7 +312,9 @@ Read `releases.json` before signing it, because `wirken update --check` tells
 operators what it says. Check that the new entry's artifacts are the five lines
 of `checksums.sha256`, that `security` is true exactly for the versions whose
 CHANGELOG section has a `### Security` heading, and that each `summary` reads
-well; edit a summary by hand if it does not. Versions the script left out are
+well. A release with that heading is summarised by the first sentence of each
+bullet under it, any other by its first bullet; a summary that reads badly is
+corrected in the CHANGELOG and the manifest built again. Versions the script left out are
 named on stderr. Its top-level `issued_at` is the time it ran: every published
 manifest must carry a later one than the last, because an install refuses a
 manifest older than the newest it has verified.
