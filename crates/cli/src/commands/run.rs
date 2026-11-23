@@ -210,6 +210,76 @@ impl wirken_agent::llm::ProviderKeySource for VaultProviderKey {
 
 /// What the proxy listener works with: a client for each upstream in
 /// `proxy.json`, each with the source its key is read from per call.
+/// File name of the lock a running gateway holds in its data directory.
+const INSTANCE_LOCK_FILE: &str = "gateway.lock";
+
+/// Take the data directory for this gateway. The lock is on a file in
+/// it that holds this process's id, and lasts as long as the returned
+/// handle does: the operating system drops it when the process ends,
+/// however it ends. A directory another gateway holds is refused, with
+/// that gateway's process id, before anything of its is touched.
+fn claim_data_dir(data_dir: &std::path::Path) -> Result<std::fs::File> {
+    use std::io::{Read as _, Seek as _, Write as _};
+    let path = data_dir.join(INSTANCE_LOCK_FILE);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {
+            file.set_len(0)?;
+            file.rewind()?;
+            write!(file, "{}", std::process::id())?;
+            file.flush()?;
+            Ok(file)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut holder = String::new();
+            let _ = file.read_to_string(&mut holder);
+            let holder = holder.trim();
+            let named = if holder.chars().all(|c| c.is_ascii_digit()) && !holder.is_empty() {
+                format!("process {holder}")
+            } else {
+                "another process".to_string()
+            };
+            anyhow::bail!(
+                "a gateway is already running on the data directory {}: {named} holds {}. \
+                 Stop it before starting another",
+                data_dir.display(),
+                path.display()
+            )
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("Failed to lock {}", path.display()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod instance_lock_tests {
+    use super::claim_data_dir;
+
+    /// A data directory is one gateway's: a second claim is refused and
+    /// names the process that holds it, and the directory is free again
+    /// once the first lets go.
+    #[test]
+    fn a_data_directory_is_claimed_by_one_gateway() {
+        let tmp = tempfile::tempdir().unwrap();
+        let held = claim_data_dir(tmp.path()).unwrap();
+        let refused = claim_data_dir(tmp.path()).unwrap_err().to_string();
+        assert!(
+            refused.contains(&format!("process {}", std::process::id())),
+            "{refused}"
+        );
+        assert!(refused.contains("already running"), "{refused}");
+        drop(held);
+        assert!(claim_data_dir(tmp.path()).is_ok());
+    }
+}
+
 /// The agents behind the proxy's MCP endpoint: a token's tools are an
 /// agent's MCP tools, and its calls run as that agent's calls, on the
 /// session the endpoint names.
@@ -468,6 +538,8 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     // here, with the file and the value named, before anything starts.
     super::load_sandbox_config(&cfg.data_dir)?;
     cfg.ensure_dirs()?;
+    // One gateway to a data directory. Held until this process ends.
+    let _instance = claim_data_dir(&cfg.data_dir)?;
 
     if wirken_vault::CredentialStore::format_at(&cfg.vault_db_path())?
         .is_some_and(|f| f < wirken_vault::BOUND_FORMAT)

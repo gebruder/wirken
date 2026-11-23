@@ -16,6 +16,10 @@ The Matrix adapter requires HTTPS for all non-localhost homeservers. Use `https:
 
 Run `wirken setup` first. This creates `~/.wirken/provider.json`.
 
+**"a gateway is already running on the data directory"**
+
+One `wirken run` serves a data directory. The message names the process that holds it. Stop that one, or point the second at another directory with `WIRKEN_DATA_DIR`.
+
 **"Failed to bind IPC at <path>"**
 
 `wirken run` removes a socket file left by an earlier run before it binds, so this is the socket directory or the path: check that `<data_dir>/sockets/` exists and is writable by you, and that the data directory's path is short enough for a Unix socket (about 100 characters with the socket's name).

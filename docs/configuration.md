@@ -45,6 +45,7 @@ moves every process at once.
 | `proxy_tokens.db` | Proxy client tokens, as digests, and a hash of each request's message list for thirty days | `wirken proxy token issue` |
 | `proxy_archive_keys.db` | One wrapped key for each archived body, and the encrypted search text of each. Back it up with `vault.db`; see [proxy-archive.md](proxy-archive.md) | `wirken run` |
 | `approvers.db` | Channel approver allowlist and approval chats | `wirken approvers add` |
+| `gateway.lock` | Held by the running gateway, with its process id. A second `wirken run` on the directory refuses to start | `wirken run` |
 
 `wirken run` reads `provider.json`, `agent_config.db`, `tool_policy.json`,
 `sandbox.json`, `budget.json`, `permissions.json`, `mcp.json`, `skills/`, and
