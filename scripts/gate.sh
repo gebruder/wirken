@@ -34,6 +34,11 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
+# No incremental compilation: the gate builds the workspace several
+# ways, each leaves its own incremental artifacts in target/, and cargo
+# never removes them.
+export CARGO_INCREMENTAL=0
+
 CI=.github/workflows/ci.yml
 # The advisory, ban, licence and source check, word for word as the
 # Deny job runs it.
