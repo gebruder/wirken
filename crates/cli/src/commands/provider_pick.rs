@@ -47,6 +47,16 @@ pub const IDS: &[&str] = &[
 /// fixed. Bedrock carries its region in the URL, Infomaniak an account
 /// id, and `custom` is whatever it points at, so those three must be
 /// given one.
+/// The check a typed endpoint passes before setup goes on: the one the
+/// LLM client makes when it starts, so a URL it would refuse is asked
+/// for again here rather than saved and refused at the first message.
+pub(crate) fn endpoint_check(url: &str) -> Result<(), String> {
+    match wirken_agent::llm::endpoint_refusal(url.trim()) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
 pub fn default_base_url(provider: &str) -> Option<&'static str> {
     match provider {
         "openai" => Some("https://api.openai.com/v1"),
@@ -128,6 +138,7 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
             let url: String = Input::new()
                 .with_prompt("  Ollama URL")
                 .default("http://localhost:11434/v1".into())
+                .validate_with(|url: &String| endpoint_check(url))
                 .interact_text()?;
             match super::probe_ollama_version(&url).await {
                 Some(version) => println!("  Ollama {version} detected."),
@@ -171,6 +182,7 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
                 let url: String = Input::new()
                     .with_prompt("  Endpoint")
                     .default("http://localhost:8000/v1".into())
+                    .validate_with(|url: &String| endpoint_check(url))
                     .interact_text()?;
                 let api_key: String = Input::new()
                     .with_prompt("  API key (blank for local)")
@@ -310,6 +322,7 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
             let proxy_url: String = Input::new()
                 .with_prompt("  Proxy URL")
                 .default("http://localhost:8080".into())
+                .validate_with(|url: &String| endpoint_check(url))
                 .interact_text()?;
             let base_url = format!("{}/v1", proxy_url.trim_end_matches('/'));
             let models = super::list_openai_models(&base_url, "").await;
@@ -445,7 +458,10 @@ pub async fn pick(cfg: &GatewayConfig) -> Result<ProviderChoice> {
         }
         10 => {
             // Custom
-            let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
+            let url: String = Input::new()
+                .with_prompt("  API base URL")
+                .validate_with(|url: &String| endpoint_check(url))
+                .interact_text()?;
             let has_key = Confirm::new()
                 .with_prompt("  Requires API key?")
                 .default(true)
@@ -579,7 +595,32 @@ fn api_key_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{IDS, default_base_url, stored_api_key};
+    use super::{IDS, default_base_url, endpoint_check, stored_api_key};
+
+    /// Issue #318: setup took plain HTTP to another host, and the first
+    /// message was refused for it. Setup now asks again with the
+    /// client's own words, and takes what the client takes.
+    #[test]
+    fn setup_asks_again_for_an_endpoint_the_client_would_refuse() {
+        for url in [
+            "http://[2001:db8::1]:11434/v1",
+            "http://192.168.1.20:11434/v1",
+            "http://ollama.lan:11434/v1",
+        ] {
+            let refusal = endpoint_check(url).unwrap_err();
+            assert!(refusal.contains("must use HTTPS"), "{refusal}");
+            assert!(refusal.contains(url), "{refusal}");
+        }
+        for url in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:11434/v1",
+            "https://[2001:db8::1]:11434/v1",
+            "  http://localhost:11434/v1  ",
+        ] {
+            assert_eq!(endpoint_check(url), Ok(()), "{url}");
+        }
+    }
     use wirken_vault::{CredentialStore, VaultSecret};
 
     fn store() -> (tempfile::TempDir, CredentialStore) {

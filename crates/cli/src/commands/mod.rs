@@ -631,10 +631,7 @@ pub async fn probe_ollama_version(base_url: &str) -> Option<String> {
         .unwrap_or(base_url);
     let url = format!("{root}/api/version");
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .ok()?;
+    let client = listing_client(base_url, 3)?;
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
@@ -655,12 +652,8 @@ pub async fn list_ollama_models(base_url: &str) -> Vec<String> {
         .unwrap_or(base_url);
     let url = format!("{root}/api/tags");
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+    let Some(client) = listing_client(base_url, 3) else {
+        return Vec::new();
     };
 
     let resp = match client.get(&url).send().await {
@@ -683,18 +676,18 @@ pub async fn list_ollama_models(base_url: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The client a model listing is asked with: `base_url` over HTTPS,
-/// or plain HTTP on loopback, and no redirect followed. A listing
-/// carries the provider's key, which goes to the origin of `base_url`,
-/// the one the key is stored for, and nowhere a redirect points.
-/// `None` for any other URL.
+/// The client setup and `wirken run` ask an endpoint with, for a model
+/// listing or Ollama's version: `base_url` over HTTPS, or plain HTTP on
+/// loopback, and no redirect followed. A listing carries the provider's
+/// key, which goes to the origin of `base_url`, the one the key is
+/// stored for, and nowhere a redirect points. `None` for any URL the
+/// LLM client would refuse (`wirken_agent::llm::endpoint_refusal`), so
+/// nothing is sent to an endpoint no chat call could use.
 fn listing_client(base_url: &str, timeout_s: u64) -> Option<reqwest::Client> {
-    let url = reqwest::Url::parse(base_url).ok()?;
-    let loopback = url.scheme() == "http"
-        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
-    if url.scheme() != "https" && !loopback {
+    if wirken_agent::llm::endpoint_refusal(base_url).is_some() {
         return None;
     }
+    let loopback = !base_url.starts_with("https://");
     reqwest::Client::builder()
         .https_only(!loopback)
         .redirect(reqwest::redirect::Policy::none())
@@ -1224,6 +1217,24 @@ pub(crate) mod child_env_tests {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Nothing setup or `wirken run` asks an endpoint, a listing with
+    /// its key or Ollama's version, goes over plain HTTP to another
+    /// host: the client for it is refused before any request.
+    #[tokio::test]
+    async fn no_listing_or_probe_goes_over_plain_http_to_another_host() {
+        for url in [
+            "http://[2001:db8::1]:11434/v1",
+            "http://192.168.1.20:11434/v1",
+        ] {
+            assert!(listing_client(url, 1).is_none(), "{url}");
+            assert_eq!(probe_ollama_version(url).await, None, "{url}");
+            assert!(list_ollama_models(url).await.is_empty(), "{url}");
+        }
+        for url in ["http://localhost:11434/v1", "https://api.openai.com/v1"] {
+            assert!(listing_client(url, 1).is_some(), "{url}");
+        }
+    }
 
     fn agent_row(
         provider: &str,

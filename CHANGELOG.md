@@ -20,6 +20,26 @@ tagged.
   the terminal, and kept so a failure still names what curl said, without
   the bar (`the_bar_is_drawn_and_an_error_still_names_the_status`,
   `what_curl_said_leaves_out_the_bar`, `crates/cli/src/commands/update/fetch.rs`).
+- `wirken setup` asks again for an LLM endpoint the client would refuse,
+  plain HTTP to a host other than this one, instead of saving it and
+  leaving the first message to fail with "LLM endpoint must use HTTPS". The
+  check is the client's own, `endpoint_refusal`, at every URL setup asks
+  for (Ollama, NIM, Privatemode, a custom endpoint, a channel override) and
+  on an organization's `provider.json`. `wirken run` does not start while an
+  agent's endpoint or a channel override's is one, and names which, where it
+  used to start and fail every message. Setup's Ollama version probe and
+  model listing now go through the listing client, under the same rule and
+  with no redirect followed. Reported by @kmq in #318
+  (`setup_and_the_client_refuse_the_same_endpoints`,
+  `crates/agent/src/llm.rs`;
+  `setup_asks_again_for_an_endpoint_the_client_would_refuse`,
+  `crates/cli/src/commands/provider_pick.rs`;
+  `an_organizations_endpoint_is_checked_at_setup`,
+  `crates/cli/src/commands/setup.rs`;
+  `the_gateway_does_not_start_on_an_endpoint_no_message_could_use`,
+  `crates/cli/src/commands/run.rs`;
+  `no_listing_or_probe_goes_over_plain_http_to_another_host`,
+  `crates/cli/src/commands/mod.rs`).
 
 ### Dependencies
 

@@ -8,6 +8,12 @@ This is not a list of code authors. Who wrote a commit is in the git history.
 A person is listed here for what they did, in the changelog's own word:
 found, reported, proposed, designed.
 
+## @kmq
+
+- Unreleased: reported that `wirken setup` saved a plain-HTTP Ollama URL on
+  another host, which the LLM client then refused at the first message
+  (#318).
+
 ## Matthew Busel (@Mattbusel)
 
 - 3.4.1: found that Anthropic's Opus 4.5 and Opus 4.7 were priced at $15

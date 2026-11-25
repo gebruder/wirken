@@ -259,6 +259,39 @@ fn claim_data_dir(data_dir: &std::path::Path) -> Result<std::fs::File> {
 }
 
 #[cfg(test)]
+mod endpoint_start_tests {
+    use super::unusable_endpoint;
+    use wirken_agent::llm::LlmConfig;
+
+    /// `wirken run` stops on an endpoint the client would refuse, an
+    /// agent's or a channel override's, and names which; it starts on
+    /// loopback and HTTPS.
+    #[test]
+    fn the_gateway_does_not_start_on_an_endpoint_no_message_could_use() {
+        let local = LlmConfig::from_provider("ollama", "http://localhost:11434/v1", "m");
+        let tls = LlmConfig::from_provider("openai", "https://api.openai.com/v1", "m");
+        let remote = LlmConfig::from_provider("ollama", "http://[2001:db8::1]:11434/v1", "m");
+        assert_eq!(
+            unusable_endpoint([
+                ("agent 'default'".to_string(), &local),
+                ("agent 'work'".to_string(), &tls),
+            ]),
+            None
+        );
+        let refusal = unusable_endpoint([
+            ("agent 'default'".to_string(), &local),
+            ("agent 'default' on channel 'slack'".to_string(), &remote),
+        ])
+        .unwrap();
+        assert!(
+            refusal.starts_with("agent 'default' on channel 'slack': "),
+            "{refusal}"
+        );
+        assert!(refusal.contains("must use HTTPS"), "{refusal}");
+    }
+}
+
+#[cfg(test)]
 mod instance_lock_tests {
     use super::claim_data_dir;
 
@@ -1393,6 +1426,22 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
     tracing::info!("Agents: {agent_list}");
     if static_configs.len() > 1 {
         println!("  Agents: {agent_list}");
+    }
+
+    // The LLM client refuses plain HTTP to another host when an agent
+    // wakes, which is the first message. Every endpoint is checked here
+    // instead, so a gateway that could answer nothing does not start.
+    if let Some(refusal) = unusable_endpoint(static_configs.iter().flat_map(|(agent_id, cfg)| {
+        std::iter::once((format!("agent '{agent_id}'"), &cfg.llm_config)).chain(
+            cfg.channel_overrides.iter().map(move |(channel, ov)| {
+                (
+                    format!("agent '{agent_id}' on channel '{channel}'"),
+                    &ov.llm_config,
+                )
+            }),
+        )
+    })) {
+        anyhow::bail!("{refusal}");
     }
 
     // --- Setup IPC listener ---
@@ -7989,6 +8038,23 @@ fn apply_provider_override(
         obj.insert("base_url".into(), url.into());
     }
     Ok(provider_json)
+}
+
+/// The first endpoint the LLM client would refuse, named by `label`, in
+/// label order so the same configuration always names the same one.
+fn unusable_endpoint<'a>(
+    configs: impl IntoIterator<Item = (String, &'a LlmConfig)>,
+) -> Option<String> {
+    let mut configs: Vec<_> = configs.into_iter().collect();
+    configs.sort_by(|a, b| a.0.cmp(&b.0));
+    configs.into_iter().find_map(|(label, config)| {
+        wirken_agent::llm::endpoint_refusal(&config.base_url).map(|refusal| {
+            format!(
+                "{label}: {refusal} Fix the base_url in provider.json, the agent's config \
+                 or --base-url, then start again."
+            )
+        })
+    })
 }
 
 /// Parse the `channel_overrides` map from provider.json and resolve

@@ -484,11 +484,8 @@ impl LlmClient {
     pub fn new(config: LlmConfig) -> Result<Self, AgentError> {
         let is_localhost = plain_http_to_loopback(&config.base_url);
 
-        if !config.base_url.starts_with("https://") && !is_localhost {
-            return Err(AgentError::Http(format!(
-                "LLM endpoint must use HTTPS (got {}). Use HTTPS or localhost.",
-                config.base_url
-            )));
+        if let Some(refusal) = endpoint_refusal(&config.base_url) {
+            return Err(AgentError::Http(refusal));
         }
 
         // No redirect is followed, for any provider. The key was read
@@ -2343,6 +2340,15 @@ pub fn tools_to_json(tools: &[ToolDef]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Why `base_url` cannot be an LLM endpoint, or `None` when it can be:
+/// HTTPS, or plain HTTP to this host. [`LlmClient::new`] refuses with
+/// these words, and `wirken setup` asks again on them, so a URL setup
+/// accepts is one the client takes.
+pub fn endpoint_refusal(base_url: &str) -> Option<String> {
+    (!base_url.starts_with("https://") && !plain_http_to_loopback(base_url))
+        .then(|| format!("LLM endpoint must use HTTPS (got {base_url}). Use HTTPS or localhost."))
+}
+
 /// Whether `url` is plain HTTP to this host, the one case reached
 /// without TLS. The host is parsed out and compared whole, so a name
 /// that only starts like a loopback one is not one.
@@ -2350,6 +2356,41 @@ pub(crate) fn plain_http_to_loopback(url: &str) -> bool {
     reqwest::Url::parse(url).is_ok_and(|u| {
         u.scheme() == "http" && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
     })
+}
+
+#[cfg(test)]
+mod endpoint_refusal_tests {
+    use super::*;
+
+    /// Setup asks again exactly where the client would refuse: the two
+    /// agree on every URL here.
+    #[test]
+    fn setup_and_the_client_refuse_the_same_endpoints() {
+        let refused = [
+            "http://[2001:db8::1]:11434/v1",
+            "http://192.168.1.20:11434/v1",
+            "http://ollama.lan:11434/v1",
+            "http://localhost.example.com/v1",
+            "ftp://localhost/v1",
+            "",
+        ];
+        let taken = [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://[::1]:11434/v1",
+            "https://[2001:db8::1]:11434/v1",
+            "https://api.openai.com/v1",
+        ];
+        for url in refused {
+            let refusal = endpoint_refusal(url).unwrap_or_else(|| panic!("{url} taken"));
+            assert!(refusal.contains("must use HTTPS"), "{refusal}");
+            let config = LlmConfig::from_provider("ollama", url, "m");
+            assert!(LlmClient::new(config).is_err(), "the client took {url}");
+        }
+        for url in taken {
+            assert_eq!(endpoint_refusal(url), None, "{url}");
+        }
+    }
 }
 
 #[cfg(test)]

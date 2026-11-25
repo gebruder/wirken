@@ -30,7 +30,7 @@ Another process holds the address. Change `bind` in `proxy.json`.
 
 **"LLM endpoint must use HTTPS"**
 
-A `base_url` is HTTPS, or plain HTTP to `localhost`, `127.0.0.1` or `[::1]` only.
+A `base_url` is HTTPS, or plain HTTP to `localhost`, `127.0.0.1` or `[::1]` only. Setup asks again when it is typed; `wirken run` says it at start, naming the agent and, for a channel override, the channel. For an Ollama or other inference host on another machine, put it behind TLS and give its `https://` URL.
 
 **"Adapter '<id>' process_exited", "connection_ended" or "connection_panicked"**
 

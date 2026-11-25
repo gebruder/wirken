@@ -74,7 +74,11 @@ Values `wirken setup` writes: `openai`, `anthropic`, `gemini`, `bedrock`,
 as `openai` pointed at its loopback proxy (`http://localhost:8080/v1` by
 default), and NIM as `custom`, which covers any OpenAI-compatible endpoint.
 
-`base_url` is HTTPS, or plain HTTP to `localhost`, `127.0.0.1` or `[::1]`. A
+`base_url` is HTTPS, or plain HTTP to `localhost`, `127.0.0.1` or `[::1]`.
+`wirken setup` asks again for any other URL, and checks an organization's
+`provider.json` the same way; `wirken run` does not start while an agent's
+`base_url`, or a channel override's, is one, and names which. Setup's model
+listing and Ollama probe go to the URL under the same rule. A
 host that is not ASCII is written in its `xn--` form. No provider request
 follows a redirect, and the key is sent only to the origin its vault entry
 allows ([credentials.md](credentials.md#where-a-credential-may-go)).

@@ -97,6 +97,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
     if org_applied && data.join("provider.json").exists() {
         println!("  Step 1: AI provider configured by organization.");
+        org_endpoint_check(&data.join("provider.json"))?;
     } else {
         super::ui::step(1, "Pick your AI");
 
@@ -691,6 +692,29 @@ async fn setup_whatsapp_channel(
     Ok(())
 }
 
+/// Refuse an organization's provider.json whose endpoint the LLM client
+/// would refuse, so setup says so rather than the first message. A
+/// plan-mode provider has no `base_url`; its endpoint is fixed.
+fn org_endpoint_check(provider_path: &std::path::Path) -> Result<()> {
+    let provider: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(provider_path)
+            .with_context(|| format!("read {}", provider_path.display()))?,
+    )
+    .with_context(|| format!("parse {}", provider_path.display()))?;
+    if super::plan_sign_in::provider_auth(&provider)?.is_plan() {
+        return Ok(());
+    }
+    let base_url = provider["base_url"]
+        .as_str()
+        .unwrap_or("http://localhost:11434/v1");
+    if let Some(refusal) = wirken_agent::llm::endpoint_refusal(base_url) {
+        anyhow::bail!(
+            "the organization's provider.json cannot be used: {refusal} Ask for an HTTPS endpoint."
+        );
+    }
+    Ok(())
+}
+
 /// Prompt the operator for optional per-channel LLM provider
 /// overrides and persist them into provider.json under a
 /// `channel_overrides` map. Each override is keyed by channel and
@@ -766,6 +790,7 @@ async fn configure_channel_overrides(
         let base_url: String = Input::new()
             .with_prompt("  Base URL")
             .default(default_base_url.to_string())
+            .validate_with(|url: &String| super::provider_pick::endpoint_check(url))
             .interact_text()?;
 
         // Configs reference vault slots by name and the vault owns
@@ -820,7 +845,34 @@ async fn configure_channel_overrides(
 
 #[cfg(test)]
 mod setup_tests {
-    use super::pick_setup_sandbox_mode;
+    use super::{org_endpoint_check, pick_setup_sandbox_mode};
+
+    /// An organization's provider.json is checked as a typed URL is:
+    /// plain HTTP to another host stops setup, and loopback, HTTPS and
+    /// a plan-mode provider go on.
+    #[test]
+    fn an_organizations_endpoint_is_checked_at_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.json");
+        let check = |json: serde_json::Value| {
+            std::fs::write(&path, json.to_string()).unwrap();
+            org_endpoint_check(&path)
+        };
+        let err = check(serde_json::json!({
+            "provider": "ollama", "model": "m", "base_url": "http://[2001:db8::1]:11434/v1"
+        }))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("must use HTTPS"), "{err:#}");
+        check(serde_json::json!({
+            "provider": "ollama", "model": "m", "base_url": "http://localhost:11434/v1"
+        }))
+        .unwrap();
+        check(serde_json::json!({
+            "provider": "openai", "model": "m", "base_url": "https://api.openai.com/v1"
+        }))
+        .unwrap();
+        check(serde_json::json!({"provider": "ollama", "model": "m"})).unwrap();
+    }
 
     #[test]
     fn no_runsc_picks_exec_only() {
