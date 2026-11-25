@@ -51,7 +51,7 @@ tagged.
   hyper-util 0.1.21, tokio-rustls 0.26.6, zip 9.8.1, bytes 1.12.2 and
   serde-saphyr 2.2.0 with granit-parser 2.2.0 in the lockfile, and with them
   proc-macro2 1.0.107, quote 1.0.47 and syn 3.0.10, from #320. The rest of
-  #320 stays out: rusqlite 0.43, capnp and capnpc 0.28 and jiff 1.0 take a
+  #320 stays out: capnp and capnpc 0.28 and jiff 1.0 take a
   soak cycle, and slack-morphism 2.34 is held until the Slack adapter passes
   a live round-trip.
 - shlex 2.0.1, from #320. 2.0 removes the deprecated `join` and `quote` and
@@ -60,6 +60,9 @@ tagged.
   (`lyrik_steps.rs`), not an `exec` for its tier, which the gate splits
   itself; the step-parsing tests in that file are its soak. shlex 1.3.0
   stays in the lockfile under a build dependency.
+- rusqlite 0.43.0 with libsqlite3-sys 0.40.0, from #320. The bundled SQLite
+  is 3.54.1 before and after, so no store's file format changes, and no
+  Wirken code needed a change for it.
 
 ## [3.5.2] - 2026-11-25
 
