@@ -10,6 +10,17 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- `wirken update` shows curl's progress bar while it downloads a release.
+  curl was given `--progress-bar` and an inherited stderr, but the
+  child was run with `output()`, which pipes stdout and stderr whatever the
+  command was given, so the bar was captured and dropped and the download
+  ran without one. curl's stderr is now read as it comes and passed on to
+  the terminal, and kept so a failure still names what curl said, without
+  the bar (`the_bar_is_drawn_and_an_error_still_names_the_status`,
+  `what_curl_said_leaves_out_the_bar`, `crates/cli/src/commands/update/fetch.rs`).
+
 ## [3.5.2] - 2026-11-25
 
 ### Added

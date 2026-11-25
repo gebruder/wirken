@@ -207,6 +207,27 @@ impl Fetcher {
         progress: Progress,
         scratch: &PathBuf,
     ) -> Result<()> {
+        let mut stderr = tokio::io::stderr();
+        self.run_curl_to(url, max_bytes, timeout, progress, scratch, &mut stderr)
+            .await
+    }
+
+    /// [`Self::run_curl`], with the bar written to `bar` as curl draws
+    /// it. curl's stderr is always a pipe read here, so its error text
+    /// is in the failure message either way; with [`Progress::Bar`] it
+    /// is also passed on to `bar` as it comes. Inheriting stderr would
+    /// not do: `output()` pipes stdout and stderr whatever the command
+    /// was given, so the bar was captured and never shown.
+    async fn run_curl_to(
+        &self,
+        url: &Url,
+        max_bytes: usize,
+        timeout: Duration,
+        progress: Progress,
+        scratch: &PathBuf,
+        bar: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut cmd = tokio::process::Command::new("curl");
         curl_env(&mut cmd);
         cmd.args(["--fail", "--show-error"])
@@ -226,23 +247,51 @@ impl Fetcher {
             .arg(scratch)
             .arg(url.as_str())
             .stdin(Stdio::null())
-            .stdout(Stdio::null());
-        match progress {
-            Progress::Silent => cmd.arg("--silent").stderr(Stdio::piped()),
-            Progress::Bar => cmd.arg("--progress-bar").stderr(Stdio::inherit()),
-        };
-        let output = cmd.output().await.map_err(|e| {
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        cmd.arg(match progress {
+            Progress::Silent => "--silent",
+            Progress::Bar => "--progress-bar",
+        });
+        let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 anyhow::anyhow!("curl is not installed; wirken update downloads with curl")
             } else {
                 anyhow::anyhow!("run curl: {e}")
             }
         })?;
-        if output.status.success() {
+        let mut pipe = child.stderr.take().context("curl's stderr was not piped")?;
+        let mut captured = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = pipe.read(&mut chunk).await.context("read curl's stderr")?;
+            if n == 0 {
+                break;
+            }
+            if progress == Progress::Bar {
+                // A terminal that cannot be written to loses the bar,
+                // not the download.
+                let _ = bar.write_all(&chunk[..n]).await;
+                let _ = bar.flush().await;
+            }
+            captured.extend_from_slice(&chunk[..n]);
+            // The bar is a few hundred bytes a second; keep only the
+            // tail, which is where curl's error line is.
+            if captured.len() > STDERR_KEPT {
+                captured.drain(..captured.len() - STDERR_KEPT);
+            }
+        }
+        let status = child.wait().await.context("wait for curl")?;
+        if progress == Progress::Bar {
+            let _ = bar.write_all(b"\n").await;
+            let _ = bar.flush().await;
+        }
+        if status.success() {
             return Ok(());
         }
-        let code = output.status.code();
-        let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let code = status.code();
+        let said = curl_said(&captured);
         let detail = if said.is_empty() {
             match code {
                 Some(c) => format!("curl exited with status {c}"),
@@ -258,6 +307,25 @@ impl Fetcher {
             _ => bail!("fetch {url}: {detail}"),
         }
     }
+}
+
+/// How much of curl's stderr is kept for the failure message.
+const STDERR_KEPT: usize = 16 * 1024;
+
+/// What curl said on stderr, without its progress bar: the lines that
+/// are not only bar characters, joined.
+fn curl_said(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.chars().all(|c| {
+                    matches!(c, '#' | '-' | '=' | 'O' | '%' | '.' | ' ') || c.is_ascii_digit()
+                })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// A scratch file for one download, unique to this process and call.
@@ -487,6 +555,58 @@ pub(crate) mod tests {
         super::curl_env(&mut cmd);
         let env = String::from_utf8(cmd.output().await.unwrap().stdout).unwrap();
         assert_inherits_nothing("curl", &env);
+    }
+
+    /// The bar reaches the terminal. It used to be lost: curl's
+    /// stderr was set to inherit, and `output()` piped it anyway and
+    /// threw it away, so `wirken update` showed no bar at all.
+    #[tokio::test]
+    async fn the_bar_is_drawn_and_an_error_still_names_the_status() {
+        let body = vec![7u8; 512 * 1024];
+        let server = serve(vec![("/blob".into(), 200, vec![], body.clone())]).await;
+        let fetcher = Fetcher::new(Source::choose(Some(&server.base), None).unwrap());
+        let scratch = scratch_path();
+        let mut bar = Vec::new();
+        fetcher
+            .run_curl_to(
+                &Url::parse(&format!("{}blob", server.base)).unwrap(),
+                body.len(),
+                Duration::from_secs(5),
+                Progress::Bar,
+                &scratch,
+                &mut bar,
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&scratch).unwrap(), body);
+        let _ = std::fs::remove_file(&scratch);
+        let drawn = String::from_utf8_lossy(&bar);
+        assert!(drawn.contains('#') && drawn.contains("100.0%"), "{drawn:?}");
+
+        let mut bar = Vec::new();
+        let err = fetcher
+            .run_curl_to(
+                &Url::parse(&format!("{}missing", server.base)).unwrap(),
+                1024,
+                Duration::from_secs(5),
+                Progress::Bar,
+                &scratch_path(),
+                &mut bar,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        assert!(!format!("{err:#}").contains('#'), "{err:#}");
+    }
+
+    #[test]
+    fn what_curl_said_leaves_out_the_bar() {
+        let stderr = b"\r######                    9.1%\r##########################  100.0%\ncurl: (22) The requested URL returned error: 404\n";
+        assert_eq!(
+            curl_said(stderr),
+            "curl: (22) The requested URL returned error: 404"
+        );
+        assert_eq!(curl_said(b""), "");
     }
 
     #[tokio::test]
