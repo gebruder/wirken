@@ -21,6 +21,12 @@ tagged.
   the bar (`the_bar_is_drawn_and_an_error_still_names_the_status`,
   `what_curl_said_leaves_out_the_bar`, `crates/cli/src/commands/update/fetch.rs`).
 
+### Dependencies
+
+- GitHub Actions: `ossf/scorecard-action` v2.6.0 and
+  `github/codeql-action/upload-sarif` v4.39.4 in the Scorecard workflow,
+  from #319.
+
 ## [3.5.2] - 2026-11-25
 
 ### Added
