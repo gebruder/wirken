@@ -37,6 +37,8 @@ Use the http_request tool to GET https://example.com/
 
 If the model answers in words instead of acting, tell it again: "Use the exec tool."
 
+After a refusal the model may still answer as if the command ran, even with made-up output. The tool line above its reply says what the gate did.
+
 ## 2. Write a rule
 
 In terminal C:
