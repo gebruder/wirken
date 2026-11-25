@@ -134,6 +134,8 @@ modes are Linux and macOS only.
 3. `git clone https://github.com/gebruder/wirken && cd wirken`
 4. Run `scripts/demo/stage.sh up`, then `scripts/demo/stage.sh ask`; [scripts/demo/README.md](scripts/demo/README.md) is the runbook.
 
+Three hands-on exercises, from writing a permission policy to red teaming the gate: [docs/workshop/](docs/workshop/README.md).
+
 Lyrik on code you don't trust: [docs/lyrik.md](docs/lyrik.md#running-on-code-you-dont-trust)
 lists each protection a Lyrik run has against a hostile target and the test
 that proves it. From the clone, on Linux with `git` and util-linux `script`:
