@@ -46,6 +46,15 @@ tagged.
 - GitHub Actions: `ossf/scorecard-action` v2.6.0 and
   `github/codeql-action/upload-sarif` v4.39.4 in the Scorecard workflow,
   from #319.
+- zeroize 1.9.2, rand 0.10.4, clap 4.6.9 with clap_derive 4.6.9, lru 0.19.1,
+  toml 1.2.2 with toml_parser 1.1.7, uuid 1.29.3, http-body-util 0.1.5,
+  hyper-util 0.1.21, tokio-rustls 0.26.6, zip 9.8.1, bytes 1.12.2 and
+  serde-saphyr 2.2.0 with granit-parser 2.2.0 in the lockfile, and with them
+  proc-macro2 1.0.107, quote 1.0.47 and syn 3.0.10, from #320. The rest of
+  #320 stays out: rusqlite 0.43, capnp and capnpc 0.28 and jiff 1.0 and
+  shlex 2.0 take a soak cycle, shlex on the path that splits an `exec`
+  command for its tier, and slack-morphism 2.34 is held until the Slack
+  adapter passes a live round-trip.
 
 ## [3.5.2] - 2026-11-25
 
