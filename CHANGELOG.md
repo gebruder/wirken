@@ -61,17 +61,23 @@ tagged.
   stays in the lockfile under a build dependency.
 - rusqlite 0.43.0 with libsqlite3-sys 0.40.0, from #320. The bundled SQLite
   is 3.54.1 before and after, so no store's file format changes, and no
-  Wirken code needed a change for it.
+  Wirken code needed a change for it. Soaked on a data directory 3.5.2
+  wrote: this build verifies its chain, lists its grants with the same
+  expiries, and exports and searches it byte for byte as 3.5.2 does; a
+  gateway of each version then wrote to the same stores in turn, and the
+  chain of both verifies.
 - capnp 0.28.2 and capnpc 0.28.1, from #320 (which named capnp 0.28.1). The
-  schema is unchanged and so is the wire encoding: frames between the
-  gateway, `wirken chat`, the adapters and the hooks read as before. No
-  Wirken code needed a change.
+  schema is unchanged and no Wirken code needed a change. Soaked across
+  versions: the 3.5.2 `wirken chat` against this gateway, and this chat
+  against a 3.5.2 gateway, each through a turn with an approval card, and
+  the hostile-model demo end to end.
 - jiff 1.0.3, from #320 (which named 1.0.2). Wirken's own `wirken-time`
   formats and parses every stored timestamp, and its tests hold the text
   rows carry to what earlier builds wrote; jiff 1.0 changes no formatting or
   parsing, and its one rename that reached Wirken, `Zoned` to
-  `ZonedDateTime`, is the Zirkel digest's date. jiff 0.2.46 stays in the
-  lockfile under slack-morphism 2.31.
+  `ZonedDateTime`, is the Zirkel digest's date, which
+  `digest_push_tests` in `crates/cli/src/commands/zirkel.rs` reach. jiff
+  0.2.46 stays in the lockfile under slack-morphism 2.31.
 
 ## [3.5.2] - 2026-11-25
 
