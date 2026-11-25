@@ -51,7 +51,7 @@ tagged.
   hyper-util 0.1.21, tokio-rustls 0.26.6, zip 9.8.1, bytes 1.12.2 and
   serde-saphyr 2.2.0 with granit-parser 2.2.0 in the lockfile, and with them
   proc-macro2 1.0.107, quote 1.0.47 and syn 3.0.10, from #320. The rest of
-  #320 stays out: jiff 1.0 takes a soak cycle, and slack-morphism 2.34 is held until the Slack adapter passes
+  #320 stays out: slack-morphism 2.34 is held until the Slack adapter passes
   a live round-trip.
 - shlex 2.0.1, from #320. 2.0 removes the deprecated `join` and `quote` and
   the unsound `DerefMut` on `Shlex`; `split`, the one function Wirken calls,
@@ -66,6 +66,12 @@ tagged.
   schema is unchanged and so is the wire encoding: frames between the
   gateway, `wirken chat`, the adapters and the hooks read as before. No
   Wirken code needed a change.
+- jiff 1.0.3, from #320 (which named 1.0.2). Wirken's own `wirken-time`
+  formats and parses every stored timestamp, and its tests hold the text
+  rows carry to what earlier builds wrote; jiff 1.0 changes no formatting or
+  parsing, and its one rename that reached Wirken, `Zoned` to
+  `ZonedDateTime`, is the Zirkel digest's date. jiff 0.2.46 stays in the
+  lockfile under slack-morphism 2.31.
 
 ## [3.5.2] - 2026-11-25
 

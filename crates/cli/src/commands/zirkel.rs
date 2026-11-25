@@ -852,7 +852,7 @@ async fn push_digest_for_run(
     }
     let opts = RenderOptions {
         date: Some(
-            wirken_time::jiff::Zoned::now()
+            wirken_time::jiff::ZonedDateTime::now()
                 .strftime("%Y-%m-%d")
                 .to_string(),
         ),

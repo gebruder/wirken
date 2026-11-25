@@ -139,7 +139,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 tempfile = "3"
 
 # Time
-jiff = "0.2"
+jiff = "1.0"
 cron = "0.17"
 
 # Error handling
