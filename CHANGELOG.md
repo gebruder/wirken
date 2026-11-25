@@ -36,6 +36,21 @@ tagged.
   `crates/cli/tests/proxy_oidc_live_round_trip.rs`;
   [docs/proxy-identity.md](docs/proxy-identity.md)).
 
+### Fixed
+
+- `wirken chat` no longer waits for good after the gateway refuses its
+  message. A message to a stopped agent was recorded as `message.refused`
+  and nothing came back, so the chat stayed on "waiting for the reply" and
+  Enter did not send, even after `wirken agents resume`. The gateway now
+  sends the terminal an `inboundRefused` frame after the row, with the reason
+  the row records (`agent_stopped`, or `channel_mismatch` for a message
+  naming another channel); the chat shows it in the transcript and takes the
+  next message. Other channels are not sent anything new
+  (`a_message_to_a_stopped_agent_is_refused_at_the_terminal_and_the_next_goes_through`,
+  `crates/cli/src/commands/run.rs`;
+  `a_refused_message_ends_the_wait_and_the_next_one_is_sent`,
+  `crates/cli/src/commands/chat/app.rs`).
+
 ## [3.5.1] - 2026-11-23
 
 ### Operator notes

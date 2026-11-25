@@ -154,6 +154,11 @@ each time the chat starts. `--agent` (alias `--persona`) picks the agent;
 without it the router picks, as for any channel, and an agent the gateway
 does not know is refused before the screen opens.
 
+A message the gateway refuses runs no turn, so no reply comes. The gateway
+tells the chat instead, after the row that records the refusal: the
+transcript shows the refusal and its reason, `agent_stopped` for a message to
+an agent `wirken agents stop` stopped, and the chat takes the next message.
+
 A draft that starts with one of these words is a command, run by the chat and
 never sent to the model. It counts only as the first word, by its exact
 lowercase name; text after it is ignored. Any other `/word` (a skill, `/HELP`,

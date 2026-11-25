@@ -83,6 +83,12 @@ pub(crate) enum ServerEvent {
     Approval(ApprovalAsk),
     /// The turn's reply as the gateway recorded it. Ends the turn.
     Reply(String),
+    /// The gateway refused the message and ran no turn for it, so no
+    /// reply follows. Ends the wait as a reply does.
+    Refused {
+        reason: String,
+        detail: String,
+    },
     /// The answer to a [`Query`], as JSON.
     Answer {
         request_id: String,
@@ -146,6 +152,13 @@ pub(crate) fn parse(
             })
         }
         frame::Outbound(o) => ServerEvent::Reply(text(o?.get_text())?),
+        frame::InboundRefused(r) => {
+            let r = r?;
+            ServerEvent::Refused {
+                reason: text(r.get_reason())?,
+                detail: text(r.get_detail())?,
+            }
+        }
         frame::TerminalReply(r) => {
             let r = r?;
             ServerEvent::Answer {
@@ -292,6 +305,20 @@ mod tests {
             .init_outbound()
             .set_text("done");
         assert_eq!(round_trip(&msg), ServerEvent::Reply("done".into()));
+
+        let mut msg = Builder::new_default();
+        {
+            let mut r = msg.init_root::<frame::Builder<'_>>().init_inbound_refused();
+            r.set_reason("agent_stopped");
+            r.set_detail("agent 'default' is stopped");
+        }
+        assert_eq!(
+            round_trip(&msg),
+            ServerEvent::Refused {
+                reason: "agent_stopped".into(),
+                detail: "agent 'default' is stopped".into(),
+            }
+        );
     }
 
     #[test]

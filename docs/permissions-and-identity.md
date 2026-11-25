@@ -317,7 +317,9 @@ stopped nothing runs under its id:
 
 - A message to it is refused: a `message.refused` row with `reason`
   `agent_stopped` follows its `message.inbound` row, no reply is sent, and
-  nothing is queued. Web chat answers 409.
+  nothing is queued. `wirken chat` is told: the refusal and its reason show
+  in the transcript, and the chat takes the next message, so one sent after
+  `resume` goes through. Web chat answers 409.
 - A cron firing for it is skipped with a `cron.skipped` row, not deferred.
 - A turn does not start, and a turn already running ends at its next tool
   call.

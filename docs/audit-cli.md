@@ -33,7 +33,7 @@ connection ended for another reason), with no sender or content.
 
 A message to a stopped agent is a `message.refused` row with detail
 `{reason: "agent_stopped", agent_id}` after its `message.inbound` row, and no
-reply is sent. A cron firing for a stopped agent is a `cron.skipped` row with
+reply is sent; a terminal is sent the refusal after the row instead. A cron firing for a stopped agent is a `cron.skipped` row with
 the same detail, targeting the job id; the firing is not deferred.
 
 | `kind` | Identity fields | Emit context |

@@ -460,6 +460,20 @@ struct TerminalReply {
   # crates/cli/src/commands/terminal_queries.rs.
 }
 
+struct InboundRefused {
+  # Gateway -> terminal. The message the terminal sent was refused and
+  # no turn ran for it, so no outbound frame follows. Sent after the
+  # row recording the refusal, and ends the wait for a reply as an
+  # outbound frame does.
+  inboundId @0 :Text;
+  # The id the terminal gave the message.
+  conversationId @1 :Text;
+  reason @2 :Text;
+  # The reason as the refusal's row records it, e.g. `agent_stopped`.
+  detail @3 :Text;
+  # One line for the operator: what was refused and what lifts it.
+}
+
 # --- Top-level frame ---
 #
 # Every message on the wire is a Frame. The tag determines
@@ -522,5 +536,6 @@ struct Frame {
     toolActivity @21 :ToolActivity;
     terminalRequest @22 :TerminalRequest;
     terminalReply @23 :TerminalReply;
+    inboundRefused @24 :InboundRefused;
   }
 }

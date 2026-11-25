@@ -3394,6 +3394,39 @@ async fn record_refused_for_stop(
     }
 }
 
+/// Tell a terminal that the message it sent was refused, after the row
+/// that records the refusal. No turn ran, so no outbound frame follows,
+/// and without this the chat waits for a reply that never comes. Only
+/// the terminal is told: a channel adapter has no frame for it, and a
+/// refusal posted into a channel's conversation would read as a reply.
+async fn tell_terminal_refused(
+    writer: &Mutex<IpcFrameWriter>,
+    inbound_id: &str,
+    conversation_id: &str,
+    reason: &str,
+    detail: &str,
+) {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let mut r = msg.init_root::<frame::Builder<'_>>().init_inbound_refused();
+        r.set_inbound_id(inbound_id);
+        r.set_conversation_id(conversation_id);
+        r.set_reason(reason);
+        r.set_detail(detail);
+    }
+    if let Err(e) = writer.lock().await.write_message(&msg).await {
+        tracing::debug!("could not tell the terminal its message was refused: {e}");
+    }
+}
+
+/// What a terminal is told when its message reaches a stopped agent.
+fn stopped_refusal_detail(agent_id: &str) -> String {
+    format!(
+        "agent '{agent_id}' is stopped; nothing runs under it until \
+         `wirken agents resume {agent_id}`"
+    )
+}
+
 /// The row for a cron firing skipped because its agent is stopped.
 async fn record_cron_skipped(audit: &AuditWriter, job_id: &str, agent_id: &str) {
     let row = AuditEvent::new(ActorKind::Service, "cron", "cron.skipped", job_id)
@@ -5643,6 +5676,20 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                         })),
                     )
                     .await;
+                if conn.terminal.is_some() {
+                    tell_terminal_refused(
+                        writer,
+                        &id,
+                        &conversation_id,
+                        "channel_mismatch",
+                        &format!(
+                            "the message named channel '{channel}'; this connection is the \
+                             '{}' channel",
+                            authenticated_channel.as_str()
+                        ),
+                    )
+                    .await;
+                }
                 return Ok(());
             }
 
@@ -5839,6 +5886,16 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                     &resolved_agent,
                 )
                 .await;
+                if conn.terminal.is_some() {
+                    tell_terminal_refused(
+                        writer,
+                        &id,
+                        &conversation_id,
+                        "agent_stopped",
+                        &stopped_refusal_detail(&resolved_agent),
+                    )
+                    .await;
+                }
                 return Ok(());
             }
 
@@ -5878,6 +5935,16 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                                 &resolved_agent,
                             )
                             .await;
+                            if conn.terminal.is_some() {
+                                tell_terminal_refused(
+                                    writer,
+                                    &id,
+                                    &conversation_id,
+                                    "agent_stopped",
+                                    &stopped_refusal_detail(&resolved_agent),
+                                )
+                                .await;
+                            }
                             return Ok(());
                         }
                         Err(e) => {
@@ -5896,6 +5963,16 @@ async fn handle_action(conn: &Conn<'_>, action: InboundAction) -> Result<()> {
                         &resolved_agent,
                     )
                     .await;
+                    if conn.terminal.is_some() {
+                        tell_terminal_refused(
+                            writer,
+                            &id,
+                            &conversation_id,
+                            "agent_stopped",
+                            &stopped_refusal_detail(&resolved_agent),
+                        )
+                        .await;
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -10692,6 +10769,7 @@ mod terminal_channel_tests {
         log: Arc<SqliteSessionLog>,
         queue: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
         operator: OperatorKey,
+        permissions: Arc<std::sync::Mutex<wirken_gateway::permissions::PermissionStore>>,
         connection: Option<tokio::task::JoinHandle<Result<()>>>,
     }
 
@@ -10706,15 +10784,16 @@ mod terminal_channel_tests {
             let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("sessions.db")).unwrap());
             let workspace = tmp.path().join("workspace");
             std::fs::create_dir_all(&workspace).unwrap();
+            let permissions = Arc::new(std::sync::Mutex::new(
+                wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
+                    ":memory:",
+                ))
+                .unwrap(),
+            ));
             let factory = AgentFactory::new(
                 default_agent(model, workspace),
                 log.clone(),
-                Arc::new(std::sync::Mutex::new(
-                    wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
-                        ":memory:",
-                    ))
-                    .unwrap(),
-                )),
+                permissions.clone(),
             );
             let queue = Arc::new(wirken_gateway::pending_approvals::PendingApprovalQueue::new());
             let terminals = Arc::new(TerminalSessions::new());
@@ -10769,6 +10848,7 @@ mod terminal_channel_tests {
                     log,
                     queue,
                     operator,
+                    permissions,
                     connection: Some(connection),
                 },
                 client_end,
@@ -10830,6 +10910,12 @@ mod terminal_channel_tests {
         },
         Reply(String),
         Answer(String, serde_json::Value),
+        Refused {
+            inbound_id: String,
+            conversation_id: String,
+            reason: String,
+            detail: String,
+        },
     }
 
     async fn next(reader: &mut IpcFrameReader) -> Seen {
@@ -10867,6 +10953,15 @@ mod terminal_channel_tests {
                 frame::Outbound(o) => {
                     Seen::Reply(o.unwrap().get_text().unwrap().to_string().unwrap())
                 }
+                frame::InboundRefused(r) => {
+                    let r = r.unwrap();
+                    Seen::Refused {
+                        inbound_id: r.get_inbound_id().unwrap().to_string().unwrap(),
+                        conversation_id: r.get_conversation_id().unwrap().to_string().unwrap(),
+                        reason: r.get_reason().unwrap().to_string().unwrap(),
+                        detail: r.get_detail().unwrap().to_string().unwrap(),
+                    }
+                }
                 frame::TerminalReply(r) => {
                     let r = r.unwrap();
                     Seen::Answer(
@@ -10881,10 +10976,19 @@ mod terminal_channel_tests {
     }
 
     async fn send_message(writer: &mut IpcFrameWriter, conversation: &str, text: &str) {
+        send_message_as(writer, "m-1", conversation, text).await;
+    }
+
+    async fn send_message_as(
+        writer: &mut IpcFrameWriter,
+        id: &str,
+        conversation: &str,
+        text: &str,
+    ) {
         let mut msg = capnp::message::Builder::new_default();
         {
             let mut m = msg.init_root::<frame::Builder<'_>>().init_inbound();
-            m.set_id("m-1");
+            m.set_id(id);
             m.set_sender_id("someone-else");
             m.set_sender_name("davi");
             m.set_channel("terminal");
@@ -10912,6 +11016,64 @@ mod terminal_channel_tests {
             }
         }
         writer.write_message(&msg).await.unwrap();
+    }
+
+    /// A message the gateway refuses gets no turn and so no reply. The
+    /// terminal is told instead, after the row, and the connection
+    /// carries the next message once the agent is resumed. Before, the
+    /// refusal sent nothing and the chat waited for good.
+    #[tokio::test]
+    async fn a_message_to_a_stopped_agent_is_refused_at_the_terminal_and_the_next_goes_through() {
+        let model = super::scripted_model::serve(vec![text_body(&["Back."])]).await;
+        let (mut gw, client) = Gateway::start(model).await;
+        let (mut reader, mut writer) = split_stream(client);
+        wirken_ipc::perform_terminal_handshake(&mut reader, &mut writer, &gw.operator, "")
+            .await
+            .unwrap();
+
+        gw.permissions
+            .lock()
+            .unwrap()
+            .stop_agent("default", "test")
+            .unwrap();
+        send_message_as(&mut writer, "m-1", "c-9", "hello").await;
+        match next(&mut reader).await {
+            Seen::Refused {
+                inbound_id,
+                conversation_id,
+                reason,
+                detail,
+            } => {
+                assert_eq!(inbound_id, "m-1");
+                assert_eq!(conversation_id, "c-9");
+                assert_eq!(reason, "agent_stopped");
+                assert!(detail.contains("wirken agents resume default"), "{detail}");
+            }
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+
+        gw.permissions
+            .lock()
+            .unwrap()
+            .resume_agent("default")
+            .unwrap();
+        send_message_as(&mut writer, "m-2", "c-9", "hello again").await;
+        let reply = loop {
+            match next(&mut reader).await {
+                Seen::Chunk(_) => {}
+                Seen::Reply(text) => break text,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert_eq!(reply, "Back.");
+        drop((reader, writer));
+        gw.finish().await.unwrap();
+
+        let refused = gw.rows("message.refused");
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(refused[0].detail["reason"], "agent_stopped");
+        assert_eq!(gw.rows("message.inbound").len(), 2);
+        assert_eq!(gw.rows("message.outbound").len(), 1);
     }
 
     #[tokio::test]
@@ -11013,6 +11175,7 @@ mod terminal_channel_tests {
                 Seen::Call(name, args) => seen.push(format!("call {name} {args}")),
                 Seen::Result(name, ok, _) => seen.push(format!("result {name} {ok}")),
                 Seen::Chunk(_) => {}
+                refused @ Seen::Refused { .. } => panic!("unexpected {refused:?}"),
             }
         };
         assert_eq!(reply, "Not run.");

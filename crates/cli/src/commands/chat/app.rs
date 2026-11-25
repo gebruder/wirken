@@ -186,6 +186,26 @@ impl App {
         }
     }
 
+    /// The turn is over, by its reply or by a refusal: the screen takes
+    /// a message again, and nothing the turn asked is still asked.
+    /// Returns what the turn changed to ask for: the panels and the list.
+    fn end_turn(&mut self, now: Instant) -> Vec<Outgoing> {
+        self.streaming = false;
+        self.busy = false;
+        if !self.cards.is_empty() {
+            self.cards.clear();
+            self.answer.clear();
+            self.entries.push(Entry::Note(
+                "The turn ended; its open approval requests closed with it.".into(),
+            ));
+        }
+        self.show_next(now);
+        vec![
+            Outgoing::Ask(Query::Status),
+            Outgoing::Ask(Query::Conversations),
+        ]
+    }
+
     /// Take in a frame from the gateway. Returns what to ask next.
     pub fn on_server(&mut self, event: ServerEvent, now: Instant) -> Vec<Outgoing> {
         match event {
@@ -253,22 +273,17 @@ impl App {
                     (true, Some(Entry::Agent(reply))) => *reply = text,
                     _ => self.entries.push(Entry::Agent(text)),
                 }
-                self.streaming = false;
-                self.busy = false;
-                // The turn is over, so nothing it asked is still asked.
-                if !self.cards.is_empty() {
-                    self.cards.clear();
-                    self.answer.clear();
-                    self.entries.push(Entry::Note(
-                        "The turn ended; its open approval requests closed with it.".into(),
-                    ));
-                }
-                self.show_next(now);
-                // What the turn changed: the panels and the list.
-                return vec![
-                    Outgoing::Ask(Query::Status),
-                    Outgoing::Ask(Query::Conversations),
-                ];
+                return self.end_turn(now);
+            }
+            // No turn ran, or a stop ended the one running: the wait is
+            // over all the same, and the next message can be sent.
+            ServerEvent::Refused { reason, detail } => {
+                self.entries.push(Entry::Note(if detail.is_empty() {
+                    format!("The gateway refused this message ({reason}).")
+                } else {
+                    format!("The gateway refused this message ({reason}): {detail}.")
+                }));
+                return self.end_turn(now);
             }
             // Answers are matched to their query by the caller.
             ServerEvent::Answer { .. } | ServerEvent::Other => {}
@@ -791,6 +806,38 @@ mod tests {
             Some(Outgoing::Open { resume: false, .. })
         ));
         assert_ne!(app.conversation, "c-1");
+    }
+
+    #[test]
+    fn a_refused_message_ends_the_wait_and_the_next_one_is_sent() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        typed(&mut app, "hi", now);
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter), now),
+            Some(Outgoing::Message("hi".into()))
+        );
+        assert!(app.busy);
+        app.on_server(
+            ServerEvent::Refused {
+                reason: "agent_stopped".into(),
+                detail: "agent 'default' is stopped".into(),
+            },
+            now,
+        );
+        assert!(!app.busy);
+        assert!(
+            matches!(app.entries.last(), Some(Entry::Note(n))
+                if n.contains("refused") && n.contains("agent_stopped")
+                    && n.contains("agent 'default' is stopped")),
+            "{:?}",
+            app.entries
+        );
+        typed(&mut app, "again", now);
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter), now),
+            Some(Outgoing::Message("again".into()))
+        );
     }
 
     #[test]
