@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [3.5.2] - 2026-11-25
+
 ### Added
 
 - A client of the proxy listener can present a JWT from the organization's
@@ -35,6 +37,11 @@ tagged.
   `crates/cli/tests/proxy_identity_commands.rs`;
   `crates/cli/tests/proxy_oidc_live_round_trip.rs`;
   [docs/proxy-identity.md](docs/proxy-identity.md)).
+- Workshop exercises, each a page of commands to copy and then open
+  questions: writing a permission policy and watching the gate allow, ask and
+  refuse; reconstructing an agent's actions from the signed audit chain
+  offline and breaking a copy of it; and red teaming the gate with the demo's
+  scripted model ([docs/workshop/](docs/workshop/README.md)).
 
 ### Fixed
 
@@ -50,6 +57,19 @@ tagged.
   `crates/cli/src/commands/run.rs`;
   `a_refused_message_ends_the_wait_and_the_next_one_is_sent`,
   `crates/cli/src/commands/chat/app.rs`).
+
+### Deferred
+
+- Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
+  serenity 0.12.5 in the Discord adapter, stay open as in 3.5.1. The fix for
+  all three is serenity on rustls 0.23, held until the migrated adapter
+  passes a live Discord round-trip.
+- #320 (eighteen Cargo updates) is deferred whole, as #317 was: it carries
+  0.x-minor and major bumps (rusqlite 0.43, capnp and capnpc 0.28, jiff 1.0,
+  shlex 2.0) that take a soak cycle, and slack-morphism 2.34, a channel-adapter
+  migration held until the Slack adapter passes a live round-trip.
+- #319 (scorecard-action 2.6.0, codeql-action upload-sarif 4.39.4) touches
+  CI only and ships in no binary; it lands after this release.
 
 ## [3.5.1] - 2026-11-23
 
