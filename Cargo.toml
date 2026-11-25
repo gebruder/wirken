@@ -84,7 +84,7 @@ security-framework = "3.7"
 secret-service = "5.1"
 
 # IPC
-capnp = "0.27"
+capnp = "0.28"
 
 # Sandbox
 bollard = "0.21"
