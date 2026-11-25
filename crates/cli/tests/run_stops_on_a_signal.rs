@@ -6,6 +6,8 @@
 //! shutdown never returned from the flush.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -64,15 +66,17 @@ fn stops_on(signal: libc::c_int) {
         r#"{"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:9"}"#,
     )
     .unwrap();
-    let mut gateway = Command::new(env!("CARGO_BIN_EXE_wirken"))
-        .args(["run", "--port", &free_port().to_string()])
-        .env("WIRKEN_DATA_DIR", data.path())
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut gateway = common::KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_wirken"))
+            .args(["run", "--port", &free_port().to_string()])
+            .env("WIRKEN_DATA_DIR", data.path())
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let pid = gateway.id();
 
     let (lines_tx, lines) = std::sync::mpsc::channel();
@@ -238,15 +242,17 @@ fn sigkill_of_the_gateway_stops_the_proxy_and_removes_its_containers() {
         eprintln!("no Docker or no {STUB_IMAGE}: checking the proxy only");
     }
 
-    let mut gateway = Command::new(env!("CARGO_BIN_EXE_wirken"))
-        .args(["run", "--port", &free_port().to_string()])
-        .env("WIRKEN_DATA_DIR", data.path())
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut gateway = common::KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_wirken"))
+            .args(["run", "--port", &free_port().to_string()])
+            .env("WIRKEN_DATA_DIR", data.path())
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let pid = gateway.id();
     let (lines_tx, lines) = std::sync::mpsc::channel();
     let stdout = gateway.stdout.take().unwrap();

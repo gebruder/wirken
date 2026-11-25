@@ -10,6 +10,40 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// A `wirken` process a test started and holds: `wirken run`, or a
+/// `wirken mcp-proxy` run on its own. Dropping it kills the process if it
+/// is still running and reaps it, however the test ends.
+///
+/// `std::process::Child` does neither on drop. A test that panicked
+/// between starting a gateway and stopping it, on an assertion that
+/// failed or a deadline that passed under load, left the gateway
+/// running after the test binary exited: orphaned, serving a data
+/// directory its `TempDir` had already removed. Hold the guard after the
+/// `TempDir` so the process is gone before the directory is.
+pub struct KillOnDrop(pub std::process::Child);
+
+impl std::ops::Deref for KillOnDrop {
+    type Target = std::process::Child;
+    fn deref(&self) -> &std::process::Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for KillOnDrop {
+    fn deref_mut(&mut self) -> &mut std::process::Child {
+        &mut self.0
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
 /// One request the scripted model received: path and JSON body.
 #[derive(Debug, Clone)]
 pub struct Received {

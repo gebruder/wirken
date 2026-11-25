@@ -25,10 +25,12 @@
 //! checked against each other.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use wirken_audit::{SessionEvent, SessionId, SessionLog};
@@ -72,7 +74,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn stop(mut gateway: Child) {
+fn stop(mut gateway: common::KillOnDrop) {
     // SAFETY: kill(2) on the child this test spawned and still holds.
     unsafe {
         libc::kill(gateway.id() as libc::pid_t, libc::SIGTERM);
@@ -221,14 +223,16 @@ async fn real_clients_go_through_the_proxy_and_the_archive_matches_the_chain() {
     let token_id = token.split('_').nth(1).unwrap().to_string();
     let lane = format!("proxy-{token_id}");
 
-    let mut gateway = wirken(data)
-        .args(["run", "--port", &free_port().to_string()])
-        .env("WIRKEN_LIVE_RELOAD_INTERVAL_S", "3600")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+    let mut gateway = common::KillOnDrop(
+        wirken(data)
+            .args(["run", "--port", &free_port().to_string()])
+            .env("WIRKEN_LIVE_RELOAD_INTERVAL_S", "3600")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
     let stdout = gateway.stdout.take().unwrap();
     let (tx, lines) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

@@ -27,6 +27,8 @@
 //! leaves it unanswered.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -104,7 +106,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn stop(mut gateway: Child) {
+fn stop(mut gateway: common::KillOnDrop) {
     // SAFETY: `kill` takes a pid and a signal and touches no memory;
     // the pid is this test's own child, still unreaped.
     unsafe {
@@ -385,14 +387,16 @@ fn a_real_mcp_client_calls_a_contained_servers_tool_through_the_gate() {
         .to_string();
     let token_id = token.split('_').nth(1).unwrap().to_string();
 
-    let gateway = wirken(&data)
-        .args(["run", "-p", &free_port().to_string()])
-        // An unanswered approval is given up on after this long.
-        .env("WIRKEN_CLI_APPROVAL_TIMEOUT_S", "12")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let gateway = common::KillOnDrop(
+        wirken(&data)
+            .args(["run", "-p", &free_port().to_string()])
+            // An unanswered approval is given up on after this long.
+            .env("WIRKEN_CLI_APPROVAL_TIMEOUT_S", "12")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let base = format!("http://127.0.0.1:{proxy_port}");
     let up = Instant::now();
     while TcpStream::connect(("127.0.0.1", proxy_port)).is_err() {

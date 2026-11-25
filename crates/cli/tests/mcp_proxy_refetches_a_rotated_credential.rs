@@ -17,10 +17,12 @@
 //! look would come after every deadline here has passed.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -180,7 +182,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn stop(mut gateway: Child) {
+fn stop(mut gateway: common::KillOnDrop) {
     // SAFETY: kill(2) on the child this test spawned and still holds.
     unsafe {
         libc::kill(gateway.id() as libc::pid_t, libc::SIGTERM);
@@ -223,17 +225,19 @@ async fn a_rotated_bearer_token_reaches_the_proxy_after_one_refused_call() {
         "tok-1",
     );
 
-    let mut gateway = Command::new(env!("CARGO_BIN_EXE_wirken"))
-        .args(["run", "--port", &free_port().to_string()])
-        .env("WIRKEN_DATA_DIR", data.path())
-        .env(PASSPHRASE_ENV, PASSPHRASE)
-        .env("WIRKEN_LIVE_RELOAD_INTERVAL_S", LIVE_RELOAD_INTERVAL_S)
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut gateway = common::KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_wirken"))
+            .args(["run", "--port", &free_port().to_string()])
+            .env("WIRKEN_DATA_DIR", data.path())
+            .env(PASSPHRASE_ENV, PASSPHRASE)
+            .env("WIRKEN_LIVE_RELOAD_INTERVAL_S", LIVE_RELOAD_INTERVAL_S)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let stdout = gateway.stdout.take().unwrap();
     let (tx, lines) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

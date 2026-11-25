@@ -124,16 +124,18 @@ fn the_proxy_run_starts_has_no_passphrase_no_vault_open_and_its_credential() {
     let scratch = tempfile::tempdir().unwrap();
     let out = scratch.path().join("token-the-server-got");
     let data = data_dir(&out);
-    let mut gateway = Command::new(env!("CARGO_BIN_EXE_wirken"))
-        .args(["run", "--port", &free_port().to_string()])
-        .env("WIRKEN_DATA_DIR", data.path())
-        .env(PASSPHRASE_ENV, PASSPHRASE)
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut gateway = common::KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_wirken"))
+            .args(["run", "--port", &free_port().to_string()])
+            .env("WIRKEN_DATA_DIR", data.path())
+            .env(PASSPHRASE_ENV, PASSPHRASE)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let pid = gateway.id();
     let stdout = gateway.stdout.take().unwrap();
     let (tx, lines) = std::sync::mpsc::channel();
@@ -266,16 +268,18 @@ fn the_proxy_binary_opens_no_vault_file() {
     // Given the passphrase in its environment and nothing handed over,
     // the proxy still has no reason, and no code, to open the vault.
     let socket = scratch.path().join("proxy.sock");
-    let mut proxy = Command::new(env!("CARGO_BIN_EXE_wirken"))
-        .arg("mcp-proxy")
-        .env("WIRKEN_DATA_DIR", data.path())
-        .env("WIRKEN_MCP_SOCKET", &socket)
-        .env(PASSPHRASE_ENV, PASSPHRASE)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut proxy = common::KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_wirken"))
+            .arg("mcp-proxy")
+            .env("WIRKEN_DATA_DIR", data.path())
+            .env("WIRKEN_MCP_SOCKET", &socket)
+            .env(PASSPHRASE_ENV, PASSPHRASE)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     proxy
         .stdin
         .take()

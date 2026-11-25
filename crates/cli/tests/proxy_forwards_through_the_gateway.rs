@@ -4,10 +4,12 @@
 //! the lane the calls are recorded on verifies and exports.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -84,7 +86,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn stop(mut gateway: Child) {
+fn stop(mut gateway: common::KillOnDrop) {
     // SAFETY: kill(2) on the child this test spawned and still holds.
     unsafe {
         libc::kill(gateway.id() as libc::pid_t, libc::SIGTERM);
@@ -118,15 +120,17 @@ fn conversation_lanes(data: &Path, token_id: &str) -> Vec<String> {
 
 /// Start `wirken run` on `data` and wait until it is serving. Returns
 /// it with what it printed.
-fn start_gateway(data: &Path) -> (Child, Vec<String>) {
-    let mut gateway = wirken(data)
-        .args(["run", "--port", &free_port().to_string()])
-        .env("WIRKEN_LIVE_RELOAD_INTERVAL_S", "3600")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+fn start_gateway(data: &Path) -> (common::KillOnDrop, Vec<String>) {
+    let mut gateway = common::KillOnDrop(
+        wirken(data)
+            .args(["run", "--port", &free_port().to_string()])
+            .env("WIRKEN_LIVE_RELOAD_INTERVAL_S", "3600")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let stdout = gateway.stdout.take().unwrap();
     let (tx, lines) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

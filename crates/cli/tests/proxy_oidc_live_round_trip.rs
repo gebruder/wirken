@@ -22,10 +22,12 @@
 //! no keys to be had, the token that was accepted is refused.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wirken_audit::{PROXY_SESSION, ProxyRefusal, SessionEvent, SessionId, SessionLog};
@@ -70,7 +72,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn stop(mut gateway: Child) {
+fn stop(mut gateway: common::KillOnDrop) {
     // SAFETY: `kill` takes a pid and a signal and touches no memory;
     // the pid is this test's own child, still unreaped.
     unsafe {
@@ -324,13 +326,15 @@ fn claims(jwt: &str) -> serde_json::Value {
     .unwrap()
 }
 
-fn start_gateway(data: &Path, proxy_port: u16) -> Child {
-    let gateway = wirken(data)
-        .args(["run", "-p", &free_port().to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+fn start_gateway(data: &Path, proxy_port: u16) -> common::KillOnDrop {
+    let gateway = common::KillOnDrop(
+        wirken(data)
+            .args(["run", "-p", &free_port().to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let up = Instant::now();
     while TcpStream::connect(("127.0.0.1", proxy_port)).is_err() {
         assert!(up.elapsed() < Duration::from_secs(60), "the listener is up");

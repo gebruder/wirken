@@ -3,6 +3,8 @@
 //! process, and leaves its socket where it is.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -33,11 +35,13 @@ fn a_second_gateway_on_a_live_data_directory_refuses_to_start() {
         r#"{"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:9"}"#,
     )
     .unwrap();
-    let mut first = run(data.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut first = common::KillOnDrop(
+        run(data.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let (lines_tx, lines) = std::sync::mpsc::channel();
     let stdout = first.stdout.take().unwrap();
     std::thread::spawn(move || {
