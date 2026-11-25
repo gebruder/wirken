@@ -367,6 +367,8 @@ export WIRKEN_DATA_DIR=/tmp/wirken-smoke/data
 ./wirken update                                                # type X.Y.Z
 ./wirken --version                                             # X.Y.Z
 ./wirken update --check                                        # Up to date.
+./wirken update --to P.Q.R --allow-downgrade                   # type P.Q.R; X.Y.Z's own download
+./wirken update                                                # type X.Y.Z
 ./wirken update --rollback                                     # type rollback
 ./wirken --version                                             # P.Q.R
 ```
@@ -380,6 +382,10 @@ X.Y.Z at ... checked against releases.json signed by <fingerprint>`, where
 the fingerprint is the release key's. A refused signature, a fetch error, or
 a sha256 mismatch means the manifest step (6-9) or the build is broken for
 every installed binary. The rollback must restore `P.Q.R` byte for byte.
+
+The first `update` downloads with `P.Q.R`'s code, so its progress bar is
+`P.Q.R`'s. The downgrade is `X.Y.Z` downloading, and must show `X.Y.Z`'s bar;
+the second `update` puts `X.Y.Z` back before the rollback.
 
 This replaces the old `install.sh` smoke test: `install.sh` is exercised by
 `scripts/test-install.sh` in the pre-flight, and the update path is the one
