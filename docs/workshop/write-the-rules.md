@@ -69,16 +69,15 @@ pwd whoami id uname hostname date echo printf which type
 wirken agents stop default --revoke-all
 ```
 
-Send any message. No reply comes: the gateway refuses the message before the model sees it, and the chat waits. Your grant from step 2 is gone; `wirken permissions list --agent default` shows none.
-
-Leave the chat with Ctrl+C. Then bring the agent back and start the chat again:
+Send any message. Nothing runs: the gateway refuses it before the model sees it, and the chat shows the refusal and its reason, `agent_stopped`. Your grant from step 2 is gone; `wirken permissions list --agent default` shows none. Then bring the agent back:
 
 ```
 wirken agents resume default
-wirken chat
 ```
 
-Send message 2 again. The card is back.
+Send message 2 again in the same chat. The card is back.
+
+On a release before 3.5.2 the chat waits for a reply that never comes: leave with Ctrl+C and start `wirken chat` again.
 
 ## 5. Now your own agent
 

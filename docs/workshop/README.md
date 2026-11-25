@@ -8,6 +8,6 @@ Three hands-on exercises. Each starts from commands to copy, then leaves you to 
 
 Work on your own laptop. Nobody touches anyone else's. If Wirken isn't running on yours, sit beside someone whose is and follow along.
 
-Before you start: Wirken installed, `wirken doctor` passing, Docker running, and Ollama with a small model.
+Before you start: Wirken installed and brought up to the latest release with `wirken update`, `wirken doctor` passing, Docker running, and Ollama with a small model.
 
-The steps were checked with Wirken 3.5.1, Ollama serving `llama3.2:3b`, and Docker's default runtime. Another model may word its replies differently; the gate's answers do not change with the model.
+The steps were checked with Wirken 3.5.2, Ollama serving `llama3.2:3b`, and Docker's default runtime. Another model may word its replies differently; the gate's answers do not change with the model.
