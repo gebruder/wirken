@@ -74,7 +74,11 @@ impl LlmClient {
             return self.complete_plan(messages, tools, Some(&tx)).await;
         }
         match self.config().provider.as_str() {
-            "openai" | "ollama" | "custom" | "infomaniak" | "hetzner" => {
+            // Ollama streams on its own `/api/chat`, which honors the
+            // context window asked for; its OpenAI bridge drops it and
+            // serves 4096 tokens whatever the model takes.
+            "ollama" => self.stream_ollama(messages, tools, &tx).await,
+            "openai" | "custom" | "infomaniak" | "hetzner" => {
                 self.stream_openai(messages, tools, api_key, &tx).await
             }
             "anthropic" => self.stream_anthropic(messages, tools, api_key, &tx).await,
@@ -92,6 +96,103 @@ impl LlmClient {
                 Ok((response, usage))
             }
         }
+    }
+
+    /// Ollama's native `/api/chat`, streamed: one JSON object per line,
+    /// each with a piece of the message, the last with `done` and the
+    /// counts. The request is the one [`LlmClient::complete`] sends
+    /// ollama, `options.num_ctx` included, so a streamed turn gets the
+    /// declared context window. The pieces are put back into one reply
+    /// and read by the same parser as the non-streamed one.
+    async fn stream_ollama(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        tx: &tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
+        let url = crate::llm::ollama_chat_url(&self.config().base_url);
+        let messages_json: Vec<serde_json::Value> =
+            messages.iter().map(super::llm::message_to_json).collect();
+        let mut body = crate::llm::build_ollama_request_body(self.config(), messages_json, tools);
+        body["stream"] = serde_json::Value::Bool(true);
+
+        let response = self
+            .http_client()
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentError::Http(e.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::Llm(format!("HTTP {status}: {body}")));
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut content = String::new();
+        let mut thinking = String::new();
+        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+        let mut last = serde_json::Value::Null;
+        'stream: while let Some(chunk) = stream.next().await {
+            let bytes = chunk.map_err(|e| AgentError::Http(format!("stream read: {e}")))?;
+            buffer.extend_from_slice(&bytes);
+            if buffer.len() > MAX_SSE_BUFFER_BYTES {
+                return Err(AgentError::Http(format!(
+                    "ollama stream exceeded {MAX_SSE_BUFFER_BYTES} bytes without a line end; \
+                     refusing to grow further (hostile or buggy upstream?)"
+                )));
+            }
+            while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=end).collect();
+                let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if let Some(error) = parsed.get("error").and_then(|e| e.as_str()) {
+                    return Err(AgentError::Llm(format!("ollama: {error}")));
+                }
+                if let Some(message) = parsed.get("message") {
+                    if let Some(piece) = message.get("content").and_then(|c| c.as_str())
+                        && !piece.is_empty()
+                    {
+                        content.push_str(piece);
+                        let _ = tx.send(StreamEvent::TextDelta(piece.to_string())).await;
+                    }
+                    if let Some(piece) = message.get("thinking").and_then(|t| t.as_str()) {
+                        thinking.push_str(piece);
+                    }
+                    if let Some(calls) = message.get("tool_calls").and_then(|t| t.as_array()) {
+                        tool_calls.extend(calls.iter().cloned());
+                    }
+                }
+                let done = parsed.get("done").and_then(|d| d.as_bool()) == Some(true);
+                last = parsed;
+                if done {
+                    break 'stream;
+                }
+            }
+        }
+
+        // The reply as the non-streamed endpoint returns it.
+        let mut message = serde_json::json!({ "role": "assistant", "content": content });
+        if !thinking.is_empty() {
+            message["thinking"] = serde_json::Value::String(thinking);
+        }
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        }
+        let mut whole = serde_json::json!({ "message": message });
+        for key in ["done_reason", "prompt_eval_count", "eval_count"] {
+            if let Some(value) = last.get(key) {
+                whole[key] = value.clone();
+            }
+        }
+        self.set_stop_reason(crate::llm::stop_reason_raw_in(&whole));
+        let (response, usage) = crate::llm::parse_ollama_response(&whole)?;
+        let _ = tx.send(StreamEvent::Done(response.clone())).await;
+        Ok((response, usage))
     }
 
     async fn stream_openai(

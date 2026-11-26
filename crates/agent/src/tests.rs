@@ -10872,6 +10872,106 @@ mod openai_compat_stub {
         stub.await.unwrap();
     }
 
+    /// A streamed ollama turn goes to ollama's own `/api/chat`, which
+    /// honors `num_ctx`, not its OpenAI bridge, which drops it and runs
+    /// the model at 4096 tokens: there a thinking model fills the window
+    /// and the reply is cut before its answer. The pieces stream out and
+    /// come back as one reply: its text, its thinking, its tool call and
+    /// its counts.
+    #[tokio::test]
+    async fn streaming_ollama_asks_its_own_endpoint_for_the_context_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stub = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // The whole request: headers, then the body they announce.
+            let mut request = Vec::new();
+            let mut buf = vec![0u8; 8192];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(at) = text.find("\r\n\r\n") {
+                    let length = text[..at]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= at + 4 + length {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            let body = concat!(
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"The log first.\"},\"done\":false}\n",
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"I'll read \"},\"done\":false}\n",
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"the deploy log.\"},\"done\":false}\n",
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"read_file\",\"arguments\":{\"path\":\"deploy.log\"}}}]},\"done\":false}\n",
+                "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":2900,\"eval_count\":61}\n",
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{body}"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            String::from_utf8_lossy(&request).into_owned()
+        });
+
+        let mut config = LlmConfig::ollama("qwen3.5:9b");
+        config.base_url = format!("http://{addr}/v1");
+        let client = LlmClient::new(config).unwrap();
+        let messages = vec![Message {
+            role: Role::User,
+            content: "what happened last night".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }];
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(16);
+        let (response, usage) = client
+            .complete_stream(&messages, &[], None, tx)
+            .await
+            .expect("stream completes");
+        let request = stub.await.unwrap();
+
+        let (head, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("POST /api/chat "), "{head}");
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["options"]["num_ctx"], 32_768);
+
+        let mut deltas = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::TextDelta(piece) = event {
+                deltas.push_str(&piece);
+            }
+        }
+        assert_eq!(deltas, "I'll read the deploy log.");
+        match response {
+            LlmResponse::ToolCalls {
+                calls,
+                text,
+                reasoning,
+            } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].name, "read_file");
+                assert_eq!(calls[0].arguments, r#"{"path":"deploy.log"}"#);
+                assert_eq!(text.as_deref(), Some("I'll read the deploy log."));
+                assert_eq!(reasoning.as_deref(), Some("The log first."));
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+        let usage = usage.expect("the last line's counts");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (2900, 61));
+    }
+
     /// The streaming OpenAI path: content deltas and a tool call in
     /// the same stream. The deltas already reached the caller; the
     /// same text has to survive on the response so the row and the

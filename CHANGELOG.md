@@ -12,6 +12,16 @@ tagged.
 
 ### Fixed
 
+- A streamed reply from an ollama model, in `wirken chat` and the web
+  chat, gets the context window Wirken declares (32,768 tokens). It went
+  through ollama's OpenAI bridge, which drops `num_ctx`, so the model ran
+  at ollama's 4096; where ollama could shift the context the reply still
+  came, but a model it cannot shift for, such as qwen3.5, filled the
+  window with its thinking and the reply was cut before its answer, so
+  the chat showed nothing. Streaming now goes to ollama's own `/api/chat`
+  with the request the non-streamed path sends, as that path has since
+  May (`streaming_ollama_asks_its_own_endpoint_for_the_context_window`,
+  `crates/agent/src/tests.rs`).
 - `wirken run` with a Signal channel and no signal-cli running prints one
   line, "signal-cli not detected. Run it with `signal-cli -a +your-number
   daemon --socket` and restart wirken to enable Signal.", and runs on
