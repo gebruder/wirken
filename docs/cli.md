@@ -184,9 +184,6 @@ than the transcript its cells wrap; when even that does not fit, each row is one
 line with its cells apart. Blockquotes, images and HTML are shown as written. Your own
 messages, tool output and the approval card stay plain.
 
-Below 90 columns the panels take one narrow column of 24, beside a transcript
-of at least 40. Below 64 columns they are not drawn.
-
 The socket is mode 0600 and the gateway checks the peer's user, as for every
 connection. The chat then answers the gateway's challenge with the operator
 key (`<data_dir>/operator/operator.key`), the key `wirken permissions
@@ -248,9 +245,14 @@ that agent. The chat opens no store itself: all of this comes from the
 gateway over the terminal connection.
 
 The panels take 36 columns and the sidebar 30, and the transcript keeps
-at least 54, so both are drawn from 120 columns. From 90 the panels are
-drawn and the sidebar yields to them; below 90 the panels are not drawn.
-Both start shown; Ctrl+B and Ctrl+P toggle them.
+at least 54, so from 120 columns both sit beside the transcript. Both
+start shown; Ctrl+B and Ctrl+P hide and show them. Narrower is the compact
+layout: the transcript takes the whole width, and its top border carries a
+meter of three numbers from the panels, the context used, the audit rows
+and the refusals when there are any. Ctrl+B and Ctrl+F open the agents and
+conversations over the transcript, with the search and what is typed in
+it, and Ctrl+P opens the panels; Esc closes either. A search open when the
+window narrows or widens moves with it.
 
 The transcript and the draft are one box, with the draft under a rule.
 Once the conversation is taller than the window, a thumb in the box's right
@@ -275,9 +277,9 @@ than the answer, which the card states.
 | ← / → | Move in the draft |
 | Backspace / Delete | Delete before / after the cursor |
 | Ctrl+U | Clear the draft, or the card's answer |
-| Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves. Where the screen is too narrow to draw the sidebar the search does not open, and the key bar says how many columns it needs |
+| Ctrl+F | Search the conversations, in the sidebar from 120 columns and over the transcript under it; arrows select, Enter opens, Esc leaves |
 | Ctrl+N | New conversation with the same agent |
-| Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels |
+| Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels; under 120 columns, open them over the transcript |
 | Ctrl+K | Verify this conversation's chain |
 | Ctrl+G / F1 | Every key and command. The key bar keeps Ctrl+G at its right at every width |
 | Ctrl+C | Leave the chat |

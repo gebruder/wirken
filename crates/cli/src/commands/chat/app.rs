@@ -52,6 +52,15 @@ pub(crate) struct Card {
     pub expires_at: Option<Instant>,
 }
 
+/// What is drawn over the transcript in the compact layout, where the
+/// sidebar and the panels have no columns of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Overlay {
+    /// The agents and conversations, with the search.
+    Conversations,
+    Panels,
+}
+
 /// What the screen sends the gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outgoing {
@@ -140,12 +149,10 @@ pub(crate) struct App {
     pub show_panels: bool,
     /// The sidebar has the keys: typing filters, arrows select.
     pub searching: bool,
-    /// The screen's width at the last draw, 0 before the first. A
-    /// toggle the layout cannot honour at this width is refused.
+    /// The screen's width at the last draw, 0 before the first.
     pub columns: u16,
-    /// Said once on the status line in place of the key hints, and
-    /// cleared by the next key: why a key just did nothing.
-    pub notice: Option<String>,
+    /// Open over the transcript in the compact layout.
+    pub overlay: Option<Overlay>,
     pub search: String,
     /// Index into the sidebar's filtered rows.
     pub selected: usize,
@@ -193,7 +200,7 @@ impl App {
             card_cut: std::cell::Cell::new(false),
             searching: false,
             columns: 0,
-            notice: None,
+            overlay: None,
             search: String::new(),
             selected: 0,
             entries: Vec::new(),
@@ -210,14 +217,43 @@ impl App {
         }
     }
 
-    /// Take the width the screen was last drawn at. A search the
-    /// sidebar can no longer show at it is closed, so typing never goes
-    /// into a search nobody sees.
+    /// Take the width the screen was last drawn at. A search open in
+    /// the sidebar moves over the transcript when the window narrows to
+    /// the compact layout, and back when it widens, so what is typed is
+    /// always on screen.
     pub fn set_columns(&mut self, columns: u16) {
         self.columns = columns;
-        if self.searching && super::view::search_refusal(columns, self.show_panels).is_some() {
-            self.searching = false;
-            self.search.clear();
+        if self.compact() {
+            if self.searching {
+                self.overlay = Some(Overlay::Conversations);
+            }
+        } else {
+            self.overlay = None;
+        }
+    }
+
+    /// Whether the window is narrower than the side-by-side layout.
+    pub fn compact(&self) -> bool {
+        self.columns > 0 && self.columns < super::view::WIDE_COLS
+    }
+
+    /// Open the conversations, searching, over the transcript or in the
+    /// sidebar, as the width has room.
+    fn search_conversations(&mut self) {
+        if self.compact() {
+            self.overlay = Some(Overlay::Conversations);
+        } else {
+            self.show_sidebar = true;
+        }
+        self.searching = true;
+        self.selected = 0;
+    }
+
+    fn close_search(&mut self) {
+        self.searching = false;
+        self.search.clear();
+        if self.overlay == Some(Overlay::Conversations) {
+            self.overlay = None;
         }
     }
 
@@ -437,6 +473,8 @@ impl App {
         self.status = None;
         self.verified = None;
         self.searching = false;
+        self.search.clear();
+        self.overlay = None;
         if let Some(a) = &agent {
             self.agent = a.clone();
         }
@@ -537,7 +575,21 @@ impl App {
             return None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        self.notice = None;
+        // The panels over the transcript take only the keys that close
+        // them, the keys screen and quitting.
+        if self.overlay == Some(Overlay::Panels) {
+            match key.code {
+                KeyCode::Esc => self.overlay = None,
+                KeyCode::Char('p') if ctrl => self.overlay = None,
+                KeyCode::Char('c') if ctrl => self.quit = true,
+                KeyCode::Char('g') if ctrl => {
+                    self.overlay = None;
+                    return self.run_command(super::slash::Command::Help);
+                }
+                _ => {}
+            }
+            return None;
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 self.quit = true;
@@ -569,13 +621,30 @@ impl App {
                 self.scroll = 0;
                 return None;
             }
+            // In the compact layout the sidebar and the panels open over
+            // the transcript; side by side, the keys show or hide them.
             KeyCode::Char('b') if ctrl => {
-                self.show_sidebar = !self.show_sidebar;
-                self.searching &= self.show_sidebar;
+                if self.compact() {
+                    if self.overlay == Some(Overlay::Conversations) {
+                        self.close_search();
+                    } else {
+                        self.search_conversations();
+                    }
+                } else {
+                    self.show_sidebar = !self.show_sidebar;
+                    if !self.show_sidebar {
+                        self.close_search();
+                    }
+                }
                 return None;
             }
             KeyCode::Char('p') if ctrl => {
-                self.show_panels = !self.show_panels;
+                if self.compact() {
+                    self.close_search();
+                    self.overlay = Some(Overlay::Panels);
+                } else {
+                    self.show_panels = !self.show_panels;
+                }
                 return None;
             }
             KeyCode::Char('k') if ctrl => return Some(Outgoing::Ask(Query::Verify)),
@@ -639,16 +708,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('f') if ctrl => {
-                // The search lives in the sidebar: where the sidebar
-                // cannot be drawn, it is not opened, and the status line
-                // says why.
-                if let Some(refusal) = super::view::search_refusal(self.columns, self.show_panels) {
-                    self.notice = Some(refusal);
-                    return None;
-                }
-                self.show_sidebar = true;
-                self.searching = true;
-                self.selected = 0;
+                self.search_conversations();
                 return None;
             }
             KeyCode::Char('n') if ctrl => {
@@ -659,10 +719,7 @@ impl App {
 
         if self.searching {
             match key.code {
-                KeyCode::Esc => {
-                    self.searching = false;
-                    self.search.clear();
-                }
+                KeyCode::Esc => self.close_search(),
                 KeyCode::Enter => return self.open_selected(),
                 KeyCode::Up => self.selected = self.selected.saturating_sub(1),
                 KeyCode::Down => {

@@ -295,3 +295,60 @@ fn the_frame_says_where_the_view_is() {
         assert_drawn(name, &render(&app, now, design.w, design.h), &design);
     }
 }
+
+fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+}
+
+fn ctrl(c: char) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char(c),
+        crossterm::event::KeyModifiers::CONTROL,
+    )
+}
+
+fn typed(app: &mut App, text: &str, now: Instant) {
+    for c in text.chars() {
+        app.on_key(key(crossterm::event::KeyCode::Char(c)), now);
+    }
+}
+
+/// The frames' Ctrl+F at 80 columns: the search opened over the
+/// transcript, with what is typed in it.
+pub(crate) fn search_compact() -> App {
+    let mut app = first_start();
+    app.set_columns(80);
+    let now = now();
+    app.on_key(ctrl('f'), now);
+    typed(&mut app, "list", now);
+    app
+}
+
+/// 03: under 120 columns the transcript takes the width, with the meter
+/// in its top border, and Ctrl+F opens the conversations over it with the
+/// search on screen.
+#[test]
+fn under_120_columns_the_transcript_takes_the_width() {
+    let now = now();
+    let cases: [Case; 4] = [
+        ("long-80x24", frame!("long-80x24"), long_conversation, 10),
+        ("refusal-80x24", frame!("refusal-80x24"), refusal, 0),
+        (
+            "first-start-80x24",
+            frame!("first-start-80x24"),
+            first_start,
+            0,
+        ),
+        (
+            "search-compact-80x24",
+            frame!("search-compact-80x24"),
+            search_compact,
+            0,
+        ),
+    ];
+    for (name, design, make, scroll) in cases {
+        let mut app = make();
+        app.scroll = scroll;
+        assert_drawn(name, &render(&app, now, design.w, design.h), &design);
+    }
+}

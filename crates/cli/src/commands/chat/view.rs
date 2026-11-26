@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::app::{App, Entry};
+use super::app::{App, Entry, Overlay};
 use super::panels::{SideItem, panels};
 use super::text::{layout_input, sanitize, width, wrap};
 
@@ -26,70 +26,26 @@ const INPUT_ROWS: usize = 6;
 const SIDEBAR_COLS: u16 = 30;
 const PANELS_COLS: u16 = 36;
 const TRANSCRIPT_MIN_COLS: u16 = 54;
-/// Below the full layout's width the panels narrow to one column of this
-/// width rather than disappear, and the transcript keeps at least the
-/// narrow minimum beside them.
-const PANELS_NARROW_COLS: u16 = 24;
-const TRANSCRIPT_NARROW_MIN_COLS: u16 = 40;
+/// The width from which the sidebar and the panels sit beside the
+/// transcript. Narrower is the compact layout: the transcript takes the
+/// width, and the two open over it.
+pub(crate) const WIDE_COLS: u16 = SIDEBAR_COLS + PANELS_COLS + TRANSCRIPT_MIN_COLS;
 
-/// What fits beside the transcript at `width`: the sidebar's and the
-/// panels' columns, and a note for the status line when something
-/// toggled on is not drawn.
-///
-/// Both flags start on, so on a screen too narrow for the panels a
-/// toggle used to change nothing anyone could see. Now the panels are
-/// drawn whenever they fit at all, taking the sidebar's place when the
-/// two do not fit together, and when even that is too wide the status
-/// line says how many columns they need.
-fn fit(width: u16, show_sidebar: bool, show_panels: bool) -> (u16, u16, Option<String>) {
-    let panels_need = PANELS_NARROW_COLS + TRANSCRIPT_NARROW_MIN_COLS;
-    let both_need = SIDEBAR_COLS + PANELS_COLS + TRANSCRIPT_MIN_COLS;
-    let panel_cols = if !show_panels {
-        0
-    } else if width >= PANELS_COLS + TRANSCRIPT_MIN_COLS {
-        PANELS_COLS
-    } else if width >= panels_need {
-        PANELS_NARROW_COLS
-    } else {
-        0
-    };
-    let side_cols = if show_sidebar
-        && width >= SIDEBAR_COLS + TRANSCRIPT_MIN_COLS
-        && (panel_cols == 0 || width >= both_need)
-    {
-        SIDEBAR_COLS
-    } else {
-        0
-    };
-    // Short, because the status line is as wide as the transcript.
-    let note = if show_panels && panel_cols == 0 {
-        Some(format!(
-            "panels hidden: need {panels_need} columns, {width} now"
-        ))
-    } else if show_sidebar && side_cols == 0 && panel_cols > 0 {
-        Some(format!(
-            "sidebar hidden: both need {both_need} columns, {width} now"
-        ))
-    } else {
-        None
-    };
-    (side_cols, panel_cols, note)
+/// What a box drawn over the transcript says at its top right.
+fn compact_note() -> String {
+    format!("compact layout · side by side from {WIDE_COLS} columns")
 }
 
-/// Why Ctrl+F cannot open the search at `width`, or `None` when the
-/// sidebar it lives in can be drawn. Width 0 is a screen not drawn yet.
-pub(crate) fn search_refusal(width: u16, show_panels: bool) -> Option<String> {
-    if width == 0 || fit(width, true, show_panels).0 > 0 {
-        return None;
+/// The sidebar's and the panels' columns at `width`: none in the compact
+/// layout, and each that is shown in the side-by-side one.
+fn fit(width: u16, show_sidebar: bool, show_panels: bool) -> (u16, u16) {
+    if width < WIDE_COLS {
+        return (0, 0);
     }
-    let need = if fit(width, false, show_panels).1 > 0 {
-        SIDEBAR_COLS + PANELS_COLS + TRANSCRIPT_MIN_COLS
-    } else {
-        SIDEBAR_COLS + TRANSCRIPT_MIN_COLS
-    };
-    Some(format!(
-        "search needs the sidebar: {need} columns, {width} now"
-    ))
+    (
+        if show_sidebar { SIDEBAR_COLS } else { 0 },
+        if show_panels { PANELS_COLS } else { 0 },
+    )
 }
 
 /// The chat's colors, by the role each plays on screen. Every cell is
@@ -161,6 +117,7 @@ const HINTS_CARD: &[(&str, &str)] = &[
     ("Ctrl+K", "verify chain"),
 ];
 const HINTS_EXPIRED: &[(&str, &str)] = &[("Enter", "dismiss"), ("PgUp/PgDn", "scroll")];
+const HINTS_PANELS: &[(&str, &str)] = &[("Esc", "close"), ("Ctrl+P", "close")];
 const HINTS_SEARCH: &[(&str, &str)] = &[
     ("type", "to filter"),
     ("↑↓", "select"),
@@ -169,40 +126,28 @@ const HINTS_SEARCH: &[(&str, &str)] = &[
 ];
 
 /// The bottom row at `width`: as many of `hints` as fit, left to right,
-/// and `pinned` at the right, which never drops. `note`, when there is
-/// one, says why a key just did nothing, in place of the hints.
-pub(crate) fn key_bar(
-    width: usize,
-    hints: &[(&str, &str)],
-    pinned: (&str, &str),
-    note: Option<&str>,
-) -> Line<'static> {
+/// and `pinned` at the right, which never drops.
+pub(crate) fn key_bar(width: usize, hints: &[(&str, &str)], pinned: (&str, &str)) -> Line<'static> {
     use palette::{BAR, BG, BLUE, GRAY, RULE, on_bar};
     let pinned_width = width_of(pinned.0) + 1 + width_of(pinned.1);
     let room = width.saturating_sub(1 + pinned_width + 1);
     let mut spans = vec![Span::styled(" ", on_bar(GRAY))];
     let mut used = 0;
-    if let Some(note) = note {
-        let note: String = note.chars().take(room.saturating_sub(BAR_GAP)).collect();
-        used = width_of(&note);
-        spans.push(Span::styled(note, on_bar(GRAY)));
-    } else {
-        for (i, (key, what)) in hints.iter().enumerate() {
-            let sep = if i == 0 { 0 } else { 3 };
-            let w = sep + width_of(key) + 1 + width_of(what);
-            if used + w + BAR_GAP > room {
-                break;
-            }
-            if sep > 0 {
-                spans.push(Span::styled(" ", on_bar(GRAY)));
-                spans.push(Span::styled("·", on_bar(RULE)));
-                spans.push(Span::styled(" ", on_bar(GRAY)));
-            }
-            spans.push(Span::styled(key.to_string(), on_bar(BLUE)));
-            spans.push(Span::styled(" ", on_bar(GRAY)));
-            spans.push(Span::styled(what.to_string(), on_bar(GRAY)));
-            used += w;
+    for (i, (key, what)) in hints.iter().enumerate() {
+        let sep = if i == 0 { 0 } else { 3 };
+        let w = sep + width_of(key) + 1 + width_of(what);
+        if used + w + BAR_GAP > room {
+            break;
         }
+        if sep > 0 {
+            spans.push(Span::styled(" ", on_bar(GRAY)));
+            spans.push(Span::styled("·", on_bar(RULE)));
+            spans.push(Span::styled(" ", on_bar(GRAY)));
+        }
+        spans.push(Span::styled(key.to_string(), on_bar(BLUE)));
+        spans.push(Span::styled(" ", on_bar(GRAY)));
+        spans.push(Span::styled(what.to_string(), on_bar(GRAY)));
+        used += w;
     }
     let pad = room.saturating_sub(used);
     spans.push(Span::styled(" ".repeat(pad), on_bar(GRAY)));
@@ -225,6 +170,8 @@ fn hints_for(app: &App, scrolled: bool) -> &'static [(&'static str, &'static str
         HINTS_EXPIRED
     } else if app.front_card().is_some() {
         HINTS_CARD
+    } else if app.overlay == Some(Overlay::Panels) {
+        HINTS_PANELS
     } else if app.searching {
         HINTS_SEARCH
     } else if scrolled {
@@ -258,10 +205,28 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     // else is drawn.
     let [full, bar_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(screen);
-    let (side_cols, panel_cols, _) = fit(full.width, app.show_sidebar, app.show_panels);
+    let compact = full.width < WIDE_COLS;
+    // In the compact layout the conversations and the panels open over
+    // the transcript, which is drawn again when they close.
+    if compact && let Some(overlay) = app.overlay {
+        match overlay {
+            Overlay::Conversations => draw_conversations_over(frame, app, full),
+            Overlay::Panels => draw_panels_over(frame, app, full),
+        }
+        frame.render_widget(
+            Paragraph::new(key_bar(
+                usize::from(bar_area.width),
+                hints_for(app, false),
+                PINNED,
+            )),
+            bar_area,
+        );
+        return;
+    }
+    let (side_cols, panel_cols) = fit(full.width, app.show_sidebar, app.show_panels);
     let [side_area, area, panel_area] = Layout::horizontal([
         Constraint::Length(side_cols),
-        Constraint::Min(TRANSCRIPT_NARROW_MIN_COLS),
+        Constraint::Min(0),
         Constraint::Length(panel_cols),
     ])
     .areas(full);
@@ -381,14 +346,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
             usize::from(bar_area.width),
             hints_for(app, scrolled),
             PINNED,
-            app.notice.as_deref(),
         )),
         bar_area,
     );
 }
 
-fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let cols = usize::from(area.width.saturating_sub(2)).max(1);
+/// The agents and conversations as the sidebar lists them, filtered by
+/// the search, at `cols` cells.
+fn side_lines(app: &App, cols: usize) -> Vec<Line<'static>> {
     let fit = |s: &str, cols: usize| -> String {
         let rows = wrap(&sanitize(s), cols.max(1));
         let first = rows.first().cloned().unwrap_or_default();
@@ -399,17 +364,7 @@ fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
     };
     let dim = Style::default().fg(Color::DarkGray);
-    let mut lines = vec![
-        Line::styled(
-            if app.search.is_empty() && !app.searching {
-                "search: Ctrl+F".to_string()
-            } else {
-                format!("search: {}", sanitize(&app.search))
-            },
-            if app.searching { Style::default() } else { dim },
-        ),
-        Line::raw(""),
-    ];
+    let mut lines = Vec::new();
     let dir = &app.directory;
     for (i, item) in app.side_items().iter().enumerate() {
         let selected = app.searching && i == app.selected.min(app.side_items().len() - 1);
@@ -459,10 +414,143 @@ fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
         lines.push(line);
     }
+    lines
+}
+
+fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines = vec![
+        Line::styled(
+            if app.search.is_empty() && !app.searching {
+                "search: Ctrl+F".to_string()
+            } else {
+                format!("search: {}", sanitize(&app.search))
+            },
+            if app.searching { Style::default() } else { dim },
+        ),
+        Line::raw(""),
+    ];
+    lines.extend(side_lines(
+        app,
+        usize::from(area.width.saturating_sub(2)).max(1),
+    ));
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" agents ")),
         area,
     );
+}
+
+/// A box over the transcript in the compact layout: `title` at its top
+/// left and the layout note at its right, `body` inside, and, when there
+/// is an `input`, a rule named `rule` over one row of typed text. The
+/// rule's right end says `count`. Returns where the typed text is.
+fn draw_over(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    body: Vec<Line<'static>>,
+    input: Option<(&str, &str, Option<String>)>,
+) -> Rect {
+    use palette::{DIM, GRAY, RULE, TEXT, WHITE, on_bg};
+    let note = compact_note();
+    let (before, after) = note.split_once(" · ").unwrap_or((&note, ""));
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(on_bg(RULE))
+            .title(Line::styled(format!(" {title} "), on_bg(WHITE)))
+            .title(
+                Line::from(vec![
+                    Span::styled(format!(" {before} "), on_bg(TEXT)),
+                    Span::styled("·", on_bg(RULE)),
+                    Span::styled(format!(" {after} "), on_bg(GRAY)),
+                ])
+                .right_aligned(),
+            ),
+        area,
+    );
+    let extra = if input.is_some() { 2 } else { 0 };
+    let inner = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2 + extra),
+    );
+    frame.render_widget(Paragraph::new(body), inner);
+    let Some((rule, typed, count)) = input else {
+        return Rect::default();
+    };
+    let rule_y = inner.bottom();
+    let name = format!(" {rule} ");
+    let count = count.map(|c| format!(" {c} ")).unwrap_or_default();
+    let fill = usize::from(area.width).saturating_sub(2 + width_of(&name) + width_of(&count));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("├", on_bg(RULE)),
+            Span::styled(name, on_bg(GRAY)),
+            Span::styled("─".repeat(fill), on_bg(RULE)),
+            Span::styled(count, on_bg(TEXT)),
+            Span::styled("┤", on_bg(RULE)),
+        ])),
+        Rect::new(area.x, rule_y, area.width, 1),
+    );
+    let field = Rect::new(area.x + 1, rule_y + 1, area.width.saturating_sub(2), 1);
+    let line = if typed.is_empty() {
+        Line::styled(" type to filter", on_bg(DIM))
+    } else {
+        Line::styled(sanitize(typed), on_bg(WHITE))
+    };
+    frame.render_widget(Paragraph::new(line), field);
+    field
+}
+
+/// The conversations over the transcript, as Ctrl+B or Ctrl+F opens them
+/// in the compact layout: the list, and the search with what is typed.
+fn draw_conversations_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let cols = usize::from(area.width.saturating_sub(2)).max(1);
+    let count = (!app.search.is_empty()).then(|| {
+        let all = app.directory.conversations.len();
+        let shown = app
+            .side_items()
+            .iter()
+            .filter(|i| matches!(i, SideItem::Conversation(_)))
+            .count();
+        format!("{shown} of {all} match")
+    });
+    let field = draw_over(
+        frame,
+        area,
+        "conversations",
+        side_lines(app, cols),
+        Some(("search", &app.search, count)),
+    );
+    let x = field.x + u16::try_from(width(&app.search)).unwrap_or(0);
+    frame.set_cursor_position(Position::new(
+        x.min(field.right().saturating_sub(1)),
+        field.y,
+    ));
+}
+
+/// The panels over the transcript, as Ctrl+P opens them in the compact
+/// layout: each panel's title, then its lines.
+fn draw_panels_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use palette::{TEXT, WHITE, on_bg};
+    let cols = usize::from(area.width.saturating_sub(2)).max(1);
+    let mut body = Vec::new();
+    match &app.status {
+        None => body.push(Line::styled("asking the gateway...", on_bg(TEXT))),
+        Some(status) => {
+            for panel in panels(status, app.verified.as_ref()) {
+                body.push(Line::styled(panel.title.to_string(), on_bg(WHITE)));
+                for l in panel.lines {
+                    for row in wrap(&sanitize(&l), cols) {
+                        body.push(Line::styled(row, on_bg(TEXT)));
+                    }
+                }
+            }
+        }
+    }
+    draw_over(frame, area, "panels", body, None);
 }
 
 fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -508,15 +596,15 @@ fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
 /// The transcript's rows at `width` cells, oldest first.
 fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let label = Style::default().add_modifier(Modifier::BOLD);
+    use palette::{AMBER, CYAN, GRAY, RED, TEXT, WHITE, on_bg};
     for entry in &app.entries {
         match entry {
             Entry::User(text) => {
-                lines.push(Line::styled("you", label.fg(Color::Cyan)));
-                indented(&mut lines, text, width, Style::default());
+                lines.push(Line::styled("you", on_bg(WHITE)));
+                indented(&mut lines, text, width, on_bg(TEXT));
             }
             Entry::Agent(text) => {
-                lines.push(Line::styled(sanitize(&app.agent), label.fg(Color::Green)));
+                lines.push(Line::styled(sanitize(&app.agent), on_bg(CYAN)));
                 for row in super::markdown::lines(&sanitize(text), width.saturating_sub(2)) {
                     let mut spans = vec![Span::raw("  ")];
                     spans.extend(row.spans);
@@ -530,10 +618,10 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 output,
                 ..
             } => {
-                let state = match outcome {
-                    None => "running",
-                    Some(true) => "done",
-                    Some(false) => "failed",
+                let (state, state_color) = match outcome {
+                    None => ("running", AMBER),
+                    Some(true) => ("done", GRAY),
+                    Some(false) => ("failed", RED),
                 };
                 let call = format!(
                     "{} {}",
@@ -546,9 +634,10 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     shown.push_str("...");
                 }
                 lines.push(Line::from(vec![
-                    Span::styled("  tool ", Style::default().fg(Color::Magenta)),
-                    Span::raw(shown),
-                    Span::styled(format!(" {state}"), Style::default().fg(Color::DarkGray)),
+                    Span::styled("  tool ", on_bg(TEXT)),
+                    Span::styled(shown, on_bg(TEXT)),
+                    Span::styled(" ", on_bg(TEXT)),
+                    Span::styled(state, on_bg(state_color)),
                 ]));
                 // What the tool returned, under its line, however the
                 // model's reply then went.
@@ -556,21 +645,22 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 let body = wrap(returned.trim_end(), width.saturating_sub(4));
                 let cut = body.len() > TOOL_OUTPUT_ROWS;
                 for row in body.into_iter().take(TOOL_OUTPUT_ROWS) {
-                    lines.push(Line::raw(format!("    {row}")));
+                    lines.push(Line::styled(format!("    {row}"), on_bg(GRAY)));
                 }
                 if cut {
-                    lines.push(Line::styled(
-                        "    ... (cut)",
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                    lines.push(Line::styled("    ... (cut)", on_bg(GRAY)));
                 }
             }
             Entry::Note(text) => {
+                // A refusal reads as one; every other note is the chat
+                // speaking, in the color of what waits on the operator.
+                let color = if text.starts_with("Refused ") {
+                    RED
+                } else {
+                    AMBER
+                };
                 for row in wrap(&sanitize(text), width.saturating_sub(2)) {
-                    lines.push(Line::styled(
-                        format!("  {row}"),
-                        Style::default().fg(Color::Yellow),
-                    ));
+                    lines.push(Line::styled(format!("  {row}"), on_bg(color)));
                 }
             }
             Entry::Help => lines.extend(help_lines(width)),
@@ -601,6 +691,73 @@ fn transcript_title(app: &App) -> Line<'static> {
     ])
 }
 
+/// The compact layout's title, left: the chat, the agent and its model.
+fn meter_title(app: &App) -> Line<'static> {
+    use palette::{CYAN, GRAY, RULE, TEXT, on_bg};
+    let mut spans = vec![
+        Span::styled(" wirken ", on_bg(TEXT)),
+        Span::styled("·", on_bg(RULE)),
+        Span::styled(" ", on_bg(TEXT)),
+        Span::styled(sanitize(&app.agent), on_bg(CYAN)),
+        Span::styled(" ", on_bg(TEXT)),
+    ];
+    if let Some(env) = app.status.as_ref().map(|s| &s.environment)
+        && !env.model.is_empty()
+    {
+        spans.push(Span::styled("·", on_bg(RULE)));
+        spans.push(Span::styled(
+            format!(" {}/{} ", sanitize(&env.provider), sanitize(&env.model)),
+            on_bg(GRAY),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The compact layout's title, right: what the panels say in three
+/// numbers. The context used, the audit rows, and the refusals when there
+/// are any.
+fn meter(app: &App) -> Line<'static> {
+    use palette::{GRAY, RULE, on_bg};
+    let Some(status) = &app.status else {
+        return Line::raw("");
+    };
+    let mut parts = Vec::new();
+    if let (Some(used), Some(window)) = (status.context.used_tokens, status.context.window)
+        && window > 0
+    {
+        parts.push(format!("ctx {}%", used.saturating_mul(100) / window));
+    }
+    let rows = status.audit.rows;
+    parts.push(format!(
+        "{rows} audit row{}",
+        if rows == 1 { "" } else { "s" }
+    ));
+    if status.approvals.denied > 0 {
+        parts.push(format!("{} denied", status.approvals.denied));
+    }
+    let mut spans = vec![Span::styled(" ", on_bg(GRAY))];
+    for (i, part) in parts.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", on_bg(RULE)));
+        }
+        spans.push(Span::styled(part, on_bg(GRAY)));
+    }
+    spans.push(Span::styled(" ", on_bg(GRAY)));
+    Line::from(spans).right_aligned()
+}
+
+/// The transcript box: titled for the layout it is drawn in.
+fn transcript_block(app: &App, compact: bool) -> Block<'static> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(palette::on_bg(palette::RULE));
+    if compact {
+        block.title(meter_title(app)).title(meter(app))
+    } else {
+        block.title(transcript_title(app))
+    }
+}
+
 /// Draw the transcript into `area`, and return how many rows are below
 /// the view: the scroll as drawn, not as asked for.
 fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) -> usize {
@@ -608,10 +765,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) -> usize {
     let lines = transcript_lines(app, width);
     let height = usize::from(area.height.saturating_sub(2));
     let (start, end) = view_window(lines.len(), height, app.scroll);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(palette::on_bg(palette::RULE))
-        .title(transcript_title(app));
+    let block = transcript_block(app, frame.area().width < WIDE_COLS);
     frame.render_widget(
         Paragraph::new(lines[start..end].to_vec()).block(block),
         area,
@@ -653,13 +807,7 @@ fn draw_conversation(
     let (start, end) = view_window(lines.len(), height, app.scroll);
     let (above, below) = (start, lines.len() - end);
 
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(on_bg(RULE))
-            .title(transcript_title(app)),
-        area,
-    );
+    frame.render_widget(transcript_block(app, frame.area().width < WIDE_COLS), area);
     let content = Rect::new(
         area.x + 1,
         area.y + 1,
@@ -1012,7 +1160,7 @@ mod tests {
 
     /// The transcript's rows inside its border, as cells.
     fn transcript_rows(buffer: &ratatui::buffer::Buffer) -> Vec<Vec<String>> {
-        let (title_x, top) = find(buffer, "wirken chat");
+        let (title_x, top) = find(buffer, "wirken");
         let left = title_x - 2;
         let right = (left + 1..buffer.area.width)
             .find(|&x| buffer[(x, top)].symbol() == "┐")
@@ -1110,12 +1258,11 @@ mod tests {
         }
     }
 
-    /// Ctrl+F opens the search only where the sidebar it lives in is
-    /// drawn. Where it is not, the status line says why and what is typed
-    /// next stays in the draft, on screen; a search left open by a resize
-    /// to such a width is closed.
+    /// Ctrl+F searches in the sidebar from 120 columns and over the
+    /// transcript under it; either way what is typed is on screen, and a
+    /// resize carries the search across.
     #[test]
-    fn search_opens_only_where_the_sidebar_is_drawn() {
+    fn the_search_is_on_screen_at_every_width() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let now = Instant::now();
         let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
@@ -1123,42 +1270,31 @@ mod tests {
             let mut app = App::new(Some("default".into()), "c-1".into());
             app.set_columns(w);
             app.on_key(ctrl_f, now);
-            let shown = all_text(&drawn(&app, now, w, h));
             for c in "list".chars() {
                 app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), now);
             }
-            let typed = all_text(&drawn(&app, now, w, h));
-            if w < 120 {
-                assert!(!app.searching, "{w}x{h}: the search opened unseen");
+            assert!(app.searching && app.draft.is_empty(), "{w}x{h}");
+            let shown = all_text(&drawn(&app, now, w, h));
+            if w < WIDE_COLS {
                 assert!(
-                    shown.contains("search needs the sidebar: 120 columns, 80 now"),
+                    shown.contains("conversations") && shown.contains("│list"),
                     "{w}x{h}:\n{shown}"
                 );
-                assert_eq!(app.draft, "list", "{w}x{h}");
-                assert!(
-                    typed.contains("list"),
-                    "{w}x{h}: the typing is not on screen"
-                );
             } else {
-                assert!(app.searching, "{w}x{h}");
-                assert!(typed.contains("search: list"), "{w}x{h}:\n{typed}");
-                assert!(app.draft.is_empty(), "{w}x{h}");
+                assert!(shown.contains("search: list"), "{w}x{h}:\n{shown}");
             }
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), now);
+            assert!(!app.searching && app.overlay.is_none(), "{w}x{h}");
         }
         let mut app = App::new(Some("default".into()), "c-1".into());
         app.set_columns(120);
         app.on_key(ctrl_f, now);
-        assert!(app.searching);
         app.set_columns(80);
-        assert!(
-            !app.searching,
-            "a resize left the search open where it is not drawn"
-        );
+        assert_eq!(app.overlay, Some(super::super::app::Overlay::Conversations));
+        app.set_columns(120);
+        assert!(app.searching && app.overlay.is_none());
     }
 
-    /// At the latest row of a conversation taller than the window, the
-    /// rule says how much is above and nothing about below; a
-    /// conversation that fits says nothing, and has no thumb.
     #[test]
     fn the_rule_says_above_only_at_the_latest_row_and_nothing_when_it_fits() {
         let now = Instant::now();
@@ -1171,7 +1307,10 @@ mod tests {
         }
         let latest = text_of(&drawn(&app, now, 120, 24));
         assert!(latest.contains("↑ 63 above ┤"), "{latest}");
-        assert!(!latest.contains("below") && latest.contains("█"), "{latest}");
+        assert!(
+            !latest.contains("below") && latest.contains("█"),
+            "{latest}"
+        );
         assert_eq!(thumb(19, 46, 17), (7, 15));
         assert_eq!(thumb(35, 46, 1), (1, 28));
         assert_eq!(thumb(19, 19, 0), (0, 0));
@@ -1315,7 +1454,7 @@ mod tests {
     fn a_long_command_is_drawn_to_its_end_and_can_be_approved() {
         let now = Instant::now();
         let mut app = long_card_app(now, 900);
-        let shown = text_of(&drawn(&app, now, 100, 50)).replace([' ', '\n'], "");
+        let shown = text_of(&drawn(&app, now, 100, 50)).replace([' ', '\n', '│'], "");
         assert!(shown.contains("-XPUThttp://bucket.example/u\"}"), "{shown}");
         assert!(!app.card_cut.get());
         let t = now + crate::commands::chat::app::ARMING;
@@ -1414,32 +1553,47 @@ mod tests {
     /// place when the two do not fit together, and a screen too narrow
     /// for them says so instead of ignoring the toggle.
     #[test]
-    fn the_panels_toggle_is_never_silent() {
+    fn the_panels_and_conversations_open_over_the_transcript_under_120_columns() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let now = Instant::now();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let mut app = App::new(Some("default".into()), "c-1".into());
-        app.show_sidebar = true;
-        app.show_panels = true;
 
         let wide = text_of(&drawn(&app, now, 130, 30));
         assert!(
             wide.contains(" agents ") && wide.contains(" status "),
             "{wide}"
         );
-        assert!(!wide.contains("columns"), "{wide}");
 
+        // Under 120 columns neither is beside the transcript; each opens
+        // over it, and Esc closes it.
+        app.set_columns(100);
         let middling = text_of(&drawn(&app, now, 100, 30));
-        assert!(middling.contains(" status "), "{middling}");
-        assert!(!middling.contains(" agents "), "{middling}");
+        assert!(
+            !middling.contains(" agents ") && !middling.contains(" status "),
+            "{middling}"
+        );
+        app.on_key(ctrl('p'), now);
+        let over = text_of(&drawn(&app, now, 100, 30));
+        assert!(
+            over.contains(" panels ") && over.contains("side by side from 120"),
+            "{over}"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), now);
+        assert!(app.overlay.is_none());
+        app.on_key(ctrl('b'), now);
+        let over = text_of(&drawn(&app, now, 100, 30));
+        assert!(
+            over.contains(" conversations ") && over.contains("new chat"),
+            "{over}"
+        );
+        app.on_key(ctrl('b'), now);
+        assert!(app.overlay.is_none());
 
-        // Below the full width the panels narrow to one column, and only
-        // when even that cannot fit do they go.
-        let narrow = text_of(&drawn(&app, now, 80, 30));
-        assert!(narrow.contains(" status "), "{narrow}");
-        let tiny = text_of(&drawn(&app, now, 50, 30));
-        assert!(!tiny.contains(" Context "), "{tiny}");
-
-        app.show_panels = false;
-        let off = text_of(&drawn(&app, now, 100, 30));
+        // Side by side, the keys still hide and show the columns.
+        app.set_columns(130);
+        app.on_key(ctrl('p'), now);
+        let off = text_of(&drawn(&app, now, 130, 30));
         assert!(
             off.contains(" agents ") && !off.contains(" status "),
             "{off}"

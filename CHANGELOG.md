@@ -29,16 +29,26 @@ tagged.
   transcript's lower edge that appeared only when scrolled up
   (`the_frame_says_where_the_view_is`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- `wirken chat` under 120 columns is a compact layout: the transcript
+  takes the whole width, and its top border is a meter of the context
+  used, the audit rows and the refusals. Ctrl+B and Ctrl+F open the agents
+  and conversations over the transcript, Ctrl+P the panels, and Esc closes
+  them. At 80 columns the transcript's text grows from 52 to 78 columns,
+  and no panel is drawn half cut; the narrow panel column between 64 and
+  120 columns is gone. The transcript takes the design's colors: you in
+  white, the agent in cyan, a failure or a refusal in red, tool output in
+  gray (`under_120_columns_the_transcript_takes_the_width`,
+  `crates/cli/src/commands/chat/frame_tests.rs`;
+  `the_panels_and_conversations_open_over_the_transcript_under_120_columns`,
+  `crates/cli/src/commands/chat/view.rs`).
 
 ### Fixed
 
 - Ctrl+F in `wirken chat` no longer opens a search the screen does not
-  show. Below the width the sidebar needs (120 columns with the panels, 84
-  without), it opened the search in a sidebar that was not drawn, so what
-  was typed next went into it unseen until Esc. It now leaves the search
-  closed and says on the status line how many columns it needs; a search
-  left open by a resize to such a width is closed
-  (`search_opens_only_where_the_sidebar_is_drawn`,
+  show. Below the width the sidebar needs, it opened the search in a
+  sidebar that was not drawn, so what was typed next went into it unseen
+  until Esc. Under 120 columns it now opens over the transcript, with what
+  is typed on screen (`the_search_is_on_screen_at_every_width`,
   `crates/cli/src/commands/chat/view.rs`).
 - The approval card in `wirken chat` says in full how it is answered. Its
   last line, "Type y and Enter to approve; n, a reason, or anything else

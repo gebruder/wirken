@@ -1,50 +1,50 @@
 80x24
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+┌ wirken · default · ollama/llama3.2:3b ──── ctx 4% · 14 audit rows · 1 denied ┐
+│you                                                                           │
+│  Use the exec tool to run this command: ls | wc -l                           │
+│                                                                              │
+│  tool exec {"command":"ls | wc -l"} failed                                   │
+│    Permission denied: 'exec' requires tier3 approval and was refused (too    │
+│    risky). This action was not executed.                                     │
+│                                                                              │
+│  Refused exec.                                                               │
+│                                                                              │
+│default                                                                       │
+│  The command was not run: the operator refused it.                           │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+├ message ─────────────────────────────────────────────────────────────────────┤
+│                                                                              │
 
  Enter send · Ctrl+J new line · PgUp/PgDn scroll · / commands       Ctrl+G keys 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- ...... - CCCCCCC - gggggggggggggggggg ---- ggg gg - gg ggggg gggg - g gggggg -
+-WWW                                                                           -
+-  ... ... .... .... .. ... .... ........ .. . .. ..                           -
+-                                                                              -
+-  .... .... .............. . .. .... RRRRRR                                   -
+-    gggggggggg ggggggg gggggg gggggggg ggggg gggggggg ggg ggg ggggggg gggg    -
+-    ggggggg gggg gggggg ggg ggg ggggggggg                                     -
+-                                                                              -
+-  RRRRRRR RRRRR                                                               -
+-                                                                              -
+-CCCCCCC                                                                       -
+-  ... ....... ... ... .... ... ........ ....... ...                           -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+- ggggggg ----------------------------------------------------------------------
+-                                                                              -
 
  KKKKK kkkk r KKKKKK kkk kkkk r KKKKKKKKK kkkkkk r K kkkkkkkk       SSSSSS SSSS 
