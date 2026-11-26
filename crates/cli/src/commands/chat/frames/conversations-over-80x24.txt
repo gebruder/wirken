@@ -1,0 +1,50 @@
+80x24
+┌ conversations ─────────────── compact layout · side by side from 120 columns ┐
+│                                                                              │
+│ * default                                                 ollama/llama3.2:3b │
+│   > Use the exec tool to run this command: ls -la                      10:12 │
+│     Write a file named notes.txt                                       18:40 │
+│   work                                           exampleai/sample-medium-4-5 │
+│     Summarize the report                                               09:05 │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+├ search ───────────────────────────────────────────────────── 3 conversations ┤
+│ type to search                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+ ↑↓ select · Enter open · Ctrl+N new chat · Esc close               Ctrl+G keys 
+
+- WWWWWWWWWWWWW --------------- ....... ...... - gggg gg gggg gggg ggg ggggggg -
+-                                                                              -
+- W WWWWWWW                                                 gggggggggggggggggg -
+-   V VVV VVV VVVV VVVV VV VVV VVVV VVVVVVVV VV VVV                      VVVVV -
+-     ..... . .... ..... .........                                       ggggg -
+-   ....                                           ggggggggggggggggggggggggggg -
+-     ......... ... ......                                               ggggg -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+- gggggg ----------------------------------------------------- . ............. -
+- dddd dd dddddd                                                               -
+--------------------------------------------------------------------------------
+ KK kkkkkk r KKKKK kkkk r KKKKKK kkk kkkk r KKK kkkkk               SSSSSS SSSS 

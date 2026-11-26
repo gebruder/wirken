@@ -305,7 +305,16 @@ impl App {
             self.show_sidebar = true;
         }
         self.searching = true;
-        self.selected = 0;
+        // The selection starts on the open conversation.
+        self.selected = self
+            .side_items()
+            .iter()
+            .position(|item| {
+                matches!(item, SideItem::Conversation(c)
+                    if self.directory.conversations.get(*c).is_some_and(|conv|
+                        conv.conversation == self.conversation && conv.agent == self.agent))
+            })
+            .unwrap_or(0);
     }
 
     fn close_search(&mut self) {

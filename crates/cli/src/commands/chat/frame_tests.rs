@@ -86,6 +86,7 @@ fn letter(fg: Color, bg: Color) -> char {
         (BG, AMBER) => 'Y',
         (RULE, BAR) => 'r',
         (RED, BG) => 'R',
+        (WHITE, SELECT) => 'V',
         _ => '?',
     }
 }
@@ -1004,4 +1005,32 @@ fn the_panels_overlay_fits_its_columns_and_scrolls_when_short() {
     let end = app.panels_scroll;
     app.on_key(key(KeyCode::Up), now);
     assert_eq!(app.panels_scroll, end - 1);
+}
+
+/// D: under 120 columns Ctrl+B and Ctrl+F open the same conversations
+/// over the transcript, the search at the bottom, each model and time at
+/// the right edge, the selection on the open conversation.
+#[test]
+fn ctrl_b_and_ctrl_f_open_the_same_conversations_overlay() {
+    let now = now();
+    for design in [
+        frame!("conversations-over-80x24"),
+        frame!("conversations-over-119x24"),
+    ] {
+        let name = format!("conversations-over-{}x{}", design.w, design.h);
+        for key in ['b', 'f'] {
+            let mut app = app_with(0, 0, 0);
+            app.set_columns(design.w);
+            app.on_key(ctrl(key), now);
+            assert_drawn(&name, &render(&app, now, design.w, design.h), &design);
+        }
+    }
+    // The selection starts on the open conversation, not the newest.
+    let mut app = App::new(Some("default".into()), "c-2".into());
+    app.on_answer(Query::Conversations, directory());
+    app.set_columns(80);
+    app.on_key(ctrl('b'), now);
+    let b = render(&app, now, 80, 24);
+    let row: String = (0..80).map(|x| b[(x, 4)].symbol().to_string()).collect();
+    assert!(row.contains("> Write a file named notes.txt"), "{row}");
 }

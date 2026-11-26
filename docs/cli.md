@@ -272,8 +272,9 @@ is the compact layout: the transcript takes the whole width, its top
 border carries a meter of three numbers from the panels, the context used,
 the audit rows and the refusals when there are any, and its bottom border
 reads `Ctrl+B conversations · Ctrl+P panels`. Ctrl+B and Ctrl+F open the agents and
-conversations over the transcript, with the search and what is typed in
-it, and Ctrl+P opens the panels; Esc closes either. Over the transcript
+conversations over the transcript, the same list either way, each agent's
+model and each conversation's time at the right edge, the selection on the
+open conversation, and the search at the bottom with what is typed in it, and Ctrl+P opens the panels; Esc closes either. Over the transcript
 the panels stand side by side in as many columns as fit, two at 80 columns
 and three at 119, and the bottom border says `all six panels shown`. In a
 window too short for them they scroll with ↑ and ↓, with a thumb in the

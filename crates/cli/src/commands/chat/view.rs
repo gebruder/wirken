@@ -71,6 +71,8 @@ pub(crate) mod palette {
     pub const DIM: Color = Color::Rgb(0x7d, 0x85, 0x90);
     /// A failure or a refusal.
     pub const RED: Color = Color::Rgb(0xff, 0xa1, 0x98);
+    /// Behind the selected row of a list.
+    pub const SELECT: Color = Color::Rgb(0x30, 0x36, 0x3d);
 
     pub fn on_bg(fg: Color) -> Style {
         Style::default().fg(fg).bg(BG)
@@ -124,6 +126,13 @@ const HINTS_PANELS_SCROLL: &[(&str, &str)] = &[("↑↓", "scroll"), ("Esc", "cl
 const HINTS_KEYS: &[(&str, &str)] = &[("type", "to filter"), ("↑↓", "scroll"), ("Esc", "close")];
 /// The keys screen's pinned key: the one that closes it.
 const PINNED_KEYS: (&str, &str) = ("Ctrl+G", "close");
+/// The conversations over the transcript before anything is typed.
+const HINTS_CONVERSATIONS: &[(&str, &str)] = &[
+    ("↑↓", "select"),
+    ("Enter", "open"),
+    ("Ctrl+N", "new chat"),
+    ("Esc", "close"),
+];
 const HINTS_SEARCH: &[(&str, &str)] = &[
     ("type", "to filter"),
     ("↑↓", "select"),
@@ -228,7 +237,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         let hints = match overlay {
             Overlay::Conversations => {
                 draw_conversations_over(frame, app, full);
-                hints_for(app, false)
+                if app.search.is_empty() {
+                    HINTS_CONVERSATIONS
+                } else {
+                    HINTS_SEARCH
+                }
             }
             Overlay::Panels => draw_panels_over(frame, app, full),
         };
@@ -518,7 +531,14 @@ fn draw_over(
     );
     let field = Rect::new(area.x + 1, rule_y + 1, area.width.saturating_sub(2), 1);
     let line = if typed.is_empty() {
-        Line::styled(" type to filter", on_bg(DIM))
+        // The conversations' search says what it searches; the keys
+        // screen's filter, what it does.
+        let hint = if rule == "search" {
+            " type to search"
+        } else {
+            " type to filter"
+        };
+        Line::styled(hint, on_bg(DIM))
     } else {
         Line::styled(sanitize(typed), on_bg(WHITE))
     };
@@ -528,22 +548,94 @@ fn draw_over(
 
 /// The conversations over the transcript, as Ctrl+B or Ctrl+F opens them
 /// in the compact layout: the list, and the search with what is typed.
+/// The agents and conversations as the overlay lists them, at `cols`
+/// cells: each agent's model and each conversation's time at the right
+/// edge, the selection marked and set apart. A search that matches
+/// nothing says so, as the sidebar does.
+fn over_lines(app: &App, cols: usize) -> Vec<Line<'static>> {
+    use palette::{GRAY, SELECT, TEXT, WHITE, on_bg};
+    let items = app.side_items();
+    if items.is_empty() {
+        return side_lines(app, cols);
+    }
+    let picked = Style::default().fg(WHITE).bg(SELECT);
+    let mut lines = vec![Line::raw("")];
+    let dir = &app.directory;
+    for (i, item) in items.iter().enumerate() {
+        let selected = i == app.selected.min(items.len() - 1);
+        // The row's left part, its right part, and the left's own color.
+        let (lead, left, right, left_style, right_style) = match item {
+            SideItem::Agent(a) => {
+                let agent = &dir.agents[*a];
+                let current = agent.id == app.agent;
+                let mark = if current { "* " } else { "  " };
+                (
+                    " ",
+                    format!("{mark}{}", cut_end(&sanitize(&agent.id), 24)),
+                    sanitize(&format!("{}/{}", agent.provider, agent.model)),
+                    on_bg(if current { WHITE } else { TEXT }),
+                    on_bg(GRAY),
+                )
+            }
+            SideItem::Conversation(c) => {
+                let conv = &dir.conversations[*c];
+                (
+                    "   ",
+                    format!(
+                        "{}{}",
+                        if selected { "> " } else { "  " },
+                        sanitize(conv.title.as_deref().unwrap_or("(no message yet)"))
+                    ),
+                    conv.updated.get(11..16).unwrap_or("").to_string(),
+                    on_bg(TEXT),
+                    on_bg(GRAY),
+                )
+            }
+        };
+        // One cell of margin at each edge, one between left and right.
+        let room = cols.saturating_sub(width(lead) + 1);
+        let right = cut_middle(&right, room.saturating_sub(2).min(width(&right)));
+        let left = cut_end(&left, room.saturating_sub(width(&right) + 1));
+        let pad = room.saturating_sub(width(&left) + width(&right));
+        let (left_style, right_style) = if selected {
+            (picked, picked)
+        } else {
+            (left_style, right_style)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(lead, on_bg(TEXT)),
+            Span::styled(left, left_style),
+            Span::styled(" ".repeat(pad), if selected { picked } else { on_bg(TEXT) }),
+            Span::styled(right, right_style),
+            Span::styled(" ", on_bg(TEXT)),
+        ]));
+    }
+    lines
+}
+
+/// The conversations over the transcript, as Ctrl+B or Ctrl+F opens them
+/// in the compact layout: the list, and the search with what is typed.
 fn draw_conversations_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let cols = usize::from(area.width.saturating_sub(2)).max(1);
-    let count = (!app.search.is_empty()).then(|| {
-        let all = app.directory.conversations.len();
+    let all = app.directory.conversations.len();
+    let count = if app.search.is_empty() {
+        Some(format!(
+            "{all} conversation{}",
+            if all == 1 { "" } else { "s" }
+        ))
+    } else {
         let shown = app
             .side_items()
             .iter()
             .filter(|i| matches!(i, SideItem::Conversation(_)))
             .count();
-        format!("{shown} of {all} match")
-    });
+        Some(format!("{shown} of {all} match"))
+    };
     let (_, field) = draw_over(
         frame,
         area,
         "conversations",
-        side_lines(app, cols),
+        over_lines(app, cols),
         Some(("search", &app.search, count)),
     );
     let x = field.x + u16::try_from(width(&app.search)).unwrap_or(0);

@@ -137,6 +137,15 @@ tagged.
   they scroll
   (`the_panels_overlay_fits_its_columns_and_scrolls_when_short`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- Ctrl+B and Ctrl+F open the same conversations over `wirken chat`'s
+  transcript under 120 columns: each agent with its model at the right
+  edge, each conversation with its time there, the selection marked `>`
+  and set apart, starting on the open conversation, and the search at the
+  bottom, `type to search` until something is typed, with the number of
+  conversations on its rule. The key bar reads `↑↓ select · Enter open ·
+  Ctrl+N new chat · Esc close`
+  (`ctrl_b_and_ctrl_f_open_the_same_conversations_overlay`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 
