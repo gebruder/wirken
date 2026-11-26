@@ -1,0 +1,50 @@
+80x24
+┌ panels ────────────────────── compact layout · side by side from 120 columns ┐
+│                                                                              │
+│ ENVIRONMENT                            AUDIT                                 │
+│ data   ~/.wirken                       14 rows · 1 chain head                │
+│ agent  default                         12 rows after the last head           │
+│ model  ollama/llama3.2:3b              Ctrl+K verifies the chain             │
+│ exec   Docker default runtime (runc)                                         │
+│        mode exec_only                  APPROVALS                             │
+│                                        0 approved · 1 denied                 │
+│ CONTEXT                                no stored grants                      │
+│ 4% · about 1.4k of 32.7k tokens                                              │
+│                                        TOOLS                                 │
+│ COST AND TOKENS                        13 tools · 5 ask first · 0 skills     │
+│ 2 calls · 2.9k in · 61 out             exec, generate_image, http_request,   │
+│ uncosted                               list_files, read_file, write_file     │
+│ budget off                                                                   │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────── all six panels shown ┘
+ Esc close                                                          Ctrl+G keys 
+
+- WWWWWW ---------------------- ....... ...... - gggg gg gggg gggg ggg ggggggg -
+-                                                                              -
+- WWWWWWWWWWW                            WWWWW                                 -
+- gggg   .........                       .. .... . . ..... ....                -
+- ggggg  .......                         .. .... ..... ... .... ....           -
+- ggggg  ..................              BBBBBB gggggggg ggg ggggg             -
+- gggg   ...... ....... ....... ......                                         -
+-        .... .........                  WWWWWWWWW                             -
+-                                        . ........ . . ......                 -
+- WWWWWWW                                .. ...... ......                      -
+- .. . ..... .... .. ..... ......                                              -
+-                                        WWWWW                                 -
+- WWWW WWW WWWWWW                        .. ..... . . ... ..... . . ......     -
+- . ..... . .... .. . .. ...             ..... ............... .............   -
+- ........                               ........... .......... ..........     -
+- ...... ...                                                                   -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+--------------------------------------------------------- ggg ggg gggggg ggggg -
+ KKK kkkkk                                                          SSSSSS SSSS 

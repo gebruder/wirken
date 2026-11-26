@@ -193,6 +193,8 @@ pub(crate) struct App {
     pub keys: Option<KeysScreen>,
     /// Rows the panels over the transcript are scrolled down.
     pub panels_scroll: usize,
+    /// The furthest the panels over the transcript scroll, as last drawn.
+    pub panels_max: std::cell::Cell<usize>,
     pub search: String,
     /// Index into the sidebar's filtered rows.
     pub selected: usize,
@@ -252,6 +254,7 @@ impl App {
             overlay: None,
             keys: None,
             panels_scroll: 0,
+            panels_max: std::cell::Cell::new(usize::MAX),
             search: String::new(),
             selected: 0,
             entries: Vec::new(),
@@ -666,7 +669,10 @@ impl App {
                 KeyCode::Esc => self.overlay = None,
                 KeyCode::Char('p') if ctrl => self.overlay = None,
                 KeyCode::Up => self.panels_scroll = self.panels_scroll.saturating_sub(1),
-                KeyCode::Down => self.panels_scroll = self.panels_scroll.saturating_add(1),
+                KeyCode::Down => {
+                    self.panels_scroll =
+                        (self.panels_scroll.saturating_add(1)).min(self.panels_max.get());
+                }
                 KeyCode::Char('c') if ctrl => self.quit = true,
                 KeyCode::Char('g') if ctrl => {
                     self.overlay = None;

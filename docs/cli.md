@@ -273,7 +273,11 @@ border carries a meter of three numbers from the panels, the context used,
 the audit rows and the refusals when there are any, and its bottom border
 reads `Ctrl+B conversations · Ctrl+P panels`. Ctrl+B and Ctrl+F open the agents and
 conversations over the transcript, with the search and what is typed in
-it, and Ctrl+P opens the panels; Esc closes either. A search open when the
+it, and Ctrl+P opens the panels; Esc closes either. Over the transcript
+the panels stand side by side in as many columns as fit, two at 80 columns
+and three at 119, and the bottom border says `all six panels shown`. In a
+window too short for them they scroll with ↑ and ↓, with a thumb in the
+right border and the rows below on the bottom border. A search open when the
 window narrows or widens moves with it.
 
 The transcript and the draft are one box, with the draft under a rule.

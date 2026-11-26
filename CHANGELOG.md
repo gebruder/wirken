@@ -128,6 +128,15 @@ tagged.
   alone there. Every waiting call reads `needs approval`
   (`more_than_one_card_says_so_on_the_bottom_border`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- The panels over `wirken chat`'s transcript, under 120 columns, stand
+  side by side in as many columns as fit, two at 80 columns and three at
+  119, each panel titled in capitals, and the bottom border says `all six
+  panels shown`. In a shorter window they scroll with the transcript's
+  thumb and `↓ N below` on the bottom border, and ↓ stops at the end, so
+  ↑ moves at once. The key bar reads `Esc close`, with `↑↓ scroll` when
+  they scroll
+  (`the_panels_overlay_fits_its_columns_and_scrolls_when_short`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

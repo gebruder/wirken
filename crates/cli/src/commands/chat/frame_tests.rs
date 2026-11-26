@@ -950,3 +950,58 @@ fn more_than_one_card_says_so_on_the_bottom_border() {
         assert_drawn(&name, &render(&make(), later, design.w, design.h), &design);
     }
 }
+
+/// C: Ctrl+P under 120 columns opens the panels over the transcript, in
+/// two columns at 80 and three at 119, and says so when all six are
+/// shown. In a shorter window they scroll, with the transcript's thumb
+/// and the rows below on the bottom border.
+#[test]
+fn the_panels_overlay_fits_its_columns_and_scrolls_when_short() {
+    use crossterm::event::KeyCode;
+    let now = now();
+    let make = |w: u16| {
+        let mut app = app_with(1470, 14, 1);
+        app.set_columns(w);
+        app.on_key(ctrl('p'), now);
+        app
+    };
+    for design in [frame!("panels-over-80x24"), frame!("panels-over-119x24")] {
+        let name = format!("panels-over-{}x{}", design.w, design.h);
+        assert_drawn(
+            &name,
+            &render(&make(design.w), now, design.w, design.h),
+            &design,
+        );
+    }
+    let mut app = make(80);
+    let text = |b: &Buffer| -> String {
+        (0..b.area.height)
+            .map(|y| {
+                (0..b.area.width)
+                    .map(|x| b[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let b = render(&app, now, 80, 12);
+    let shown = text(&b);
+    assert!(
+        shown.contains("↓ ") && shown.contains(" below") && !shown.contains("all six"),
+        "{shown}"
+    );
+    assert!((1..10).any(|y| b[(79, y)].symbol() == "█"), "{shown}");
+    assert!(shown.contains("↑↓ scroll"), "{shown}");
+    for _ in 0..20 {
+        app.on_key(key(KeyCode::Down), now);
+    }
+    let shown = text(&render(&app, now, 80, 12));
+    assert!(
+        shown.contains("write_file") && shown.contains(" above"),
+        "{shown}"
+    );
+    // Down past the end goes no further, so Up moves at once.
+    let end = app.panels_scroll;
+    app.on_key(key(KeyCode::Up), now);
+    assert_eq!(app.panels_scroll, end - 1);
+}

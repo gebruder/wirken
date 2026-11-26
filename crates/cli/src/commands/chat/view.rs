@@ -118,7 +118,9 @@ const HINTS_CARD_HIDDEN: &[(&str, &str)] =
     &[("Ctrl+U", "clear answer"), ("Ctrl+K", "verify chain")];
 /// At the one line a short window shows, there is no answer to clear.
 const HINTS_CARD_ONE_LINE: &[(&str, &str)] = &[("PgUp/PgDn", "scroll"), ("Ctrl+K", "verify chain")];
-const HINTS_PANELS: &[(&str, &str)] = &[("↑↓", "scroll"), ("Esc", "close"), ("Ctrl+P", "close")];
+const HINTS_PANELS: &[(&str, &str)] = &[("Esc", "close")];
+/// Over a window too short for them, the panels scroll.
+const HINTS_PANELS_SCROLL: &[(&str, &str)] = &[("↑↓", "scroll"), ("Esc", "close")];
 const HINTS_KEYS: &[(&str, &str)] = &[("type", "to filter"), ("↑↓", "scroll"), ("Esc", "close")];
 /// The keys screen's pinned key: the one that closes it.
 const PINNED_KEYS: (&str, &str) = ("Ctrl+G", "close");
@@ -223,16 +225,15 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     // In the compact layout the conversations and the panels open over
     // the transcript, which is drawn again when they close.
     if compact && let Some(overlay) = app.overlay {
-        match overlay {
-            Overlay::Conversations => draw_conversations_over(frame, app, full),
+        let hints = match overlay {
+            Overlay::Conversations => {
+                draw_conversations_over(frame, app, full);
+                hints_for(app, false)
+            }
             Overlay::Panels => draw_panels_over(frame, app, full),
-        }
+        };
         frame.render_widget(
-            Paragraph::new(key_bar(
-                usize::from(bar_area.width),
-                hints_for(app, false),
-                PINNED,
-            )),
+            Paragraph::new(key_bar(usize::from(bar_area.width), hints, PINNED)),
             bar_area,
         );
         return;
@@ -764,33 +765,161 @@ fn draw_keys_screen(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 /// The panels over the transcript, as Ctrl+P opens them in the compact
 /// layout: each panel's title, then its lines.
-fn draw_panels_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    use palette::{TEXT, WHITE, on_bg};
-    let cols = usize::from(area.width.saturating_sub(2)).max(1);
-    let mut body = Vec::new();
+/// Cells a column of the panels over the transcript takes, and the gap
+/// after it.
+const OVER_COLUMN: usize = 37;
+const OVER_GAP: usize = 2;
+
+/// One panel as a column over the transcript shows it: its title in
+/// capitals, then its lines in `width` cells.
+fn over_panel(panel: &super::panels::Panel, names: &[&str], width: usize) -> Vec<Line<'static>> {
+    use palette::{BLUE, GRAY, TEXT, WHITE, on_bg};
+    // Spans, not a line's style: the columns are joined span by span.
+    let mut out = vec![Line::from(Span::styled(
+        panel.title.to_uppercase(),
+        on_bg(WHITE),
+    ))];
+    for (j, line) in panel.lines.iter().enumerate() {
+        let text = sanitize(line);
+        if panel.title == "Tools" && j == 1 {
+            for r in tool_names(names, width, usize::MAX) {
+                out.push(Line::from(Span::styled(r, on_bg(TEXT))));
+            }
+            continue;
+        }
+        if text == VERIFY_LINE {
+            out.push(Line::from(vec![
+                Span::styled("Ctrl+K", on_bg(BLUE)),
+                Span::styled(" verifies the chain", on_bg(GRAY)),
+            ]));
+            continue;
+        }
+        let label = (panel.title == "Environment" && !text.starts_with(' ')).then(|| {
+            text.char_indices()
+                .nth(ENV_LABEL)
+                .map_or(text.len(), |(at, _)| at)
+        });
+        let (lead, value) = match label {
+            Some(at) => text.split_at(at),
+            None => ("", text.as_str()),
+        };
+        let indent = if panel.title == "Environment" {
+            ENV_LABEL
+        } else {
+            0
+        };
+        let value = value.trim_start();
+        let room = width.saturating_sub(indent).max(1);
+        for (k, r) in wrap(value, room).into_iter().enumerate() {
+            let first = if k == 0 && !lead.is_empty() {
+                Span::styled(lead.to_string(), on_bg(GRAY))
+            } else {
+                Span::styled(" ".repeat(indent), on_bg(TEXT))
+            };
+            out.push(Line::from(vec![first, Span::styled(r, on_bg(TEXT))]));
+        }
+    }
+    out
+}
+
+/// The panels over the transcript in the compact layout: side by side in
+/// as many columns as fit, the six in order down each. Taller than the
+/// window, they scroll with the arrows, a thumb in the right border and
+/// the rows below on the bottom one. Returns the key bar's hints.
+fn draw_panels_over(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+) -> &'static [(&'static str, &'static str)] {
+    use palette::{GRAY, RULE, TEXT, on_bg};
+    let inner = usize::from(area.width.saturating_sub(2)).max(1);
+    let mut body = vec![Line::raw("")];
     match &app.status {
-        None => body.push(Line::styled("asking the gateway...", on_bg(TEXT))),
+        None => body.push(Line::styled(" asking the gateway...", on_bg(TEXT))),
         Some(status) => {
-            for panel in panels(status, app.verified.as_ref()) {
-                body.push(Line::styled(panel.title.to_string(), on_bg(WHITE)));
-                for l in panel.lines {
-                    for row in wrap(&sanitize(&l), cols) {
-                        body.push(Line::styled(row, on_bg(TEXT)));
+            let shown = panels(status, app.verified.as_ref());
+            let pitch = OVER_COLUMN + OVER_GAP;
+            let columns = ((inner + 1) / pitch).clamp(1, shown.len().max(1));
+            let width = if columns == 1 {
+                inner.saturating_sub(2)
+            } else {
+                OVER_COLUMN
+            };
+            let per = shown.len().div_ceil(columns);
+            let names: Vec<&str> = status.tools.names.iter().map(String::as_str).collect();
+            let mut stacks: Vec<Vec<Line<'static>>> = Vec::new();
+            for group in shown.chunks(per.max(1)) {
+                let mut stack = Vec::new();
+                for (i, panel) in group.iter().enumerate() {
+                    if i > 0 {
+                        stack.push(Line::raw(""));
+                    }
+                    stack.extend(over_panel(panel, &names, width));
+                }
+                stacks.push(stack);
+            }
+            let rows = stacks.iter().map(Vec::len).max().unwrap_or(0);
+            for r in 0..rows {
+                let mut spans = vec![Span::styled(" ", on_bg(TEXT))];
+                for (c, stack) in stacks.iter().enumerate() {
+                    let line = stack.get(r).cloned().unwrap_or_default();
+                    let used = line.width();
+                    spans.extend(line.spans);
+                    if c + 1 < stacks.len() {
+                        spans.push(Span::styled(
+                            " ".repeat((width + OVER_GAP).saturating_sub(used)),
+                            on_bg(TEXT),
+                        ));
                     }
                 }
+                body.push(Line::from(spans));
             }
         }
     }
-    // Taller than the window, the panels scroll with the arrows.
     let rows = usize::from(area.height.saturating_sub(2));
     let skip = app.panels_scroll.min(body.len().saturating_sub(rows));
-    draw_over(
+    app.panels_max.set(body.len().saturating_sub(rows));
+    let total = body.len();
+    let below = total.saturating_sub(skip + rows);
+    let (inner_area, _) = draw_over(
         frame,
         area,
         "panels",
         body.into_iter().skip(skip).collect(),
         None,
     );
+    let (t0, t1) = thumb(rows, total, skip);
+    let right = area.right().saturating_sub(1);
+    for row in t0..t1 {
+        let y = inner_area.y + u16::try_from(row).unwrap_or(0);
+        if let Some(cell) = frame.buffer_mut().cell_mut((right, y)) {
+            cell.set_symbol("█").set_style(on_bg(GRAY));
+        }
+    }
+    let said = if total <= rows {
+        Span::styled("all six panels shown", on_bg(GRAY))
+    } else if below > 0 {
+        Span::styled(format!("↓ {below} below"), on_bg(TEXT))
+    } else {
+        Span::styled(format!("↑ {skip} above"), on_bg(GRAY))
+    };
+    let used = width_of(&said.content);
+    if used + 3 <= inner && area.height >= 2 {
+        let line = Line::from(vec![
+            Span::styled(format!("└{} ", "─".repeat(inner - used - 2)), on_bg(RULE)),
+            said,
+            Span::styled(" ┘", on_bg(RULE)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        );
+    }
+    if total <= rows {
+        HINTS_PANELS
+    } else {
+        HINTS_PANELS_SCROLL
+    }
 }
 
 /// The panels in one frame beside the transcript: a rule per section,
@@ -2309,11 +2438,11 @@ mod tests {
         }
         let bottom = text_of(&drawn(&app, now, 80, 10));
         assert!(
-            top.contains("Environment") && !top.contains("Tools"),
+            top.contains("ENVIRONMENT") && !top.contains("TOOLS"),
             "{top}"
         );
         assert!(
-            bottom.contains("Tools") && !bottom.contains("Environment"),
+            bottom.contains("TOOLS") && !bottom.contains("ENVIRONMENT"),
             "{bottom}"
         );
     }
