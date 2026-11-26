@@ -122,6 +122,12 @@ tagged.
   refused is written when it is put away; the tool's line reads `expired`
   (`an_expired_card_holds_until_esc`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- With more than one card waiting in `wirken chat`, the card in front
+  reads `N more waiting after this one` on its bottom border, where the
+  count shared the answer's rule with the countdown; the countdown stays
+  alone there. Every waiting call reads `needs approval`
+  (`more_than_one_card_says_so_on_the_bottom_border`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

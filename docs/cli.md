@@ -224,6 +224,11 @@ refuses.`, and Enter there refuses with no reason. The decision is recorded with
 `approved_via` / `denied_via` `{"kind":"channel_adapter","channel":"terminal"}`
 and, for an approval, `approved_by` `<user> (operator key <key id>)`.
 
+Cards come one at a time, in the order the gateway asked. While more than
+one waits, the card in front says on its bottom border how many more wait
+after it, and every waiting call's line in the transcript reads `needs
+approval`.
+
 The gateway waits `WIRKEN_TERMINAL_APPROVAL_TIMEOUT_S` seconds (default 300)
 for a decision. The card closes a few seconds before that and stays in
 front as expired, in a gray single rule titled `approval expired`, its

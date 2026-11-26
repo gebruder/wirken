@@ -905,3 +905,48 @@ fn an_expired_card_holds_until_esc() {
         Some("r2")
     );
 }
+
+/// B: with more than one card waiting, the card in front says how many
+/// more on its bottom border, the countdown stays alone on the answer's
+/// rule, and every waiting call reads "needs approval".
+#[test]
+fn more_than_one_card_says_so_on_the_bottom_border() {
+    let t0 = now();
+    let later = t0 + super::app::ARMING;
+    let make = || {
+        let mut app = tier3_card(t0);
+        for (n, command) in [
+            (2, r#"{"command":"ls -la"}"#),
+            (3, r#"{"command":"ls | wc -l"}"#),
+        ] {
+            app.entries.push(Entry::Tool {
+                id: format!("call_{n}"),
+                name: "exec".into(),
+                arguments: command.into(),
+                outcome: None,
+                output: String::new(),
+            });
+            app.on_server(
+                super::wire::ServerEvent::Approval(super::wire::ApprovalAsk {
+                    request_id: format!("r{n}"),
+                    tool_name: "exec".into(),
+                    action_key: "shell:ls".into(),
+                    tier: "tier3".into(),
+                    agent: "default".into(),
+                    trigger: String::new(),
+                    exec_location: String::new(),
+                    arguments: command.into(),
+                    assistant_text: String::new(),
+                    timeout_secs: 46,
+                    exec_runtime: "docker".into(),
+                }),
+                t0,
+            );
+        }
+        app
+    };
+    for design in [frame!("waiting-80x24"), frame!("waiting-120x24")] {
+        let name = format!("waiting-{}x{}", design.w, design.h);
+        assert_drawn(&name, &render(&make(), later, design.w, design.h), &design);
+    }
+}

@@ -1524,13 +1524,14 @@ fn draw_card_screen(
             Span::styled("Esc", on_bg(palette::BLUE)),
             Span::styled(" puts this card away", on_bg(GRAY)),
         ]
+    } else if waiting > 0 {
+        // The countdown stays alone on the answer's rule.
+        vec![Span::styled(
+            format!("{waiting} more waiting after this one"),
+            amber,
+        )]
     } else {
         Vec::new()
-    };
-    let countdown = match (waiting, countdown) {
-        (0, c) => c,
-        (n, Some(c)) => Some(format!("{n} more waiting · {c}")),
-        (n, None) => Some(format!("{n} more waiting")),
     };
 
     // What fits: the whole card, then the card without its spacer, then
