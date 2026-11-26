@@ -191,6 +191,8 @@ pub(crate) struct App {
     pub overlay: Option<Overlay>,
     /// Every key and command, over the whole screen, while it is open.
     pub keys: Option<KeysScreen>,
+    /// Rows the panels over the transcript are scrolled down.
+    pub panels_scroll: usize,
     pub search: String,
     /// Index into the sidebar's filtered rows.
     pub selected: usize,
@@ -245,6 +247,7 @@ impl App {
             columns: 0,
             overlay: None,
             keys: None,
+            panels_scroll: 0,
             search: String::new(),
             selected: 0,
             entries: Vec::new(),
@@ -659,6 +662,8 @@ impl App {
             match key.code {
                 KeyCode::Esc => self.overlay = None,
                 KeyCode::Char('p') if ctrl => self.overlay = None,
+                KeyCode::Up => self.panels_scroll = self.panels_scroll.saturating_sub(1),
+                KeyCode::Down => self.panels_scroll = self.panels_scroll.saturating_add(1),
                 KeyCode::Char('c') if ctrl => self.quit = true,
                 KeyCode::Char('g') if ctrl => {
                     self.overlay = None;
@@ -720,6 +725,7 @@ impl App {
                 if self.compact() {
                     self.close_search();
                     self.overlay = Some(Overlay::Panels);
+                    self.panels_scroll = 0;
                 } else {
                     self.show_panels = !self.show_panels;
                 }

@@ -118,7 +118,7 @@ const HINTS_CARD_HIDDEN: &[(&str, &str)] =
     &[("Ctrl+U", "clear answer"), ("Ctrl+K", "verify chain")];
 /// At the one line a short window shows, there is no answer to clear.
 const HINTS_CARD_ONE_LINE: &[(&str, &str)] = &[("PgUp/PgDn", "scroll"), ("Ctrl+K", "verify chain")];
-const HINTS_PANELS: &[(&str, &str)] = &[("Esc", "close"), ("Ctrl+P", "close")];
+const HINTS_PANELS: &[(&str, &str)] = &[("↑↓", "scroll"), ("Esc", "close"), ("Ctrl+P", "close")];
 const HINTS_KEYS: &[(&str, &str)] = &[("type", "to filter"), ("↑↓", "scroll"), ("Esc", "close")];
 /// The keys screen's pinned key: the one that closes it.
 const PINNED_KEYS: (&str, &str) = ("Ctrl+G", "close");
@@ -713,7 +713,16 @@ fn draw_panels_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
         }
     }
-    draw_over(frame, area, "panels", body, None);
+    // Taller than the window, the panels scroll with the arrows.
+    let rows = usize::from(area.height.saturating_sub(2));
+    let skip = app.panels_scroll.min(body.len().saturating_sub(rows));
+    draw_over(
+        frame,
+        area,
+        "panels",
+        body.into_iter().skip(skip).collect(),
+        None,
+    );
 }
 
 fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -884,9 +893,12 @@ fn meter(app: &App) -> Line<'static> {
         return Line::raw("");
     };
     let mut parts = Vec::new();
-    if let (Some(used), Some(window)) = (status.context.used_tokens, status.context.window)
+    // Before anything is sent the gateway knows the window and has used
+    // none of it.
+    if let Some(window) = status.context.window
         && window > 0
     {
+        let used = status.context.used_tokens.unwrap_or(0);
         parts.push(format!("ctx {}%", used.saturating_mul(100) / window));
     }
     let rows = status.audit.rows;
@@ -1856,6 +1868,38 @@ mod tests {
     /// The panels are drawn wherever they fit, taking the sidebar's
     /// place when the two do not fit together, and a screen too narrow
     /// for them says so instead of ignoring the toggle.
+    #[test]
+    fn the_meter_says_ctx_0_before_anything_is_sent_and_the_panels_scroll() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_answer(
+            crate::commands::chat::wire::Query::Status,
+            serde_json::json!({"agent": "default", "context": {"window": 32768},
+                               "audit": {"rows": 0}}),
+        );
+        let shown = text_of(&drawn(&app, now, 80, 24));
+        assert!(shown.contains("ctx 0% · 0 audit rows"), "{shown}");
+        app.set_columns(80);
+        app.on_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            now,
+        );
+        let top = text_of(&drawn(&app, now, 80, 10));
+        for _ in 0..30 {
+            app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), now);
+        }
+        let bottom = text_of(&drawn(&app, now, 80, 10));
+        assert!(
+            top.contains("Environment") && !top.contains("Tools"),
+            "{top}"
+        );
+        assert!(
+            bottom.contains("Tools") && !bottom.contains("Environment"),
+            "{bottom}"
+        );
+    }
+
     #[test]
     fn the_panels_and_conversations_open_over_the_transcript_under_120_columns() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
