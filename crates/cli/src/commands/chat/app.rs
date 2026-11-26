@@ -549,9 +549,6 @@ impl App {
     fn open_selected(&mut self) -> Option<Outgoing> {
         let items = self.side_items();
         match items.get(self.selected.min(items.len().saturating_sub(1)))? {
-            SideItem::NewChat => {
-                self.open(self.requested_agent.clone(), new_conversation_id(), false)
-            }
             SideItem::Agent(i) => {
                 let agent = self.directory.agents.get(*i)?.id.clone();
                 self.open(Some(agent), new_conversation_id(), false)
@@ -994,11 +991,7 @@ mod tests {
         );
         assert_eq!(
             app.side_items(),
-            [
-                SideItem::NewChat,
-                SideItem::Agent(1),
-                SideItem::Conversation(0)
-            ]
+            [SideItem::Agent(1), SideItem::Conversation(0)]
         );
         app.on_key(key(KeyCode::Down), now);
         app.on_key(key(KeyCode::Down), now);

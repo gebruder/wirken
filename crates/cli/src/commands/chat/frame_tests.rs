@@ -161,7 +161,7 @@ pub(crate) fn status(used: u64, rows: u64, denied: u64) -> serde_json::Value {
 pub(crate) fn directory() -> serde_json::Value {
     serde_json::json!({
         "agents": [{"id": "default", "provider": "ollama", "model": "llama3.2:3b"},
-                   {"id": "work", "provider": "example", "model": "model-a"}],
+                   {"id": "work", "provider": "exampleai", "model": "sample-medium-4-5"}],
         "conversations": [
             {"agent": "default", "conversation": "c-1", "title": "Use the exec tool to run this command: ls -la", "updated": "2026-11-26T10:12:00+00:00"},
             {"agent": "default", "conversation": "c-2", "title": "Write a file named notes.txt", "updated": "2026-11-25T18:40:00+00:00"},
@@ -721,4 +721,49 @@ fn a_first_screen_teaches_until_the_first_message() {
         !text.contains("Type a message") && !text.contains("type a message"),
         "{text}"
     );
+}
+
+/// 09: the sidebar cuts text only when it does not fit, with one "…",
+/// cuts model names in the middle, keeps times in a right column, and a
+/// search that matches nothing says so.
+#[test]
+fn the_sidebar_uses_its_width() {
+    let now = now();
+    let cases: [Case; 7] = [
+        (
+            "first-start-120x24",
+            frame!("first-start-120x24"),
+            first_start,
+            0,
+        ),
+        (
+            "first-start-120x40",
+            frame!("first-start-120x40"),
+            first_start,
+            0,
+        ),
+        ("long-120x24", frame!("long-120x24"), long_conversation, 10),
+        ("long-120x40", frame!("long-120x40"), long_conversation, 10),
+        ("refusal-120x24", frame!("refusal-120x24"), refusal, 0),
+        ("refusal-120x40", frame!("refusal-120x40"), refusal, 0),
+        (
+            "search-compact-80x24",
+            frame!("search-compact-80x24"),
+            search_compact,
+            0,
+        ),
+    ];
+    for (name, design, make, scroll) in cases {
+        let mut app = make();
+        app.scroll = scroll;
+        assert_drawn(name, &render(&app, now, design.w, design.h), &design);
+    }
+    use super::view::{cut_end, cut_middle};
+    assert_eq!(cut_end("ollama/llama3.2:3b", 18), "ollama/llama3.2:3b");
+    assert_eq!(cut_end("Summarize the report", 18), "Summarize the rep…");
+    assert_eq!(
+        cut_middle("exampleai/sample-medium-4-5", 21),
+        "exampleai/…medium-4-5"
+    );
+    assert_eq!(cut_middle("ollama/llama3.2:3b", 21), "ollama/llama3.2:3b");
 }

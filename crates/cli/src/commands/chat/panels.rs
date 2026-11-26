@@ -350,7 +350,6 @@ fn contains(hay: &str, needle: &str) -> bool {
 /// One row of the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SideItem {
-    NewChat,
     /// Index into [`Directory::agents`].
     Agent(usize),
     /// Index into [`Directory::conversations`].
@@ -362,7 +361,7 @@ pub(crate) enum SideItem {
 /// when it matches or its agent does.
 pub(crate) fn side_items(dir: &Directory, filter: &str) -> Vec<SideItem> {
     let filter = filter.trim();
-    let mut items = vec![SideItem::NewChat];
+    let mut items = Vec::new();
     for (i, agent) in dir.agents.iter().enumerate() {
         let agent_hit = filter.is_empty()
             || contains(&agent.id, filter)
@@ -540,24 +539,19 @@ mod tests {
     #[test]
     fn the_sidebar_filters_by_agent_model_and_title() {
         let dir = directory();
-        assert_eq!(side_items(&dir, "").len(), 1 + 2 + 3);
+        assert_eq!(side_items(&dir, "").len(), 2 + 3);
         assert_eq!(
             side_items(&dir, "suppl"),
-            [
-                SideItem::NewChat,
-                SideItem::Agent(1),
-                SideItem::Conversation(1)
-            ]
+            [SideItem::Agent(1), SideItem::Conversation(1)]
         );
         assert_eq!(
             side_items(&dir, "QWEN"),
             [
-                SideItem::NewChat,
                 SideItem::Agent(1),
                 SideItem::Conversation(1),
                 SideItem::Conversation(2)
             ]
         );
-        assert_eq!(side_items(&dir, "nothing like it"), [SideItem::NewChat]);
+        assert!(side_items(&dir, "nothing like it").is_empty());
     }
 }

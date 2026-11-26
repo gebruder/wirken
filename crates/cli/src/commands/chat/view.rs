@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -303,58 +303,108 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     );
 }
 
-/// The agents and conversations as the sidebar lists them, filtered by
-/// the search, at `cols` cells.
-fn side_lines(app: &App, cols: usize) -> Vec<Line<'static>> {
-    let fit = |s: &str, cols: usize| -> String {
-        let rows = wrap(&sanitize(s), cols.max(1));
-        let first = rows.first().cloned().unwrap_or_default();
-        if rows.len() > 1 {
-            format!("{first}...")
-        } else {
-            first
+/// `s` in `cols` cells, cut at its end with one `…` only when it does not
+/// fit.
+pub(crate) fn cut_end(s: &str, cols: usize) -> String {
+    if width(s) <= cols {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        if width(&out) + width(&c.to_string()) + 1 > cols {
+            break;
         }
-    };
-    let dim = Style::default().fg(Color::DarkGray);
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+/// `s` in `cols` cells, cut in its middle with one `…` when it does not
+/// fit, so a model name keeps its version.
+pub(crate) fn cut_middle(s: &str, cols: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= cols || cols < 3 {
+        return cut_end(s, cols);
+    }
+    let head = (cols - 1) / 2;
+    let tail = cols - 1 - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
+/// The agents and conversations as the sidebar lists them, filtered by
+/// the search, at `cols` cells. A search that matches nothing says so,
+/// and how to clear it.
+fn side_lines(app: &App, cols: usize) -> Vec<Line<'static>> {
+    use palette::{BLUE, GRAY, TEXT, WHITE, on_bg};
     let mut lines = Vec::new();
     let dir = &app.directory;
-    for (i, item) in app.side_items().iter().enumerate() {
-        let selected = app.searching && i == app.selected.min(app.side_items().len() - 1);
+    let items = app.side_items();
+    if items.is_empty() && !app.search.trim().is_empty() {
+        lines.push(Line::raw(""));
+        for row in wrap(
+            &format!(
+                "No conversation matches \"{}\".",
+                sanitize(app.search.trim())
+            ),
+            cols.saturating_sub(1),
+        ) {
+            lines.push(Line::styled(format!(" {row}"), on_bg(WHITE)));
+        }
+        lines.push(Line::raw(""));
+        for (key, what) in [("Esc", "clear the search"), ("Ctrl+N", "new chat")] {
+            lines.push(Line::from(vec![
+                Span::styled(" ", on_bg(TEXT)),
+                Span::styled(format!("{key:<13}"), on_bg(BLUE)),
+                Span::styled(what, on_bg(TEXT)),
+            ]));
+        }
+        return lines;
+    }
+    for (i, item) in items.iter().enumerate() {
+        let selected = app.searching && i == app.selected.min(items.len() - 1);
         let mut line = match item {
-            SideItem::NewChat => {
-                Line::from(vec![Span::raw("+ new chat"), Span::styled("  Ctrl+N", dim)])
-            }
             SideItem::Agent(a) => {
                 let agent = &dir.agents[*a];
                 let current = agent.id == app.agent;
+                let name = format!(
+                    "{}{} ",
+                    if current { "* " } else { "  " },
+                    cut_end(&sanitize(&agent.id), 12)
+                );
+                let room = cols.saturating_sub(width(&name));
                 Line::from(vec![
+                    Span::styled(name, on_bg(if current { WHITE } else { TEXT })),
                     Span::styled(
-                        format!(
-                            "{}{} ",
-                            if current { "* " } else { "  " },
-                            fit(&agent.id, 12)
+                        cut_middle(
+                            &sanitize(&format!("{}/{}", agent.provider, agent.model)),
+                            room,
                         ),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        fit(
-                            &format!("{}/{}", agent.provider, agent.model),
-                            cols.saturating_sub(16),
-                        ),
-                        dim,
+                        on_bg(GRAY),
                     ),
                 ])
             }
             SideItem::Conversation(c) => {
                 let conv = &dir.conversations[*c];
-                let title = conv.title.as_deref().unwrap_or("(no message yet)");
+                let title = sanitize(conv.title.as_deref().unwrap_or("(no message yet)"));
                 let current = conv.conversation == app.conversation && conv.agent == app.agent;
-                let time = conv.updated.get(11..16).unwrap_or("");
-                Line::from(vec![
-                    Span::raw(format!("    {}", fit(title, cols.saturating_sub(11)))),
-                    Span::styled(format!(" {time}"), dim),
-                ])
-                .style(if current {
+                let time = conv.updated.get(11..16).unwrap_or("").to_string();
+                // The time in a column of its own at the right.
+                let room =
+                    cols.saturating_sub(4 + if time.is_empty() { 0 } else { 1 + width(&time) });
+                let title = cut_end(&title, room);
+                let pad = room.saturating_sub(width(&title));
+                let mut spans = vec![Span::styled(
+                    format!("    {title}{}", " ".repeat(pad)),
+                    on_bg(TEXT),
+                )];
+                if !time.is_empty() {
+                    spans.push(Span::styled(format!(" {time}"), on_bg(GRAY)));
+                }
+                Line::from(spans).style(if current {
                     Style::default().add_modifier(Modifier::UNDERLINED)
                 } else {
                     Style::default()
@@ -370,16 +420,20 @@ fn side_lines(app: &App, cols: usize) -> Vec<Line<'static>> {
 }
 
 fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let dim = Style::default().fg(Color::DarkGray);
+    use palette::{BLUE, GRAY, RULE, WHITE, on_bg};
     let mut lines = vec![
-        Line::styled(
-            if app.search.is_empty() && !app.searching {
-                "search: Ctrl+F".to_string()
-            } else {
-                format!("search: {}", sanitize(&app.search))
-            },
-            if app.searching { Style::default() } else { dim },
-        ),
+        if app.searching || !app.search.is_empty() {
+            Line::styled(format!("search: {}", sanitize(&app.search)), on_bg(WHITE))
+        } else {
+            Line::from(vec![
+                Span::styled("Ctrl+F", on_bg(BLUE)),
+                Span::styled(" search", on_bg(GRAY)),
+            ])
+        },
+        Line::from(vec![
+            Span::styled("Ctrl+N", on_bg(BLUE)),
+            Span::styled(" new chat", on_bg(GRAY)),
+        ]),
         Line::raw(""),
     ];
     lines.extend(side_lines(
@@ -387,7 +441,12 @@ fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         usize::from(area.width.saturating_sub(2)).max(1),
     ));
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" agents ")),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(on_bg(RULE))
+                .title(Line::styled(" agents ", on_bg(palette::TEXT))),
+        ),
         area,
     );
 }
@@ -2114,7 +2173,7 @@ mod tests {
         app.on_key(ctrl('b'), now);
         let over = text_of(&drawn(&app, now, 100, 30));
         assert!(
-            over.contains(" conversations ") && over.contains("new chat"),
+            over.contains(" conversations ") && over.contains("search"),
             "{over}"
         );
         app.on_key(ctrl('b'), now);
@@ -2237,7 +2296,7 @@ mod tests {
             "no stored grants",
             "Tools",
             "13 tools · 5 ask first",
-            "+ new chat",
+            "Ctrl+N new chat",
             "ollama/llama3.1",
             "list the files",
             "15:25",

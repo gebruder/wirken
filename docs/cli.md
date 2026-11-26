@@ -247,8 +247,11 @@ verify the conversation's chain and signed heads and shows the result),
 Approvals (approved and denied on this conversation, the agent's stored
 grants) and Tools (how many, how many ask first, skills, names). A sidebar
 lists the agents with their models and every terminal conversation on the
-chain, newest first; Ctrl+F filters it by agent, model or first message,
-and Enter on a conversation resumes it, its messages read back from the
+chain, newest first, each with its time in a column at the right. Text is
+cut only when it does not fit, with one `…`, and a model name is cut in its
+middle so its version stays. Ctrl+F filters it by agent, model or first
+message; a search that matches nothing says so and that Esc clears it.
+Enter on a conversation resumes it, its messages read back from the
 session chain. A conversation of another agent opens a new connection for
 that agent. The chat opens no store itself: all of this comes from the
 gateway over the terminal connection.

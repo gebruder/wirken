@@ -88,6 +88,13 @@ tagged.
   commands`. Both go with the first message
   (`a_first_screen_teaches_until_the_first_message`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- The sidebar in `wirken chat` cuts text only when it does not fit, with
+  one `…` where it cut three dots, and cuts a model name in its middle so
+  its version stays: `ollama/llama3.2:3b` fits whole. Times sit in a column
+  at the right and are never cut. `Ctrl+N new chat` is a hint under the
+  search, no longer a row of the list. A search that matches nothing says
+  so and shows Esc to clear it (`the_sidebar_uses_its_width`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 
