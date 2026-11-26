@@ -35,7 +35,12 @@ tagged.
   and Delete and the card's answers. The list is one table in the code that
   `/help` prints, and a test holds `docs/cli.md` to it
   (`the_docs_key_table_names_every_key_help_lists`,
-  `crates/cli/src/commands/chat/app.rs`).
+  `crates/cli/src/commands/chat/app.rs`). `/help` is drawn as two tables at
+  the transcript's width: a description that wraps continues under its own
+  column, not at the left margin, and the name column is the longest name
+  and two cells, so "Backspace Delete" no longer runs into its description
+  (`help_is_two_aligned_tables_at_each_size`,
+  `crates/cli/src/commands/chat/view.rs`).
 - `wirken chat` scrolls with the arrow keys, the mouse wheel and the
   trackpad. Only PgUp and PgDn scrolled the transcript, which on a Mac
   laptop are Fn+↑ and Fn+↓, so a long reply could not be read back the way

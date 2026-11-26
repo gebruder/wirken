@@ -425,6 +425,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     ));
                 }
             }
+            Entry::Help => lines.extend(help_lines(width)),
         }
         lines.push(Line::raw(""));
     }
@@ -451,6 +452,59 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Paragraph::new(lines[start..end].to_vec()).block(block),
         area,
     );
+}
+
+/// Rows between the longest name in a `/help` table and its
+/// description.
+const HELP_GAP: usize = 2;
+/// Where a `/help` table's names start, under its heading.
+const HELP_INDENT: usize = 4;
+
+/// The column a `/help` table's descriptions start at: past its longest
+/// name and the gap.
+fn help_column(rows: &[(&str, &str)]) -> usize {
+    HELP_INDENT
+        + rows
+            .iter()
+            .map(|(name, _)| name.chars().count())
+            .max()
+            .unwrap_or(0)
+        + HELP_GAP
+}
+
+/// `/help` at `width`: the commands, then the keys, each a table whose
+/// descriptions wrap inside their own column, so a continued line stays
+/// under the description it continues.
+fn help_lines(width: usize) -> Vec<Line<'static>> {
+    let style = Style::default().fg(Color::Yellow);
+    let mut lines = Vec::new();
+    for (title, rows) in [
+        ("commands", super::slash::COMMANDS),
+        ("keys", super::app::KEYS),
+    ] {
+        lines.push(Line::styled(
+            format!("  {title}"),
+            style.add_modifier(Modifier::BOLD),
+        ));
+        let column = help_column(rows);
+        let room = width.saturating_sub(column).max(10);
+        for (name, what) in rows {
+            for (i, row) in wrap(what, room).into_iter().enumerate() {
+                let lead = if i == 0 {
+                    format!(
+                        "{:indent$}{name:<pad$}",
+                        "",
+                        indent = HELP_INDENT,
+                        pad = column - HELP_INDENT
+                    )
+                } else {
+                    " ".repeat(column)
+                };
+                lines.push(Line::styled(format!("{lead}{row}"), style));
+            }
+        }
+    }
+    lines
 }
 
 fn indented(lines: &mut Vec<Line<'static>>, text: &str, width: usize, style: Style) {
@@ -679,6 +733,106 @@ mod tests {
             ),
             "{sent:?}"
         );
+    }
+
+    /// The transcript's rows inside its border, as cells.
+    fn transcript_rows(buffer: &ratatui::buffer::Buffer) -> Vec<Vec<String>> {
+        let (title_x, top) = find(buffer, "wirken chat");
+        let left = title_x - 2;
+        let right = (left + 1..buffer.area.width)
+            .find(|&x| buffer[(x, top)].symbol() == "┐")
+            .unwrap();
+        (top + 1..buffer.area.height)
+            .take_while(|&y| buffer[(left, y)].symbol() == "│")
+            .map(|y| {
+                (left + 1..right)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `/help` is two aligned tables at each size: every description
+    /// starts at its table's column, at least two cells past the longest
+    /// name, and every continued line starts at that same column. It used
+    /// to wrap as a note, continued lines back at the left margin, and
+    /// "Backspace Delete" one cell from its description.
+    #[test]
+    fn help_is_two_aligned_tables_at_each_size() {
+        let now = Instant::now();
+        let tables = [
+            (
+                "commands",
+                help_column(super::super::slash::COMMANDS),
+                super::super::slash::COMMANDS,
+            ),
+            (
+                "keys",
+                help_column(super::super::app::KEYS),
+                super::super::app::KEYS,
+            ),
+        ];
+        for (w, h) in [(80u16, 24u16), (120, 24)] {
+            let mut seen: Vec<String> = Vec::new();
+            // Every part of the list, scrolled through it from the bottom
+            // to the top in steps shorter than the screen.
+            for scroll in (0..=60).step_by(8) {
+                let mut app = App::new(Some("default".into()), "c-1".into());
+                app.entries.push(Entry::Help);
+                app.scroll = scroll;
+                let rows = transcript_rows(&drawn(&app, now, w, h));
+                // The column of the last entry above, once one is on screen;
+                // continued lines at the top, whose entry scrolled off, sit
+                // at one of the two columns.
+                let mut column: Option<usize> = None;
+                for cells in rows {
+                    let text: String = cells.concat();
+                    let lead = cells.iter().take_while(|c| c.as_str() == " ").count();
+                    if text.trim().is_empty()
+                        || tables.iter().any(|(title, ..)| text.trim() == *title)
+                    {
+                        continue;
+                    }
+                    if lead == HELP_INDENT {
+                        let (_, col, _) = tables
+                            .iter()
+                            .find(|(_, col, rows)| {
+                                let name = cells[HELP_INDENT..(*col).min(cells.len())].concat();
+                                rows.iter().any(|(n, _)| name.trim_end() == *n)
+                            })
+                            .unwrap_or_else(|| {
+                                panic!("{w}x{h}: no entry starts this row: {text:?}")
+                            });
+                        assert!(
+                            cells[col - HELP_GAP..*col].iter().all(|c| c == " "),
+                            "{w}x{h}: less than {HELP_GAP} cells before the description: {text:?}"
+                        );
+                        assert_ne!(
+                            cells[*col], " ",
+                            "{w}x{h}: description not at column {col}: {text:?}"
+                        );
+                        seen.push(cells[HELP_INDENT..*col].concat().trim().to_string());
+                        column = Some(*col);
+                    } else {
+                        match column {
+                            Some(col) => assert_eq!(
+                                lead, col,
+                                "{w}x{h}: continued line not under its description: {text:?}"
+                            ),
+                            None => assert!(
+                                tables.iter().any(|(_, col, _)| lead == *col),
+                                "{w}x{h}: continued line at no description column: {text:?}"
+                            ),
+                        }
+                    }
+                }
+            }
+            for (_, _, rows) in tables {
+                for (name, _) in rows {
+                    assert!(seen.iter().any(|s| s == name), "{w}x{h}: {name} not shown");
+                }
+            }
+        }
     }
 
     /// Ctrl+F opens the search only where the sidebar it lives in is

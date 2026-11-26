@@ -37,6 +37,9 @@ pub(crate) enum Entry {
         output: String,
     },
     Note(String),
+    /// The `/help` list: the commands and the keys, drawn as two
+    /// columns at whatever width the transcript has.
+    Help,
 }
 
 /// An approval request waiting for the operator.
@@ -105,19 +108,6 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
         "on a card, approves; n, a reason or anything else refuses",
     ),
 ];
-
-/// The `/help` note: the command table, then every key.
-fn help_text() -> String {
-    let mut lines = vec!["commands".to_string()];
-    for (name, what) in super::slash::COMMANDS {
-        lines.push(format!("  {name:<12}{what}"));
-    }
-    lines.push("keys".to_string());
-    for (keys, what) in KEYS {
-        lines.push(format!("  {keys:<17}{what}"));
-    }
-    lines.join("\n")
-}
 
 pub(crate) fn new_conversation_id() -> String {
     let hex: String = uuid::Uuid::new_v4()
@@ -355,7 +345,7 @@ impl App {
             }
             Command::Verify => Some(Outgoing::Ask(Query::Verify)),
             Command::Help => {
-                self.entries.push(Entry::Note(help_text()));
+                self.entries.push(Entry::Help);
                 None
             }
             Command::Clear => self.open(self.requested_agent.clone(), new_conversation_id(), false),
@@ -1228,15 +1218,7 @@ mod tests {
     fn help_lists_every_command_and_sends_nothing() {
         let mut app = App::new(Some("default".into()), "c-1".into());
         assert_eq!(command(&mut app, "/help", Instant::now()), None);
-        let Some(Entry::Note(help)) = app.entries.last() else {
-            panic!("no help note: {:?}", app.entries);
-        };
-        for (name, _) in super::super::slash::COMMANDS {
-            assert!(help.contains(name), "{name} missing from {help}");
-        }
-        for (keys, _) in KEYS {
-            assert!(help.contains(keys), "{keys} missing from {help}");
-        }
+        assert_eq!(app.entries.last(), Some(&Entry::Help));
     }
 
     /// Every key `/help` lists is in the key table of `docs/cli.md`, and
