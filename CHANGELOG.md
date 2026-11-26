@@ -10,149 +10,124 @@ tagged.
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-11-26
+
 ### Changed
 
-- `wirken chat` has a key bar: the bottom row, across the whole width, at
-  every size and in every state. It shows the keys for what is on screen,
-  most needed first, and drops them from the right as the window narrows;
-  `Ctrl+G keys` stays at its right whatever the width. Scrolled up, `End
-  latest` leads; at a card it lists the keys other than the answer. It
-  replaces the status line under the transcript, which at 80 columns showed
-  a layout note in place of any key and at 120 was cut after the scroll
-  keys. The side columns end one row higher. Ctrl+G and F1 open the keys
+- `wirken chat` is redrawn so that every key it takes is on the screen
+  where it acts: a key bar on the bottom row at every size, one keys screen
+  for every key and command, a list of the commands on `/`, and the keys of
+  each column on its own border. Mouse capture stays off, so text is
+  selected as in any terminal, and no field, label or sentence of the
+  shared approval card changes. The frames the tests hold it to are in
+  `crates/cli/src/commands/chat/frames/`.
+- The layout follows the window. From 120 columns the sidebar (30
+  columns) and the panels (36) sit beside the transcript, `Ctrl+B hide` and
+  `Ctrl+P hide` on their bottom borders. Under 120 the transcript takes the
+  whole width, its top border a meter of the context used, the audit rows
+  and the refusals, and its bottom border `Ctrl+B conversations · Ctrl+P
+  panels`; at 80 columns its text is 78 columns wide where it was 52. The
+  transcript is colored by who speaks: you in white, the agent in cyan, a
+  failure or a refusal in red, tool output in gray
+  (`under_120_columns_the_transcript_takes_the_width`,
+  `hints_sit_on_the_borders_they_act_on`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
+- The bottom row is a key bar across the whole width, in every state. It
+  shows the keys for what is on screen, most needed first, drops them from
+  the right as the window narrows, and keeps `Ctrl+G keys` at its right at
+  any width. Scrolled up, `End latest` leads; at a card it lists the keys
+  other than the answer, which the card states
   (`the_key_bar_is_the_bottom_row_at_every_size`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
-- The transcript and the draft in `wirken chat` are one box, the draft
-  under a rule. Once the conversation is taller than the window, a thumb in
-  the box's right border and the rule's right end show where the view is:
-  `↑ 17 above · ↓ 10 below · End latest`. This replaces the line on the
-  transcript's lower edge that appeared only when scrolled up
-  (`the_frame_says_where_the_view_is`,
+- The transcript and the draft are one box, the draft under a rule. Once
+  the conversation is taller than the window, a thumb in the right border
+  and the rule's right end say where the view is: `↑ 17 above · ↓ 10 below
+  · End latest`. PgUp and PgDn move a screen less two rows, so two rows
+  stay in view across a page. A tool call is drawn whole, wrapped under
+  itself, and ends in its state: `running`, `needs approval` while a card
+  asks about it, `expired`, `done` or `failed`; calls in a row are one
+  block (`the_frame_says_where_the_view_is`, `small_corrections_hold`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
-- `wirken chat` under 120 columns is a compact layout: the transcript
-  takes the whole width, and its top border is a meter of the context
-  used, the audit rows and the refusals. Ctrl+B and Ctrl+F open the agents
-  and conversations over the transcript, Ctrl+P the panels, and Esc closes
-  them. At 80 columns the transcript's text grows from 52 to 78 columns,
-  and no panel is drawn half cut; the narrow panel column between 64 and
-  120 columns is gone. The transcript takes the design's colors: you in
-  white, the agent in cyan, a failure or a refusal in red, tool output in
-  gray (`under_120_columns_the_transcript_takes_the_width`,
-  `crates/cli/src/commands/chat/frame_tests.rs`;
-  `the_panels_and_conversations_open_over_the_transcript_under_120_columns`,
-  `crates/cli/src/commands/chat/view.rs`).
-- `wirken chat` has one keys screen, opened by Ctrl+G, F1 or `/help`: every
-  key and command in groups (scroll, write, conversations, approvals,
-  screen, commands, mouse), over the whole screen. Typing filters it and
-  marks what matched; keys that do not apply now, such as the answers
-  while no card waits, are dimmed; Esc or Ctrl+G closes it. The whole list
-  fits 80x24 without scrolling. It replaces the help `/help` printed into
-  the transcript, and the layout note moves to its title
-  (`the_keys_screen_lists_every_key_and_filters`,
+- An empty conversation teaches before anything is typed: how to send, the
+  six keys a newcomer needs first (send, new line, the two ways to scroll,
+  commands, the keys screen), and how many of the agent's tools ask first.
+  The empty draft says `type a message · / for commands`. Both go with the
+  first message (`a_first_screen_teaches_until_the_first_message`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
-- The approval card in `wirken chat` spans the window at every width while
-  it is open: the side columns are put away, and the transcript keeps the
-  rows left with the meter in its top border, or one row saying it is
-  hidden. Its title rule reads `approval needed · tier 3 · exec`. Every
-  field wraps in a column beside its label, none cut, in the shared card's
-  order; the model's claim comes last under its own rule, indented and in
-  the agent's color. The answer rule is stated once, as the instruction,
-  with `Closes in Ns.` on the rule over the answer field; the line
-  `[y] approve [n] refuse Enter alone refuses.` and the answer box's title
-  rule are gone. A card that does not fit gives up its spacer row, then
-  cuts its long values with a count each, the reply-to first and the
-  arguments last, and says on its title rule how many rows it cut and in a
-  two-row notice that only a refusal is accepted. Under 15 rows of window
-  it is one line that Enter refuses. No field, label or sentence of the
-  shared card changes
-  (`the_card_spans_the_window_and_says_when_it_cannot_be_approved`,
+- Ctrl+G, F1 and `/help` open one keys screen: every key and command in
+  groups (scroll, write, conversations, approvals, screen, commands,
+  mouse), over the whole screen, all of it at 80x24 without scrolling.
+  Typing filters it and marks what matched; keys that do not apply now are
+  dimmed; Esc or Ctrl+G closes it. It replaces the help `/help` printed
+  into the transcript (`the_keys_screen_lists_every_key_and_filters`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
-- A cut card in `wirken chat` is tested at every height from 15 rows: the
-  transcript's rows go first, then the spacer, then rows of the long values
-  in order, the reply-to, the runs, the claim and the arguments last; the
-  title, the first row of every field, the countdown and the answer field
-  stay. Its notice says a single cut row as one
-  (`a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- The panels beside `wirken chat`'s transcript are one frame, a rule per
-  section, where there were six boxes. The exec runtime wraps under its
-  label with the mode on its line, the cost's spend and budget share a
-  line, and a Tools list that does not fit ends in `+N more`, with `/tools`
-  on its rule. At 120x24 every panel shows every line, where Environment
-  showed one of five (`the_panels_are_one_frame`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- An empty conversation in `wirken chat` teaches before anything is typed:
-  how to send, the six keys a newcomer needs first (send, new line, the
-  two ways to scroll, commands, the keys screen), and how many of the
-  agent's tools ask first; the empty draft says `type a message · / for
-  commands`. Both go with the first message
-  (`a_first_screen_teaches_until_the_first_message`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- The sidebar in `wirken chat` cuts text only when it does not fit, with
-  one `…` where it cut three dots, and cuts a model name in its middle so
-  its version stays: `ollama/llama3.2:3b` fits whole. Times sit in a column
-  at the right and are never cut. `Ctrl+N new chat` is a hint under the
-  search, no longer a row of the list. A search that matches nothing says
-  so and shows Esc to clear it (`the_sidebar_uses_its_width`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- The keys of `wirken chat`'s columns sit on the frames they act on:
-  `Ctrl+B hide` on the sidebar's bottom border, `Ctrl+P hide` on the
-  panels', and `Ctrl+K verify` on the Audit rule, which loses its line
-  naming the key. In the compact layout the transcript's bottom border
-  reads `Ctrl+B conversations · Ctrl+P panels`. A Tools rule with no
-  word after its key was a cell short
-  (`hints_sit_on_the_borders_they_act_on`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- In `wirken chat`, PgUp and PgDn move the transcript a screen less two
-  rows, where they moved a fixed 10, so two rows stay in view across a
-  page. A tool call waiting on a card reads `needs approval`, not
-  `running`, and the whole call wraps under itself where it was cut to one
-  row; tool calls in a row are one block. The Audit panel says `1 chain
-  head`. The docs say that inside tmux Ctrl+B is tmux's prefix and reaches
-  the chat on a second press (`small_corrections_hold`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- An expired card in `wirken chat` is the card as it was, dimmed in a
-  gray single rule titled `approval expired · tier 3 · exec`, all seven
-  fields in the shared order and no answer field. One sentence says the
-  request closed before it was answered and was not approved, and the
-  bottom border reads `Esc puts this card away`. Esc alone puts it away:
-  Enter does nothing, so a late `y` and Enter sends and moves nothing. It
-  stays in front when live cards wait behind it, and none comes forward
-  without a key. The transcript's note that the gateway records it as
-  refused is written when it is put away; the tool's line reads `expired`
-  (`an_expired_card_holds_until_esc`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- With more than one card waiting in `wirken chat`, the card in front
-  reads `N more waiting after this one` on its bottom border, where the
-  count shared the answer's rule with the countdown; the countdown stays
-  alone there. Every waiting call reads `needs approval`
-  (`more_than_one_card_says_so_on_the_bottom_border`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- The panels over `wirken chat`'s transcript, under 120 columns, stand
-  side by side in as many columns as fit, two at 80 columns and three at
-  119, each panel titled in capitals, and the bottom border says `all six
-  panels shown`. In a shorter window they scroll with the transcript's
-  thumb and `↓ N below` on the bottom border, and ↓ stops at the end, so
-  ↑ moves at once. The key bar reads `Esc close`, with `↑↓ scroll` when
-  they scroll
-  (`the_panels_overlay_fits_its_columns_and_scrolls_when_short`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- Ctrl+B and Ctrl+F open the same conversations over `wirken chat`'s
-  transcript under 120 columns: each agent with its model at the right
-  edge, each conversation with its time there, the selection marked `>`
-  and set apart, starting on the open conversation, and the search at the
-  bottom, `type to search` until something is typed, with the number of
-  conversations on its rule. The key bar reads `↑↓ select · Enter open ·
-  Ctrl+N new chat · Esc close`
-  (`ctrl_b_and_ctrl_f_open_the_same_conversations_overlay`,
-  `crates/cli/src/commands/chat/frame_tests.rs`).
-- A `/` typed in an empty draft in `wirken chat` lists the ten commands
-  above the draft, in the transcript's last rows, and what is typed after
-  it narrows the list to the commands that start with it, the typed part
-  set apart as on the keys screen's filter. It goes with a space or once
-  the draft is sent
+- A `/` typed in an empty draft lists the ten commands above the draft, and
+  what is typed after it narrows the list to the commands that start with
+  it, the typed part marked as on the keys screen. It goes with a space or
+  once the draft is sent
   (`a_slash_lists_the_commands_and_typing_narrows_them`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- The approval card spans the window at every width while it is open: the
+  side columns are put away, and the transcript keeps the rows left, with
+  the meter in its top border, or one row saying it is hidden. Its title
+  rule reads `approval needed · tier 3 · exec`. Every field wraps beside its
+  label, in the shared card's order, and the model's claim comes last under
+  its own rule, indented and in the agent's color. The answer rule is
+  stated once, as the instruction, with `Closes in Ns.` alone on the rule
+  over the answer field; `[y] approve [n] refuse Enter alone refuses.` and
+  the answer box's own rule are gone. With more cards waiting, the bottom
+  border reads `N more waiting after this one`. A card that comes to the
+  front drops keys and pastes while it arms, as before
+  (`the_card_spans_the_window_and_says_when_it_cannot_be_approved`,
+  `more_than_one_card_says_so_on_the_bottom_border`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
+- A card that does not fit says so and takes a refusal only. The
+  transcript gives up its rows first, then the card its spacer row; then
+  long values are cut, each with a count such as `… +2 rows`, the reply-to
+  first, then the runs, the claim, and the arguments last. The title, the
+  first row of every field, the countdown and the answer field never drop.
+  The title rule says how many rows were cut, and a two-row notice in
+  place of the instruction says to enlarge the window. Under 15 rows of
+  window the card is one line, `This request cannot be approved at this
+  size. Enter refuses.`, where Enter refuses with no reason
+  (`a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
+- A card whose time ran out stays in front as it was, dimmed in a gray
+  single rule titled `approval expired · tier 3 · exec`, all seven fields
+  in the shared order and no answer field. One sentence says the request
+  closed before it was answered and was not approved, and the bottom
+  border reads `Esc puts this card away`. Esc alone puts it away: Enter
+  does nothing, so a late `y` and Enter sends and moves nothing, and no
+  card waiting behind it comes forward without a key. The transcript's
+  note that the gateway records it as refused is written when it is put
+  away (`an_expired_card_holds_until_esc`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
+- The panels beside the transcript are one frame, a rule per section. The
+  exec runtime wraps under its label with the mode on its line, the cost's
+  spend and budget share a line, Ctrl+K sits on the Audit rule, and a Tools
+  list that does not fit ends in `+N more`, with `/tools` on its rule. At
+  120x24 every panel shows every line. One head reads `1 chain head`
+  (`the_panels_are_one_frame`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
+- The sidebar cuts text only when it does not fit, with one `…`, and cuts
+  a model name in its middle so its version stays. Times sit in a column
+  at the right. `Ctrl+F search` and `Ctrl+N new chat` are hints at its
+  top, and a search that matches nothing says so and that Esc clears it
+  (`the_sidebar_uses_its_width`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
+- Under 120 columns Ctrl+B and Ctrl+F open the same conversations over the
+  transcript: each agent with its model at the right edge, each
+  conversation with its time there, the selection marked `>` and starting
+  on the open conversation, and the search at the bottom. Ctrl+P opens the
+  panels over it, side by side in as many columns as fit, two at 80 and
+  three at 119, with `all six panels shown` on the bottom border; in a
+  shorter window they scroll with the transcript's thumb and `↓ N below`
+  (`ctrl_b_and_ctrl_f_open_the_same_conversations_overlay`,
+  `the_panels_overlay_fits_its_columns_and_scrolls_when_short`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
+- Inside tmux, Ctrl+B is tmux's prefix by default and its first press does
+  not reach the chat; `docs/cli.md` says to press it twice or rebind the
+  prefix. No key changed.
 
 ### Fixed
 
@@ -251,6 +226,15 @@ tagged.
   `ZonedDateTime`, is the Zirkel digest's date, which
   `digest_push_tests` in `crates/cli/src/commands/zirkel.rs` reach. jiff
   0.2.46 stays in the lockfile under slack-morphism 2.31.
+
+### Deferred
+
+- Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
+  serenity 0.12.5 in the Discord adapter, stay open as in 3.5.2. The fix for
+  all three is serenity on rustls 0.23, held until the migrated adapter
+  passes a live Discord round-trip.
+- #322 (slack-morphism 2.34.0) is held, as it was in #320, until the Slack
+  adapter passes a live round-trip.
 
 ## [3.5.2] - 2026-11-25
 
