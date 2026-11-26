@@ -4007,13 +4007,18 @@ async fn supervise_adapter<S>(
             .panicked
             .store(false, std::sync::atomic::Ordering::Release);
 
+        let mut disabled = false;
         let (cause, exit) = match spawn() {
             Ok(mut child) => {
                 tokio::select! {
-                    status = child.wait() => (
-                        AdapterRestartCause::ProcessExited,
-                        status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()),
-                    ),
+                    status = child.wait() => {
+                        disabled = status.as_ref().ok().and_then(std::process::ExitStatus::code)
+                            == Some(super::adapter_handoff::ADAPTER_DISABLED);
+                        (
+                            AdapterRestartCause::ProcessExited,
+                            status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()),
+                        )
+                    }
                     _ = lifeline.ended.notified() => {
                         // `kill` waits for the process to exit; `wait`
                         // then returns the status it already has.
@@ -4048,6 +4053,22 @@ async fn supervise_adapter<S>(
             .unwrap()
             .take()
             .map(|t| t.elapsed());
+        if disabled {
+            // The adapter said why on its way out; restarting it would
+            // only say it again.
+            tracing::info!("Adapter '{adapter_id}' disabled itself ({exit}); not restarted");
+            record_adapter_event(
+                session_log,
+                SessionEvent::AdapterRestartAbandoned {
+                    adapter_id: adapter_id.to_string(),
+                    channel: channel.to_string(),
+                    attempts: unconnected_runs + 1,
+                    last_cause: cause,
+                    last_exit: exit,
+                },
+            );
+            return;
+        }
         if cause == AdapterRestartCause::CredentialChanged {
             // Asked for, not a failure: started again at once, and not
             // counted toward giving up.
@@ -7136,6 +7157,7 @@ mod adapter_restart_tests {
     };
 
     const EXITS: &[&str] = &["sh", "-c", "exit 3"];
+    const DISABLES_ITSELF: &[&str] = &["sh", "-c", "exit 69"];
     const STAYS_UP: &[&str] = &["sleep", "600"];
 
     /// The gateway-side pieces one adapter's restart touches, on a
@@ -7529,6 +7551,29 @@ mod adapter_restart_tests {
         assert_eq!(row["attempts"], 8);
         assert_eq!(row["last_cause"], "process_exited");
         assert_eq!(row["last_exit"], "exit status: 3");
+    }
+
+    #[tokio::test]
+    async fn an_adapter_that_disables_itself_is_not_restarted() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(DISABLES_ITSELF, FAST);
+        next_pid(&mut pids).await;
+        returns(supervisor).await;
+        assert!(pids.recv().await.is_none(), "one run and no restart");
+
+        let log = gw.log.clone();
+        let abandoned = gw.rows("adapter_restart_abandoned").await;
+        assert_eq!(abandoned.len(), 1, "{abandoned:?}");
+        assert_eq!(abandoned[0]["attempts"], 1);
+        assert_eq!(abandoned[0]["last_exit"], "exit status: 69");
+        let lane = log.handle_for(SessionId::new(ADAPTER_LIFECYCLE_SESSION));
+        let restarts = log
+            .get_since(&lane, 0)
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(r.event, wirken_audit::SessionEvent::AdapterRestart { .. }))
+            .count();
+        assert_eq!(restarts, 0);
     }
 
     #[tokio::test]

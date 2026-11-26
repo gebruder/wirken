@@ -197,10 +197,14 @@ pub async fn run(channel: &str) -> Result<()> {
 
                 let adapter = SignalAdapter::new(identity, endpoint, phone_number, allowlist)
                     .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
-                std::sync::Arc::new(adapter)
-                    .run(&socket_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
+                match std::sync::Arc::new(adapter).run(&socket_path).await {
+                    Err(e @ wirken_adapter_signal::SignalError::SignalCliNotDetected { .. }) => {
+                        // Plain stderr, not a log line: no log filter hides it.
+                        eprintln!("{e}");
+                        std::process::exit(super::adapter_handoff::ADAPTER_DISABLED);
+                    }
+                    other => other.map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?,
+                }
             }
             #[cfg(not(unix))]
             {

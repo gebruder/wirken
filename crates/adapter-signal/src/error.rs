@@ -14,6 +14,16 @@ pub enum SignalError {
     #[error("signal-cli error: {0}")]
     Signal(String),
 
+    /// Nothing answers on the signal-cli socket at start. The adapter
+    /// stops there, before it connects to the gateway, and the gateway
+    /// runs on without Signal. `socket` is empty for signal-cli's own
+    /// default path, which `--socket` alone serves.
+    #[error(
+        "signal-cli not detected. Run it with `signal-cli -a +your-number daemon \
+         --socket{socket}` and restart wirken to enable Signal."
+    )]
+    SignalCliNotDetected { socket: String },
+
     /// The socket is served by another user.
     #[error(
         "the signal-cli socket is served by uid {peer}, not this user (uid {own}); refusing it"

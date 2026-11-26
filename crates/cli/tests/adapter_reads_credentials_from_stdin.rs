@@ -4,8 +4,9 @@
 //! The binary runs with a hand-off on stdin, no vault passphrase in its
 //! environment, and a data directory holding no vault. There is no
 //! gateway socket, so an adapter that read every credential it needs
-//! fails at the gateway connection; one missing a credential fails
-//! earlier with its "No ... found" error. Either way the data directory
+//! fails at the gateway connection, or Signal at the signal-cli socket
+//! it opens first; one missing a credential fails earlier with its
+//! "No ... found" error. Either way the data directory
 //! must not gain a vault file, which `CredentialStore::open` would
 //! create.
 #![cfg(unix)]
@@ -82,9 +83,17 @@ fn each_adapter_starts_from_the_handoff_and_opens_no_vault() {
         let data = tempfile::tempdir().unwrap();
         let (status, stderr) = run_adapter(adapter, data.path(), &handoff(&credentials(adapter)));
         assert!(!status.success(), "{adapter}: {stderr}");
+        // Signal opens the signal-cli socket before the gateway's.
+        let past_credentials = if *adapter == "signal" {
+            // 69: the status the gateway does not restart.
+            assert_eq!(status.code(), Some(69), "{stderr}");
+            stderr.contains("signal-cli not detected")
+        } else {
+            stderr.contains("adapter error")
+        };
         assert!(
-            stderr.contains("adapter error"),
-            "{adapter} did not get past its credentials to the gateway connection: {stderr}"
+            past_credentials,
+            "{adapter} did not get past its credentials to its first connection: {stderr}"
         );
         assert_no_vault_files(adapter, data.path());
     }

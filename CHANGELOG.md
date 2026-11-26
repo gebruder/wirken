@@ -10,6 +10,25 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- `wirken run` with a Signal channel and no signal-cli running prints one
+  line, "signal-cli not detected. Run it with `signal-cli -a +your-number
+  daemon --socket` and restart wirken to enable Signal.", and runs on
+  without Signal. It restarted the adapter forever instead, each run logged
+  as `Adapter 'signal' connection_ended (signal: 9 (SIGKILL))` with the
+  adapter's own error lost: the adapter shook hands with the gateway before
+  it looked for signal-cli, so every run counted as connected and the
+  restart loop's limit of eight unconnected runs never applied, and the
+  gateway killed it before it could print why it stopped. The adapter now
+  opens the signal-cli socket first, says so and exits with status 69 when
+  nothing answers, and the gateway does not restart an adapter that exits
+  with it. The socket it opened is the one its first subscribe uses
+  (`no_signal_cli_stops_the_adapter_before_the_gateway`,
+  `crates/adapter-signal/src/tests.rs`;
+  `an_adapter_that_disables_itself_is_not_restarted`,
+  `crates/cli/src/commands/run.rs`).
+
 ## [3.6.0] - 2026-11-26
 
 ### Changed

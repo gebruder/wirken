@@ -270,9 +270,15 @@ fn a_vault_populated_only_by_channel_add_starts_the_adapter() {
             .collect();
         let (status, stderr) = run_adapter(adapter, data.path(), &handoff(&entries));
         assert!(!status.success(), "{adapter}: {stderr}");
+        // Signal opens the signal-cli socket before the gateway's.
+        let first_connection = if *adapter == "signal" {
+            "signal-cli not detected"
+        } else {
+            "adapter error"
+        };
         assert!(
-            stderr.contains("adapter error"),
-            "{adapter} did not get past its credentials to the gateway connection: {stderr}"
+            stderr.contains(first_connection),
+            "{adapter} did not get past its credentials to its first connection: {stderr}"
         );
     }
 }

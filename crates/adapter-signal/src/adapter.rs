@@ -235,13 +235,15 @@ impl SignalAdapter {
     /// who hit a collision; 8 is the typing-ergonomic default.
     pub(crate) const PREFIX_LEN: usize = 8;
 
-    /// Run the adapter to completion (or indefinitely). Handles the
-    /// gateway handshake once, makes the first signal-cli connect,
-    /// then spawns the long-lived gateway-side tasks (heartbeat,
-    /// outbound handler, inbound pump), and enters the signal-cli
-    /// reconnect loop. First-attempt signal-cli failure is fatal
-    /// (run() returns Err so the adapter process exits with a
-    /// clear error); mid-session disconnects retry with backoff.
+    /// Run the adapter to completion (or indefinitely). Opens the
+    /// signal-cli socket, handles the gateway handshake once, subscribes
+    /// on that first signal-cli connection, then spawns the long-lived
+    /// gateway-side tasks (heartbeat, outbound handler, inbound pump),
+    /// and enters the signal-cli reconnect loop. Nothing on the socket
+    /// at start is fatal and comes before the gateway is dialed: `run()`
+    /// returns `SignalCliNotDetected`, the process says so once and
+    /// exits, and the gateway runs on without Signal. Mid-session
+    /// disconnects retry with backoff.
     ///
     /// Connect ordering: outbound_handler is spawned only after the
     /// first signal-cli connect+subscribe completes. The
@@ -263,6 +265,28 @@ impl SignalAdapter {
                 self.allowlist.len()
             );
         }
+
+        // signal-cli first: with nothing on its socket there is nothing
+        // to bridge, so the adapter stops here, before the gateway
+        // counts it as connected, and says once that Signal is off.
+        // The connection this opens is the one the first subscribe
+        // uses, so signal-cli sees one connection at start, as before.
+        let first = match UnixStream::connect(&self.socket_path).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::debug!(path = %self.socket_path.display(), "signal-cli socket: {e}");
+                let default = std::env::var_os("XDG_RUNTIME_DIR")
+                    .filter(|d| !d.is_empty())
+                    .map(|d| std::path::Path::new(&d).join("signal-cli/socket"));
+                return Err(SignalError::SignalCliNotDetected {
+                    socket: if default.as_deref() == Some(self.socket_path.as_path()) {
+                        String::new()
+                    } else {
+                        format!(" {}", self.socket_path.display())
+                    },
+                });
+            }
+        };
 
         tracing::info!("Connecting to gateway at {}", gateway_socket.display());
         let gw_stream = connect(gateway_socket).await?;
@@ -309,7 +333,7 @@ impl SignalAdapter {
         // adapter exits here with a clear error rather than
         // entering a degraded state where every outbound frame
         // surfaces as ApprovalRequestFailed.
-        let mut reader_handle = self.connect_and_subscribe().await?;
+        let mut reader_handle = self.connect_and_subscribe(Some(first)).await?;
 
         let outbound_self = self.clone();
         let outbound_writer = gw_writer.clone();
@@ -353,7 +377,7 @@ impl SignalAdapter {
             loop {
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
-                match self.connect_and_subscribe().await {
+                match self.connect_and_subscribe(None).await {
                     Ok(handle) => {
                         reader_handle = handle;
                         backoff = BACKOFF_MIN;
@@ -379,8 +403,12 @@ impl SignalAdapter {
     /// starts from a clean state.
     async fn connect_and_subscribe(
         self: &Arc<Self>,
+        opened: Option<UnixStream>,
     ) -> Result<tokio::task::JoinHandle<Result<(), SignalError>>, SignalError> {
-        let stream = UnixStream::connect(&self.socket_path).await?;
+        let stream = match opened {
+            Some(stream) => stream,
+            None => UnixStream::connect(&self.socket_path).await?,
+        };
         check_peer_is_self(&stream)?;
         let (read, write) = stream.into_split();
         let conn = Arc::new(Connection {
@@ -1076,7 +1104,9 @@ async fn send_approval_request(
 /// per-platform branching.
 fn classify_send_error(e: &SignalError) -> &'static str {
     match e {
-        SignalError::ConnectionClosed => "channel_not_accessible",
+        SignalError::ConnectionClosed | SignalError::SignalCliNotDetected { .. } => {
+            "channel_not_accessible"
+        }
         SignalError::ReconnectTimeout => "reconnect_timeout",
         SignalError::Timeout { .. } => "signal_rpc_timeout",
         SignalError::Signal(_) => "signal_rpc_error",

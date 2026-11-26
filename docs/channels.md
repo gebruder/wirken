@@ -374,6 +374,11 @@ it in Note to Self. Replace `+15551234567` with your number throughout.
    ```
 
    The socket path defaults to the one above (`--endpoint` to change it).
+   `wirken run` checks it before it starts the adapter's connection: with
+   nothing answering there, it prints `signal-cli not detected. Run it
+   with ... and restart wirken to enable Signal.` once and runs on without
+   Signal, and the adapter is not restarted. Start signal-cli first, or
+   restart `wirken run` after it.
 5. **Admit your number at the gateway** too; Signal has two allowlists
    ([below](#the-allowlist-is-the-perimeter)):
 

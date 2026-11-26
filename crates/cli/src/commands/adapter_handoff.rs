@@ -207,6 +207,11 @@ fn take_field<'a>(rest: &mut &'a [u8]) -> Result<&'a [u8]> {
 /// Arguments and environment for an adapter child. Stdin is piped for
 /// the hand-off. The vault passphrase is removed, so the child cannot
 /// inherit it from the gateway's own environment.
+/// The exit status of an adapter that found what it bridges to absent
+/// at start, said so, and is not to be restarted: `EX_UNAVAILABLE`.
+/// The gateway runs on without it until the next `wirken run`.
+pub(crate) const ADAPTER_DISABLED: i32 = 69;
+
 pub(crate) fn configure_adapter_command<'a>(
     cmd: &'a mut Command,
     adapter_id: &str,
