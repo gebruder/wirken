@@ -1328,10 +1328,21 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 ..
             } => {
                 let (state, state_color) = match outcome {
-                    None if app.expired.as_ref().is_some_and(|a| a.tool_name == *name) => {
+                    // The card asks for this call: the same tool with the
+                    // same arguments. Calls the gateway has not asked about
+                    // yet still run.
+                    None if app
+                        .expired
+                        .as_ref()
+                        .is_some_and(|a| a.tool_name == *name && a.arguments == *arguments) =>
+                    {
                         ("expired", RED)
                     }
-                    None if app.cards.iter().any(|c| c.ask.tool_name == *name) => {
+                    None if app
+                        .cards
+                        .iter()
+                        .any(|c| c.ask.tool_name == *name && c.ask.arguments == *arguments) =>
+                    {
                         ("needs approval", AMBER)
                     }
                     None => ("running", AMBER),

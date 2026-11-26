@@ -836,8 +836,27 @@ fn small_corrections_hold() {
         &design,
     );
 
-    // With no card the same call is running.
+    // A call the gateway has not asked about yet is running.
     let mut app = tier3_card(t0);
+    app.entries.push(Entry::Tool {
+        id: "call_2".into(),
+        name: "exec".into(),
+        arguments: r#"{"command":"ls"}"#.into(),
+        outcome: None,
+        output: String::new(),
+    });
+    let b = render(&app, later, 120, 24);
+    let shown: String = (0..24)
+        .map(|y| {
+            (0..120)
+                .map(|x| b[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(shown.contains(r#"{"command":"ls"} running"#), "{shown}");
+    // With no card the call is running.
+    app.entries.pop();
     app.cards.clear();
     let b = render(&app, later, 120, 24);
     let row = |y: u16| -> String { (0..120).map(|x| b[(x, y)].symbol().to_string()).collect() };
