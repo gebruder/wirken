@@ -37,6 +37,14 @@ tagged.
   got an empty list and no word of why
   (`past_conversations_are_listed_from_the_chain`,
   `crates/cli/src/commands/webchat.rs`).
+- An adapter whose gateway connection ends has two seconds to exit on
+  its own before `wirken run` kills it, so what it says on the way out,
+  such as why it stopped, reaches the terminal, and the restart row
+  records its exit status instead of `signal: 9 (SIGKILL)`. It was killed
+  the moment the connection ended. One that does not exit in that time
+  is killed as before; an order to stop or respawn it still kills it at
+  once (`an_adapter_whose_connection_ends_may_exit_before_the_kill`,
+  `crates/cli/src/commands/run.rs`).
 - `wirken run` with a Signal channel and no signal-cli running prints one
   line, "signal-cli not detected. Run it with `signal-cli -a +your-number
   daemon --socket` and restart wirken to enable Signal.", and runs on

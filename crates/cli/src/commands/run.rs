@@ -3391,6 +3391,11 @@ struct RestartBackoff {
     /// back to zero, so a run that connects and then drops is restarted
     /// without bound.
     abandon_after: u32,
+    /// After its connection ends, how long the process has to exit on
+    /// its own before it is killed. An adapter on its way out says why
+    /// on stderr first; killed at once, it never does, and the restart
+    /// row records the kill, not its exit.
+    exit_grace: std::time::Duration,
 }
 
 const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
@@ -3401,14 +3406,17 @@ const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
     // for a dependency such as signal-cli to come up, and no time
     // wasted on a credential or setting that will not fix itself.
     abandon_after: 8,
+    exit_grace: std::time::Duration::from_secs(2),
 };
 
 /// Keep one adapter process running for as long as this future is.
 ///
 /// Spawns the process with `spawn`, then waits for whichever comes
 /// first: the process exiting, or its gateway connection ending. On the
-/// second the process is killed, since every adapter keeps running
-/// after it loses the gateway and none dials back in. Either way an
+/// second the process has `backoff.exit_grace` to exit on its own, and
+/// say why, and is then killed, since every adapter keeps running after
+/// it loses the gateway and none dials back in. An order to stop or
+/// respawn kills it at once. Either way an
 /// `AdapterRestart` event on the adapter lane records the attempt, the
 /// cause and the delay before the next spawn. The delay doubles from `backoff.first` to
 /// `backoff.cap` and goes back to `first` after a connection that
@@ -4020,10 +4028,26 @@ async fn supervise_adapter<S>(
                         )
                     }
                     _ = lifeline.ended.notified() => {
-                        // `kill` waits for the process to exit; `wait`
-                        // then returns the status it already has.
-                        let _ = child.kill().await;
-                        let status = child.wait().await;
+                        // Asked to stop or respawn, it goes now. A
+                        // connection that ended by itself leaves the
+                        // process a moment to exit and say why; then it
+                        // is killed. `kill` waits for the process to
+                        // exit; `wait` then returns the status it has.
+                        let ordered = lifeline.order.lock().unwrap().is_some();
+                        let exited = if ordered {
+                            None
+                        } else {
+                            tokio::time::timeout(backoff.exit_grace, child.wait()).await.ok()
+                        };
+                        let status = match exited {
+                            Some(status) => status,
+                            None => {
+                                let _ = child.kill().await;
+                                child.wait().await
+                            }
+                        };
+                        disabled = status.as_ref().ok().and_then(std::process::ExitStatus::code)
+                            == Some(super::adapter_handoff::ADAPTER_DISABLED);
                         let panicked = lifeline
                             .panicked
                             .swap(false, std::sync::atomic::Ordering::Acquire);
@@ -7147,6 +7171,7 @@ mod adapter_restart_tests {
         cap: Duration::from_millis(400),
         reset_after: Duration::from_secs(60),
         abandon_after: 8,
+        exit_grace: Duration::from_millis(300),
     };
 
     /// Short delays for the tests that run a process eight times or more.
@@ -7551,6 +7576,35 @@ mod adapter_restart_tests {
         assert_eq!(row["attempts"], 8);
         assert_eq!(row["last_cause"], "process_exited");
         assert_eq!(row["last_exit"], "exit status: 3");
+    }
+
+    /// A process whose connection ends gets a moment to exit on its own
+    /// before it is killed: what it says on the way out reaches the
+    /// terminal, and the restart row records its exit, not a kill. One
+    /// that does not exit in that moment is killed, as before.
+    #[tokio::test]
+    async fn an_adapter_whose_connection_ends_may_exit_before_the_kill() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise_each(
+            |n| {
+                if n == 0 {
+                    &["sh", "-c", "sleep 0.1; exit 3"]
+                } else {
+                    STAYS_UP
+                }
+            },
+            BACKOFF,
+        );
+        next_pid(&mut pids).await;
+        gw.connect_ending(false).send(()).unwrap();
+        next_pid(&mut pids).await;
+        gw.connect_ending(false).send(()).unwrap();
+        next_pid(&mut pids).await;
+        supervisor.abort();
+
+        let restarts = gw.rows("adapter_restart").await;
+        assert_eq!(restarts[0]["exit"], "exit status: 3", "{restarts:?}");
+        assert_eq!(restarts[1]["exit"], "signal: 9 (SIGKILL)", "{restarts:?}");
     }
 
     #[tokio::test]
