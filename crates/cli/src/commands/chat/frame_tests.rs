@@ -759,6 +759,19 @@ fn the_sidebar_uses_its_width() {
         app.scroll = scroll;
         assert_drawn(name, &render(&app, now, design.w, design.h), &design);
     }
+    // In the docked sidebar the no-match keys fit its width.
+    let mut app = app_with(0, 0, 0);
+    app.set_columns(120);
+    app.on_key(ctrl('f'), now);
+    typed(&mut app, "zzz", now);
+    let b = render(&app, now, 120, 40);
+    let side: Vec<String> = (0..40)
+        .map(|y| (0..30).map(|x| b[(x, y)].symbol().to_string()).collect())
+        .collect();
+    assert!(
+        side.iter().any(|r| r.contains("Esc     clear the search")),
+        "{side:#?}"
+    );
     use super::view::{cut_end, cut_middle};
     assert_eq!(cut_end("ollama/llama3.2:3b", 18), "ollama/llama3.2:3b");
     assert_eq!(cut_end("Summarize the report", 18), "Summarize the rep…");

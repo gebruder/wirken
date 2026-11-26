@@ -369,10 +369,17 @@ fn side_lines(app: &App, cols: usize) -> Vec<Line<'static>> {
             lines.push(Line::styled(format!(" {row}"), on_bg(WHITE)));
         }
         lines.push(Line::raw(""));
+        // The keys screen's column where it fits, as over the transcript;
+        // in the sidebar's 28 cells a narrower one, so nothing is cut.
+        let column = if cols > KEY_COLUMN + 17 {
+            KEY_COLUMN
+        } else {
+            8
+        };
         for (key, what) in [("Esc", "clear the search"), ("Ctrl+N", "new chat")] {
             lines.push(Line::from(vec![
                 Span::styled(" ", on_bg(TEXT)),
-                Span::styled(format!("{key:<13}"), on_bg(BLUE)),
+                Span::styled(format!("{key:<column$}"), on_bg(BLUE)),
                 Span::styled(what, on_bg(TEXT)),
             ]));
         }
