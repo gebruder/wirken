@@ -598,13 +598,6 @@ function sinceWords(iso) {
   const s = Math.floor((Date.now() - t) / 1000);
   return s < 60 ? 'just now' : ageWords(s);
 }
-function windowWords(seconds) {
-  if (!isSet(seconds)) return null;
-  const s = Number(seconds);
-  if (s % 3600 === 0) return (s / 3600) + ' h';
-  if (s % 60 === 0) return (s / 60) + ' min';
-  return s + ' s';
-}
 const REFUSAL_PREFIX = 'sandbox error: ';
 
 // The sole path from a value to the DOM. A browser renders textContent
@@ -1776,6 +1769,7 @@ function railEntries() {
       count: r.message_count,
       last: r.last_activity,
       turnOpen: r.turn_open === true,
+      past: r.past === true,
     });
   }
   if (resumed && !entries.some((e) => e.key === resumed.key)) {
@@ -1816,9 +1810,7 @@ function tickRail() {
   }
 }
 function railFootnote() {
-  const w = status && status.gateway ? windowWords(status.gateway.session_expiry_secs) : null;
-  return 'titles are each conversation\'s first message · quiet for ' +
-    (w || 'the gateway\'s window') + ' drops off this list, not out of the record';
+  return 'titles are each conversation\'s first message · every conversation on the record is listed';
 }
 function renderRail() {
   const entries = railEntries();
@@ -1836,6 +1828,7 @@ function renderRail() {
     let meta;
     if (e.draft) meta = 'unsent';
     else if (pending.has(e.key)) meta = '○ awaiting you · ' + askedWords(pending.get(e.key));
+    else if (e.past) meta = e.last ? sinceWords(e.last) : 'earlier';
     else meta = (isSet(e.count) ? e.count + ' msg' : 'no messages yet') + (e.last ? ' · ' + sinceWords(e.last) : '');
     let suffix = '';
     if (e.turnOpen || (e.key === currentKey && (turnOpen || elsewhereTurn))) suffix += ' · turn open';
@@ -3090,9 +3083,18 @@ fn route_sessions(req: &Request<'_>, shared: &Shared) -> Response {
     }
     let cfg = &shared.cfg;
     let body = match super::session::active_session_rows(cfg, None) {
-        Ok(rows) => serde_json::to_string(&conversation_rows(cfg, rows, &shared.open_turns))
-            .unwrap_or_else(|_| "[]".into()),
-        Err(_) => "[]".to_string(),
+        Ok(rows) => {
+            let active: Vec<String> = rows.iter().map(|r| r.log_id.clone()).collect();
+            let mut list = conversation_rows(cfg, rows, &shared.open_turns);
+            if let Some(list) = list.as_array_mut() {
+                list.extend(past_conversation_rows(cfg, &active));
+            }
+            serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())
+        }
+        Err(e) => {
+            tracing::warn!("webchat: the conversation list could not be read: {e:#}");
+            "[]".to_string()
+        }
     };
     Response::Complete(json_ok(&body))
 }
@@ -4069,6 +4071,85 @@ fn approval_belongs_to_conversation(
 /// characters, otherwise verbatim) and whether a turn is open in it.
 /// Another channel's first message is that channel's user's words and
 /// stays null here, as it does on the approvals route.
+/// Most past conversations the rail lists, newest first.
+const PAST_CONVERSATIONS: usize = 200;
+
+/// The web chat's conversations on the session chain that the session
+/// store no longer holds as active: quiet past its expiry window, they
+/// are still in the record and can be opened and continued. Newest
+/// first, at most [`PAST_CONVERSATIONS`], each with its first message
+/// as its title and the time of its last row; `past` marks them, and
+/// they carry no message count, which only the store keeps.
+fn past_conversation_rows(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    active: &[String],
+) -> Vec<serde_json::Value> {
+    use wirken_audit::{SessionEvent, SessionLog};
+    use wirken_time::TimestampExt as _;
+    let audit_path = cfg.audit_db_path();
+    if !audit_path.exists() {
+        return Vec::new();
+    }
+    let Ok(log) = wirken_audit::SqliteSessionLog::open(&audit_path) else {
+        return Vec::new();
+    };
+    let mut past: Vec<(String, serde_json::Value)> = Vec::new();
+    for log_id in log.list_session_ids().unwrap_or_default() {
+        let mut parts = log_id.splitn(3, '/');
+        let (Some(_), Some("webchat"), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if log_id.contains("#sub-") || active.contains(&log_id) {
+            continue;
+        }
+        let handle = log.handle_for(SessionId::new(log_id.clone()));
+        let first_message = log.get_range(&handle, 0..64).ok().and_then(|events| {
+            events.into_iter().find_map(|ev| match ev.event {
+                SessionEvent::UserMessage { content, .. } => Some(
+                    wirken_agent::ansi::strip_control_sequences(&content)
+                        .chars()
+                        .take(120)
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+        });
+        // A conversation nobody wrote in is not one to go back to.
+        let Some(first_message) = first_message else {
+            continue;
+        };
+        let Some(last) = log
+            .last_index(&handle)
+            .ok()
+            .flatten()
+            .and_then(|last| log.get_range(&handle, last..last + 1).ok())
+            .and_then(|r| r.into_iter().next())
+            .map(|r| r.ts.to_rfc3339_z())
+        else {
+            continue;
+        };
+        past.push((
+            last.clone(),
+            serde_json::json!({
+                "store_id": null,
+                "log_id": log_id,
+                "channel": "webchat",
+                "message_count": null,
+                "last_activity": last,
+                "first_message": first_message,
+                "turn_open": false,
+                "turn_open_age_seconds": null,
+                "past": true,
+            }),
+        ));
+    }
+    past.sort_by(|a, b| b.0.cmp(&a.0));
+    past.into_iter()
+        .take(PAST_CONVERSATIONS)
+        .map(|(_, row)| row)
+        .collect()
+}
+
 fn conversation_rows(
     cfg: &wirken_gateway::config::GatewayConfig,
     rows: Vec<super::session::SessionRow>,
@@ -8374,7 +8455,49 @@ mod tests {
             snap["gateway"]["session_expiry_secs"],
             cfg.session_expiry_secs
         );
-        assert!(page_script().contains("windowWords(status.gateway.session_expiry_secs)"));
+    }
+
+    /// A web chat conversation gone quiet past the store's window is
+    /// still listed from the chain, after the active ones, newest first,
+    /// with its first message as its title: the rail shows every
+    /// conversation on the record. An active one is not listed twice,
+    /// and other channels and empty lanes are not listed.
+    #[test]
+    fn past_conversations_are_listed_from_the_chain() {
+        use wirken_audit::SessionLog as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
+        let say = |id: &str, text: &str| {
+            let handle = log.handle_for(wirken_audit::SessionId::new(id.to_string()));
+            log.append(
+                &handle,
+                wirken_audit::TrustLevel::User,
+                wirken_audit::SessionEvent::UserMessage {
+                    content: text.into(),
+                    inbound_id: None,
+                    adapter_id: Some("webchat".into()),
+                    sender_id: None,
+                },
+            )
+            .unwrap();
+        };
+        say("default/webchat/c-older", "the older one");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        say("default/webchat/c-newer", "the newer one");
+        say("default/webchat/c-active", "still active");
+        say("default/telegram/-100", "another channel");
+        say("default/webchat/c-older#sub-1", "a sub-agent's lane");
+        drop(log);
+
+        let rows = crate::commands::webchat::past_conversation_rows(&cfg, &["default/webchat/c-active".to_string()]);
+        let ids: Vec<&str> = rows.iter().map(|r| r["log_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["default/webchat/c-newer", "default/webchat/c-older"]);
+        assert_eq!(rows[1]["first_message"], "the older one");
+        assert_eq!(rows[1]["past"], true);
+        assert_eq!(rows[1]["channel"], "webchat");
+        assert!(rows[1]["message_count"].is_null());
+        assert!(rows[1]["last_activity"].as_str().unwrap().ends_with('Z'));
     }
 
     /// The rail exists when there is more than one destination: a
@@ -8565,8 +8688,12 @@ mod tests {
                 && script.contains("'\". It can only be decided there.'")
         );
         assert!(script.contains("el('button', 'link', 'open it →')"));
-        assert!(script.contains("'titles are each conversation\\'s first message · quiet for '"));
-        assert!(script.contains("' drops off this list, not out of the record'"));
+        assert!(script.contains(
+            "'titles are each conversation\\'s first message · every conversation on the record is listed'"
+        ));
+        assert!(
+            script.contains("else if (e.past) meta = e.last ? sinceWords(e.last) : 'earlier';")
+        );
         assert_eq!(
             script
                 .split_once("const DECISION_ELSEWHERE = '")

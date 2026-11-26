@@ -27,6 +27,16 @@ tagged.
   price, so the line is at debug level for ollama, and its cost is still
   recorded as unknown. Every other provider keeps the warning, which marks
   a model the price table does not know.
+- The web chat's left column lists every web chat conversation on the
+  record, newest first, as `wirken chat`'s sidebar does. It listed only
+  the conversations the session store held as active, so one quiet past
+  the gateway's window dropped off, and with a single conversation left
+  the column was not drawn at all. A past conversation shows its first
+  message and when it was last active, and opens and continues as before.
+  A conversation list that cannot be read is now logged, where the page
+  got an empty list and no word of why
+  (`past_conversations_are_listed_from_the_chain`,
+  `crates/cli/src/commands/webchat.rs`).
 - `wirken run` with a Signal channel and no signal-cli running prints one
   line, "signal-cli not detected. Run it with `signal-cli -a +your-number
   daemon --socket` and restart wirken to enable Signal.", and runs on
