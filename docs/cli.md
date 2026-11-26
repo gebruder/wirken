@@ -212,7 +212,10 @@ and the message the turn replies to as the gateway established them; what
 the model said beside the call is drawn apart and labeled `model's claim
 (unverified)`. A draft being typed when a card
 arrives is set aside and comes back once the cards are answered; cards that
-arrive together are asked in order. The decision is recorded with
+arrive together are asked in order. Every line of the card wraps to its
+width, the line saying how to answer included; a card that is not on the
+screen whole, a line cut or its last line below the edge, takes no approval
+and says so. The decision is recorded with
 `approved_via` / `denied_via` `{"kind":"channel_adapter","channel":"terminal"}`
 and, for an approval, `approved_by` `<user> (operator key <key id>)`.
 

@@ -20,6 +20,15 @@ tagged.
   left open by a resize to such a width is closed
   (`search_opens_only_where_the_sidebar_is_drawn`,
   `crates/cli/src/commands/chat/view.rs`).
+- The approval card in `wirken chat` says in full how it is answered. Its
+  last line, "Type y and Enter to approve; n, a reason, or anything else
+  refuses." with the time left, was one line cut at the card's edge at every
+  size, mid-word at 120 columns. It now wraps, and so do the line of the two
+  answers on a narrow card and the line of an expired card. A card with any
+  line wider than itself takes no approval, as one whose arguments or last
+  line are cut does (`the_card_says_how_to_answer_it_in_full_at_each_size`,
+  `a_card_without_room_for_its_last_line_takes_no_approval`,
+  `crates/cli/src/commands/chat/view.rs`).
 - `wirken chat` scrolls with the arrow keys, the mouse wheel and the
   trackpad. Only PgUp and PgDn scrolled the transcript, which on a Mac
   laptop are Fn+↑ and Fn+↓, so a long reply could not be read back the way

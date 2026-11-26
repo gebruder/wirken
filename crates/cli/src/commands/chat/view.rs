@@ -153,9 +153,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     .areas(area);
 
     // The card takes an approval only when all of it is on the screen:
-    // every row of the arguments, and its last line.
-    app.card_cut
-        .set(app.front_card().is_some() && (arguments_cut || card_area.height < card_height));
+    // every row of the arguments, every line at its full width, and its
+    // last line.
+    let too_wide = card.iter().any(|line| line.width() > inner_width);
+    app.card_cut.set(
+        app.front_card().is_some() && (arguments_cut || too_wide || card_area.height < card_height),
+    );
 
     draw_transcript(frame, app, transcript_area);
 
@@ -462,10 +465,11 @@ fn card_lines(app: &App, width: usize, now: Instant) -> (Vec<Line<'static>>, boo
     let mut lines = Vec::new();
     let mut arguments_cut = false;
     if let Some(ask) = &app.expired {
-        lines.push(Line::raw(format!(
+        let said = format!(
             "The request to run {} expired; the gateway records it as refused.",
             sanitize(&ask.tool_name)
-        )));
+        );
+        lines.extend(wrap(&said, width).into_iter().map(Line::raw));
         return (lines, false);
     }
     let Some(card) = app.front_card() else {
@@ -524,16 +528,26 @@ fn card_lines(app: &App, width: usize, now: Instant) -> (Vec<Line<'static>>, boo
         arguments_cut |= is_arguments && cut;
     }
 
-    // The two answers, drawn alike.
-    lines.push(Line::from(vec![
+    // The two answers, drawn alike; on a card too narrow for one line,
+    // what Enter alone does goes on the next.
+    let choices = vec![
         Span::styled("[y] approve", choice_style()),
         Span::raw("   "),
         Span::styled("[n] refuse", choice_style()),
-        Span::styled(
-            "   Enter alone refuses.",
+    ];
+    let enter = "Enter alone refuses.";
+    let one_line = Line::from(choices.clone()).width() + 3 + enter.chars().count();
+    if one_line <= width {
+        let mut row = choices;
+        row.push(Span::styled(
+            format!("   {enter}"),
             Style::default().fg(Color::DarkGray),
-        ),
-    ]));
+        ));
+        lines.push(Line::from(row));
+    } else {
+        lines.push(Line::from(choices));
+        lines.push(Line::styled(enter, Style::default().fg(Color::DarkGray)));
+    }
 
     let waiting = app.cards.len().saturating_sub(1);
     let mut status = match card.armed_at {
@@ -549,7 +563,11 @@ fn card_lines(app: &App, width: usize, now: Instant) -> (Vec<Line<'static>>, boo
     if waiting > 0 {
         status.push_str(&format!(" {waiting} more waiting."));
     }
-    lines.push(Line::styled(status, Style::default().fg(Color::Yellow)));
+    // Wrapped, not cut: the last line is how the card is answered, and
+    // it is read whole or the card takes no answer.
+    for row in wrap(&status, width) {
+        lines.push(Line::styled(row, Style::default().fg(Color::Yellow)));
+    }
     (lines, arguments_cut)
 }
 
@@ -585,6 +603,82 @@ mod tests {
             .map(|y| row_text(buffer, y))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn pipeline_card(app: &mut App, now: Instant) {
+        app.on_server(
+            ServerEvent::Approval(ApprovalAsk {
+                request_id: "r1".into(),
+                tool_name: "exec".into(),
+                action_key: "shell::pipeline:".into(),
+                tier: "tier3".into(),
+                agent: "default".into(),
+                trigger: "Use the exec tool to run this command: ls | wc -l".into(),
+                exec_location: "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)".into(),
+                arguments: r#"{"command":"ls | wc -l"}"#.into(),
+                assistant_text: String::new(),
+                timeout_secs: 300,
+                exec_runtime: "docker".into(),
+            }),
+            now,
+        );
+    }
+
+    /// The card's last line, how it is answered, is wrapped and read
+    /// whole at each size, and the card takes an answer there. It used to
+    /// be one line cut at the card's edge, mid-word at 120 columns.
+    #[test]
+    fn the_card_says_how_to_answer_it_in_full_at_each_size() {
+        let now = Instant::now();
+        let later = now + std::time::Duration::from_secs(2);
+        // 64 columns is the narrowest layout with the panels: a card of 38.
+        for (w, h) in [(80u16, 24u16), (120, 24), (120, 40), (64, 30)] {
+            let mut app = App::new(Some("default".into()), "c-1".into());
+            pipeline_card(&mut app, now);
+            let buffer = drawn(&app, later, w, h);
+            let words = all_text(&buffer)
+                .replace(['│', '└', '┘', '─', '┌', '┐'], " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            for whole in [
+                "Type y and Enter to approve; n, a reason, or anything else refuses.",
+                "Closes in",
+                "[y] approve [n] refuse Enter alone refuses.",
+            ] {
+                assert!(
+                    words.contains(whole),
+                    "{w}x{h}: {whole:?} not whole:\n{}",
+                    all_text(&buffer)
+                );
+            }
+            assert!(
+                !app.card_cut.get(),
+                "{w}x{h}: a card shown whole takes no answer"
+            );
+        }
+    }
+
+    /// A card whose last line does not fit takes no approval, as a card
+    /// whose arguments were cut does.
+    #[test]
+    fn a_card_without_room_for_its_last_line_takes_no_approval() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let now = Instant::now();
+        let later = now + std::time::Duration::from_secs(2);
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        pipeline_card(&mut app, now);
+        drawn(&app, later, 120, 14);
+        assert!(app.card_cut.get(), "the card's last line is off the screen");
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), later);
+        let sent = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), later);
+        assert!(
+            !matches!(
+                sent,
+                Some(crate::commands::chat::app::Outgoing::Decision { approve: true, .. })
+            ),
+            "{sent:?}"
+        );
     }
 
     /// Ctrl+F opens the search only where the sidebar it lives in is
