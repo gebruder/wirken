@@ -206,6 +206,30 @@ rule dimension, so the first would drop the rule from production `src` and the
 second would drop every rule from the test paths. Per-alert dismissal is the
 mechanism, and it persists while the fingerprint does.
 
+**A real model answers in the chat.** The tests and the gate run against
+scripted models; this is the one check of the path an operator uses every
+day, a streamed reply from a real model. Build the tip, start it on a
+scratch data dir and its own port with the model you run (a local ollama
+model needs no key), and send one message in `wirken chat`:
+
+```bash
+cargo build -p wirken-cli
+export WIRKEN_DATA_DIR=$(mktemp -d /tmp/wk-chat.XXXX)   # short: it holds sockets
+export WIRKEN_VAULT_PASSPHRASE=scratch                  # so `run` does not prompt
+printf '{"provider": "ollama", "model": "%s", "base_url": "http://localhost:11434/v1"}\n' \
+    qwen3.5:9b > "$WIRKEN_DATA_DIR/provider.json"
+target/debug/wirken run -p 18899 &
+target/debug/wirken chat        # send "one plus one?"; a reply must show
+kill %1; rm -rf "$WIRKEN_DATA_DIR"; unset WIRKEN_DATA_DIR WIRKEN_VAULT_PASSPHRASE
+```
+
+The reply must be the model's words, not `(no response: the model returned
+nothing)`. With ollama, its log shows the call as `POST "/api/chat"` and
+`truncated = 0` (`journalctl -u ollama --since "5 min ago"`). A thinking
+model is the stricter test: it fills a small context window before it
+answers, which is how 3.6.0 shipped a chat that showed nothing with one.
+No reply stops the release.
+
 ### 2. Bump the version
 
 Five files change together in the release commit:
