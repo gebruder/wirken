@@ -74,6 +74,13 @@ tagged.
   stay. Its notice says a single cut row as one
   (`a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- The panels beside `wirken chat`'s transcript are one frame, a rule per
+  section, where there were six boxes. The exec runtime wraps under its
+  label with the mode on its line, the cost's spend and budget share a
+  line, and a Tools list that does not fit ends in `+N more`, with `/tools`
+  on its rule. At 120x24 every panel shows every line, where Environment
+  showed one of five (`the_panels_are_one_frame`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

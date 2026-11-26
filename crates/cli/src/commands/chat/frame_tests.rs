@@ -177,9 +177,21 @@ pub(crate) fn app_with(used: u64, rows: u64, denied: u64) -> App {
     app
 }
 
-/// The frames' first start: nothing sent, nothing on the chain.
+/// The frames' first start: nothing sent, nothing on the chain, one
+/// agent and no conversation yet.
 pub(crate) fn first_start() -> App {
-    app_with(0, 0, 0)
+    let mut app = App::new(Some("default".into()), "c-1".into());
+    let mut status = status(0, 0, 0);
+    status["cost"] = serde_json::json!({"calls": 0, "input_tokens": 0, "output_tokens": 0,
+                                        "budget": {"mode": "off"}});
+    status["audit"] = serde_json::json!({"rows": 0, "heads": 0, "unsigned_tail": 0});
+    app.on_answer(Query::Status, status);
+    app.on_answer(
+        Query::Conversations,
+        serde_json::json!({"agents": [{"id": "default", "provider": "ollama", "model": "llama3.2:3b"}],
+                           "conversations": []}),
+    );
+    app
 }
 
 /// The frames' long conversation: lists of five to eight fruits.
@@ -316,7 +328,7 @@ fn typed(app: &mut App, text: &str, now: Instant) {
 /// The frames' Ctrl+F at 80 columns: the search opened over the
 /// transcript, with what is typed in it.
 pub(crate) fn search_compact() -> App {
-    let mut app = first_start();
+    let mut app = app_with(0, 0, 0);
     app.set_columns(80);
     let now = now();
     app.on_key(ctrl('f'), now);
@@ -612,4 +624,59 @@ fn a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops() {
     );
     assert!(shown.contains("Card cut: "), "{shown}");
     app.cards.clear();
+}
+
+/// 07: beside the transcript the panels are one frame, a rule per
+/// section, the exec runtime wrapped under its label, and a Tools list
+/// that does not fit ends in how many more there are.
+#[test]
+fn the_panels_are_one_frame() {
+    let now = now();
+    let cases: [Case; 6] = [
+        (
+            "first-start-120x24",
+            frame!("first-start-120x24"),
+            first_start,
+            0,
+        ),
+        (
+            "first-start-120x40",
+            frame!("first-start-120x40"),
+            first_start,
+            0,
+        ),
+        ("long-120x24", frame!("long-120x24"), long_conversation, 10),
+        ("long-120x40", frame!("long-120x40"), long_conversation, 10),
+        ("refusal-120x24", frame!("refusal-120x24"), refusal, 0),
+        ("refusal-120x40", frame!("refusal-120x40"), refusal, 0),
+    ];
+    for (name, design, make, scroll) in cases {
+        let mut app = make();
+        app.scroll = scroll;
+        assert_drawn(name, &render(&app, now, design.w, design.h), &design);
+    }
+    let names = [
+        "exec",
+        "generate_image",
+        "http_request",
+        "list_files",
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch",
+        "spawn_subagent",
+        "memory_read",
+        "memory_write",
+        "schedule",
+        "send_message",
+    ];
+    let rows = super::view::tool_names(&names, 34, 3);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows[2].ends_with("more"), "{rows:?}");
+    let shown: usize = rows.join(" ").matches(',').count();
+    assert!(
+        rows[2].contains(&format!("+{} more", names.len() - shown)),
+        "{rows:?}"
+    );
+    assert_eq!(super::view::tool_names(&names[..6], 34, 3).len(), 3);
 }

@@ -725,44 +725,172 @@ fn draw_panels_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// The panels in one frame beside the transcript: a rule per section,
+/// the exec runtime wrapped under its label, and a Tools list that does
+/// not fit ending in how many more there are.
 fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use palette::{BLUE, GRAY, RULE, TEXT, on_bg};
+    let inner = usize::from(area.width.saturating_sub(2)).max(1);
+    let rule = |title: &str, right: Option<(&str, &str)>, top: bool| -> Line<'static> {
+        let (left, end) = if top { ("┌", "┐") } else { ("├", "┤") };
+        let title = format!(" {title} ");
+        let right_width = right.map_or(0, |(k, w)| width_of(k) + 1 + width_of(w) + 2);
+        let fill = inner.saturating_sub(width_of(&title) + right_width);
+        let mut spans = vec![
+            Span::styled(left, on_bg(RULE)),
+            Span::styled(title, on_bg(TEXT)),
+            Span::styled("─".repeat(fill), on_bg(RULE)),
+        ];
+        if let Some((key, what)) = right {
+            spans.push(Span::styled(" ", on_bg(RULE)));
+            spans.push(Span::styled(key.to_string(), on_bg(BLUE)));
+            if !what.is_empty() {
+                spans.push(Span::styled(format!(" {what}"), on_bg(GRAY)));
+            }
+            spans.push(Span::styled(" ", on_bg(RULE)));
+        }
+        spans.push(Span::styled(end, on_bg(RULE)));
+        Line::from(spans)
+    };
+    let row = |mut spans: Vec<Span<'static>>| -> Line<'static> {
+        let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
+        spans.insert(0, Span::styled("│", on_bg(RULE)));
+        spans.push(Span::styled(
+            " ".repeat(inner.saturating_sub(used)),
+            on_bg(TEXT),
+        ));
+        spans.push(Span::styled("│", on_bg(RULE)));
+        Line::from(spans)
+    };
+    let height = usize::from(area.height);
+    let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(status) = &app.status else {
-        frame.render_widget(
-            Paragraph::new("asking the gateway...")
-                .block(Block::default().borders(Borders::ALL).title(" status ")),
-            area,
-        );
+        lines.push(rule("status", None, true));
+        lines.push(row(vec![Span::styled(
+            "asking the gateway...",
+            on_bg(TEXT),
+        )]));
+        while lines.len() + 1 < height {
+            lines.push(row(Vec::new()));
+        }
+        lines.push(Line::styled(
+            format!("└{}┘", "─".repeat(inner)),
+            on_bg(RULE),
+        ));
+        frame.render_widget(Paragraph::new(lines), area);
         return;
     };
-    let cols = usize::from(area.width.saturating_sub(2)).max(1);
     let shown = panels(status, app.verified.as_ref());
-    let blocks: Vec<(String, Vec<Line<'static>>)> = shown
-        .into_iter()
-        .map(|p| {
-            let mut lines = Vec::new();
-            for l in p.lines {
-                for (i, row) in wrap(&sanitize(&l), cols).into_iter().enumerate() {
-                    // Two rows a line at most: the panels are a summary.
-                    if i < 2 {
-                        lines.push(Line::raw(row));
+    let sections = shown.len();
+    for (i, panel) in shown.into_iter().enumerate() {
+        let is_tools = panel.title == "Tools";
+        lines.push(rule(
+            panel.title,
+            is_tools.then_some(("/tools", "")),
+            i == 0,
+        ));
+        let mut texts: Vec<String> = panel.lines.iter().map(|l| sanitize(l)).collect();
+        match panel.title {
+            // The mode goes on the runtime's line, which wraps under
+            // its label.
+            "Environment" => {
+                if let Some(at) = texts.iter().position(|l| l.starts_with("exec "))
+                    && at + 1 < texts.len()
+                    && texts[at + 1].starts_with("       ")
+                {
+                    let mode = texts.remove(at + 1);
+                    texts[at] = format!("{} · {}", texts[at], mode.trim());
+                }
+            }
+            "Cost and tokens" if texts.len() > 2 => {
+                let rest = texts.split_off(1).join(" · ");
+                texts.push(rest);
+            }
+            _ => {}
+        }
+        // Rows left for this section, keeping one for each section still
+        // to come and one for the frame's bottom.
+        let after = sections - i - 1;
+        let room = height.saturating_sub(lines.len() + after * 2 + 1);
+        let mut rows: Vec<Line<'static>> = Vec::new();
+        for (j, text) in texts.iter().enumerate() {
+            if is_tools && j == 1 {
+                let names: Vec<&str> = status.tools.names.iter().map(String::as_str).collect();
+                let left = room.saturating_sub(rows.len());
+                for r in tool_names(&names, inner, left) {
+                    rows.push(row(vec![Span::styled(r, on_bg(TEXT))]));
+                }
+                continue;
+            }
+            // A label column: Environment's lines are a name padded to
+            // seven cells, then its value.
+            let label = (panel.title == "Environment" && text.chars().count() > ENV_LABEL)
+                .then_some(ENV_LABEL);
+            match label {
+                Some(at) => {
+                    let (name, value) = text.split_at(at);
+                    for (k, r) in wrap(value, inner.saturating_sub(at))
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let lead = if k == 0 {
+                            name.to_string()
+                        } else {
+                            " ".repeat(at)
+                        };
+                        rows.push(row(vec![
+                            Span::styled(lead, on_bg(if k == 0 { GRAY } else { TEXT })),
+                            Span::styled(r, on_bg(TEXT)),
+                        ]));
+                    }
+                }
+                None => {
+                    for r in wrap(text, inner) {
+                        rows.push(row(vec![Span::styled(r, on_bg(TEXT))]));
                     }
                 }
             }
-            (format!(" {} ", p.title), lines)
-        })
-        .collect();
-    let constraints: Vec<Constraint> = blocks
-        .iter()
-        .map(|(_, l)| Constraint::Length(u16::try_from(l.len() + 2).unwrap_or(u16::MAX)))
-        .chain(std::iter::once(Constraint::Min(0)))
-        .collect();
-    let areas = Layout::vertical(constraints).split(area);
-    for ((title, lines), rect) in blocks.into_iter().zip(areas.iter()) {
-        frame.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
-            *rect,
-        );
+        }
+        rows.truncate(room);
+        lines.extend(rows);
     }
+    while lines.len() + 1 < height {
+        lines.push(row(Vec::new()));
+    }
+    lines.truncate(height.saturating_sub(1));
+    lines.push(Line::styled(
+        format!("└{}┘", "─".repeat(inner)),
+        on_bg(RULE),
+    ));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Cells an Environment line's name takes before its value.
+const ENV_LABEL: usize = 7;
+
+/// The tool names in at most `rows` rows of `width` cells: all of them,
+/// or as many as fit with `+N more` saying how many did not.
+pub(crate) fn tool_names(names: &[&str], width: usize, rows: usize) -> Vec<String> {
+    if rows == 0 || names.is_empty() {
+        return Vec::new();
+    }
+    let all = wrap(&names.join(", "), width);
+    if all.len() <= rows {
+        return all;
+    }
+    for shown in (0..names.len()).rev() {
+        let more = format!("+{} more", names.len() - shown);
+        let text = if shown == 0 {
+            more
+        } else {
+            format!("{}, {more}", names[..shown].join(", "))
+        };
+        let wrapped = wrap(&text, width);
+        if wrapped.len() <= rows {
+            return wrapped;
+        }
+    }
+    vec![format!("+{} more", names.len())]
 }
 
 /// The transcript's rows at `width` cells, oldest first.
