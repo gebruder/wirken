@@ -680,3 +680,45 @@ fn the_panels_are_one_frame() {
     );
     assert_eq!(super::view::tool_names(&names[..6], 34, 3).len(), 3);
 }
+
+/// 08: an empty conversation teaches the keys a newcomer needs and the
+/// empty draft says what to do; both go with the first message.
+#[test]
+fn a_first_screen_teaches_until_the_first_message() {
+    let now = now();
+    let cases: [Case; 3] = [
+        (
+            "first-start-80x24",
+            frame!("first-start-80x24"),
+            first_start,
+            0,
+        ),
+        (
+            "first-start-120x24",
+            frame!("first-start-120x24"),
+            first_start,
+            0,
+        ),
+        (
+            "first-start-120x40",
+            frame!("first-start-120x40"),
+            first_start,
+            0,
+        ),
+    ];
+    for (name, design, make, _) in cases {
+        assert_drawn(name, &render(&make(), now, design.w, design.h), &design);
+    }
+    let mut app = first_start();
+    typed(&mut app, "hello", now);
+    app.on_key(key(crossterm::event::KeyCode::Enter), now);
+    let b = render(&app, now, 80, 24);
+    let text: String = (0..24)
+        .flat_map(|y| (0..80).map(move |x| (x, y)))
+        .map(|(x, y)| b[(x, y)].symbol().to_string())
+        .collect();
+    assert!(
+        !text.contains("Type a message") && !text.contains("type a message"),
+        "{text}"
+    );
+}

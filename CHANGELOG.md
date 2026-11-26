@@ -81,6 +81,13 @@ tagged.
   on its rule. At 120x24 every panel shows every line, where Environment
   showed one of five (`the_panels_are_one_frame`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- An empty conversation in `wirken chat` teaches before anything is typed:
+  how to send, the six keys a newcomer needs first (send, new line, the
+  two ways to scroll, commands, the keys screen), and how many of the
+  agent's tools ask first; the empty draft says `type a message · / for
+  commands`. Both go with the first message
+  (`a_first_screen_teaches_until_the_first_message`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

@@ -893,8 +893,54 @@ pub(crate) fn tool_names(names: &[&str], width: usize, rows: usize) -> Vec<Strin
     vec![format!("+{} more", names.len())]
 }
 
+/// The keys a first screen teaches, before anything is sent.
+const FIRST_KEYS: &[(&str, &str)] = &[
+    ("Enter", "send the message"),
+    ("Ctrl+J", "new line in the draft"),
+    ("PgUp PgDn", "scroll the conversation"),
+    ("↑ ↓ wheel", "scroll three rows"),
+    ("/", "list the commands"),
+    ("Ctrl+G", "every key and command"),
+];
+/// What an empty draft says, until the first message.
+const DRAFT_PLACEHOLDER: &str = " type a message · / for commands";
+
+/// An empty conversation's screen: how to send, the keys a newcomer
+/// needs first, and how many of the agent's tools ask before they run.
+fn first_screen(app: &App) -> Vec<Line<'static>> {
+    use palette::{BLUE, GRAY, TEXT, WHITE, on_bg};
+    let mut lines = vec![
+        Line::raw(""),
+        Line::styled("  Type a message, then press Enter.", on_bg(WHITE)),
+        Line::raw(""),
+    ];
+    for (key, what) in FIRST_KEYS {
+        lines.push(Line::from(vec![
+            Span::styled("  ", on_bg(TEXT)),
+            Span::styled(format!("{key:<13}"), on_bg(BLUE)),
+            Span::styled(what.to_string(), on_bg(TEXT)),
+        ]));
+    }
+    if let Some(tools) = app.status.as_ref().map(|s| &s.tools)
+        && let Some(count) = tools.count
+    {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!(
+                "  {} of this agent's {count} tools ask you first.",
+                tools.ask_first
+            ),
+            on_bg(GRAY),
+        ));
+    }
+    lines
+}
+
 /// The transcript's rows at `width` cells, oldest first.
 fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    if app.entries.is_empty() {
+        return first_screen(app);
+    }
     let mut lines: Vec<Line<'static>> = Vec::new();
     use palette::{AMBER, CYAN, GRAY, RED, TEXT, WHITE, on_bg};
     for entry in &app.entries {
@@ -1172,10 +1218,12 @@ fn draw_conversation(
         area.width.saturating_sub(2),
         input_rows,
     );
-    frame.render_widget(
-        Paragraph::new(input.iter().cloned().map(Line::raw).collect::<Vec<_>>()),
-        draft,
-    );
+    let typed = if app.entries.is_empty() && app.draft.is_empty() {
+        vec![Line::styled(DRAFT_PLACEHOLDER, on_bg(palette::DIM))]
+    } else {
+        input.iter().cloned().map(Line::raw).collect::<Vec<_>>()
+    };
+    frame.render_widget(Paragraph::new(typed), draft);
     below
 }
 
