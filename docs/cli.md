@@ -185,8 +185,7 @@ line with its cells apart. Blockquotes, images and HTML are shown as written. Yo
 messages, tool output and the approval card stay plain.
 
 Below 90 columns the panels take one narrow column of 24, beside a transcript
-of at least 40. Below 64 columns they are not drawn, and the status line says
-how many columns they need.
+of at least 40. Below 64 columns they are not drawn.
 
 The socket is mode 0600 and the gateway checks the peer's user, as for every
 connection. The chat then answers the gateway's challenge with the operator
@@ -251,8 +250,13 @@ gateway over the terminal connection.
 The panels take 36 columns and the sidebar 30, and the transcript keeps
 at least 54, so both are drawn from 120 columns. From 90 the panels are
 drawn and the sidebar yields to them; below 90 the panels are not drawn.
-Either way the status line says what is hidden and how many columns it
-needs. Both start shown; Ctrl+B and Ctrl+P toggle them.
+Both start shown; Ctrl+B and Ctrl+P toggle them.
+
+The bottom row is the key bar, across the whole width at every size. It shows
+the keys for what is on screen, most needed first, and drops them from the
+right as the window narrows; Ctrl+G, the keys screen, stays at its right
+whatever the width. Scrolled up, End leads; at a card it lists the keys other
+than the answer, which the card states.
 
 | Key | Action |
 |-----|--------|
@@ -266,10 +270,11 @@ needs. Both start shown; Ctrl+B and Ctrl+P toggle them.
 | ← / → | Move in the draft |
 | Backspace / Delete | Delete before / after the cursor |
 | Ctrl+U | Clear the draft, or the card's answer |
-| Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves. Where the screen is too narrow to draw the sidebar the search does not open, and the status line says how many columns it needs |
+| Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves. Where the screen is too narrow to draw the sidebar the search does not open, and the key bar says how many columns it needs |
 | Ctrl+N | New conversation with the same agent |
 | Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels |
 | Ctrl+K | Verify this conversation's chain |
+| Ctrl+G / F1 | Every key and command. The key bar keeps Ctrl+G at its right at every width |
 | Ctrl+C | Leave the chat |
 | Esc | Leave the sidebar search; put away an expired card |
 | y | On a card, with Enter, approves; n, a reason or anything else refuses, and Enter alone refuses |

@@ -102,6 +102,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl+B", "show or hide the sidebar"),
     ("Ctrl+P", "show or hide the panels"),
     ("Ctrl+K", "verify this conversation's chain"),
+    ("Ctrl+G F1", "every key and command"),
     ("Ctrl+C", "leave the chat"),
     (
         "y",
@@ -578,6 +579,9 @@ impl App {
                 return None;
             }
             KeyCode::Char('k') if ctrl => return Some(Outgoing::Ask(Query::Verify)),
+            // The key the bar keeps on screen: every key and command.
+            KeyCode::Char('g') if ctrl => return self.run_command(super::slash::Command::Help),
+            KeyCode::F(1) => return self.run_command(super::slash::Command::Help),
             _ => {}
         }
 

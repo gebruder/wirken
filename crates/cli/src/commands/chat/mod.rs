@@ -15,6 +15,8 @@
 //! run) runs before the screen is taken, in the terminal as it is.
 
 mod app;
+#[cfg(test)]
+mod frame_tests;
 mod markdown;
 mod panels;
 mod slash;

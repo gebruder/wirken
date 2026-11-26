@@ -10,8 +10,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use wirken_adapter_core::approval_card::runtime_words;
-
 use super::app::{App, Entry};
 use super::panels::{SideItem, panels};
 use super::text::{layout_input, sanitize, width, wrap};
@@ -94,6 +92,148 @@ pub(crate) fn search_refusal(width: u16, show_panels: bool) -> Option<String> {
     ))
 }
 
+/// The chat's colors, by the role each plays on screen. Every cell is
+/// drawn on [`palette::BG`]; the key bar on [`palette::BAR`].
+// The roles the redesign has not drawn yet are unused until it does.
+#[allow(dead_code)]
+pub(crate) mod palette {
+    use ratatui::style::{Color, Style};
+
+    pub const BG: Color = Color::Rgb(0x0f, 0x11, 0x15);
+    pub const BAR: Color = Color::Rgb(0x1c, 0x21, 0x28);
+    /// Text: what was said, and what a key does.
+    pub const TEXT: Color = Color::Rgb(0xc9, 0xd1, 0xd9);
+    /// Frame lines, rules and separators.
+    pub const RULE: Color = Color::Rgb(0x6e, 0x76, 0x81);
+    /// What the operator wrote or must read before answering.
+    pub const WHITE: Color = Color::Rgb(0xff, 0xff, 0xff);
+    /// What waits on the operator: a card, its tier.
+    pub const AMBER: Color = Color::Rgb(0xf0, 0xb4, 0x29);
+    /// Facts about the session: model, counts, labels.
+    pub const GRAY: Color = Color::Rgb(0x8b, 0x94, 0x9e);
+    /// Keys.
+    pub const BLUE: Color = Color::Rgb(0x79, 0xc0, 0xff);
+    /// The agent, and what the agent says.
+    pub const CYAN: Color = Color::Rgb(0x56, 0xd4, 0xdd);
+    /// Placeholders and what does not apply now.
+    pub const DIM: Color = Color::Rgb(0x7d, 0x85, 0x90);
+    /// A failure or a refusal.
+    pub const RED: Color = Color::Rgb(0xff, 0xa1, 0x98);
+
+    pub fn on_bg(fg: Color) -> Style {
+        Style::default().fg(fg).bg(BG)
+    }
+
+    pub fn on_bar(fg: Color) -> Style {
+        Style::default().fg(fg).bg(BAR)
+    }
+}
+
+/// The key the bar keeps whatever its width: the keys screen.
+pub(crate) const PINNED: (&str, &str) = ("Ctrl+G", "keys");
+/// Cells kept clear between the last hint and the pinned key.
+const BAR_GAP: usize = 2;
+
+/// The key bar's hints, by state, most needed first. The bar drops them
+/// from the right as the window narrows.
+const HINTS: &[(&str, &str)] = &[
+    ("Enter", "send"),
+    ("Ctrl+J", "new line"),
+    ("PgUp/PgDn", "scroll"),
+    ("/", "commands"),
+    ("Ctrl+F", "search"),
+    ("Ctrl+N", "new"),
+    ("Ctrl+C", "quit"),
+];
+/// Scrolled up, the way back leads.
+const HINTS_SCROLLED: &[(&str, &str)] = &[
+    ("End", "latest"),
+    ("PgUp/PgDn", "scroll"),
+    ("Enter", "send"),
+    ("Ctrl+J", "new line"),
+    ("/", "commands"),
+    ("Ctrl+F", "search"),
+];
+/// At a card the answer rule is on the card; the bar has the rest.
+const HINTS_CARD: &[(&str, &str)] = &[
+    ("PgUp/PgDn", "scroll"),
+    ("Ctrl+U", "clear answer"),
+    ("Ctrl+K", "verify chain"),
+];
+const HINTS_EXPIRED: &[(&str, &str)] = &[("Enter", "dismiss"), ("PgUp/PgDn", "scroll")];
+const HINTS_SEARCH: &[(&str, &str)] = &[
+    ("type", "to filter"),
+    ("↑↓", "select"),
+    ("Enter", "open"),
+    ("Esc", "close"),
+];
+
+/// The bottom row at `width`: as many of `hints` as fit, left to right,
+/// and `pinned` at the right, which never drops. `note`, when there is
+/// one, says why a key just did nothing, in place of the hints.
+pub(crate) fn key_bar(
+    width: usize,
+    hints: &[(&str, &str)],
+    pinned: (&str, &str),
+    note: Option<&str>,
+) -> Line<'static> {
+    use palette::{BAR, BG, BLUE, GRAY, RULE, on_bar};
+    let pinned_width = width_of(pinned.0) + 1 + width_of(pinned.1);
+    let room = width.saturating_sub(1 + pinned_width + 1);
+    let mut spans = vec![Span::styled(" ", on_bar(GRAY))];
+    let mut used = 0;
+    if let Some(note) = note {
+        let note: String = note.chars().take(room.saturating_sub(BAR_GAP)).collect();
+        used = width_of(&note);
+        spans.push(Span::styled(note, on_bar(GRAY)));
+    } else {
+        for (i, (key, what)) in hints.iter().enumerate() {
+            let sep = if i == 0 { 0 } else { 3 };
+            let w = sep + width_of(key) + 1 + width_of(what);
+            if used + w + BAR_GAP > room {
+                break;
+            }
+            if sep > 0 {
+                spans.push(Span::styled(" ", on_bar(GRAY)));
+                spans.push(Span::styled("·", on_bar(RULE)));
+                spans.push(Span::styled(" ", on_bar(GRAY)));
+            }
+            spans.push(Span::styled(key.to_string(), on_bar(BLUE)));
+            spans.push(Span::styled(" ", on_bar(GRAY)));
+            spans.push(Span::styled(what.to_string(), on_bar(GRAY)));
+            used += w;
+        }
+    }
+    let pad = room.saturating_sub(used);
+    spans.push(Span::styled(" ".repeat(pad), on_bar(GRAY)));
+    let pin = Style::default().fg(BG).bg(BLUE);
+    spans.push(Span::styled(pinned.0.to_string(), pin));
+    spans.push(Span::styled(" ", pin));
+    spans.push(Span::styled(pinned.1.to_string(), pin));
+    spans.push(Span::styled(" ", Style::default().bg(BAR)));
+    Line::from(spans)
+}
+
+fn width_of(s: &str) -> usize {
+    width(s)
+}
+
+/// The hints for what the screen is showing now. `scrolled` is whether
+/// the transcript, as drawn, has rows below the view.
+fn hints_for(app: &App, scrolled: bool) -> &'static [(&'static str, &'static str)] {
+    if app.expired.is_some() {
+        HINTS_EXPIRED
+    } else if app.front_card().is_some() {
+        HINTS_CARD
+    } else if app.searching {
+        HINTS_SEARCH
+    } else if scrolled {
+        HINTS_SCROLLED
+    } else {
+        HINTS
+    }
+}
+
 /// How the model's own words are drawn on the card: set apart from what
 /// the gateway established, because they are a claim, not a fact.
 pub(crate) fn claim_style() -> Style {
@@ -109,8 +249,16 @@ pub(crate) fn choice_style() -> Style {
 }
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
-    let full = frame.area();
-    let (side_cols, panel_cols, layout_note) = fit(full.width, app.show_sidebar, app.show_panels);
+    let screen = frame.area();
+    frame.render_widget(
+        Block::default().style(palette::on_bg(palette::TEXT)),
+        screen,
+    );
+    // The bottom row is the key bar, across the whole width, whatever
+    // else is drawn.
+    let [full, bar_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(screen);
+    let (side_cols, panel_cols, _) = fit(full.width, app.show_sidebar, app.show_panels);
     let [side_area, area, panel_area] = Layout::horizontal([
         Constraint::Length(side_cols),
         Constraint::Min(TRANSCRIPT_NARROW_MIN_COLS),
@@ -144,11 +292,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let first_row = (cursor_row + 1).saturating_sub(shown_rows);
     let input_height = u16::try_from(shown_rows + 2).unwrap_or(u16::MAX);
 
-    let [transcript_area, card_area, input_area, status_area] = Layout::vertical([
+    let [transcript_area, card_area, input_area] = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(card_height),
         Constraint::Length(input_height),
-        Constraint::Length(1),
     ])
     .areas(area);
 
@@ -160,7 +307,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         app.front_card().is_some() && (arguments_cut || too_wide || card_area.height < card_height),
     );
 
-    draw_transcript(frame, app, transcript_area);
+    let scrolled = draw_transcript(frame, app, transcript_area) > 0;
 
     if card_height > 0 {
         let title = if app.expired.is_some() {
@@ -213,29 +360,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         ));
     }
 
-    // The runtime is the one the gateway named; until it has said,
-    // the line says nothing about where commands run. With the panels
-    // drawn, Environment names it, and the line keeps its width for the
-    // keys: the transcript column is all the line has.
-    let exec = app
-        .status
-        .as_ref()
-        .map(|s| s.environment.exec.runtime.as_str())
-        .filter(|r| !r.is_empty() && panel_cols == 0)
-        .map(|r| format!("exec: {} · ", sanitize(&runtime_words(r))))
-        .unwrap_or_default();
-    // A toggle the screen cannot honour is explained here, in place of
-    // the key hints, so the key is never seen to do nothing.
-    let line = match app.notice.clone().or(layout_note) {
-        Some(note) => note,
-        None => format!(
-            "{exec}Enter send · Ctrl+J newline · ↑↓ PgUp PgDn scroll · End latest · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar \
-             · Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
-        ),
-    };
     frame.render_widget(
-        Paragraph::new(Line::styled(line, Style::default().fg(Color::DarkGray))),
-        status_area,
+        Paragraph::new(key_bar(
+            usize::from(bar_area.width),
+            hints_for(app, scrolled),
+            PINNED,
+            app.notice.as_deref(),
+        )),
+        bar_area,
     );
 }
 
@@ -357,7 +489,9 @@ fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
+/// Draw the transcript into `area`, and return how many rows are below
+/// the view: the scroll as drawn, not as asked for.
+fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) -> usize {
     let width = usize::from(area.width.saturating_sub(2)).max(1);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let label = Style::default().add_modifier(Modifier::BOLD);
@@ -452,6 +586,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Paragraph::new(lines[start..end].to_vec()).block(block),
         area,
     );
+    scroll
 }
 
 /// Rows between the longest name in a `/help` table and its
@@ -1153,22 +1288,13 @@ mod tests {
         let middling = text_of(&drawn(&app, now, 100, 30));
         assert!(middling.contains(" status "), "{middling}");
         assert!(!middling.contains(" agents "), "{middling}");
-        assert!(
-            middling.contains("sidebar hidden: both need 120 columns, 100 now"),
-            "{middling}"
-        );
 
         // Below the full width the panels narrow to one column, and only
-        // when even that cannot fit do they go, with the threshold named.
+        // when even that cannot fit do they go.
         let narrow = text_of(&drawn(&app, now, 80, 30));
         assert!(narrow.contains(" status "), "{narrow}");
-        assert!(!narrow.contains("panels hidden"), "{narrow}");
         let tiny = text_of(&drawn(&app, now, 50, 30));
         assert!(!tiny.contains(" Context "), "{tiny}");
-        assert!(
-            tiny.contains("panels hidden: need 64 columns, 50 now"),
-            "{tiny}"
-        );
 
         app.show_panels = false;
         let off = text_of(&drawn(&app, now, 100, 30));
@@ -1230,8 +1356,7 @@ mod tests {
             crate::commands::chat::wire::Query::Status,
             serde_json::json!({"agent": "default", "environment": {"exec": {"mode": "gvisor", "runtime": "gvisor"}}}),
         );
-        // With the panels drawn, Environment names it and the status
-        // line leaves it out, to keep its width for the keys.
+        // Environment names it; the key bar has keys only.
         let buffer = drawn(&app, now, 200, 40);
         find(&buffer, "Environment");
         find(&buffer, "gVisor (runsc)");
@@ -1239,14 +1364,7 @@ mod tests {
             .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
             .map(|(x, y)| buffer[(x, y)].symbol().to_string())
             .collect();
-        assert!(
-            !text.contains("exec: "),
-            "the status line names the runtime twice"
-        );
-        // With them hidden, the status line names it.
-        app.show_panels = false;
-        let buffer = drawn(&app, now, 200, 40);
-        find(&buffer, "exec: gVisor (runsc)");
+        assert!(!text.contains("exec: "), "the key bar names the runtime");
     }
 
     #[test]

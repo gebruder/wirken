@@ -10,6 +10,19 @@ tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- `wirken chat` has a key bar: the bottom row, across the whole width, at
+  every size and in every state. It shows the keys for what is on screen,
+  most needed first, and drops them from the right as the window narrows;
+  `Ctrl+G keys` stays at its right whatever the width. Scrolled up, `End
+  latest` leads; at a card it lists the keys other than the answer. It
+  replaces the status line under the transcript, which at 80 columns showed
+  a layout note in place of any key and at 120 was cut after the scroll
+  keys. The side columns end one row higher. Ctrl+G and F1 open the keys
+  (`the_key_bar_is_the_bottom_row_at_every_size`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
+
 ### Fixed
 
 - Ctrl+F in `wirken chat` no longer opens a search the screen does not
