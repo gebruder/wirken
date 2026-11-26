@@ -1,0 +1,82 @@
+120x40
+┌ keys and commands ───────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ SCROLL                                  APPROVALS · none waiting               COMMANDS                              │
+│ PgUp PgDn    scroll 10 rows             y Enter      approve the card          /status      every panel, as of now   │
+│ ↑ ↓ wheel    scroll 3 rows              n or Enter   refuse; so does a reason  /context     the context window       │
+│ End          back to the latest row     Esc          put away an expired card  /cost        tokens and cost          │
+│                                         Ctrl+K       verify the audit chain    /tools       tools this agent can use │
+│ WRITE                                                                          /approvals   approvals waiting on you │
+│ Enter        send                       SCREEN                                 /audit       audit trail and chain    │
+│ Ctrl+J       new line                   Ctrl+B       toggle conversations      /verify      check the chain          │
+│ Home Ctrl+A  start of the draft         Ctrl+P       toggle panels             /clear       new conversation         │
+│ End Ctrl+E   end of the draft           Ctrl+G F1    this screen               /help        this screen              │
+│ Ctrl+U       clear the draft or answer  Esc          close this or the search  /quit /exit  leave the chat           │
+│                                         Ctrl+C       quit                                                            │
+│ CONVERSATIONS                                                                  LAYOUT                                │
+│ Ctrl+N       new conversation           MOUSE                                  From 120 columns, conversations and   │
+│ Ctrl+F       search conversations       wheel scrolls · drag selects text      panels sit beside the transcript.     │
+│                                         the chat does not capture the mouse    Narrower, they open over it.          │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+├ filter ──────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ type to filter                                                                                                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ type to filter · ↑↓ scroll · Esc close                                                                    Ctrl+G close 
+
+- WWWW WWW WWWWWWWW ----------------------------------------------------------------------------------------------------
+- WWWWWW                                  WWWWWWWWW d dddd ddddddd               WWWWWWWW                              -
+- BBBB BBBB    ...... .. ....             d ddddd      ddddddd ddd dddd          BBBBBBB      ..... ...... .. .. ...   -
+- B B BBBBB    ...... . ....              d dd ddddd   ddddddd dd dddd d dddddd  BBBBBBBB     ... ....... ......       -
+- BBB          .... .. ... ...... ...     ddd          ddd dddd dd ddddddd dddd  BBBBB        ...... ... ....          -
+-                                         BBBBBB       ...... ... ..... .....    BBBBBB       ..... .... ..... ... ... -
+- WWWWW                                                                          BBBBBBBBBB   ......... ....... .. ... -
+- BBBBB        ....                       WWWWWW                                 BBBBBB       ..... ..... ... .....    -
+- BBBBBB       ... ....                   BBBBBB       ...... .............      BBBBBBB      ..... ... .....          -
+- BBBB BBBBBB  ..... .. ... .....         BBBBBB       ...... ......             BBBBBB       ... ............         -
+- BBB BBBBBB   ... .. ... .....           BBBBBB BB    .... ......               BBBBB        .... ......              -
+- BBBBBB       ..... ... ..... .. ......  BBB          ..... .... .. ... ......  BBBBB BBBBB  ..... ... ....           -
+-                                         BBBBBB       ....                                                            -
+- WWWWWWWWWWWWW                                                                  WWWWWW                                -
+- BBBBBB       ... ............           WWWWW                                  .... ... ........ ............. ...   -
+- BBBBBB       ...... .............       ..... ....... . .... ....... ....      ...... ... ...... ... ...........     -
+-                                         ... .... .... ... ....... ... .....    ......... .... .... .... ...          -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+-                                                                                                                      -
+- gggggg ---------------------------------------------------------------------------------------------------------------
+- dddd dd dddddd                                                                                                       -
+------------------------------------------------------------------------------------------------------------------------
+ KKKK kk kkkkkk r KK kkkkkk r KKK kkkkk                                                                    SSSSSS SSSSS 

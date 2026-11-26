@@ -352,3 +352,42 @@ fn under_120_columns_the_transcript_takes_the_width() {
         assert_drawn(name, &render(&app, now, design.w, design.h), &design);
     }
 }
+
+/// The frames' keys screen, opened with Ctrl+G, and filtered by `filter`.
+fn keys_screen(filter: &str) -> App {
+    let mut app = first_start();
+    let now = now();
+    app.on_key(ctrl('g'), now);
+    typed(&mut app, filter, now);
+    app
+}
+
+/// 04: Ctrl+G, F1 and /help open one keys screen: every key and command in
+/// groups, the approval keys dimmed while none waits, the whole list
+/// fitting 80x24, and typing filters it with the matches marked.
+#[test]
+fn the_keys_screen_lists_every_key_and_filters() {
+    let now = now();
+    let cases: [Case; 4] = [
+        ("keys-80x24", frame!("keys-80x24"), || keys_screen(""), 0),
+        ("keys-120x24", frame!("keys-120x24"), || keys_screen(""), 0),
+        ("keys-120x40", frame!("keys-120x40"), || keys_screen(""), 0),
+        (
+            "keys-filtered-80x24",
+            frame!("keys-filtered-80x24"),
+            || keys_screen("scroll"),
+            0,
+        ),
+    ];
+    for (name, design, make, _) in cases {
+        assert_drawn(name, &render(&make(), now, design.w, design.h), &design);
+    }
+    // F1 and /help open the same screen, and Esc closes it.
+    let mut app = first_start();
+    app.on_key(key(crossterm::event::KeyCode::F(1)), now);
+    assert!(app.keys.is_some());
+    app.on_key(key(crossterm::event::KeyCode::Esc), now);
+    typed(&mut app, "/help", now);
+    app.on_key(key(crossterm::event::KeyCode::Enter), now);
+    assert!(app.keys.is_some() && app.entries.is_empty());
+}

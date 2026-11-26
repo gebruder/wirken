@@ -41,6 +41,15 @@ tagged.
   `crates/cli/src/commands/chat/frame_tests.rs`;
   `the_panels_and_conversations_open_over_the_transcript_under_120_columns`,
   `crates/cli/src/commands/chat/view.rs`).
+- `wirken chat` has one keys screen, opened by Ctrl+G, F1 or `/help`: every
+  key and command in groups (scroll, write, conversations, approvals,
+  screen, commands, mouse), over the whole screen. Typing filters it and
+  marks what matched; keys that do not apply now, such as the answers
+  while no card waits, are dimmed; Esc or Ctrl+G closes it. The whole list
+  fits 80x24 without scrolling. It replaces the help `/help` printed into
+  the transcript, and the layout note moves to its title
+  (`the_keys_screen_lists_every_key_and_filters`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 
@@ -59,18 +68,12 @@ tagged.
   line are cut does (`the_card_says_how_to_answer_it_in_full_at_each_size`,
   `a_card_without_room_for_its_last_line_takes_no_approval`,
   `crates/cli/src/commands/chat/view.rs`).
-- `/help` in `wirken chat` lists every key the chat takes, one per line:
-  Esc, Ctrl+U, Ctrl+A and Ctrl+E were missing from it, and Ctrl+A and
-  Ctrl+E from the key table in `docs/cli.md` too, with the arrows, Backspace
-  and Delete and the card's answers. The list is one table in the code that
-  `/help` prints, and a test holds `docs/cli.md` to it
-  (`the_docs_key_table_names_every_key_help_lists`,
-  `crates/cli/src/commands/chat/app.rs`). `/help` is drawn as two tables at
-  the transcript's width: a description that wraps continues under its own
-  column, not at the left margin, and the name column is the longest name
-  and two cells, so "Backspace Delete" no longer runs into its description
-  (`help_is_two_aligned_tables_at_each_size`,
-  `crates/cli/src/commands/chat/view.rs`).
+- Esc, Ctrl+U, Ctrl+A and Ctrl+E were missing from `/help` in `wirken
+  chat`, and Ctrl+A and Ctrl+E from the key table in `docs/cli.md`; the
+  docs table now also has the arrows, Backspace and Delete and the card's
+  answers. A test holds `docs/cli.md` to every key and command the keys
+  screen lists (`the_docs_name_every_key_and_command_the_keys_screen_lists`,
+  `crates/cli/src/commands/chat/app.rs`).
 - `wirken chat` scrolls with the arrow keys, the mouse wheel and the
   trackpad. Only PgUp and PgDn scrolled the transcript, which on a Mac
   laptop are Fn+↑ and Fn+↓, so a long reply could not be read back the way

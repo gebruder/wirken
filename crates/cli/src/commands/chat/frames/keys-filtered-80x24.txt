@@ -1,0 +1,50 @@
+80x24
+┌ keys and commands ─────────── compact layout · side by side from 120 columns ┐
+│ SCROLL                                                                       │
+│ PgUp PgDn    scroll 10 rows                                                  │
+│ ↑ ↓ wheel    scroll 3 rows                                                   │
+│ End          back to the latest row                                          │
+│                                                                              │
+│ MOUSE                                                                        │
+│ wheel scrolls · drag selects text                                            │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+├ filter ─────────────────────────────────────────────────────── 4 of 30 match ┤
+│scroll                                                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+ type to filter · ↑↓ scroll · Esc close                            Ctrl+G close 
+
+- WWWW WWW WWWWWWWW ----------- ....... ...... - gggg gg gggg gggg ggg ggggggg -
+- YYYYYY                                                                       -
+- BBBB BBBB    YYYYYY .. ....                                                  -
+- B B BBBBB    YYYYYY . ....                                                   -
+- BBB          .... .. ... ...... ...                                          -
+-                                                                              -
+- WWWWW                                                                        -
+- ..... YYYYYY. . .... ....... ....                                            -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+-                                                                              -
+- gggggg ------------------------------------------------------- . .. .. ..... -
+-WWWWWW                                                                        -
+--------------------------------------------------------------------------------
+ KKKK kk kkkkkk r KK kkkkkk r KKK kkkkk                            SSSSSS SSSSS 

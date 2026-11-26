@@ -37,9 +37,6 @@ pub(crate) enum Entry {
         output: String,
     },
     Note(String),
-    /// The `/help` list: the commands and the keys, drawn as two
-    /// columns at whatever width the transcript has.
-    Help,
 }
 
 /// An approval request waiting for the operator.
@@ -82,42 +79,81 @@ pub(crate) enum Outgoing {
     },
 }
 
-/// A new conversation's id: `c-` and 12 hex digits.
-/// Every key the chat takes, as `/help` lists it; `docs/cli.md` names
-/// each in its key table, which a test holds it to.
-pub(crate) const KEYS: &[(&str, &str)] = &[
-    (
-        "Enter",
-        "send; answer a card; in search, open the conversation",
-    ),
-    ("Ctrl+J", "new line in the draft"),
-    (
-        "↑ ↓ wheel",
-        "scroll a few rows; in search, move the selection",
-    ),
-    ("PgUp PgDn", "scroll a page (Fn+↑ Fn+↓ on a Mac laptop)"),
-    (
-        "End",
-        "scrolled up, the latest row; else the end of the draft",
-    ),
-    ("Home", "the start of the draft"),
-    ("Ctrl+A Ctrl+E", "the start / the end of the draft"),
-    ("← →", "move in the draft"),
-    ("Backspace Delete", "delete before / after the cursor"),
-    ("Ctrl+U", "clear the draft, or the card's answer"),
-    ("Ctrl+F", "search the sidebar"),
-    ("Esc", "leave the search; put away an expired card"),
-    ("Ctrl+N", "new conversation"),
-    ("Ctrl+B", "show or hide the sidebar"),
-    ("Ctrl+P", "show or hide the panels"),
-    ("Ctrl+K", "verify this conversation's chain"),
-    ("Ctrl+G F1", "every key and command"),
-    ("Ctrl+C", "leave the chat"),
-    (
-        "y",
-        "on a card, approves; n, a reason or anything else refuses",
-    ),
+/// One group of the keys screen: a heading, and each key or keys with
+/// what it does.
+pub(crate) struct KeyGroup {
+    pub title: &'static str,
+    pub keys: &'static [(&'static str, &'static str)],
+}
+
+/// Every key the chat takes, by group, as the keys screen lists it;
+/// `docs/cli.md` names each in its key table, which a test holds it to.
+/// The commands are the slash commands' own table.
+pub(crate) const KEYS: &[KeyGroup] = &[
+    KeyGroup {
+        title: "SCROLL",
+        keys: &[
+            ("PgUp PgDn", "scroll 10 rows"),
+            ("↑ ↓ wheel", "scroll 3 rows"),
+            ("End", "back to the latest row"),
+        ],
+    },
+    KeyGroup {
+        title: "WRITE",
+        keys: &[
+            ("Enter", "send"),
+            ("Ctrl+J", "new line"),
+            ("Home Ctrl+A", "start of the draft"),
+            ("End Ctrl+E", "end of the draft"),
+            ("Ctrl+U", "clear the draft or answer"),
+        ],
+    },
+    KeyGroup {
+        title: "CONVERSATIONS",
+        keys: &[
+            ("Ctrl+N", "new conversation"),
+            ("Ctrl+F", "search conversations"),
+        ],
+    },
+    KeyGroup {
+        title: "APPROVALS",
+        keys: &[
+            ("y Enter", "approve the card"),
+            ("n or Enter", "refuse; so does a reason"),
+            ("Esc", "put away an expired card"),
+            ("Ctrl+K", "verify the audit chain"),
+        ],
+    },
+    KeyGroup {
+        title: "SCREEN",
+        keys: &[
+            ("Ctrl+B", "toggle conversations"),
+            ("Ctrl+P", "toggle panels"),
+            ("Ctrl+G F1", "this screen"),
+            ("Esc", "close this or the search"),
+            ("Ctrl+C", "quit"),
+        ],
+    },
+    KeyGroup {
+        title: "COMMANDS",
+        keys: super::slash::COMMANDS,
+    },
 ];
+
+/// What the keys screen says of the mouse, one entry: the first line
+/// always, the second where there is room for it.
+pub(crate) const MOUSE: (&str, &str) = (
+    "wheel scrolls · drag selects text",
+    "the chat does not capture the mouse",
+);
+
+/// The keys screen: what is typed to filter it, and how far its list is
+/// scrolled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KeysScreen {
+    pub filter: String,
+    pub scroll: usize,
+}
 
 pub(crate) fn new_conversation_id() -> String {
     let hex: String = uuid::Uuid::new_v4()
@@ -153,6 +189,8 @@ pub(crate) struct App {
     pub columns: u16,
     /// Open over the transcript in the compact layout.
     pub overlay: Option<Overlay>,
+    /// Every key and command, over the whole screen, while it is open.
+    pub keys: Option<KeysScreen>,
     pub search: String,
     /// Index into the sidebar's filtered rows.
     pub selected: usize,
@@ -201,6 +239,7 @@ impl App {
             searching: false,
             columns: 0,
             overlay: None,
+            keys: None,
             search: String::new(),
             selected: 0,
             entries: Vec::new(),
@@ -334,6 +373,12 @@ impl App {
                 }
             }
             ServerEvent::Approval(ask) => {
+                // A card is answered where it is seen: nothing stays over it.
+                self.keys = None;
+                if self.overlay.is_some() {
+                    self.close_search();
+                    self.overlay = None;
+                }
                 let expires_at = (ask.timeout_secs > 0).then(|| {
                     now + Duration::from_secs(u64::from(ask.timeout_secs))
                         .saturating_sub(EXPIRY_MARGIN)
@@ -382,7 +427,8 @@ impl App {
             }
             Command::Verify => Some(Outgoing::Ask(Query::Verify)),
             Command::Help => {
-                self.entries.push(Entry::Help);
+                self.overlay = None;
+                self.keys = Some(KeysScreen::default());
                 None
             }
             Command::Clear => self.open(self.requested_agent.clone(), new_conversation_id(), false),
@@ -575,6 +621,33 @@ impl App {
             return None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // The keys screen takes every key while it is open: typing
+        // filters it, the arrows scroll it, Esc or Ctrl+G closes it.
+        if let Some(screen) = &mut self.keys {
+            match key.code {
+                KeyCode::Esc => self.keys = None,
+                KeyCode::Char('g') if ctrl => self.keys = None,
+                KeyCode::Char('c') if ctrl => self.quit = true,
+                KeyCode::Char('u') if ctrl => {
+                    screen.filter.clear();
+                    screen.scroll = 0;
+                }
+                KeyCode::Up => screen.scroll = screen.scroll.saturating_sub(1),
+                KeyCode::Down => screen.scroll = screen.scroll.saturating_add(1),
+                KeyCode::PageUp => screen.scroll = screen.scroll.saturating_sub(10),
+                KeyCode::PageDown => screen.scroll = screen.scroll.saturating_add(10),
+                KeyCode::Backspace => {
+                    screen.filter.pop();
+                    screen.scroll = 0;
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    screen.filter.push(c);
+                    screen.scroll = 0;
+                }
+                _ => {}
+            }
+            return None;
+        }
         // The panels over the transcript take only the keys that close
         // them, the keys screen and quitting.
         if self.overlay == Some(Overlay::Panels) {
@@ -1279,30 +1352,35 @@ mod tests {
     fn help_lists_every_command_and_sends_nothing() {
         let mut app = App::new(Some("default".into()), "c-1".into());
         assert_eq!(command(&mut app, "/help", Instant::now()), None);
-        assert_eq!(app.entries.last(), Some(&Entry::Help));
+        assert!(
+            app.entries.is_empty(),
+            "nothing printed into the transcript"
+        );
+        assert_eq!(app.keys, Some(KeysScreen::default()));
     }
 
-    /// Every key `/help` lists is in the key table of `docs/cli.md`, and
-    /// the keys that went unlisted are among them.
+    /// Every key the keys screen lists is in the key table of
+    /// `docs/cli.md`, and every command in its command table.
     #[test]
-    fn the_docs_key_table_names_every_key_help_lists() {
+    fn the_docs_name_every_key_and_command_the_keys_screen_lists() {
         let docs = include_str!("../../../../../docs/cli.md");
-        let start = docs.find("| Key | Action |").expect("the key table");
-        let table = &docs[start..start + docs[start..].find("\n\n").unwrap()];
-        for (keys, _) in KEYS {
-            for key in keys.split_whitespace() {
-                assert!(
-                    table.contains(key),
-                    "{key} is not in docs/cli.md's key table"
-                );
+        let table = |head: &str| {
+            let start = docs.find(head).expect(head);
+            &docs[start..start + docs[start..].find("\n\n").unwrap()]
+        };
+        let keys = table("| Key | Action |");
+        let commands = table("| Command | What it does |");
+        for group in KEYS {
+            let (table, what) = if group.title == "COMMANDS" {
+                (commands, "command")
+            } else {
+                (keys, "key")
+            };
+            for (names, _) in group.keys {
+                for name in names.split_whitespace().filter(|w| *w != "or") {
+                    assert!(table.contains(name), "{what} {name} is not in docs/cli.md");
+                }
             }
-        }
-        for key in ["Esc", "Ctrl+U", "Ctrl+A", "Ctrl+E"] {
-            assert!(
-                KEYS.iter()
-                    .any(|(k, _)| k.split_whitespace().any(|w| w == key)),
-                "{key}"
-            );
         }
     }
 

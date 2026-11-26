@@ -22,19 +22,20 @@ pub(crate) enum Command {
     Quit,
 }
 
-/// The command table, in the order `/help` lists it. The description is
-/// what the line says after the name.
+/// The command table, in the order the keys screen lists it. The
+/// description is what the line says after the name; a name with two
+/// words is a command and its alias.
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
-    ("/status", "every panel, as the gateway has them now"),
-    ("/context", "the context window and what fills it"),
-    ("/cost", "tokens and cost for this conversation"),
-    ("/tools", "the tools this agent can use"),
+    ("/status", "every panel, as of now"),
+    ("/context", "the context window"),
+    ("/cost", "tokens and cost"),
+    ("/tools", "tools this agent can use"),
     ("/approvals", "approvals waiting on you"),
-    ("/audit", "the audit trail and its chain"),
-    ("/verify", "check this conversation's chain"),
-    ("/clear", "start a new conversation"),
-    ("/help", "this list and the keys"),
-    ("/quit", "leave the chat"),
+    ("/audit", "audit trail and chain"),
+    ("/verify", "check the chain"),
+    ("/clear", "new conversation"),
+    ("/help", "this screen"),
+    ("/quit /exit", "leave the chat"),
 ];
 
 /// The command the draft names, when its first word is one. `/exit` is an
@@ -85,8 +86,10 @@ mod tests {
 
     #[test]
     fn every_listed_command_parses() {
-        for (name, _) in COMMANDS {
-            assert!(parse(name).is_some(), "{name} is listed but does not parse");
+        for (names, _) in COMMANDS {
+            for name in names.split_whitespace() {
+                assert!(parse(name).is_some(), "{name} is listed but does not parse");
+            }
         }
     }
 }

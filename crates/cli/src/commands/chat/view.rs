@@ -118,6 +118,9 @@ const HINTS_CARD: &[(&str, &str)] = &[
 ];
 const HINTS_EXPIRED: &[(&str, &str)] = &[("Enter", "dismiss"), ("PgUp/PgDn", "scroll")];
 const HINTS_PANELS: &[(&str, &str)] = &[("Esc", "close"), ("Ctrl+P", "close")];
+const HINTS_KEYS: &[(&str, &str)] = &[("type", "to filter"), ("↑↓", "scroll"), ("Esc", "close")];
+/// The keys screen's pinned key: the one that closes it.
+const PINNED_KEYS: (&str, &str) = ("Ctrl+G", "close");
 const HINTS_SEARCH: &[(&str, &str)] = &[
     ("type", "to filter"),
     ("↑↓", "select"),
@@ -206,6 +209,18 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let [full, bar_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(screen);
     let compact = full.width < WIDE_COLS;
+    if app.keys.is_some() {
+        draw_keys_screen(frame, app, full);
+        frame.render_widget(
+            Paragraph::new(key_bar(
+                usize::from(bar_area.width),
+                HINTS_KEYS,
+                PINNED_KEYS,
+            )),
+            bar_area,
+        );
+        return;
+    }
     // In the compact layout the conversations and the panels open over
     // the transcript, which is drawn again when they close.
     if compact && let Some(overlay) = app.overlay {
@@ -450,25 +465,26 @@ fn draw_over(
     title: &str,
     body: Vec<Line<'static>>,
     input: Option<(&str, &str, Option<String>)>,
-) -> Rect {
+) -> (Rect, Rect) {
     use palette::{DIM, GRAY, RULE, TEXT, WHITE, on_bg};
-    let note = compact_note();
-    let (before, after) = note.split_once(" · ").unwrap_or((&note, ""));
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(on_bg(RULE))
-            .title(Line::styled(format!(" {title} "), on_bg(WHITE)))
-            .title(
-                Line::from(vec![
-                    Span::styled(format!(" {before} "), on_bg(TEXT)),
-                    Span::styled("·", on_bg(RULE)),
-                    Span::styled(format!(" {after} "), on_bg(GRAY)),
-                ])
-                .right_aligned(),
-            ),
-        area,
-    );
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(on_bg(RULE))
+        .title(Line::styled(format!(" {title} "), on_bg(WHITE)));
+    // The layout note, where the layout is the compact one.
+    if area.width < WIDE_COLS {
+        let note = compact_note();
+        let (before, after) = note.split_once(" · ").unwrap_or((&note, ""));
+        block = block.title(
+            Line::from(vec![
+                Span::styled(format!(" {before} "), on_bg(TEXT)),
+                Span::styled("·", on_bg(RULE)),
+                Span::styled(format!(" {after} "), on_bg(GRAY)),
+            ])
+            .right_aligned(),
+        );
+    }
+    frame.render_widget(block, area);
     let extra = if input.is_some() { 2 } else { 0 };
     let inner = Rect::new(
         area.x + 1,
@@ -478,7 +494,7 @@ fn draw_over(
     );
     frame.render_widget(Paragraph::new(body), inner);
     let Some((rule, typed, count)) = input else {
-        return Rect::default();
+        return (inner, Rect::default());
     };
     let rule_y = inner.bottom();
     let name = format!(" {rule} ");
@@ -501,7 +517,7 @@ fn draw_over(
         Line::styled(sanitize(typed), on_bg(WHITE))
     };
     frame.render_widget(Paragraph::new(line), field);
-    field
+    (inner, field)
 }
 
 /// The conversations over the transcript, as Ctrl+B or Ctrl+F opens them
@@ -517,7 +533,7 @@ fn draw_conversations_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .count();
         format!("{shown} of {all} match")
     });
-    let field = draw_over(
+    let (_, field) = draw_over(
         frame,
         area,
         "conversations",
@@ -529,6 +545,216 @@ fn draw_conversations_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
         x.min(field.right().saturating_sub(1)),
         field.y,
     ));
+}
+
+/// Cells a key takes on the keys screen before what it does.
+const KEY_COLUMN: usize = 13;
+
+/// One row of a column on the keys screen.
+enum KeyRow {
+    /// A group's heading, and what follows it dimmed.
+    Heading(&'static str, Option<String>),
+    /// A key and what it does; dimmed when it does not apply now.
+    Key(&'static str, &'static str, bool),
+    Text(String),
+    Blank,
+}
+
+/// Where each `text` matches `filter`, ignoring case, drawn on `style`,
+/// with the matched cells set apart.
+fn marked(text: &str, filter: &str, style: Style) -> Vec<Span<'static>> {
+    let mark = Style::default().fg(palette::BG).bg(palette::AMBER);
+    // Character by character: a lowercased string can be longer than
+    // the one it came from, so positions in it are no use in the text.
+    let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let needle: Vec<char> = filter.chars().map(lower).collect();
+    if needle.is_empty() {
+        return vec![Span::styled(text.to_string(), style)];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut spans, mut plain, mut i) = (Vec::new(), String::new(), 0);
+    while i < chars.len() {
+        let here = chars.len() - i >= needle.len()
+            && needle
+                .iter()
+                .enumerate()
+                .all(|(k, n)| lower(chars[i + k]) == *n);
+        if here {
+            if !plain.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut plain), style));
+            }
+            spans.push(Span::styled(
+                chars[i..i + needle.len()].iter().collect::<String>(),
+                mark,
+            ));
+            i += needle.len();
+        } else {
+            plain.push(chars[i]);
+            i += 1;
+        }
+    }
+    if !plain.is_empty() {
+        spans.push(Span::styled(plain, style));
+    }
+    spans
+}
+
+/// The keys screen: every key and command in groups, filtered by what
+/// is typed, over the whole screen.
+fn draw_keys_screen(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use super::app::{KEYS, MOUSE};
+    use palette::{BLUE, DIM, TEXT, WHITE, on_bg};
+    let screen = app.keys.as_ref().expect("the keys screen is open");
+    let filter = screen.filter.trim();
+    let wide = area.width >= WIDE_COLS;
+    let hit = |s: &str| filter.is_empty() || s.to_lowercase().contains(&filter.to_lowercase());
+
+    // Each group's rows under the filter: all of a group whose heading
+    // matches, else the entries that do; nothing when none does.
+    let waiting = app.cards.len();
+    let mut groups: Vec<(&str, Vec<KeyRow>)> = Vec::new();
+    let (mut total, mut shown) = (0, 0);
+    for group in KEYS {
+        let whole = hit(group.title);
+        let mut rows = Vec::new();
+        for (key, what) in group.keys {
+            total += 1;
+            if whole || hit(key) || hit(what) {
+                shown += 1;
+                let applies = group.title != "APPROVALS"
+                    || *key == "Ctrl+K"
+                    || if *key == "Esc" {
+                        app.expired.is_some()
+                    } else {
+                        waiting > 0
+                    };
+                rows.push(KeyRow::Key(key, what, !applies));
+            }
+        }
+        if rows.is_empty() {
+            continue;
+        }
+        let suffix = (group.title == "APPROVALS").then(|| match waiting {
+            0 => "none waiting".to_string(),
+            n => format!("{n} waiting"),
+        });
+        rows.insert(0, KeyRow::Heading(group.title, suffix));
+        groups.push((group.title, rows));
+    }
+    total += 1;
+    if hit("MOUSE") || hit(MOUSE.0) || hit(MOUSE.1) {
+        shown += 1;
+        let mut rows = vec![KeyRow::Heading("MOUSE", None), KeyRow::Text(MOUSE.0.into())];
+        if wide && filter.is_empty() {
+            rows.push(KeyRow::Text(MOUSE.1.into()));
+        }
+        groups.push(("MOUSE", rows));
+    }
+    if wide && filter.is_empty() {
+        let text = format!(
+            "From {WIDE_COLS} columns, conversations and panels sit beside the transcript. \
+             Narrower, they open over it."
+        );
+        let mut rows = vec![KeyRow::Heading("LAYOUT", None)];
+        rows.extend(wrap(&text, 38).into_iter().map(KeyRow::Text));
+        groups.push(("LAYOUT", rows));
+    }
+
+    let count = (!filter.is_empty()).then(|| format!("{shown} of {total} match"));
+    let (inner, field) = draw_over(
+        frame,
+        area,
+        "keys and commands",
+        Vec::new(),
+        Some(("filter", &screen.filter, count)),
+    );
+    let x = field.x + u16::try_from(width(&screen.filter)).unwrap_or(0);
+    frame.set_cursor_position(Position::new(
+        x.min(field.right().saturating_sub(1)),
+        field.y,
+    ));
+
+    // The columns: three side by side, two in the compact layout, one
+    // when filtered and it fits. Groups are set apart by a blank row
+    // where every column has the room.
+    let placement: &[&[&str]] = if wide {
+        &[
+            &["SCROLL", "WRITE", "CONVERSATIONS"],
+            &["APPROVALS", "SCREEN", "MOUSE"],
+            &["COMMANDS", "LAYOUT"],
+        ]
+    } else {
+        &[
+            &["SCROLL", "WRITE", "CONVERSATIONS", "APPROVALS"],
+            &["SCREEN", "COMMANDS", "MOUSE"],
+        ]
+    };
+    let height = usize::from(inner.height);
+    let stack = |names: &[&str], gaps: bool| -> Vec<&KeyRow> {
+        let mut out = Vec::new();
+        for (title, rows) in groups.iter().filter(|(t, _)| names.contains(t)) {
+            let _ = title;
+            if gaps && !out.is_empty() {
+                out.push(&KeyRow::Blank);
+            }
+            out.extend(rows.iter());
+        }
+        out
+    };
+    let every: Vec<&str> = groups.iter().map(|(t, _)| *t).collect();
+    let one = stack(&every, true);
+    let columns: Vec<Vec<&KeyRow>> = if !filter.is_empty() && one.len() <= height {
+        vec![one]
+    } else {
+        let gaps = placement
+            .iter()
+            .all(|names| stack(names, true).len() <= height);
+        placement.iter().map(|names| stack(names, gaps)).collect()
+    };
+    let longest = columns.iter().map(Vec::len).max().unwrap_or(0);
+    let offset = screen.scroll.min(longest.saturating_sub(height));
+    let n = u16::try_from(placement.len()).unwrap_or(1);
+    let span = area.width.saturating_sub(2);
+    let start = |i: u16| area.x + 2 + (i * span).div_ceil(n);
+    for (i, column) in columns.iter().enumerate() {
+        let i = u16::try_from(i).unwrap_or(0);
+        let x = start(i);
+        let right = if i + 1 < n {
+            start(i + 1).saturating_sub(1)
+        } else {
+            area.right().saturating_sub(1)
+        };
+        let w = right.saturating_sub(x);
+        for (r, row) in column.iter().skip(offset).take(height).enumerate() {
+            let y = inner.y + u16::try_from(r).unwrap_or(0);
+            let spans = match row {
+                KeyRow::Blank => continue,
+                KeyRow::Heading(title, suffix) => {
+                    let mut spans = marked(title, filter, on_bg(WHITE));
+                    if let Some(suffix) = suffix {
+                        spans.push(Span::styled(format!(" · {suffix}"), on_bg(DIM)));
+                    }
+                    spans
+                }
+                KeyRow::Key(key, what, dim) => {
+                    let (k, d) = if *dim {
+                        (on_bg(DIM), on_bg(DIM))
+                    } else {
+                        (on_bg(BLUE), on_bg(TEXT))
+                    };
+                    let mut spans = marked(key, filter, k);
+                    spans.push(Span::styled(
+                        " ".repeat(KEY_COLUMN.saturating_sub(width(key))),
+                        k,
+                    ));
+                    spans.extend(marked(what, filter, d));
+                    spans
+                }
+                KeyRow::Text(text) => marked(text, filter, on_bg(TEXT)),
+            };
+            frame.render_widget(Paragraph::new(Line::from(spans)), Rect::new(x, y, w, 1));
+        }
+    }
 }
 
 /// The panels over the transcript, as Ctrl+P opens them in the compact
@@ -663,7 +889,6 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     lines.push(Line::styled(format!("  {row}"), on_bg(color)));
                 }
             }
-            Entry::Help => lines.extend(help_lines(width)),
         }
         lines.push(Line::raw(""));
     }
@@ -875,59 +1100,6 @@ fn draw_conversation(
         draft,
     );
     below
-}
-
-/// Rows between the longest name in a `/help` table and its
-/// description.
-const HELP_GAP: usize = 2;
-/// Where a `/help` table's names start, under its heading.
-const HELP_INDENT: usize = 4;
-
-/// The column a `/help` table's descriptions start at: past its longest
-/// name and the gap.
-fn help_column(rows: &[(&str, &str)]) -> usize {
-    HELP_INDENT
-        + rows
-            .iter()
-            .map(|(name, _)| name.chars().count())
-            .max()
-            .unwrap_or(0)
-        + HELP_GAP
-}
-
-/// `/help` at `width`: the commands, then the keys, each a table whose
-/// descriptions wrap inside their own column, so a continued line stays
-/// under the description it continues.
-fn help_lines(width: usize) -> Vec<Line<'static>> {
-    let style = Style::default().fg(Color::Yellow);
-    let mut lines = Vec::new();
-    for (title, rows) in [
-        ("commands", super::slash::COMMANDS),
-        ("keys", super::app::KEYS),
-    ] {
-        lines.push(Line::styled(
-            format!("  {title}"),
-            style.add_modifier(Modifier::BOLD),
-        ));
-        let column = help_column(rows);
-        let room = width.saturating_sub(column).max(10);
-        for (name, what) in rows {
-            for (i, row) in wrap(what, room).into_iter().enumerate() {
-                let lead = if i == 0 {
-                    format!(
-                        "{:indent$}{name:<pad$}",
-                        "",
-                        indent = HELP_INDENT,
-                        pad = column - HELP_INDENT
-                    )
-                } else {
-                    " ".repeat(column)
-                };
-                lines.push(Line::styled(format!("{lead}{row}"), style));
-            }
-        }
-    }
-    lines
 }
 
 fn indented(lines: &mut Vec<Line<'static>>, text: &str, width: usize, style: Style) {
@@ -1156,143 +1328,6 @@ mod tests {
             ),
             "{sent:?}"
         );
-    }
-
-    /// The transcript's rows inside its border, as cells.
-    fn transcript_rows(buffer: &ratatui::buffer::Buffer) -> Vec<Vec<String>> {
-        let (title_x, top) = find(buffer, "wirken");
-        let left = title_x - 2;
-        let right = (left + 1..buffer.area.width)
-            .find(|&x| buffer[(x, top)].symbol() == "┐")
-            .unwrap();
-        (top + 1..buffer.area.height)
-            .take_while(|&y| buffer[(left, y)].symbol() == "│")
-            .map(|y| {
-                (left + 1..right)
-                    .map(|x| buffer[(x, y)].symbol().to_string())
-                    .collect()
-            })
-            .collect()
-    }
-
-    /// `/help` is two aligned tables at each size: every description
-    /// starts at its table's column, at least two cells past the longest
-    /// name, and every continued line starts at that same column. It used
-    /// to wrap as a note, continued lines back at the left margin, and
-    /// "Backspace Delete" one cell from its description.
-    #[test]
-    fn help_is_two_aligned_tables_at_each_size() {
-        let now = Instant::now();
-        let tables = [
-            (
-                "commands",
-                help_column(super::super::slash::COMMANDS),
-                super::super::slash::COMMANDS,
-            ),
-            (
-                "keys",
-                help_column(super::super::app::KEYS),
-                super::super::app::KEYS,
-            ),
-        ];
-        for (w, h) in [(80u16, 24u16), (120, 24)] {
-            let mut seen: Vec<String> = Vec::new();
-            // Every part of the list, scrolled through it from the bottom
-            // to the top in steps shorter than the screen.
-            for scroll in (0..=60).step_by(8) {
-                let mut app = App::new(Some("default".into()), "c-1".into());
-                app.entries.push(Entry::Help);
-                app.scroll = scroll;
-                let rows = transcript_rows(&drawn(&app, now, w, h));
-                // The column of the last entry above, once one is on screen;
-                // continued lines at the top, whose entry scrolled off, sit
-                // at one of the two columns.
-                let mut column: Option<usize> = None;
-                for cells in rows {
-                    let text: String = cells.concat();
-                    let lead = cells.iter().take_while(|c| c.as_str() == " ").count();
-                    if text.trim().is_empty()
-                        || tables.iter().any(|(title, ..)| text.trim() == *title)
-                    {
-                        continue;
-                    }
-                    if lead == HELP_INDENT {
-                        let (_, col, _) = tables
-                            .iter()
-                            .find(|(_, col, rows)| {
-                                let name = cells[HELP_INDENT..(*col).min(cells.len())].concat();
-                                rows.iter().any(|(n, _)| name.trim_end() == *n)
-                            })
-                            .unwrap_or_else(|| {
-                                panic!("{w}x{h}: no entry starts this row: {text:?}")
-                            });
-                        assert!(
-                            cells[col - HELP_GAP..*col].iter().all(|c| c == " "),
-                            "{w}x{h}: less than {HELP_GAP} cells before the description: {text:?}"
-                        );
-                        assert_ne!(
-                            cells[*col], " ",
-                            "{w}x{h}: description not at column {col}: {text:?}"
-                        );
-                        seen.push(cells[HELP_INDENT..*col].concat().trim().to_string());
-                        column = Some(*col);
-                    } else {
-                        match column {
-                            Some(col) => assert_eq!(
-                                lead, col,
-                                "{w}x{h}: continued line not under its description: {text:?}"
-                            ),
-                            None => assert!(
-                                tables.iter().any(|(_, col, _)| lead == *col),
-                                "{w}x{h}: continued line at no description column: {text:?}"
-                            ),
-                        }
-                    }
-                }
-            }
-            for (_, _, rows) in tables {
-                for (name, _) in rows {
-                    assert!(seen.iter().any(|s| s == name), "{w}x{h}: {name} not shown");
-                }
-            }
-        }
-    }
-
-    /// Ctrl+F searches in the sidebar from 120 columns and over the
-    /// transcript under it; either way what is typed is on screen, and a
-    /// resize carries the search across.
-    #[test]
-    fn the_search_is_on_screen_at_every_width() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let now = Instant::now();
-        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
-        for (w, h) in [(80u16, 24u16), (120, 24), (120, 40)] {
-            let mut app = App::new(Some("default".into()), "c-1".into());
-            app.set_columns(w);
-            app.on_key(ctrl_f, now);
-            for c in "list".chars() {
-                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), now);
-            }
-            assert!(app.searching && app.draft.is_empty(), "{w}x{h}");
-            let shown = all_text(&drawn(&app, now, w, h));
-            if w < WIDE_COLS {
-                assert!(
-                    shown.contains("conversations") && shown.contains("│list"),
-                    "{w}x{h}:\n{shown}"
-                );
-            } else {
-                assert!(shown.contains("search: list"), "{w}x{h}:\n{shown}");
-            }
-            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), now);
-            assert!(!app.searching && app.overlay.is_none(), "{w}x{h}");
-        }
-        let mut app = App::new(Some("default".into()), "c-1".into());
-        app.set_columns(120);
-        app.on_key(ctrl_f, now);
-        app.set_columns(80);
-        assert_eq!(app.overlay, Some(super::super::app::Overlay::Conversations));
-        app.set_columns(120);
-        assert!(app.searching && app.overlay.is_none());
     }
 
     #[test]

@@ -170,7 +170,7 @@ lowercase name; text after it is ignored. Any other `/word` (a skill, `/HELP`,
 | `/context`, `/cost`, `/tools`, `/approvals`, `/audit` | That one panel |
 | `/verify` | Checks this conversation's chain, as Ctrl+K does |
 | `/clear` | A new conversation, as Ctrl+N opens one; refused mid-turn |
-| `/help` | The command list and the keys |
+| `/help` | The keys screen, as Ctrl+G opens it |
 | `/quit`, `/exit` | Leaves the chat, as Ctrl+C does |
 
 Commands run during a turn. `/clear` waits for the turn to end, as Ctrl+N does.
@@ -281,7 +281,7 @@ than the answer, which the card states.
 | Ctrl+N | New conversation with the same agent |
 | Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels; under 120 columns, open them over the transcript |
 | Ctrl+K | Verify this conversation's chain |
-| Ctrl+G / F1 | Every key and command. The key bar keeps Ctrl+G at its right at every width |
+| Ctrl+G / F1 | The keys screen: every key and command in groups, over the whole screen. Typing filters it, ↑ and ↓ scroll it, Esc or Ctrl+G closes it; keys that do not apply now are dimmed. The key bar keeps Ctrl+G at its right at every width |
 | Ctrl+C | Leave the chat |
 | Esc | Leave the sidebar search; put away an expired card |
 | y | On a card, with Enter, approves; n, a reason or anything else refuses, and Enter alone refuses |

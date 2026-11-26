@@ -1,0 +1,50 @@
+80x24
+┌ keys and commands ─────────── compact layout · side by side from 120 columns ┐
+│ SCROLL                                 SCREEN                                │
+│ PgUp PgDn    scroll 10 rows            Ctrl+B       toggle conversations     │
+│ ↑ ↓ wheel    scroll 3 rows             Ctrl+P       toggle panels            │
+│ End          back to the latest row    Ctrl+G F1    this screen              │
+│ WRITE                                  Esc          close this or the search │
+│ Enter        send                      Ctrl+C       quit                     │
+│ Ctrl+J       new line                  COMMANDS                              │
+│ Home Ctrl+A  start of the draft        /status      every panel, as of now   │
+│ End Ctrl+E   end of the draft          /context     the context window       │
+│ Ctrl+U       clear the draft or answer /cost        tokens and cost          │
+│ CONVERSATIONS                          /tools       tools this agent can use │
+│ Ctrl+N       new conversation          /approvals   approvals waiting on you │
+│ Ctrl+F       search conversations      /audit       audit trail and chain    │
+│ APPROVALS · none waiting               /verify      check the chain          │
+│ y Enter      approve the card          /clear       new conversation         │
+│ n or Enter   refuse; so does a reason  /help        this screen              │
+│ Esc          put away an expired card  /quit /exit  leave the chat           │
+│ Ctrl+K       verify the audit chain    MOUSE                                 │
+│                                        wheel scrolls · drag selects text     │
+├ filter ──────────────────────────────────────────────────────────────────────┤
+│ type to filter                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+ type to filter · ↑↓ scroll · Esc close                            Ctrl+G close 
+
+- WWWW WWW WWWWWWWW ----------- ....... ...... - gggg gg gggg gggg ggg ggggggg -
+- WWWWWW                                 WWWWWW                                -
+- BBBB BBBB    ...... .. ....            BBBBBB       ...... .............     -
+- B B BBBBB    ...... . ....             BBBBBB       ...... ......            -
+- BBB          .... .. ... ...... ...    BBBBBB BB    .... ......              -
+- WWWWW                                  BBB          ..... .... .. ... ...... -
+- BBBBB        ....                      BBBBBB       ....                     -
+- BBBBBB       ... ....                  WWWWWWWW                              -
+- BBBB BBBBBB  ..... .. ... .....        BBBBBBB      ..... ...... .. .. ...   -
+- BBB BBBBBB   ... .. ... .....          BBBBBBBB     ... ....... ......       -
+- BBBBBB       ..... ... ..... .. ...... BBBBB        ...... ... ....          -
+- WWWWWWWWWWWWW                          BBBBBB       ..... .... ..... ... ... -
+- BBBBBB       ... ............          BBBBBBBBBB   ......... ....... .. ... -
+- BBBBBB       ...... .............      BBBBBB       ..... ..... ... .....    -
+- WWWWWWWWW d dddd ddddddd               BBBBBBB      ..... ... .....          -
+- d ddddd      ddddddd ddd dddd          BBBBBB       ... ............         -
+- d dd ddddd   ddddddd dd dddd d dddddd  BBBBB        .... ......              -
+- ddd          ddd dddd dd ddddddd dddd  BBBBB BBBBB  ..... ... ....           -
+- BBBBBB       ...... ... ..... .....    WWWWW                                 -
+-                                        ..... ....... . .... ....... ....     -
+- gggggg -----------------------------------------------------------------------
+- dddd dd dddddd                                                               -
+--------------------------------------------------------------------------------
+ KKKK kk kkkkkk r KK kkkkkk r KKK kkkkk                            SSSSSS SSSSS 
