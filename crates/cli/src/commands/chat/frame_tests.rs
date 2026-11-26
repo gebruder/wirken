@@ -264,3 +264,34 @@ fn the_key_bar_is_the_bottom_row_at_every_size() {
         assert_drawn(name, &render(&app, now, design.w, design.h), &design);
     }
 }
+
+/// 02: the transcript and the draft are one box. Once the conversation is
+/// taller than the window, a thumb in its right border and the rule above
+/// the draft say how much is above and below, and name the key back.
+#[test]
+fn the_frame_says_where_the_view_is() {
+    let now = now();
+    let cases: [Case; 6] = [
+        ("long-120x24", frame!("long-120x24"), long_conversation, 10),
+        ("long-120x40", frame!("long-120x40"), long_conversation, 10),
+        (
+            "first-start-120x24",
+            frame!("first-start-120x24"),
+            first_start,
+            0,
+        ),
+        (
+            "first-start-120x40",
+            frame!("first-start-120x40"),
+            first_start,
+            0,
+        ),
+        ("refusal-120x24", frame!("refusal-120x24"), refusal, 0),
+        ("refusal-120x40", frame!("refusal-120x40"), refusal, 0),
+    ];
+    for (name, design, make, scroll) in cases {
+        let mut app = make();
+        app.scroll = scroll;
+        assert_drawn(name, &render(&app, now, design.w, design.h), &design);
+    }
+}

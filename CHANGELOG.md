@@ -22,6 +22,13 @@ tagged.
   keys. The side columns end one row higher. Ctrl+G and F1 open the keys
   (`the_key_bar_is_the_bottom_row_at_every_size`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- The transcript and the draft in `wirken chat` are one box, the draft
+  under a rule. Once the conversation is taller than the window, a thumb in
+  the box's right border and the rule's right end show where the view is:
+  `↑ 17 above · ↓ 10 below · End latest`. This replaces the line on the
+  transcript's lower edge that appeared only when scrolled up
+  (`the_frame_says_where_the_view_is`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 
@@ -60,14 +67,10 @@ tagged.
   a terminal is scrolled; workshop participants could not find it. ↑ and ↓
   now scroll three rows, the chat turns on the terminal's alternate scroll
   so the wheel arrives as those keys, and mouse capture is not taken, so
-  text is selected as before. Scrolled up, the transcript's lower edge says
-  how many rows are below, and End returns to the latest; at the latest
-  row End is still the end of the draft. The status line names the keys,
-  and with the panels drawn it leaves out the exec runtime, which
-  Environment shows, so they fit in the transcript's width (`arrows_scroll_the_transcript_and_move_the_search_selection`,
-  `crates/cli/src/commands/chat/app.rs`;
-  `a_scrolled_transcript_says_there_is_more_below`,
-  `crates/cli/src/commands/chat/view.rs`).
+  text is selected as before. Scrolled up, End returns to the latest row;
+  at the latest row End is still the end of the draft
+  (`arrows_scroll_the_transcript_and_move_the_search_selection`,
+  `crates/cli/src/commands/chat/app.rs`).
 - `wirken update` shows curl's progress bar while it downloads a release.
   curl was given `--progress-bar` and an inherited stderr, but the
   child was run with `output()`, which pipes stdout and stderr whatever the

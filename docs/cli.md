@@ -252,6 +252,11 @@ at least 54, so both are drawn from 120 columns. From 90 the panels are
 drawn and the sidebar yields to them; below 90 the panels are not drawn.
 Both start shown; Ctrl+B and Ctrl+P toggle them.
 
+The transcript and the draft are one box, with the draft under a rule.
+Once the conversation is taller than the window, a thumb in the box's right
+border shows where the view is, and the rule's right end says how many rows
+are above and below, and names End, the key back to the latest row.
+
 The bottom row is the key bar, across the whole width at every size. It shows
 the keys for what is on screen, most needed first, and drops them from the
 right as the window narrows; Ctrl+G, the keys screen, stays at its right
@@ -264,7 +269,7 @@ than the answer, which the card states.
 | Ctrl+J | New line in the message |
 | ↑ / ↓, mouse wheel | Scroll the transcript a few rows; in the sidebar search, move the selection. The wheel arrives as ↑ and ↓ (the chat turns on the terminal's alternate scroll), and text can still be selected |
 | PgUp / PgDn | Scroll the transcript a page; on a Mac laptop, Fn+↑ / Fn+↓ |
-| End | Scrolled up, back to the latest row; the transcript's lower edge says how many rows are below while it is scrolled. At the latest row, the end of the draft |
+| End | Scrolled up, back to the latest row. At the latest row, the end of the draft |
 | Home | The start of the draft |
 | Ctrl+A / Ctrl+E | The start / the end of the draft |
 | ← / → | Move in the draft |

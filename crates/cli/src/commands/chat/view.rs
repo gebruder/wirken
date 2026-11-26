@@ -292,24 +292,51 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let first_row = (cursor_row + 1).saturating_sub(shown_rows);
     let input_height = u16::try_from(shown_rows + 2).unwrap_or(u16::MAX);
 
-    let [transcript_area, card_area, input_area] = Layout::vertical([
-        Constraint::Min(3),
-        Constraint::Length(card_height),
-        Constraint::Length(input_height),
-    ])
-    .areas(area);
+    let input_title = if app.expired.is_some() {
+        " Enter or Esc to dismiss "
+    } else if app.front_card().is_some() {
+        " your answer: y approves, anything else refuses "
+    } else if app.busy {
+        " waiting for the reply "
+    } else {
+        " message "
+    };
+    let rows: Vec<String> = input_rows
+        .iter()
+        .skip(first_row)
+        .take(shown_rows)
+        .cloned()
+        .collect();
 
-    // The card takes an approval only when all of it is on the screen:
-    // every row of the arguments, every line at its full width, and its
-    // last line.
-    let too_wide = card.iter().any(|line| line.width() > inner_width);
-    app.card_cut.set(
-        app.front_card().is_some() && (arguments_cut || too_wide || card_area.height < card_height),
-    );
+    let (scrolled, input_area) = if card_height == 0 {
+        // No card: the transcript and the draft are one box, the rule
+        // between them saying where the view is.
+        let below = draw_conversation(frame, app, area, input_title.trim(), &rows);
+        let input_area = Rect::new(
+            area.x,
+            area.bottom().saturating_sub(input_height),
+            area.width,
+            input_height,
+        );
+        (below > 0, input_area)
+    } else {
+        let [transcript_area, card_area, input_area] = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(card_height),
+            Constraint::Length(input_height),
+        ])
+        .areas(area);
 
-    let scrolled = draw_transcript(frame, app, transcript_area) > 0;
+        // The card takes an approval only when all of it is on the screen:
+        // every row of the arguments, every line at its full width, and its
+        // last line.
+        let too_wide = card.iter().any(|line| line.width() > inner_width);
+        app.card_cut.set(
+            app.front_card().is_some()
+                && (arguments_cut || too_wide || card_area.height < card_height),
+        );
 
-    if card_height > 0 {
+        let scrolled = draw_transcript(frame, app, transcript_area) > 0;
         let title = if app.expired.is_some() {
             " approval expired "
         } else {
@@ -324,27 +351,16 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
             ),
             card_area,
         );
-    }
-
-    let input_title = if app.expired.is_some() {
-        " Enter or Esc to dismiss "
-    } else if app.front_card().is_some() {
-        " your answer: y approves, anything else refuses "
-    } else if app.busy {
-        " waiting for the reply "
-    } else {
-        " message "
+        frame.render_widget(
+            Paragraph::new(rows.into_iter().map(Line::raw).collect::<Vec<_>>())
+                .block(Block::default().borders(Borders::ALL).title(input_title)),
+            input_area,
+        );
+        (scrolled, input_area)
     };
-    let rows: Vec<Line<'_>> = input_rows
-        .iter()
-        .skip(first_row)
-        .take(shown_rows)
-        .map(|r| Line::raw(r.clone()))
-        .collect();
-    frame.render_widget(
-        Paragraph::new(rows).block(Block::default().borders(Borders::ALL).title(input_title)),
-        input_area,
-    );
+    if card_height == 0 {
+        app.card_cut.set(false);
+    }
     if app.searching && side_cols > 0 {
         let x = side_area.x + 1 + u16::try_from(width(&app.search)).unwrap_or(0);
         frame.set_cursor_position(Position::new(
@@ -489,10 +505,8 @@ fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-/// Draw the transcript into `area`, and return how many rows are below
-/// the view: the scroll as drawn, not as asked for.
-fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) -> usize {
-    let width = usize::from(area.width.saturating_sub(2)).max(1);
+/// The transcript's rows at `width` cells, oldest first.
+fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let label = Style::default().add_modifier(Modifier::BOLD);
     for entry in &app.entries {
@@ -563,30 +577,156 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) -> usize {
         }
         lines.push(Line::raw(""));
     }
+    lines
+}
 
+/// Which of `total` rows a view of `height` shows, scrolled `scroll` up
+/// from the latest: `[start, end)`, with `start` rows above it and
+/// `total - end` below.
+fn view_window(total: usize, height: usize, scroll: usize) -> (usize, usize) {
+    let below = scroll.min(total.saturating_sub(height));
+    let end = total - below;
+    (end.saturating_sub(height), end)
+}
+
+/// The transcript box's title: the chat and the agent.
+fn transcript_title(app: &App) -> Line<'static> {
+    use palette::{CYAN, RULE, TEXT, on_bg};
+    Line::from(vec![
+        Span::styled(" wirken chat ", on_bg(TEXT)),
+        Span::styled("·", on_bg(RULE)),
+        Span::styled(" ", on_bg(TEXT)),
+        Span::styled(sanitize(&app.agent), on_bg(CYAN)),
+        Span::styled(" ", on_bg(TEXT)),
+    ])
+}
+
+/// Draw the transcript into `area`, and return how many rows are below
+/// the view: the scroll as drawn, not as asked for.
+fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) -> usize {
+    let width = usize::from(area.width.saturating_sub(2)).max(1);
+    let lines = transcript_lines(app, width);
     let height = usize::from(area.height.saturating_sub(2));
-    let total = lines.len();
-    let scroll = app.scroll.min(total.saturating_sub(height));
-    let end = total - scroll;
-    let start = end.saturating_sub(height);
-    let title = format!(" wirken chat · {} ", sanitize(&app.agent));
-    let mut block = Block::default().borders(Borders::ALL).title(title);
-    // Scrolled up, the latest rows are out of view: say how many, and
-    // how to get back to them.
-    if scroll > 0 {
-        block = block.title_bottom(
-            Line::styled(
-                format!(" ↓ {scroll} more below · End for the latest "),
-                Style::default().fg(Color::Yellow),
-            )
-            .right_aligned(),
-        );
-    }
+    let (start, end) = view_window(lines.len(), height, app.scroll);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(palette::on_bg(palette::RULE))
+        .title(transcript_title(app));
     frame.render_widget(
         Paragraph::new(lines[start..end].to_vec()).block(block),
         area,
     );
-    scroll
+    lines.len() - end
+}
+
+/// The rows of a scroll thumb on a track of `track` rows, for a view of
+/// `track` rows `above` rows into `total`: `[start, end)`. Empty when all
+/// of it is in view.
+fn thumb(track: usize, total: usize, above: usize) -> (usize, usize) {
+    if total <= track || track == 0 {
+        return (0, 0);
+    }
+    let round = |n: usize| (n + total / 2) / total;
+    let size = round(track * track).clamp(1, track);
+    let start = round(above * track).min(track - size);
+    (start, start + size)
+}
+
+/// The transcript and the draft in one box: the conversation above, the
+/// rule naming the draft, then the draft's `input` rows. Once the
+/// conversation is taller than its rows, a thumb in the right border
+/// and the rule's right end say where the view is: rows above, rows
+/// below, and the key back to the latest. Returns the rows below.
+fn draw_conversation(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    input_title: &str,
+    input: &[String],
+) -> usize {
+    use palette::{BLUE, GRAY, RULE, TEXT, on_bg};
+    let width = usize::from(area.width.saturating_sub(2)).max(1);
+    let input_rows = u16::try_from(input.len().max(1)).unwrap_or(1);
+    let content_rows = area.height.saturating_sub(3 + input_rows);
+    let lines = transcript_lines(app, width);
+    let height = usize::from(content_rows);
+    let (start, end) = view_window(lines.len(), height, app.scroll);
+    let (above, below) = (start, lines.len() - end);
+
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(on_bg(RULE))
+            .title(transcript_title(app)),
+        area,
+    );
+    let content = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        content_rows,
+    );
+    frame.render_widget(Paragraph::new(lines[start..end].to_vec()), content);
+
+    // The thumb, in the right border beside the rows it stands for.
+    let (t0, t1) = thumb(height, lines.len(), above);
+    let right = area.right().saturating_sub(1);
+    for row in t0..t1 {
+        let y = content.y + u16::try_from(row).unwrap_or(0);
+        if let Some(cell) = frame.buffer_mut().cell_mut((right, y)) {
+            cell.set_symbol("█").set_style(on_bg(GRAY));
+        }
+    }
+
+    // The rule between the conversation and the draft.
+    let rule_y = content.y + content_rows;
+    let mut position: Vec<Span<'static>> = Vec::new();
+    if lines.len() > height {
+        position.push(Span::styled(format!("↑ {above} above"), on_bg(GRAY)));
+        if below > 0 {
+            position.push(Span::styled(" · ", on_bg(RULE)));
+            position.push(Span::styled(format!("↓ {below} below"), on_bg(TEXT)));
+            position.push(Span::styled(" · ", on_bg(RULE)));
+            position.push(Span::styled("End", on_bg(BLUE)));
+            position.push(Span::styled(" latest", on_bg(GRAY)));
+        }
+    }
+    let total = usize::from(area.width);
+    let title = format!(" {input_title} ");
+    let used = 1 + width_of(&title) + 1;
+    let position_width: usize = position.iter().map(|s| width_of(&s.content)).sum();
+    let mut rule = vec![
+        Span::styled("├", on_bg(RULE)),
+        Span::styled(title, on_bg(GRAY)),
+    ];
+    let fill = if position_width > 0 {
+        total.saturating_sub(used + position_width + 2)
+    } else {
+        total.saturating_sub(used)
+    };
+    rule.push(Span::styled("─".repeat(fill), on_bg(RULE)));
+    if position_width > 0 {
+        rule.push(Span::styled(" ", on_bg(RULE)));
+        rule.extend(position);
+        rule.push(Span::styled(" ", on_bg(RULE)));
+    }
+    rule.push(Span::styled("┤", on_bg(RULE)));
+    frame.render_widget(
+        Paragraph::new(Line::from(rule)),
+        Rect::new(area.x, rule_y, area.width, 1),
+    );
+
+    let draft = Rect::new(
+        area.x + 1,
+        rule_y + 1,
+        area.width.saturating_sub(2),
+        input_rows,
+    );
+    frame.render_widget(
+        Paragraph::new(input.iter().cloned().map(Line::raw).collect::<Vec<_>>()),
+        draft,
+    );
+    below
 }
 
 /// Rows between the longest name in a `/help` table and its
@@ -1016,23 +1156,25 @@ mod tests {
         );
     }
 
-    /// Scrolled up, the transcript says how much is below and how to get
-    /// back; at the bottom it says nothing.
+    /// At the latest row of a conversation taller than the window, the
+    /// rule says how much is above and nothing about below; a
+    /// conversation that fits says nothing, and has no thumb.
     #[test]
-    fn a_scrolled_transcript_says_there_is_more_below() {
+    fn the_rule_says_above_only_at_the_latest_row_and_nothing_when_it_fits() {
         let now = Instant::now();
         let mut app = App::new(Some("default".into()), "c-1".into());
+        app.entries.push(Entry::Note("short".into()));
+        let fits = text_of(&drawn(&app, now, 120, 24));
+        assert!(!fits.contains("above") && !fits.contains("█"), "{fits}");
         for n in 0..40 {
             app.entries.push(Entry::Note(format!("line {n}")));
         }
-        assert!(!screen(&app, now).contains("more below"));
-        app.scroll = 6;
-        let shown = screen(&app, now);
-        assert!(
-            shown.contains("↓ 6 more below · End for the latest"),
-            "{shown}"
-        );
-        assert!(!shown.contains("line 39"), "{shown}");
+        let latest = text_of(&drawn(&app, now, 120, 24));
+        assert!(latest.contains("↑ 63 above ┤"), "{latest}");
+        assert!(!latest.contains("below") && latest.contains("█"), "{latest}");
+        assert_eq!(thumb(19, 46, 17), (7, 15));
+        assert_eq!(thumb(35, 46, 1), (1, 28));
+        assert_eq!(thumb(19, 19, 0), (0, 0));
     }
 
     #[test]
