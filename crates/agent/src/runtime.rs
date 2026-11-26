@@ -7307,7 +7307,8 @@ fn finish_reason_for(response: &LlmResponse) -> &'static str {
 }
 
 /// Look up per-call cost in micros against the baked pricing table.
-/// On miss, emit a `tracing::warn` so a stale binary against a new
+/// On miss, emit a `tracing::warn` (a debug line for a local ollama
+/// model, which has no price) so a stale binary against a new
 /// model is visible in the audit stream. The call itself is not
 /// blocked; the caller writes `None` cost fields onto the
 /// `SessionEvent::LlmResponse`.
@@ -7325,11 +7326,21 @@ fn resolve_cost_micros(
         usage.cache_read_input_tokens,
     );
     if result.0.is_none() {
-        tracing::warn!(
-            provider = provider,
-            model = model,
-            "no pricing entry for (provider, model); recording LlmResponse cost fields as None",
-        );
+        // A local ollama model has no price to look up: a miss there is
+        // every turn and says nothing, so it is not a warning.
+        if provider == "ollama" {
+            tracing::debug!(
+                provider = provider,
+                model = model,
+                "local model; recording LlmResponse cost fields as None",
+            );
+        } else {
+            tracing::warn!(
+                provider = provider,
+                model = model,
+                "no pricing entry for (provider, model); recording LlmResponse cost fields as None",
+            );
+        }
     }
     result
 }

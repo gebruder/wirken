@@ -22,6 +22,11 @@ tagged.
   with the request the non-streamed path sends, as that path has since
   May (`streaming_ollama_asks_its_own_endpoint_for_the_context_window`,
   `crates/agent/src/tests.rs`).
+- A turn with a local ollama model no longer logs `no pricing entry for
+  (provider, model)` as a warning on every reply: a local model has no
+  price, so the line is at debug level for ollama, and its cost is still
+  recorded as unknown. Every other provider keeps the warning, which marks
+  a model the price table does not know.
 - `wirken run` with a Signal channel and no signal-cli running prints one
   line, "signal-cli not detected. Run it with `signal-cli -a +your-number
   daemon --socket` and restart wirken to enable Signal.", and runs on
