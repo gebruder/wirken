@@ -12,6 +12,14 @@ tagged.
 
 ### Fixed
 
+- Ctrl+F in `wirken chat` no longer opens a search the screen does not
+  show. Below the width the sidebar needs (120 columns with the panels, 84
+  without), it opened the search in a sidebar that was not drawn, so what
+  was typed next went into it unseen until Esc. It now leaves the search
+  closed and says on the status line how many columns it needs; a search
+  left open by a resize to such a width is closed
+  (`search_opens_only_where_the_sidebar_is_drawn`,
+  `crates/cli/src/commands/chat/view.rs`).
 - `wirken chat` scrolls with the arrow keys, the mouse wheel and the
   trackpad. Only PgUp and PgDn scrolled the transcript, which on a Mac
   laptop are Fn+↑ and Fn+↓, so a long reply could not be read back the way

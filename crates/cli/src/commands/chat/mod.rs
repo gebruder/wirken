@@ -324,7 +324,8 @@ async fn event_loop(
         if PANICKED.load(Ordering::Relaxed) {
             anyhow::bail!("the chat stopped after an internal error");
         }
-        screen.draw(&app)?;
+        let columns = screen.draw(&app)?;
+        app.set_columns(columns);
         let outgoing: Vec<Outgoing> = tokio::select! {
             frame = link.frames.recv() => match frame {
                 Some(Ok(wire::ServerEvent::Answer { request_id, body })) => {
@@ -432,12 +433,17 @@ impl Screen {
         }
     }
 
-    fn draw(&mut self, app: &App) -> Result<()> {
+    /// Draw `app`, and return the width it was drawn at.
+    fn draw(&mut self, app: &App) -> Result<u16> {
         let now = Instant::now();
+        let mut width = 0;
         self.terminal
-            .draw(|frame| view::draw(frame, app, now))
+            .draw(|frame| {
+                width = frame.area().width;
+                view::draw(frame, app, now)
+            })
             .context("draw the chat")?;
-        Ok(())
+        Ok(width)
     }
 
     fn leave(&mut self) {

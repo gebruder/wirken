@@ -115,6 +115,12 @@ pub(crate) struct App {
     pub show_panels: bool,
     /// The sidebar has the keys: typing filters, arrows select.
     pub searching: bool,
+    /// The screen's width at the last draw, 0 before the first. A
+    /// toggle the layout cannot honour at this width is refused.
+    pub columns: u16,
+    /// Said once on the status line in place of the key hints, and
+    /// cleared by the next key: why a key just did nothing.
+    pub notice: Option<String>,
     pub search: String,
     /// Index into the sidebar's filtered rows.
     pub selected: usize,
@@ -161,6 +167,8 @@ impl App {
             pending_panel: None,
             card_cut: std::cell::Cell::new(false),
             searching: false,
+            columns: 0,
+            notice: None,
             search: String::new(),
             selected: 0,
             entries: Vec::new(),
@@ -174,6 +182,17 @@ impl App {
             expired: None,
             scroll: 0,
             quit: false,
+        }
+    }
+
+    /// Take the width the screen was last drawn at. A search the
+    /// sidebar can no longer show at it is closed, so typing never goes
+    /// into a search nobody sees.
+    pub fn set_columns(&mut self, columns: u16) {
+        self.columns = columns;
+        if self.searching && super::view::search_refusal(columns, self.show_panels).is_some() {
+            self.searching = false;
+            self.search.clear();
         }
     }
 
@@ -493,6 +512,7 @@ impl App {
             return None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        self.notice = None;
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 self.quit = true;
@@ -591,6 +611,13 @@ impl App {
 
         match key.code {
             KeyCode::Char('f') if ctrl => {
+                // The search lives in the sidebar: where the sidebar
+                // cannot be drawn, it is not opened, and the status line
+                // says why.
+                if let Some(refusal) = super::view::search_refusal(self.columns, self.show_panels) {
+                    self.notice = Some(refusal);
+                    return None;
+                }
                 self.show_sidebar = true;
                 self.searching = true;
                 self.selected = 0;

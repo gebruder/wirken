@@ -260,7 +260,7 @@ needs. Both start shown; Ctrl+B and Ctrl+P toggle them.
 | End | Scrolled up, back to the latest row; the transcript's lower edge says how many rows are below while it is scrolled. At the latest row, the end of the draft |
 | Home | The start of the draft |
 | Ctrl+U | Clear the message or the answer |
-| Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves |
+| Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves. Where the screen is too narrow to draw the sidebar the search does not open, and the status line says how many columns it needs |
 | Ctrl+N | New conversation with the same agent |
 | Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels |
 | Ctrl+K | Verify this conversation's chain |

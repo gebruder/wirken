@@ -78,6 +78,22 @@ fn fit(width: u16, show_sidebar: bool, show_panels: bool) -> (u16, u16, Option<S
     (side_cols, panel_cols, note)
 }
 
+/// Why Ctrl+F cannot open the search at `width`, or `None` when the
+/// sidebar it lives in can be drawn. Width 0 is a screen not drawn yet.
+pub(crate) fn search_refusal(width: u16, show_panels: bool) -> Option<String> {
+    if width == 0 || fit(width, true, show_panels).0 > 0 {
+        return None;
+    }
+    let need = if fit(width, false, show_panels).1 > 0 {
+        SIDEBAR_COLS + PANELS_COLS + TRANSCRIPT_MIN_COLS
+    } else {
+        SIDEBAR_COLS + TRANSCRIPT_MIN_COLS
+    };
+    Some(format!(
+        "search needs the sidebar: {need} columns, {width} now"
+    ))
+}
+
 /// How the model's own words are drawn on the card: set apart from what
 /// the gateway established, because they are a claim, not a fact.
 pub(crate) fn claim_style() -> Style {
@@ -207,7 +223,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         .unwrap_or_default();
     // A toggle the screen cannot honour is explained here, in place of
     // the key hints, so the key is never seen to do nothing.
-    let line = match layout_note {
+    let line = match app.notice.clone().or(layout_note) {
         Some(note) => note,
         None => format!(
             "{exec}Enter send · Ctrl+J newline · ↑↓ PgUp PgDn scroll · End latest · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar \
@@ -556,6 +572,65 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn all_text(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| row_text(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Ctrl+F opens the search only where the sidebar it lives in is
+    /// drawn. Where it is not, the status line says why and what is typed
+    /// next stays in the draft, on screen; a search left open by a resize
+    /// to such a width is closed.
+    #[test]
+    fn search_opens_only_where_the_sidebar_is_drawn() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let now = Instant::now();
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        for (w, h) in [(80u16, 24u16), (120, 24), (120, 40)] {
+            let mut app = App::new(Some("default".into()), "c-1".into());
+            app.set_columns(w);
+            app.on_key(ctrl_f, now);
+            let shown = all_text(&drawn(&app, now, w, h));
+            for c in "list".chars() {
+                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), now);
+            }
+            let typed = all_text(&drawn(&app, now, w, h));
+            if w < 120 {
+                assert!(!app.searching, "{w}x{h}: the search opened unseen");
+                assert!(
+                    shown.contains("search needs the sidebar: 120 columns, 80 now"),
+                    "{w}x{h}:\n{shown}"
+                );
+                assert_eq!(app.draft, "list", "{w}x{h}");
+                assert!(
+                    typed.contains("list"),
+                    "{w}x{h}: the typing is not on screen"
+                );
+            } else {
+                assert!(app.searching, "{w}x{h}");
+                assert!(typed.contains("search: list"), "{w}x{h}:\n{typed}");
+                assert!(app.draft.is_empty(), "{w}x{h}");
+            }
+        }
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.set_columns(120);
+        app.on_key(ctrl_f, now);
+        assert!(app.searching);
+        app.set_columns(80);
+        assert!(
+            !app.searching,
+            "a resize left the search open where it is not drawn"
+        );
     }
 
     /// Scrolled up, the transcript says how much is below and how to get
