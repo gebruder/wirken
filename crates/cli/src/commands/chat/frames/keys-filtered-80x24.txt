@@ -1,7 +1,7 @@
 80x24
 ┌ keys and commands ─────────── compact layout · side by side from 120 columns ┐
 │ SCROLL                                                                       │
-│ PgUp PgDn    scroll 10 rows                                                  │
+│ PgUp PgDn    ░░░░░░░░░░░░░░░                                                 │
 │ ↑ ↓ wheel    scroll 3 rows                                                   │
 │ End          back to the latest row                                          │
 │                                                                              │
@@ -26,7 +26,7 @@
 
 - WWWW WWW WWWWWWWW ----------- ....... ...... - gggg gg gggg gggg ggg ggggggg -
 - YYYYYY                                                                       -
-- BBBB BBBB    YYYYYY .. ....                                                  -
+- BBBB BBBB    ░░░░░░░░░░░░░░░                                                 -
 - B B BBBBB    YYYYYY . ....                                                   -
 - BBB          .... .. ... ...... ...                                          -
 -                                                                              -

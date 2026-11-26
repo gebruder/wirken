@@ -11,7 +11,7 @@
 │                            ││  Refused exec.                                     ││2 calls · 2.9k in · 61 out        │
 │                            ││                                                    ││uncosted · budget off             │
 │                            ││default                                             │├ Audit ──────────── Ctrl+K verify ┤
-│                            ││  The command was not run: the operator refused it. ││░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│                            ││  The command was not run: the operator refused it. ││14 rows · 1 chain head            │
 │                            ││                                                    ││12 rows after the last head       │
 │                            ││                                                    │├ Approvals ───────────────────────┤
 │                            ││                                                    ││0 approved · 1 denied             │
@@ -36,7 +36,7 @@
 -                            --  RRRRRRR RRRRR                                     --. ..... . .... .. . .. ...        -
 -                            --                                                    --........ . ...... ...             -
 -                            --CCCCCCC                                             -- ..... ------------ BBBBBB gggggg -
--                            --  ... ....... ... ... .... ... ........ ....... ... --░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░-
+-                            --  ... ....... ... ... .... ... ........ ....... ... --.. .... . . ..... ....            -
 -                            --                                                    --.. .... ..... ... .... ....       -
 -                            --                                                    -- ......... ------------------------
 -                            --                                                    --. ........ . . ......             -

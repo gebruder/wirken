@@ -1043,7 +1043,14 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     }
     let mut lines: Vec<Line<'static>> = Vec::new();
     use palette::{AMBER, CYAN, GRAY, RED, TEXT, WHITE, on_bg};
-    for entry in &app.entries {
+    for (i, entry) in app.entries.iter().enumerate() {
+        if i > 0
+            && matches!(entry, Entry::Tool { .. })
+            && matches!(app.entries[i - 1], Entry::Tool { .. })
+        {
+            // Tool calls in a row are one block.
+            lines.pop();
+        }
         match entry {
             Entry::User(text) => {
                 lines.push(Line::styled("you", on_bg(WHITE)));
@@ -1065,30 +1072,55 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 ..
             } => {
                 let (state, state_color) = match outcome {
+                    None if app.expired.as_ref().is_some_and(|a| a.tool_name == *name) => {
+                        ("expired", RED)
+                    }
+                    None if app.cards.iter().any(|c| c.ask.tool_name == *name) => {
+                        ("needs approval", AMBER)
+                    }
                     None => ("running", AMBER),
                     Some(true) => ("done", GRAY),
                     Some(false) => ("failed", RED),
                 };
+                // The whole call, wrapped under itself, the state its last
+                // words.
                 let call = format!(
-                    "{} {}",
+                    "tool {} {} {state}",
                     sanitize(name),
                     sanitize(arguments).replace('\n', " ")
                 );
-                let rows = wrap(&call, width.saturating_sub(16));
-                let mut shown = rows.first().cloned().unwrap_or_default();
-                if rows.len() > 1 {
-                    shown.push_str("...");
+                let rows = wrap(&call, width.saturating_sub(5).max(1));
+                let mut state_left = state.chars().filter(|c| *c != ' ').count();
+                let mut drawn: Vec<Line<'static>> = Vec::new();
+                for (k, row) in rows.iter().enumerate().rev() {
+                    // The row's tail that is still the state.
+                    let mut split = row.len();
+                    for (at, c) in row.char_indices().rev() {
+                        if state_left == 0 {
+                            break;
+                        }
+                        if c != ' ' {
+                            state_left -= 1;
+                        }
+                        split = at;
+                    }
+                    let (plain, colored) = row.split_at(split);
+                    let indent = if k == 0 { "  " } else { "    " };
+                    drawn.push(Line::from(vec![
+                        Span::styled(format!("{indent}{plain}"), on_bg(TEXT)),
+                        Span::styled(colored.to_string(), on_bg(state_color)),
+                    ]));
                 }
-                lines.push(Line::from(vec![
-                    Span::styled("  tool ", on_bg(TEXT)),
-                    Span::styled(shown, on_bg(TEXT)),
-                    Span::styled(" ", on_bg(TEXT)),
-                    Span::styled(state, on_bg(state_color)),
-                ]));
+                drawn.reverse();
+                lines.extend(drawn);
                 // What the tool returned, under its line, however the
                 // model's reply then went.
                 let returned = sanitize(output);
-                let body = wrap(returned.trim_end(), width.saturating_sub(4));
+                let body = if returned.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    wrap(returned.trim_end(), width.saturating_sub(4))
+                };
                 let cut = body.len() > TOOL_OUTPUT_ROWS;
                 for row in body.into_iter().take(TOOL_OUTPUT_ROWS) {
                     lines.push(Line::styled(format!("    {row}"), on_bg(GRAY)));
@@ -1210,7 +1242,11 @@ fn transcript_block(app: &App, compact: bool) -> Block<'static> {
 /// the view: the scroll as drawn, not as asked for.
 fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect, meter: bool) -> usize {
     let width = usize::from(area.width.saturating_sub(2)).max(1);
-    let lines = transcript_lines(app, width);
+    let mut lines = transcript_lines(app, width);
+    // Over a card the last entry's blank row goes: the rows are few.
+    if lines.last().is_some_and(|l| l.width() == 0) {
+        lines.pop();
+    }
     let height = usize::from(area.height.saturating_sub(2));
     let (start, end) = view_window(lines.len(), height, app.scroll);
     let block = transcript_block(app, meter);
@@ -1254,6 +1290,7 @@ fn draw_conversation(
     let height = usize::from(content_rows);
     let (start, end) = view_window(lines.len(), height, app.scroll);
     let (above, below) = (start, lines.len() - end);
+    app.page_rows.set(height);
 
     let compact = frame.area().width < WIDE_COLS;
     frame.render_widget(transcript_block(app, compact), area);
@@ -2345,7 +2382,7 @@ mod tests {
             "uncosted",
             "budget off",
             "Audit",
-            "6 rows · 1 chain heads",
+            "6 rows · 1 chain head",
             "Approvals",
             "no stored grants",
             "Tools",

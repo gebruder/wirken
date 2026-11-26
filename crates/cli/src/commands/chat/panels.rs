@@ -256,7 +256,12 @@ pub(crate) fn panels(status: &Status, verified: Option<&Verified>) -> Vec<Panel>
 
     let a = &status.audit;
     let mut audit = vec![
-        format!("{} rows · {} chain heads", a.rows, a.heads),
+        format!(
+            "{} rows · {} chain {}",
+            a.rows,
+            a.heads,
+            if a.heads == 1 { "head" } else { "heads" }
+        ),
         format!("{} rows after the last head", a.unsigned_tail),
     ];
     audit.push(match verified {
@@ -474,7 +479,7 @@ mod tests {
             "{cost}"
         );
         let audit = text(&p, "Audit");
-        assert!(audit.contains("14 rows · 1 chain heads"), "{audit}");
+        assert!(audit.contains("14 rows · 1 chain head"), "{audit}");
         assert!(audit.contains("Ctrl+K"), "{audit}");
         let approvals = text(&p, "Approvals");
         assert!(approvals.contains("1 approved · 2 denied"), "{approvals}");

@@ -806,3 +806,50 @@ fn hints_sit_on_the_borders_they_act_on() {
         assert_drawn(name, &render(&app, now, design.w, design.h), &design);
     }
 }
+
+/// 12: one chain head is singular, a tool call waiting on a card reads
+/// "needs approval" and wraps whole under itself, and PgUp and PgDn move
+/// a screen less two rows.
+#[test]
+fn small_corrections_hold() {
+    let t0 = now();
+    let later = t0 + super::app::ARMING;
+    let cards: [(&str, Design); 3] = [
+        ("card-80x24", frame!("card-80x24")),
+        ("card-120x24", frame!("card-120x24")),
+        ("card-120x40", frame!("card-120x40")),
+    ];
+    for (name, design) in cards {
+        assert_drawn(
+            name,
+            &render(&tier3_card(t0), later, design.w, design.h),
+            &design,
+        );
+    }
+    let design = frame!("long-120x24");
+    let mut app = long_conversation();
+    app.scroll = 10;
+    assert_drawn(
+        "long-120x24",
+        &render(&app, t0, design.w, design.h),
+        &design,
+    );
+
+    // With no card the same call is running.
+    let mut app = tier3_card(t0);
+    app.cards.clear();
+    let b = render(&app, later, 120, 24);
+    let row = |y: u16| -> String { (0..120).map(|x| b[(x, y)].symbol().to_string()).collect() };
+    let shown: String = (0..24).map(row).collect::<Vec<_>>().join("\n");
+    assert!(
+        shown.contains("} running") && !shown.contains("needs approval"),
+        "{shown}"
+    );
+
+    // A page is the rows drawn less two.
+    let mut app = long_conversation();
+    render(&app, t0, 120, 40);
+    let rows = app.page_rows.get();
+    app.on_key(key(crossterm::event::KeyCode::PageUp), t0);
+    assert_eq!(app.scroll, rows - 2);
+}

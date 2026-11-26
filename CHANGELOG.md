@@ -103,6 +103,14 @@ tagged.
   word after its key was a cell short
   (`hints_sit_on_the_borders_they_act_on`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- In `wirken chat`, PgUp and PgDn move the transcript a screen less two
+  rows, where they moved a fixed 10, so two rows stay in view across a
+  page. A tool call waiting on a card reads `needs approval`, not
+  `running`, and the whole call wraps under itself where it was cut to one
+  row; tool calls in a row are one block. The Audit panel says `1 chain
+  head`. The docs say that inside tmux Ctrl+B is tmux's prefix and reaches
+  the chat on a second press (`small_corrections_hold`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

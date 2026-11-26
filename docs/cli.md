@@ -284,7 +284,7 @@ than the answer, which the card states.
 | Enter | Send the message, or answer the card |
 | Ctrl+J | New line in the message |
 | ↑ / ↓, mouse wheel | Scroll the transcript a few rows; in the sidebar search, move the selection. The wheel arrives as ↑ and ↓ (the chat turns on the terminal's alternate scroll), and text can still be selected |
-| PgUp / PgDn | Scroll the transcript a page; on a Mac laptop, Fn+↑ / Fn+↓ |
+| PgUp / PgDn | Scroll the transcript a screen less two rows, so two rows stay in view; on a Mac laptop, Fn+↑ / Fn+↓ |
 | End | Scrolled up, back to the latest row. At the latest row, the end of the draft |
 | Home | The start of the draft |
 | Ctrl+A / Ctrl+E | The start / the end of the draft |
@@ -293,7 +293,7 @@ than the answer, which the card states.
 | Ctrl+U | Clear the draft, or the card's answer |
 | Ctrl+F | Search the conversations, in the sidebar from 120 columns and over the transcript under it; arrows select, Enter opens, Esc leaves |
 | Ctrl+N | New conversation with the same agent |
-| Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels; under 120 columns, open them over the transcript |
+| Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels; under 120 columns, open them over the transcript. Inside tmux, Ctrl+B is tmux's prefix by default and the first press does not reach the chat: press Ctrl+B twice, or rebind the prefix |
 | Ctrl+K | Verify this conversation's chain |
 | Ctrl+G / F1 | The keys screen: every key and command in groups, over the whole screen. Typing filters it, ↑ and ↓ scroll it, Esc or Ctrl+G closes it; keys that do not apply now are dimmed. The key bar keeps Ctrl+G at its right at every width |
 | Ctrl+C | Leave the chat |

@@ -1,7 +1,7 @@
 80x24
 ┌ keys and commands ─────────── compact layout · side by side from 120 columns ┐
 │ SCROLL                                 SCREEN                                │
-│ PgUp PgDn    scroll 10 rows            Ctrl+B       toggle conversations     │
+│ PgUp PgDn    ░░░░░░░░░░░░░░░           Ctrl+B       toggle conversations     │
 │ ↑ ↓ wheel    scroll 3 rows             Ctrl+P       toggle panels            │
 │ End          back to the latest row    Ctrl+G F1    this screen              │
 │ WRITE                                  Esc          close this or the search │
@@ -26,7 +26,7 @@
 
 - WWWW WWW WWWWWWWW ----------- ....... ...... - gggg gg gggg gggg ggg ggggggg -
 - WWWWWW                                 WWWWWW                                -
-- BBBB BBBB    ...... .. ....            BBBBBB       ...... .............     -
+- BBBB BBBB    ░░░░░░░░░░░░░░░           BBBBBB       ...... .............     -
 - B B BBBBB    ...... . ....             BBBBBB       ...... ......            -
 - BBB          .... .. ... ...... ...    BBBBBB BB    .... ......              -
 - WWWWW                                  BBB          ..... .... .. ... ...... -

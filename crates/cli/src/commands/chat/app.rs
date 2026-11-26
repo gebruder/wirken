@@ -93,7 +93,7 @@ pub(crate) const KEYS: &[KeyGroup] = &[
     KeyGroup {
         title: "SCROLL",
         keys: &[
-            ("PgUp PgDn", "scroll 10 rows"),
+            ("PgUp PgDn", "scroll a screen"),
             ("↑ ↓ wheel", "scroll 3 rows"),
             ("End", "back to the latest row"),
         ],
@@ -217,6 +217,9 @@ pub(crate) struct App {
     pub quit: bool,
     /// The panel command waiting for the gateway's status answer.
     pub pending_panel: Option<super::slash::Command>,
+    /// Rows of conversation last drawn. PgUp and PgDn move this many
+    /// less two, so two rows stay in view across a page.
+    pub page_rows: std::cell::Cell<usize>,
     /// Whether the card in front was last drawn with its arguments cut
     /// or its bottom off the screen. Set by the view on each draw. A
     /// card in that state takes a refusal and no approval.
@@ -241,6 +244,7 @@ impl App {
             show_sidebar: true,
             show_panels: true,
             pending_panel: None,
+            page_rows: std::cell::Cell::new(12),
             card_cut: std::cell::Cell::new(false),
             card_one_line: std::cell::Cell::new(false),
             searching: false,
@@ -268,6 +272,11 @@ impl App {
     /// the sidebar moves over the transcript when the window narrows to
     /// the compact layout, and back when it widens, so what is typed is
     /// always on screen.
+    /// Rows PgUp and PgDn move: a screen less two.
+    fn page(&self) -> usize {
+        self.page_rows.get().saturating_sub(2).max(1)
+    }
+
     pub fn set_columns(&mut self, columns: u16) {
         self.columns = columns;
         if self.compact() {
@@ -676,11 +685,11 @@ impl App {
                 return None;
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll = self.scroll.saturating_add(self.page());
                 return None;
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll = self.scroll.saturating_sub(self.page());
                 return None;
             }
             // Arrows scroll a few rows. They are also what most terminals
@@ -1095,7 +1104,12 @@ mod tests {
         app.on_key(key(KeyCode::Down), now);
         assert_eq!(app.scroll, 3);
         app.on_key(key(KeyCode::PageUp), now);
-        assert_eq!(app.scroll, 13);
+        assert_eq!(app.scroll, 13, "a screen of 12 rows less two");
+        app.page_rows.set(20);
+        app.on_key(key(KeyCode::PageDown), now);
+        assert_eq!(app.scroll, 0);
+        app.on_key(key(KeyCode::PageUp), now);
+        assert_eq!(app.scroll, 18, "a screen of 20 rows less two");
         app.on_key(key(KeyCode::End), now);
         assert_eq!(app.scroll, 0, "End returns to the latest row");
         app.on_key(key(KeyCode::Up), now);
