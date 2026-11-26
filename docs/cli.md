@@ -255,13 +255,20 @@ needs. Both start shown; Ctrl+B and Ctrl+P toggle them.
 |-----|--------|
 | Enter | Send the message, or answer the card |
 | Ctrl+J | New line in the message |
-| PgUp / PgDn | Scroll the transcript |
+| ↑ / ↓, mouse wheel | Scroll the transcript a few rows; in the sidebar search, move the selection. The wheel arrives as ↑ and ↓ (the chat turns on the terminal's alternate scroll), and text can still be selected |
+| PgUp / PgDn | Scroll the transcript a page; on a Mac laptop, Fn+↑ / Fn+↓ |
+| End | Back to the latest row. Scrolled up, the transcript's lower edge says how many rows are below |
 | Ctrl+U | Clear the message or the answer |
 | Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves |
 | Ctrl+N | New conversation with the same agent |
 | Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels |
 | Ctrl+K | Verify this conversation's chain |
 | Ctrl+C | Leave the chat |
+
+The chat takes no mouse capture, so text is selected and copied as in any
+terminal. A selection runs the width of the screen, so it takes in the
+sidebar and the panels beside the transcript; hide them with Ctrl+B and
+Ctrl+P to copy transcript lines alone.
 
 Log output written while the screen is up is held and printed to stderr when
 the chat exits. The chat is not available on Windows.

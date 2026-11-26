@@ -406,6 +406,16 @@ impl Screen {
                 .map_err(anyhow::Error::from)
             })
             .and_then(|()| {
+                // Alternate scroll: the terminal sends the wheel as ↑ and ↓
+                // on this screen, which scroll the transcript. Most
+                // terminals do so already; xterm waits to be asked. Mouse
+                // capture is not taken, so text can still be selected.
+                let mut out = std::io::stdout();
+                out.write_all(b"\x1b[?1007h")
+                    .and_then(|()| out.flush())
+                    .map_err(anyhow::Error::from)
+            })
+            .and_then(|()| {
                 // Never `Terminal::clear`: it asks the terminal where the
                 // cursor is, and the answer arrives on stdin, where the
                 // key reader takes it. A fresh terminal draws every cell
@@ -455,6 +465,7 @@ fn leave_terminal() {
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::cursor::Show,
     );
+    let _ = out.write_all(b"\x1b[?1007l");
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = out.flush();
     let held = HELD_LOGS

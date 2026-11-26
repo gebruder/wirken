@@ -78,7 +78,7 @@ fn help_text() -> String {
         lines.push(format!("  {name:<12}{what}"));
     }
     lines.push(
-        "keys: Enter send · Ctrl+J newline · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar · \
+        "keys: Enter send · Ctrl+J newline · ↑↓ or wheel scroll · PgUp/PgDn page · End latest · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar · \
          Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
             .into(),
     );
@@ -506,6 +506,23 @@ impl App {
                 self.scroll = self.scroll.saturating_sub(10);
                 return None;
             }
+            // Arrows scroll a few rows. They are also what most terminals
+            // send for the mouse wheel and the trackpad on a full-screen
+            // app, so scrolling the way one scrolls a terminal works. In
+            // the sidebar search they move the selection instead.
+            KeyCode::Up if !self.searching => {
+                self.scroll = self.scroll.saturating_add(3);
+                return None;
+            }
+            KeyCode::Down if !self.searching => {
+                self.scroll = self.scroll.saturating_sub(3);
+                return None;
+            }
+            // Back to the latest row from anywhere up the transcript.
+            KeyCode::End if !self.searching => {
+                self.scroll = 0;
+                return None;
+            }
             KeyCode::Char('b') if ctrl => {
                 self.show_sidebar = !self.show_sidebar;
                 self.searching &= self.show_sidebar;
@@ -838,6 +855,25 @@ mod tests {
             app.on_key(key(KeyCode::Enter), now),
             Some(Outgoing::Message("again".into()))
         );
+    }
+
+    #[test]
+    fn arrows_scroll_the_transcript_and_move_the_search_selection() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_key(key(KeyCode::Up), now);
+        app.on_key(key(KeyCode::Up), now);
+        assert_eq!(app.scroll, 6);
+        app.on_key(key(KeyCode::Down), now);
+        assert_eq!(app.scroll, 3);
+        app.on_key(key(KeyCode::PageUp), now);
+        assert_eq!(app.scroll, 13);
+        app.on_key(key(KeyCode::End), now);
+        assert_eq!(app.scroll, 0, "End returns to the latest row");
+        app.on_key(key(KeyCode::Up), now);
+        app.on_key(ctrl('f'), now);
+        app.on_key(key(KeyCode::Down), now);
+        assert_eq!(app.scroll, 3, "in search the arrows move the selection");
     }
 
     #[test]

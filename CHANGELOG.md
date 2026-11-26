@@ -12,6 +12,18 @@ tagged.
 
 ### Fixed
 
+- `wirken chat` scrolls with the arrow keys, the mouse wheel and the
+  trackpad. Only PgUp and PgDn scrolled the transcript, which on a Mac
+  laptop are Fn+↑ and Fn+↓, so a long reply could not be read back the way
+  a terminal is scrolled; workshop participants could not find it. ↑ and ↓
+  now scroll three rows, the chat turns on the terminal's alternate scroll
+  so the wheel arrives as those keys, and mouse capture is not taken, so
+  text is selected as before. Scrolled up, the transcript's lower edge says
+  how many rows are below, and End returns to the latest. The status line
+  names the keys (`arrows_scroll_the_transcript_and_move_the_search_selection`,
+  `crates/cli/src/commands/chat/app.rs`;
+  `a_scrolled_transcript_says_there_is_more_below`,
+  `crates/cli/src/commands/chat/view.rs`).
 - `wirken update` shows curl's progress bar while it downloads a release.
   curl was given `--progress-bar` and an inherited stderr, but the
   child was run with `output()`, which pipes stdout and stderr whatever the

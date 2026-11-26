@@ -208,7 +208,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let line = match layout_note {
         Some(note) => note,
         None => format!(
-            "{exec}Enter send · Ctrl+J newline · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar \
+            "{exec}Enter send · Ctrl+J newline · ↑↓ PgUp PgDn scroll · End latest · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar \
              · Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
         ),
     };
@@ -414,9 +414,20 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let end = total - scroll;
     let start = end.saturating_sub(height);
     let title = format!(" wirken chat · {} ", sanitize(&app.agent));
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    // Scrolled up, the latest rows are out of view: say how many, and
+    // how to get back to them.
+    if scroll > 0 {
+        block = block.title_bottom(
+            Line::styled(
+                format!(" ↓ {scroll} more below · End for the latest "),
+                Style::default().fg(Color::Yellow),
+            )
+            .right_aligned(),
+        );
+    }
     frame.render_widget(
-        Paragraph::new(lines[start..end].to_vec())
-            .block(Block::default().borders(Borders::ALL).title(title)),
+        Paragraph::new(lines[start..end].to_vec()).block(block),
         area,
     );
 }
@@ -543,6 +554,25 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// Scrolled up, the transcript says how much is below and how to get
+    /// back; at the bottom it says nothing.
+    #[test]
+    fn a_scrolled_transcript_says_there_is_more_below() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        for n in 0..40 {
+            app.entries.push(Entry::Note(format!("line {n}")));
+        }
+        assert!(!screen(&app, now).contains("more below"));
+        app.scroll = 6;
+        let shown = screen(&app, now);
+        assert!(
+            shown.contains("↓ 6 more below · End for the latest"),
+            "{shown}"
+        );
+        assert!(!shown.contains("line 39"), "{shown}");
     }
 
     #[test]
