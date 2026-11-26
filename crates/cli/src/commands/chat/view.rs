@@ -195,12 +195,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     }
 
     // The runtime is the one the gateway named; until it has said,
-    // the line says nothing about where commands run.
+    // the line says nothing about where commands run. With the panels
+    // drawn, Environment names it, and the line keeps its width for the
+    // keys: the transcript column is all the line has.
     let exec = app
         .status
         .as_ref()
         .map(|s| s.environment.exec.runtime.as_str())
-        .filter(|r| !r.is_empty())
+        .filter(|r| !r.is_empty() && panel_cols == 0)
         .map(|r| format!("exec: {} · ", sanitize(&runtime_words(r))))
         .unwrap_or_default();
     // A toggle the screen cannot honour is explained here, in place of
@@ -905,9 +907,23 @@ mod tests {
             crate::commands::chat::wire::Query::Status,
             serde_json::json!({"agent": "default", "environment": {"exec": {"mode": "gvisor", "runtime": "gvisor"}}}),
         );
+        // With the panels drawn, Environment names it and the status
+        // line leaves it out, to keep its width for the keys.
+        let buffer = drawn(&app, now, 200, 40);
+        find(&buffer, "Environment");
+        find(&buffer, "gVisor (runsc)");
+        let text: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+            .collect();
+        assert!(
+            !text.contains("exec: "),
+            "the status line names the runtime twice"
+        );
+        // With them hidden, the status line names it.
+        app.show_panels = false;
         let buffer = drawn(&app, now, 200, 40);
         find(&buffer, "exec: gVisor (runsc)");
-        find(&buffer, "Environment");
     }
 
     #[test]

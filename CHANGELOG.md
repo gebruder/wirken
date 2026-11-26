@@ -19,8 +19,10 @@ tagged.
   now scroll three rows, the chat turns on the terminal's alternate scroll
   so the wheel arrives as those keys, and mouse capture is not taken, so
   text is selected as before. Scrolled up, the transcript's lower edge says
-  how many rows are below, and End returns to the latest. The status line
-  names the keys (`arrows_scroll_the_transcript_and_move_the_search_selection`,
+  how many rows are below, and End returns to the latest; at the latest
+  row End is still the end of the draft. The status line names the keys,
+  and with the panels drawn it leaves out the exec runtime, which
+  Environment shows, so they fit in the transcript's width (`arrows_scroll_the_transcript_and_move_the_search_selection`,
   `crates/cli/src/commands/chat/app.rs`;
   `a_scrolled_transcript_says_there_is_more_below`,
   `crates/cli/src/commands/chat/view.rs`).
