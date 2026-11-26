@@ -257,7 +257,8 @@ needs. Both start shown; Ctrl+B and Ctrl+P toggle them.
 | Ctrl+J | New line in the message |
 | ↑ / ↓, mouse wheel | Scroll the transcript a few rows; in the sidebar search, move the selection. The wheel arrives as ↑ and ↓ (the chat turns on the terminal's alternate scroll), and text can still be selected |
 | PgUp / PgDn | Scroll the transcript a page; on a Mac laptop, Fn+↑ / Fn+↓ |
-| End | Back to the latest row. Scrolled up, the transcript's lower edge says how many rows are below |
+| End | Scrolled up, back to the latest row; the transcript's lower edge says how many rows are below while it is scrolled. At the latest row, the end of the draft |
+| Home | The start of the draft |
 | Ctrl+U | Clear the message or the answer |
 | Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves |
 | Ctrl+N | New conversation with the same agent |

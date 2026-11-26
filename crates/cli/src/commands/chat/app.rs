@@ -78,7 +78,7 @@ fn help_text() -> String {
         lines.push(format!("  {name:<12}{what}"));
     }
     lines.push(
-        "keys: Enter send · Ctrl+J newline · ↑↓ or wheel scroll · PgUp/PgDn page · End latest · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar · \
+        "keys: Enter send · Ctrl+J newline · ↑↓ or wheel scroll · PgUp/PgDn page · End latest or end of draft · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar · \
          Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
             .into(),
     );
@@ -518,8 +518,9 @@ impl App {
                 self.scroll = self.scroll.saturating_sub(3);
                 return None;
             }
-            // Back to the latest row from anywhere up the transcript.
-            KeyCode::End if !self.searching => {
+            // Scrolled up, End is back to the latest row. At the latest
+            // row it falls through to the draft: the end of the line.
+            KeyCode::End if !self.searching && self.scroll > 0 => {
                 self.scroll = 0;
                 return None;
             }
@@ -854,6 +855,27 @@ mod tests {
         assert_eq!(
             app.on_key(key(KeyCode::Enter), now),
             Some(Outgoing::Message("again".into()))
+        );
+    }
+
+    #[test]
+    fn end_returns_to_the_latest_row_when_scrolled_and_ends_the_draft_otherwise() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        typed(&mut app, "hello", now);
+        app.on_key(key(KeyCode::Home), now);
+        assert_eq!(app.cursor, 0);
+
+        app.on_key(key(KeyCode::Up), now);
+        app.on_key(key(KeyCode::End), now);
+        assert_eq!(app.scroll, 0, "scrolled up, End is the latest row");
+        assert_eq!(app.cursor, 0, "and leaves the draft's cursor where it was");
+
+        app.on_key(key(KeyCode::End), now);
+        assert_eq!(
+            app.cursor,
+            "hello".len(),
+            "at the latest row, End ends the draft"
         );
     }
 
