@@ -164,6 +164,12 @@ never sent to the model. It counts only as the first word, by its exact
 lowercase name; text after it is ignored. Any other `/word` (a skill, `/HELP`,
 `/etc/hosts`) goes to the agent as typed.
 
+A `/` typed in an empty draft lists the ten commands above the draft, and
+what is typed after it narrows the list to the commands that start with it,
+the typed part set apart as on the keys screen. A draft that starts no
+command says so there. The list goes with a space or once the draft is
+sent.
+
 | Command | What it does |
 |---|---|
 | `/status` | Every panel, as the gateway has them now |

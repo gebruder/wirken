@@ -645,6 +645,41 @@ fn draw_conversations_over(frame: &mut Frame<'_>, app: &App, area: Rect) {
     ));
 }
 
+/// The commands a draft can still become, as rows: while the draft is a
+/// `/` and the start of one word, each command whose name starts with it,
+/// the typed part set apart as the keys screen's filter sets it apart.
+/// `None` when the draft is not the start of a command.
+pub(crate) fn command_list(draft: &str) -> Option<Vec<Line<'static>>> {
+    use palette::{BLUE, DIM, TEXT, on_bg};
+    if !draft.starts_with('/') || draft.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let typed = draft.to_lowercase();
+    // A lone `/` matches every command; nothing is set apart for it.
+    let filter = if typed == "/" { "" } else { draft };
+    let rows: Vec<Line<'static>> = super::slash::COMMANDS
+        .iter()
+        .filter(|(names, _)| names.split(' ').any(|n| n.starts_with(&typed)))
+        .map(|(names, what)| {
+            let mut spans = vec![Span::styled(" ", on_bg(TEXT))];
+            spans.extend(marked(names, filter, on_bg(BLUE)));
+            spans.push(Span::styled(
+                " ".repeat(KEY_COLUMN.saturating_sub(width(names))),
+                on_bg(TEXT),
+            ));
+            spans.push(Span::styled(*what, on_bg(TEXT)));
+            Line::from(spans)
+        })
+        .collect();
+    if rows.is_empty() {
+        return Some(vec![Line::styled(
+            format!(" No command starts with \"{}\".", sanitize(draft)),
+            on_bg(DIM),
+        )]);
+    }
+    Some(rows)
+}
+
 /// Cells a key takes on the keys screen before what it does.
 const KEY_COLUMN: usize = 13;
 
@@ -1582,6 +1617,18 @@ fn draw_conversation(
         Paragraph::new(Line::from(rule)),
         Rect::new(area.x, rule_y, area.width, 1),
     );
+
+    // A draft that starts a command lists the commands it can still be,
+    // in the rows above the rule.
+    if let Some(rows) = command_list(&app.draft) {
+        let shown = rows.len().min(height);
+        for (i, row) in rows.into_iter().rev().take(shown).enumerate() {
+            let y = rule_y - 1 - u16::try_from(i).unwrap_or(0);
+            let at = Rect::new(content.x, y, content.width, 1);
+            frame.render_widget(ratatui::widgets::Clear, at);
+            frame.render_widget(Paragraph::new(row).style(on_bg(TEXT)), at);
+        }
+    }
 
     let draft = Rect::new(
         area.x + 1,

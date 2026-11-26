@@ -146,6 +146,13 @@ tagged.
   Ctrl+N new chat · Esc close`
   (`ctrl_b_and_ctrl_f_open_the_same_conversations_overlay`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- A `/` typed in an empty draft in `wirken chat` lists the ten commands
+  above the draft, in the transcript's last rows, and what is typed after
+  it narrows the list to the commands that start with it, the typed part
+  set apart as on the keys screen's filter. It goes with a space or once
+  the draft is sent
+  (`a_slash_lists_the_commands_and_typing_narrows_them`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

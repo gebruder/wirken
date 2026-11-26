@@ -1034,3 +1034,50 @@ fn ctrl_b_and_ctrl_f_open_the_same_conversations_overlay() {
     let row: String = (0..80).map(|x| b[(x, 4)].symbol().to_string()).collect();
     assert!(row.contains("> Write a file named notes.txt"), "{row}");
 }
+
+/// 11: a "/" in an empty draft lists the ten commands above the draft,
+/// and what is typed after it narrows the list, set apart as the keys
+/// screen's filter sets it apart.
+#[test]
+fn a_slash_lists_the_commands_and_typing_narrows_them() {
+    let now = now();
+    let text = |b: &Buffer, y: u16| -> String {
+        (0..b.area.width)
+            .map(|x| b[(x, y)].symbol().to_string())
+            .collect()
+    };
+    for (w, h) in [(80, 24), (120, 24), (120, 40)] {
+        let mut app = long_conversation();
+        app.set_columns(w);
+        typed(&mut app, "/", now);
+        let b = render(&app, now, w, h);
+        let rule = (0..h)
+            .find(|y| text(&b, *y).contains("┤") && text(&b, *y).contains("message"))
+            .unwrap();
+        let listed: Vec<String> = (rule - 10..rule).map(|y| text(&b, y)).collect();
+        for ((name, what), row) in super::slash::COMMANDS.iter().zip(&listed) {
+            assert!(row.contains(name) && row.contains(what), "{w}x{h}: {row}");
+        }
+        typed(&mut app, "c", now);
+        let b = render(&app, now, w, h);
+        let rows: Vec<String> = (rule - 3..rule).map(|y| text(&b, y)).collect();
+        for (row, name) in rows.iter().zip(["/context", "/cost", "/clear"]) {
+            assert!(row.contains(name), "{w}x{h}: {rows:?}");
+        }
+        // The typed part is set apart, as the keys screen's filter is.
+        let x = u16::try_from(rows[0].chars().position(|c| c == '/').unwrap()).unwrap();
+        assert_eq!(b[(x, rule - 3)].bg, palette::AMBER);
+        assert!(!text(&b, rule - 4).contains("/status"), "{w}x{h}");
+        typed(&mut app, "x", now);
+        let b = render(&app, now, w, h);
+        assert!(text(&b, rule - 1).contains("No command starts with \"/cx\"."));
+    }
+    // Not a command's start: no list.
+    let mut app = long_conversation();
+    app.set_columns(80);
+    typed(&mut app, "/status now", now);
+    assert!(super::view::command_list(&app.draft).is_none());
+    assert!(super::view::command_list("hello").is_none());
+    app.on_key(key(crossterm::event::KeyCode::Enter), now);
+    assert!(super::view::command_list(&app.draft).is_none());
+}
