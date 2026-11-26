@@ -111,6 +111,17 @@ tagged.
   head`. The docs say that inside tmux Ctrl+B is tmux's prefix and reaches
   the chat on a second press (`small_corrections_hold`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- An expired card in `wirken chat` is the card as it was, dimmed in a
+  gray single rule titled `approval expired · tier 3 · exec`, all seven
+  fields in the shared order and no answer field. One sentence says the
+  request closed before it was answered and was not approved, and the
+  bottom border reads `Esc puts this card away`. Esc alone puts it away:
+  Enter does nothing, so a late `y` and Enter sends and moves nothing. It
+  stays in front when live cards wait behind it, and none comes forward
+  without a key. The transcript's note that the gateway records it as
+  refused is written when it is put away; the tool's line reads `expired`
+  (`an_expired_card_holds_until_esc`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

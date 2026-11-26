@@ -225,9 +225,12 @@ refuses.`, and Enter there refuses with no reason. The decision is recorded with
 and, for an approval, `approved_by` `<user> (operator key <key id>)`.
 
 The gateway waits `WIRKEN_TERMINAL_APPROVAL_TIMEOUT_S` seconds (default 300)
-for a decision. The card closes a few seconds before that and stays on
-screen as expired until Enter or Esc puts it away, so a late `y` answers
-nothing; the chain records the timeout as a `PermissionDenied` with
+for a decision. The card closes a few seconds before that and stays in
+front as expired, in a gray single rule titled `approval expired`, its
+fields dimmed and no answer field, until Esc puts it away, also when other
+cards wait behind it. Enter does nothing there, so a late `y` and Enter
+answers nothing and moves nothing on, and the tool's line reads `expired`.
+Put away, it leaves a note in the transcript; the chain records the timeout as a `PermissionDenied` with
 `approval timeout`. If the chat disconnects while a card is open, the request
 is withdrawn and recorded as refused with the reason
 `terminal client disconnected`.

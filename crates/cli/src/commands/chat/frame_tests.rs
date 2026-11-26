@@ -853,3 +853,55 @@ fn small_corrections_hold() {
     app.on_key(key(crossterm::event::KeyCode::PageUp), t0);
     assert_eq!(app.scroll, rows - 2);
 }
+
+/// A: a card whose time ran out stays in front, dimmed in a gray single
+/// rule, all seven fields in order and no answer field, until Esc puts it
+/// away; Enter does nothing, and the transcript says what became of it
+/// only then.
+#[test]
+fn an_expired_card_holds_until_esc() {
+    use crossterm::event::KeyCode;
+    let t0 = now();
+    let late = t0 + Duration::from_secs(60);
+    let make = || {
+        let mut app = tier3_card(t0);
+        app.on_server(
+            super::wire::ServerEvent::Approval(super::wire::ApprovalAsk {
+                request_id: "r2".into(),
+                tool_name: "exec".into(),
+                action_key: "shell:ls".into(),
+                tier: "tier3".into(),
+                agent: "default".into(),
+                trigger: String::new(),
+                exec_location: String::new(),
+                arguments: r#"{"command":"ls"}"#.into(),
+                assistant_text: String::new(),
+                timeout_secs: 600,
+                exec_runtime: "docker".into(),
+            }),
+            t0,
+        );
+        app.tick(late);
+        app
+    };
+    for design in [frame!("expired-80x24"), frame!("expired-120x24")] {
+        // The live card behind it waits, unseen.
+        let app = make();
+        let name = format!("expired-{}x{}", design.w, design.h);
+        assert_drawn(&name, &render(&app, late, design.w, design.h), &design);
+    }
+    let mut app = make();
+    let entries = app.entries.len();
+    typed(&mut app, "y", late);
+    assert_eq!(app.on_key(key(KeyCode::Enter), late), None);
+    assert!(app.expired.is_some() && app.entries.len() == entries);
+    assert_eq!(app.on_key(key(KeyCode::Esc), late), None);
+    assert!(app.expired.is_none());
+    assert!(
+        matches!(app.entries.last(), Some(Entry::Note(n)) if n.ends_with("the gateway records it as refused."))
+    );
+    assert_eq!(
+        app.front_card().map(|c| c.ask.request_id.as_str()),
+        Some("r2")
+    );
+}

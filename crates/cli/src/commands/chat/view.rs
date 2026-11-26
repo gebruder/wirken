@@ -112,7 +112,7 @@ const HINTS_CARD: &[(&str, &str)] = &[
     ("Ctrl+U", "clear answer"),
     ("Ctrl+K", "verify chain"),
 ];
-const HINTS_EXPIRED: &[(&str, &str)] = &[("Enter", "dismiss"), ("PgUp/PgDn", "scroll")];
+const HINTS_EXPIRED: &[(&str, &str)] = &[("PgUp/PgDn", "scroll"), ("Ctrl+K", "verify chain")];
 /// At a card that puts the conversation away there is nothing to scroll.
 const HINTS_CARD_HIDDEN: &[(&str, &str)] =
     &[("Ctrl+U", "clear answer"), ("Ctrl+K", "verify chain")];
@@ -1451,35 +1451,18 @@ fn draw_card_screen(
     let inner = usize::from(area.width.saturating_sub(2)).max(1);
     let amber = on_bg(AMBER);
 
-    // An expired card: what became of it, and how to put it away.
-    if let Some(ask) = &app.expired {
-        let said = format!(
-            "The request to run {} expired; the gateway records it as refused.",
-            sanitize(&ask.tool_name)
-        );
-        let mut lines = vec![card_title(
-            &format!(
-                "approval expired · {} · {}",
-                tier_words(&ask.tier),
-                sanitize(&ask.tool_name)
-            ),
-            None,
-            inner,
-        )];
-        for row in wrap(&said, inner) {
-            lines.push(card_row(vec![Span::styled(row, on_bg(WHITE))], inner));
-        }
-        lines.push(card_rule("Enter or Esc to dismiss", None, inner, amber));
-        lines.push(card_row(Vec::new(), inner));
-        lines.push(card_bottom(inner));
-        place_card(frame, app, area, lines);
-        app.card_cut.set(true);
-        return HINTS_EXPIRED;
-    }
-    let Some(card) = app.front_card() else {
+    // An expired card is drawn as the live one was, dimmed, in a single
+    // gray rule, with no answer field: one sentence says what became of
+    // it, and its bottom border how to put it away.
+    let expired = app.expired.as_ref();
+    let card = app.front_card();
+    let Some(ask) = expired.or(card.map(|c| &c.ask)) else {
         return HINTS;
     };
-    let ask = &card.ask;
+    let look = CardLook {
+        expired: expired.is_some(),
+    };
+    let frame_style = look.frame();
     // Values wrap one cell short of the border; a cut value's last row,
     // with its count, runs to it.
     let value_room = inner.saturating_sub(CARD_LABEL).max(10);
@@ -1504,7 +1487,8 @@ fn draw_card_screen(
             kind,
         });
     }
-    let instruction = match card.armed_at {
+    let instruction = match card.and_then(|c| c.armed_at) {
+        _ if look.expired => "This request closed before it was answered. It was not approved.",
         Some(at) if now < at => "Read the request; it takes an answer in a moment.",
         _ => "Type y and Enter to approve; n, a reason, or anything else refuses.",
     };
@@ -1523,13 +1507,26 @@ fn draw_card_screen(
             "Enlarge the window to approve. Until then only a refusal is accepted.".to_string(),
         ]
     };
-    let countdown = card.expires_at.map(|at| {
+    let countdown = card.and_then(|c| c.expires_at).map(|at| {
         format!(
             "Closes in {}s.",
             at.saturating_duration_since(now).as_secs()
         )
     });
-    let waiting = app.cards.len().saturating_sub(1);
+    // The cards behind this one, said on its bottom border.
+    let waiting = if look.expired {
+        app.cards.len()
+    } else {
+        app.cards.len().saturating_sub(1)
+    };
+    let bottom_right: Vec<Span<'static>> = if look.expired {
+        vec![
+            Span::styled("Esc", on_bg(palette::BLUE)),
+            Span::styled(" puts this card away", on_bg(GRAY)),
+        ]
+    } else {
+        Vec::new()
+    };
     let countdown = match (waiting, countdown) {
         (0, c) => c,
         (n, Some(c)) => Some(format!("{n} more waiting · {c}")),
@@ -1540,10 +1537,16 @@ fn draw_card_screen(
     // the card with long values cut, then one line.
     let fields_rows: usize = fields.iter().map(|f| f.rows.len()).sum();
     let claim_rows = claim.as_ref().map_or(0, |c| 1 + c.len());
-    let fixed = 1 + 3;
+    // The title and the bottom, and on a live card the answer's rule and
+    // field.
+    let fixed = if look.expired { 2 } else { 4 };
     let body = usize::from(area.height);
     let natural = fixed + fields_rows + claim_rows + 1 + instruction.len();
-    let notice_rows: usize = notice(999).iter().map(|s| wrap(s, inner).len()).sum();
+    let notice_rows: usize = if look.expired {
+        instruction.len()
+    } else {
+        notice(999).iter().map(|s| wrap(s, inner).len()).sum()
+    };
     let fit = if window_rows < CARD_MIN_ROWS {
         CardFit::OneLine
     } else if natural <= body {
@@ -1579,7 +1582,11 @@ fn draw_card_screen(
         let [above, line] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
         draw_transcript(frame, app, above, true);
-        let mut said = " This request cannot be approved at this size. Enter refuses.".to_string();
+        let mut said = if look.expired {
+            " This request closed before it was answered. Esc puts it away.".to_string()
+        } else {
+            " This request cannot be approved at this size. Enter refuses.".to_string()
+        };
         if let Some(c) = &countdown {
             said.push(' ');
             said.push_str(c);
@@ -1590,7 +1597,11 @@ fn draw_card_screen(
         );
         app.card_cut.set(true);
         app.card_one_line.set(true);
-        return HINTS_CARD_ONE_LINE;
+        return if look.expired {
+            HINTS_EXPIRED
+        } else {
+            HINTS_CARD_ONE_LINE
+        };
     }
     app.card_one_line.set(false);
 
@@ -1615,7 +1626,8 @@ fn draw_card_screen(
         _ => None,
     };
     let title = format!(
-        "approval needed · {} · {}",
+        "approval {} · {} · {}",
+        if look.expired { "expired" } else { "needed" },
         tier_words(&ask.tier),
         sanitize(&ask.tool_name)
     );
@@ -1623,6 +1635,7 @@ fn draw_card_screen(
         &title,
         cut_total.map(|n| format!("{n} row{} cut", if n == 1 { "" } else { "s" })),
         inner,
+        look,
     )];
     for field in &fields {
         let keep = allowed(field.label, field.rows.len());
@@ -1633,7 +1646,7 @@ fn draw_card_screen(
             } else {
                 " ".repeat(CARD_LABEL)
             };
-            let mut spans = vec![Span::styled(lead, on_bg(GRAY))];
+            let mut spans = vec![Span::styled(lead, look.label())];
             let (text, count) = if gone > 0 && i + 1 == keep {
                 let (t, c) = with_count(row, value_room, gone);
                 (t, Some(c))
@@ -1641,6 +1654,7 @@ fn draw_card_screen(
                 (row.clone(), None)
             };
             match field.kind {
+                _ if look.expired => spans.push(Span::styled(text, on_bg(GRAY))),
                 FieldKind::Code => spans.push(Span::styled(text, on_bg(WHITE))),
                 FieldKind::Plain => spans.push(Span::styled(text, on_bg(TEXT))),
                 FieldKind::Request => {
@@ -1658,70 +1672,86 @@ fn draw_card_screen(
                 }
             }
             if let Some(count) = count {
-                spans.push(Span::styled(count, amber));
+                spans.push(Span::styled(count, look.accent()));
             }
-            lines.push(card_row(spans, inner));
+            lines.push(card_row(spans, inner, look));
         }
     }
     // The model's claim, last, under its own rule.
     if let Some(claim) = &claim {
+        let (left, right) = if look.expired {
+            ("├ ", "┤")
+        } else {
+            ("╟ ", "╢")
+        };
         lines.push(Line::from(vec![
-            Span::styled("╟ ", amber),
+            Span::styled(left, frame_style),
             Span::styled("model's claim ", on_bg(GRAY)),
-            Span::styled("(unverified)", amber),
+            Span::styled("(unverified)", look.accent()),
             Span::styled(": ", on_bg(GRAY)),
             Span::styled(
                 "─".repeat(inner.saturating_sub(width_of("model's claim (unverified): ") + 1)),
                 on_bg(RULE),
             ),
-            Span::styled("╢", amber),
+            Span::styled(right, frame_style),
         ]));
         let keep = allowed(CUT_ORDER[2], claim.len());
         let gone = claim.len() - keep;
+        let said = on_bg(if look.expired { GRAY } else { CYAN });
         for (i, row) in claim.iter().take(keep).enumerate() {
-            let mut spans = vec![Span::styled("  ", on_bg(CYAN))];
+            let mut spans = vec![Span::styled("  ", said)];
             if gone > 0 && i + 1 == keep {
                 let (text, count) = with_count(row, inner.saturating_sub(2), gone);
-                spans.push(Span::styled(text, on_bg(CYAN)));
-                spans.push(Span::styled(count, amber));
+                spans.push(Span::styled(text, said));
+                spans.push(Span::styled(count, look.accent()));
             } else {
-                spans.push(Span::styled(row.clone(), on_bg(CYAN)));
+                spans.push(Span::styled(row.clone(), said));
             }
-            lines.push(card_row(spans, inner));
+            lines.push(card_row(spans, inner, look));
         }
     }
     match &fit {
-        CardFit::Cut { cut, .. } => {
+        // An expired card takes no answer, so nothing is cut from it
+        // that a notice must explain: its sentence stays.
+        CardFit::Cut { cut, .. } if !look.expired => {
             for (i, sentence) in notice(*cut).iter().enumerate() {
                 let style = if i == 0 { amber } else { on_bg(WHITE) };
                 for row in wrap(sentence, inner) {
-                    lines.push(card_row(vec![Span::styled(row, style)], inner));
+                    lines.push(card_row(vec![Span::styled(row, style)], inner, look));
                 }
             }
         }
-        CardFit::Whole { spacer } => {
-            if *spacer {
-                lines.push(card_row(Vec::new(), inner));
+        CardFit::Whole { .. } | CardFit::Cut { .. } => {
+            if matches!(fit, CardFit::Whole { spacer: true }) {
+                lines.push(card_row(Vec::new(), inner, look));
             }
             for row in &instruction {
                 lines.push(card_row(
                     vec![Span::styled(row.clone(), on_bg(WHITE))],
                     inner,
+                    look,
                 ));
             }
         }
         CardFit::OneLine => {}
     }
-    lines.push(card_rule("your answer", countdown.as_deref(), inner, amber));
     let answer: String = sanitize(&app.answer);
-    lines.push(card_row(
-        vec![Span::styled(answer.clone(), on_bg(WHITE))],
-        inner,
-    ));
-    lines.push(card_bottom(inner));
+    if !look.expired {
+        lines.push(card_rule("your answer", countdown.as_deref(), inner, amber));
+        lines.push(card_row(
+            vec![Span::styled(answer.clone(), on_bg(WHITE))],
+            inner,
+            look,
+        ));
+    }
+    lines.push(card_bottom(inner, bottom_right, look));
 
     let card_rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let card_area = place_card(frame, app, area, lines);
+    if look.expired {
+        app.card_cut.set(true);
+        return HINTS_EXPIRED;
+    }
     let answer_y = card_area.bottom().saturating_sub(2);
     let x = card_area.x + 1 + u16::try_from(width(&answer)).unwrap_or(0);
     frame.set_cursor_position(Position::new(
@@ -1772,18 +1802,63 @@ fn place_card(frame: &mut Frame<'_>, app: &App, area: Rect, lines: Vec<Line<'sta
     card_area
 }
 
+/// How a card is drawn: live, in amber double rules, or expired, dimmed
+/// in a single gray rule.
+#[derive(Clone, Copy)]
+struct CardLook {
+    expired: bool,
+}
+
+impl CardLook {
+    fn frame(self) -> Style {
+        palette::on_bg(if self.expired {
+            palette::RULE
+        } else {
+            palette::AMBER
+        })
+    }
+    /// A field's label.
+    fn label(self) -> Style {
+        palette::on_bg(if self.expired {
+            palette::DIM
+        } else {
+            palette::GRAY
+        })
+    }
+    /// What a live card sets apart in amber: the tier, the counts.
+    fn accent(self) -> Style {
+        palette::on_bg(if self.expired {
+            palette::GRAY
+        } else {
+            palette::AMBER
+        })
+    }
+    fn corners(self) -> [&'static str; 5] {
+        if self.expired {
+            ["┌", "┐", "└", "┘", "─"]
+        } else {
+            ["╔", "╗", "╚", "╝", "═"]
+        }
+    }
+}
+
 /// The card's top: `title` and, at the right, what was cut.
-fn card_title(title: &str, right: Option<String>, inner: usize) -> Line<'static> {
-    let amber = palette::on_bg(palette::AMBER);
+fn card_title(title: &str, right: Option<String>, inner: usize, look: CardLook) -> Line<'static> {
+    let [left, end, _, _, fill_char] = look.corners();
+    let title_style = if look.expired {
+        palette::on_bg(palette::WHITE)
+    } else {
+        look.frame()
+    };
     let title = format!(" {title} ");
     let right = right.map(|r| format!(" {r} ")).unwrap_or_default();
     let fill = inner.saturating_sub(width_of(&title) + width_of(&right));
     Line::from(vec![
-        Span::styled("╔", amber),
-        Span::styled(title, amber),
-        Span::styled("═".repeat(fill), amber),
-        Span::styled(right, amber),
-        Span::styled("╗", amber),
+        Span::styled(left, look.frame()),
+        Span::styled(title, title_style),
+        Span::styled(fill_char.repeat(fill), look.frame()),
+        Span::styled(right, look.accent()),
+        Span::styled(end, look.frame()),
     ])
 }
 
@@ -1803,25 +1878,35 @@ fn card_rule(name: &str, right: Option<&str>, inner: usize, rule: Style) -> Line
 }
 
 /// One row inside the card: `spans`, padded to the card's width.
-fn card_row(mut spans: Vec<Span<'static>>, inner: usize) -> Line<'static> {
-    let amber = palette::on_bg(palette::AMBER);
+fn card_row(mut spans: Vec<Span<'static>>, inner: usize, look: CardLook) -> Line<'static> {
+    let side = if look.expired { "│" } else { "║" };
     let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
-    spans.insert(0, Span::styled("║", amber));
+    spans.insert(0, Span::styled(side, look.frame()));
     spans.push(Span::styled(
         " ".repeat(inner.saturating_sub(used)),
         palette::on_bg(palette::TEXT),
     ));
-    spans.push(Span::styled("║", amber));
+    spans.push(Span::styled(side, look.frame()));
     Line::from(spans)
 }
 
-fn card_bottom(inner: usize) -> Line<'static> {
-    let amber = palette::on_bg(palette::AMBER);
-    Line::from(vec![
-        Span::styled("╚", amber),
-        Span::styled("═".repeat(inner), amber),
-        Span::styled("╝", amber),
-    ])
+/// The card's bottom, `right` at its end when it fits.
+fn card_bottom(inner: usize, right: Vec<Span<'static>>, look: CardLook) -> Line<'static> {
+    let [_, _, left, end, fill_char] = look.corners();
+    let used: usize = right.iter().map(|s| width_of(&s.content)).sum();
+    let mut spans = vec![Span::styled(left, look.frame())];
+    if right.is_empty() || used + 3 > inner {
+        spans.push(Span::styled(fill_char.repeat(inner), look.frame()));
+    } else {
+        spans.push(Span::styled(
+            format!("{} ", fill_char.repeat(inner - used - 2)),
+            look.frame(),
+        ));
+        spans.extend(right);
+        spans.push(Span::styled(" ", look.frame()));
+    }
+    spans.push(Span::styled(end, look.frame()));
+    Line::from(spans)
 }
 
 #[cfg(test)]

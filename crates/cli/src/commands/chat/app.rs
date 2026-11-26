@@ -575,13 +575,10 @@ impl App {
             .front_card()
             .and_then(|c| c.expires_at)
             .is_some_and(|at| now >= at);
+        // It stays in front, as it was, until Esc puts it away; the
+        // transcript says what became of it then.
         if due && let Some(card) = self.cards.pop_front() {
             self.answer.clear();
-            self.entries.push(Entry::Note(format!(
-                "The approval for {} expired without an answer; the gateway records it as \
-                 refused.",
-                card.ask.tool_name
-            )));
             self.expired = Some(card.ask);
         }
     }
@@ -744,10 +741,16 @@ impl App {
             _ => {}
         }
 
-        if self.expired.is_some() {
-            // Whatever was typed for the card that expired goes
-            // nowhere; Enter or Esc puts it away.
-            if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+        if let Some(ask) = &self.expired {
+            // Whatever is typed at a card that expired goes nowhere, Enter
+            // too, so a late "y Enter" sends and moves nothing. Esc alone
+            // puts it away.
+            if key.code == KeyCode::Esc {
+                self.entries.push(Entry::Note(format!(
+                    "The approval for {} expired without an answer; the gateway records it \
+                     as refused.",
+                    ask.tool_name
+                )));
                 self.expired = None;
                 self.answer.clear();
                 self.show_next(now);
@@ -1206,14 +1209,45 @@ mod tests {
         assert!(app.answer.is_empty(), "the half-typed answer is dropped");
         let late = now + Duration::from_secs(11);
         assert!(typed(&mut app, "y", late).is_empty());
-        assert_eq!(
-            app.on_key(key(KeyCode::Enter), late),
-            None,
-            "dismissed, not sent"
-        );
+        let entries = app.entries.len();
+        assert_eq!(app.on_key(key(KeyCode::Enter), late), None, "not sent");
+        assert!(app.expired.is_some(), "Enter does not put it away");
+        assert_eq!(app.entries.len(), entries, "the frame holds while it is up");
+        assert_eq!(app.on_key(key(KeyCode::Esc), late), None);
         assert!(app.expired.is_none());
         assert_eq!(app.draft, "draft");
         assert!(matches!(app.entries.last(), Some(Entry::Note(n)) if n.contains("expired")));
+    }
+
+    #[test]
+    fn an_expired_card_stays_in_front_of_live_ones_until_esc() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_server(ask("r1", 10), now);
+        app.on_server(ask("r2", 60), now);
+        app.tick(now + Duration::from_secs(10));
+        assert!(app.expired.is_some() && app.front_card().is_none());
+        let late = now + Duration::from_secs(11);
+        for k in [
+            KeyCode::Char('y'),
+            KeyCode::Enter,
+            KeyCode::Char('n'),
+            KeyCode::Enter,
+        ] {
+            assert_eq!(app.on_key(key(k), late), None);
+        }
+        app.tick(now + Duration::from_secs(30));
+        assert!(
+            app.expired.is_some(),
+            "no live card comes to the front by itself"
+        );
+        assert_eq!(app.cards.len(), 1);
+        app.on_key(key(KeyCode::Esc), late);
+        let front = app
+            .front_card()
+            .expect("the live card is in front after Esc");
+        assert_eq!(front.ask.request_id, "r2");
+        assert!(app.answer.is_empty());
     }
 
     #[test]
