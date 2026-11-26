@@ -391,3 +391,126 @@ fn the_keys_screen_lists_every_key_and_filters() {
     app.on_key(key(crossterm::event::KeyCode::Enter), now);
     assert!(app.keys.is_some() && app.entries.is_empty());
 }
+
+const SHORT_COMMAND: &str = r#"{"command":"find /workspace/logs -name '*.log' -mtime +7 -print0 | xargs -0 grep -l 'ERROR' | sort | uniq | wc -l"}"#;
+const LONG_COMMAND: &str = r#"{"command":"find /workspace/data -type f -name '*.csv' -newer /workspace/.last_run -print0 | xargs -0 -n 1 -P 4 sh -c 'python3 /workspace/tools/clean.py --input \"$0\" --output \"${0%.csv}.clean.csv\" --drop-empty --trim --dedupe --encoding utf-8 --delimiter \",\" --quote minimal --on-error skip >> /workspace/logs/clean.log 2>&1' ; for f in /workspace/data/*.clean.csv; do mv \"$f\" \"${f%.clean.csv}.csv\"; done ; sort -u /workspace/logs/clean.log | grep -v '^DEBUG' | awk -F: '{count[$1]++} END {for (k in count) print count[k], k}' | sort -rn | head -n 25 | tee /workspace/reports/clean-summary.txt ; touch /workspace/.last_run ; wc -l /workspace/reports/clean-summary.txt"}"#;
+
+/// A Tier 3 exec waiting on its card, asked at `t0`, which the frames
+/// draw a second later with 42 seconds left.
+fn waiting_card(asked: &str, command: &str, claim: &str, t0: Instant) -> App {
+    let mut app = app_with(1470, 14, 1);
+    app.entries.push(Entry::User(asked.into()));
+    app.entries.push(Entry::Tool {
+        id: "call_1".into(),
+        name: "exec".into(),
+        arguments: command.into(),
+        outcome: None,
+        output: String::new(),
+    });
+    app.on_server(
+        super::wire::ServerEvent::Approval(super::wire::ApprovalAsk {
+            request_id: "r1".into(),
+            tool_name: "exec".into(),
+            action_key: "shell::pipeline:".into(),
+            tier: "tier3".into(),
+            agent: "default".into(),
+            trigger: asked.into(),
+            exec_location: "runs in sandbox container (exec_only, read-only root, workspace at \
+                            /workspace, no network)"
+                .into(),
+            arguments: command.into(),
+            assistant_text: claim.into(),
+            // The chat closes a card three seconds before the gateway.
+            timeout_secs: 46,
+            exec_runtime: "docker".into(),
+        }),
+        t0,
+    );
+    app
+}
+
+fn tier3_card(t0: Instant) -> App {
+    waiting_card(
+        "How many of the old log files have errors in them?",
+        SHORT_COMMAND,
+        "I'll count the log files older than a week that mention an error, so we know how much \
+         there is to clean up. This only reads files; nothing is changed or deleted.",
+        t0,
+    )
+}
+
+fn long_card(t0: Instant) -> App {
+    waiting_card(
+        "Clean up the new CSV exports and tell me what you changed.",
+        LONG_COMMAND,
+        "I'll clean the CSV files that changed since the last run, then show a summary of what \
+         was fixed. Each original is replaced only after its file cleans without errors.",
+        t0,
+    )
+}
+
+/// A card frame, the card's state, and whether it takes only a refusal.
+type CardCase = (&'static str, Design, fn(Instant) -> App, bool);
+
+/// 05: a card spans the window at every width, its fields wrapped and
+/// none cut, the model's claim last under its own rule, the answer rule
+/// once, and the countdown on the rule over the answer. A card that does
+/// not fit says how many rows it cut and takes only a refusal; under 15
+/// rows it is one line.
+#[test]
+fn the_card_spans_the_window_and_says_when_it_cannot_be_approved() {
+    let t0 = Instant::now();
+    let later = t0 + Duration::from_secs(1);
+    let cases: [CardCase; 7] = [
+        ("card-80x24", frame!("card-80x24"), tier3_card, false),
+        ("card-120x24", frame!("card-120x24"), tier3_card, false),
+        ("card-120x40", frame!("card-120x40"), tier3_card, false),
+        (
+            "long-card-cut-80x24",
+            frame!("long-card-cut-80x24"),
+            long_card,
+            true,
+        ),
+        (
+            "long-card-120x24",
+            frame!("long-card-120x24"),
+            long_card,
+            false,
+        ),
+        (
+            "long-card-120x40",
+            frame!("long-card-120x40"),
+            long_card,
+            false,
+        ),
+        ("short-80x10", frame!("short-80x10"), tier3_card, true),
+    ];
+    for (name, design, make, refusal_only) in cases {
+        let mut app = make(t0);
+        assert_drawn(name, &render(&app, later, design.w, design.h), &design);
+        assert_eq!(app.card_cut.get(), refusal_only, "{name}");
+        // A card drawn whole takes y; one cut or one line does not.
+        typed(&mut app, "y", later);
+        let sent = app.on_key(key(crossterm::event::KeyCode::Enter), later);
+        let approved = matches!(
+            sent,
+            Some(super::app::Outgoing::Decision { approve: true, .. })
+        );
+        assert_eq!(approved, !refusal_only, "{name}: {sent:?}");
+    }
+    // The one line refuses on Enter alone, with no reason.
+    let mut app = tier3_card(t0);
+    render(&app, later, 80, 10);
+    let sent = app.on_key(key(crossterm::event::KeyCode::Enter), later);
+    assert!(
+        matches!(
+            sent,
+            Some(super::app::Outgoing::Decision {
+                approve: false,
+                reason: None,
+                ..
+            })
+        ),
+        "{sent:?}"
+    );
+}

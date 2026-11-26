@@ -50,6 +50,23 @@ tagged.
   the transcript, and the layout note moves to its title
   (`the_keys_screen_lists_every_key_and_filters`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- The approval card in `wirken chat` spans the window at every width while
+  it is open: the side columns are put away, and the transcript keeps the
+  rows left with the meter in its top border, or one row saying it is
+  hidden. Its title rule reads `approval needed · tier 3 · exec`. Every
+  field wraps in a column beside its label, none cut, in the shared card's
+  order; the model's claim comes last under its own rule, indented and in
+  the agent's color. The answer rule is stated once, as the instruction,
+  with `Closes in Ns.` on the rule over the answer field; the line
+  `[y] approve [n] refuse Enter alone refuses.` and the answer box's title
+  rule are gone. A card that does not fit gives up its spacer row, then
+  cuts its long values with a count each, the reply-to first and the
+  arguments last, and says on its title rule how many rows it cut and in a
+  two-row notice that only a refusal is accepted. Under 15 rows of window
+  it is one line that Enter refuses. No field, label or sentence of the
+  shared card changes
+  (`the_card_spans_the_window_and_says_when_it_cannot_be_approved`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 
@@ -62,10 +79,8 @@ tagged.
 - The approval card in `wirken chat` says in full how it is answered. Its
   last line, "Type y and Enter to approve; n, a reason, or anything else
   refuses." with the time left, was one line cut at the card's edge at every
-  size, mid-word at 120 columns. It now wraps, and so do the line of the two
-  answers on a narrow card and the line of an expired card. A card with any
-  line wider than itself takes no approval, as one whose arguments or last
-  line are cut does (`the_card_says_how_to_answer_it_in_full_at_each_size`,
+  size, mid-word at 120 columns. It now wraps, at every size
+  (`the_card_says_how_to_answer_it_in_full_at_each_size`,
   `a_card_without_room_for_its_last_line_takes_no_approval`,
   `crates/cli/src/commands/chat/view.rs`).
 - Esc, Ctrl+U, Ctrl+A and Ctrl+E were missing from `/help` in `wirken

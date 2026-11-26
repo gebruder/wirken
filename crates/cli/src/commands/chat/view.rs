@@ -14,8 +14,6 @@ use super::app::{App, Entry, Overlay};
 use super::panels::{SideItem, panels};
 use super::text::{layout_input, sanitize, width, wrap};
 
-/// Rows of anything else a card shows per field.
-const CARD_FIELD_ROWS: usize = 3;
 /// Rows of a tool's output the transcript shows before it says the
 /// rest is cut.
 const TOOL_OUTPUT_ROWS: usize = 6;
@@ -50,8 +48,6 @@ fn fit(width: u16, show_sidebar: bool, show_panels: bool) -> (u16, u16) {
 
 /// The chat's colors, by the role each plays on screen. Every cell is
 /// drawn on [`palette::BG`]; the key bar on [`palette::BAR`].
-// The roles the redesign has not drawn yet are unused until it does.
-#[allow(dead_code)]
 pub(crate) mod palette {
     use ratatui::style::{Color, Style};
 
@@ -117,6 +113,11 @@ const HINTS_CARD: &[(&str, &str)] = &[
     ("Ctrl+K", "verify chain"),
 ];
 const HINTS_EXPIRED: &[(&str, &str)] = &[("Enter", "dismiss"), ("PgUp/PgDn", "scroll")];
+/// At a card that puts the conversation away there is nothing to scroll.
+const HINTS_CARD_HIDDEN: &[(&str, &str)] =
+    &[("Ctrl+U", "clear answer"), ("Ctrl+K", "verify chain")];
+/// At the one line a short window shows, there is no answer to clear.
+const HINTS_CARD_ONE_LINE: &[(&str, &str)] = &[("PgUp/PgDn", "scroll"), ("Ctrl+K", "verify chain")];
 const HINTS_PANELS: &[(&str, &str)] = &[("Esc", "close"), ("Ctrl+P", "close")];
 const HINTS_KEYS: &[(&str, &str)] = &[("type", "to filter"), ("↑↓", "scroll"), ("Esc", "close")];
 /// The keys screen's pinned key: the one that closes it.
@@ -184,20 +185,6 @@ fn hints_for(app: &App, scrolled: bool) -> &'static [(&'static str, &'static str
     }
 }
 
-/// How the model's own words are drawn on the card: set apart from what
-/// the gateway established, because they are a claim, not a fact.
-pub(crate) fn claim_style() -> Style {
-    Style::default()
-        .fg(Color::Magenta)
-        .add_modifier(Modifier::ITALIC)
-}
-
-/// The style of both answers on the card. One style for both: neither
-/// is the default, and approving is not drawn as the expected choice.
-pub(crate) fn choice_style() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
-}
-
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let screen = frame.area();
     frame.render_widget(
@@ -221,6 +208,18 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         );
         return;
     }
+    // A card spans the window at every width while it is open: the side
+    // columns are put away, and the transcript keeps what rows are left.
+    if app.front_card().is_some() || app.expired.is_some() {
+        let hints = draw_card_screen(frame, app, full, screen.height, now);
+        frame.render_widget(
+            Paragraph::new(key_bar(usize::from(bar_area.width), hints, PINNED)),
+            bar_area,
+        );
+        return;
+    }
+    app.card_cut.set(false);
+    app.card_one_line.set(false);
     // In the compact layout the conversations and the panels open over
     // the transcript, which is drawn again when they close.
     if compact && let Some(overlay) = app.overlay {
@@ -253,33 +252,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     }
 
     let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
-
-    let (card, arguments_cut) = card_lines(app, inner_width, now);
-    let card_height = if card.is_empty() {
-        0
-    } else {
-        u16::try_from(card.len() + 2).unwrap_or(u16::MAX)
-    };
-
-    let (input_text, input_cursor) = if app.front_card().is_some() {
-        (app.answer.clone(), app.answer.len())
-    } else {
-        (app.draft.clone(), app.cursor)
-    };
-    let (input_rows, (cursor_row, cursor_col)) =
-        layout_input(&input_text, input_cursor, inner_width);
+    let (input_rows, (cursor_row, cursor_col)) = layout_input(&app.draft, app.cursor, inner_width);
     let shown_rows = input_rows.len().min(INPUT_ROWS);
     let first_row = (cursor_row + 1).saturating_sub(shown_rows);
     let input_height = u16::try_from(shown_rows + 2).unwrap_or(u16::MAX);
-
-    let input_title = if app.expired.is_some() {
-        " Enter or Esc to dismiss "
-    } else if app.front_card().is_some() {
-        " your answer: y approves, anything else refuses "
-    } else if app.busy {
-        " waiting for the reply "
+    let input_title = if app.busy {
+        "waiting for the reply"
     } else {
-        " message "
+        "message"
     };
     let rows: Vec<String> = input_rows
         .iter()
@@ -288,66 +268,23 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
         .cloned()
         .collect();
 
-    let (scrolled, input_area) = if card_height == 0 {
-        // No card: the transcript and the draft are one box, the rule
-        // between them saying where the view is.
-        let below = draw_conversation(frame, app, area, input_title.trim(), &rows);
-        let input_area = Rect::new(
-            area.x,
-            area.bottom().saturating_sub(input_height),
-            area.width,
-            input_height,
-        );
-        (below > 0, input_area)
-    } else {
-        let [transcript_area, card_area, input_area] = Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Length(card_height),
-            Constraint::Length(input_height),
-        ])
-        .areas(area);
-
-        // The card takes an approval only when all of it is on the screen:
-        // every row of the arguments, every line at its full width, and its
-        // last line.
-        let too_wide = card.iter().any(|line| line.width() > inner_width);
-        app.card_cut.set(
-            app.front_card().is_some()
-                && (arguments_cut || too_wide || card_area.height < card_height),
-        );
-
-        let scrolled = draw_transcript(frame, app, transcript_area) > 0;
-        let title = if app.expired.is_some() {
-            " approval expired "
-        } else {
-            " approval needed "
-        };
-        frame.render_widget(
-            Paragraph::new(card).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
-                    .title(title),
-            ),
-            card_area,
-        );
-        frame.render_widget(
-            Paragraph::new(rows.into_iter().map(Line::raw).collect::<Vec<_>>())
-                .block(Block::default().borders(Borders::ALL).title(input_title)),
-            input_area,
-        );
-        (scrolled, input_area)
-    };
-    if card_height == 0 {
-        app.card_cut.set(false);
-    }
+    // The transcript and the draft are one box, the rule between them
+    // saying where the view is.
+    let below = draw_conversation(frame, app, area, input_title, &rows);
+    let scrolled = below > 0;
+    let input_area = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(input_height),
+        area.width,
+        input_height,
+    );
     if app.searching && side_cols > 0 {
         let x = side_area.x + 1 + u16::try_from(width(&app.search)).unwrap_or(0);
         frame.set_cursor_position(Position::new(
             x.min(side_area.right().saturating_sub(2)),
             side_area.y + 1,
         ));
-    } else if app.expired.is_none() {
+    } else {
         let x = input_area.x + 1 + u16::try_from(cursor_col).unwrap_or(0);
         let y = input_area.y + 1 + u16::try_from(cursor_row - first_row).unwrap_or(0);
         frame.set_cursor_position(Position::new(
@@ -985,12 +922,12 @@ fn transcript_block(app: &App, compact: bool) -> Block<'static> {
 
 /// Draw the transcript into `area`, and return how many rows are below
 /// the view: the scroll as drawn, not as asked for.
-fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect) -> usize {
+fn draw_transcript(frame: &mut Frame<'_>, app: &App, area: Rect, meter: bool) -> usize {
     let width = usize::from(area.width.saturating_sub(2)).max(1);
     let lines = transcript_lines(app, width);
     let height = usize::from(area.height.saturating_sub(2));
     let (start, end) = view_window(lines.len(), height, app.scroll);
-    let block = transcript_block(app, frame.area().width < WIDE_COLS);
+    let block = transcript_block(app, meter);
     frame.render_widget(
         Paragraph::new(lines[start..end].to_vec()).block(block),
         area,
@@ -1108,116 +1045,439 @@ fn indented(lines: &mut Vec<Line<'static>>, text: &str, width: usize, style: Sty
     }
 }
 
-/// The card in front as lines of at most `width` cells, or the expired
-/// one, or nothing; and whether its arguments were cut.
-fn card_lines(app: &App, width: usize, now: Instant) -> (Vec<Line<'static>>, bool) {
-    let mut lines = Vec::new();
-    let mut arguments_cut = false;
+/// Cells a card's labels take before their values.
+const CARD_LABEL: usize = 13;
+/// Windows shorter than this show a card as one line, refusal only.
+const CARD_MIN_ROWS: u16 = 15;
+
+/// One field of the card: its label, its value's rows, and how the value
+/// is drawn.
+struct CardField {
+    label: &'static str,
+    rows: Vec<String>,
+    kind: FieldKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldKind {
+    /// The request, with its tier set apart.
+    Request,
+    /// What will run: the action key and the arguments.
+    Code,
+    Plain,
+}
+
+/// The order a card's long values give up rows when it does not fit,
+/// first to last. The reply-to goes first, the arguments last.
+const CUT_ORDER: [&str; 7] = [
+    "in reply to",
+    "runs",
+    "model's claim (unverified)",
+    "arguments",
+    "request",
+    "action key",
+    "runtime",
+];
+
+/// How a card is drawn in the rows it has.
+enum CardFit {
+    /// Whole, with or without the spacer row before the instruction.
+    Whole { spacer: bool },
+    /// Values cut to `rows` each, by label; `cut` rows in all.
+    Cut {
+        rows: Vec<(&'static str, usize)>,
+        cut: usize,
+    },
+    /// One line: the window is too short for the card at all.
+    OneLine,
+}
+
+/// `tier3` as the title says it: `tier 3`.
+fn tier_words(tier: &str) -> String {
+    match tier.strip_prefix("tier") {
+        Some(n) if !n.is_empty() => format!("tier {n}"),
+        _ => tier.to_string(),
+    }
+}
+
+/// The card, the transcript above it in what rows are left, and the
+/// hints for the key bar.
+fn draw_card_screen(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    window_rows: u16,
+    now: Instant,
+) -> &'static [(&'static str, &'static str)] {
+    use palette::{AMBER, BG, CYAN, GRAY, RULE, TEXT, WHITE, on_bg};
+    let inner = usize::from(area.width.saturating_sub(2)).max(1);
+    let amber = on_bg(AMBER);
+
+    // An expired card: what became of it, and how to put it away.
     if let Some(ask) = &app.expired {
         let said = format!(
             "The request to run {} expired; the gateway records it as refused.",
             sanitize(&ask.tool_name)
         );
-        lines.extend(wrap(&said, width).into_iter().map(Line::raw));
-        return (lines, false);
+        let mut lines = vec![card_title(
+            &format!(
+                "approval expired · {} · {}",
+                tier_words(&ask.tier),
+                sanitize(&ask.tool_name)
+            ),
+            None,
+            inner,
+        )];
+        for row in wrap(&said, inner) {
+            lines.push(card_row(vec![Span::styled(row, on_bg(WHITE))], inner));
+        }
+        lines.push(card_rule("Enter or Esc to dismiss", None, inner, amber));
+        lines.push(card_row(Vec::new(), inner));
+        lines.push(card_bottom(inner));
+        place_card(frame, app, area, lines);
+        app.card_cut.set(true);
+        return HINTS_EXPIRED;
     }
     let Some(card) = app.front_card() else {
-        return (lines, false);
+        return HINTS;
     };
     let ask = &card.ask;
-    let mut field = |name: &str, value: &str, rows: usize, style: Option<Style>| {
-        let value = sanitize(value);
-        if value.trim().is_empty() {
-            return false;
-        }
-        let prefix = format!("{name}: ");
-        let body = wrap(&value, width.saturating_sub(prefix.chars().count()).max(10));
-        let cut = body.len() > rows;
-        let label = style.unwrap_or_else(|| Style::default().fg(Color::DarkGray));
-        let text = style.unwrap_or_default();
-        for (i, row) in body.into_iter().take(rows).enumerate() {
-            let lead = if i == 0 {
-                prefix.clone()
-            } else {
-                " ".repeat(prefix.chars().count())
-            };
-            lines.push(Line::from(vec![
-                Span::styled(lead, label),
-                Span::styled(row, text),
-            ]));
-        }
-        if cut {
-            lines.push(Line::styled(
-                "  ... (cut)",
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        cut
-    };
-    // The card every surface renders, line by line. What the gateway
-    // established is drawn plain; the model's own account of the call
-    // is set apart, since the gateway has not checked it and it is not
-    // a description of what will run. The arguments, which are, get
-    // every row they need: the gateway sends none longer than a card
-    // line holds, and a card that does not fit the screen takes no
-    // approval.
+    // Values wrap one cell short of the border; a cut value's last row,
+    // with its count, runs to it.
+    let value_room = inner.saturating_sub(CARD_LABEL).max(10);
+    let value_width = value_room.saturating_sub(1).max(10);
+    let mut fields = Vec::new();
+    let mut claim: Option<Vec<String>> = None;
     for line in ask.card().lines() {
-        let is_arguments = line.label == "arguments";
-        let rows = if is_arguments {
-            usize::MAX
-        } else {
-            CARD_FIELD_ROWS
+        let value = sanitize(&line.value);
+        if line.is_model_claim {
+            // Indented two cells, and kept two from the right border.
+            claim = Some(wrap(&value, inner.saturating_sub(4).max(10)));
+            continue;
+        }
+        let kind = match line.label {
+            "request" => FieldKind::Request,
+            "action key" | "arguments" => FieldKind::Code,
+            _ => FieldKind::Plain,
         };
-        let cut = field(
-            line.label,
-            &line.value,
-            rows,
-            line.is_model_claim.then(claim_style),
-        );
-        arguments_cut |= is_arguments && cut;
+        fields.push(CardField {
+            label: line.label,
+            rows: wrap(&value, value_width),
+            kind,
+        });
     }
-
-    // The two answers, drawn alike; on a card too narrow for one line,
-    // what Enter alone does goes on the next.
-    let choices = vec![
-        Span::styled("[y] approve", choice_style()),
-        Span::raw("   "),
-        Span::styled("[n] refuse", choice_style()),
-    ];
-    let enter = "Enter alone refuses.";
-    let one_line = Line::from(choices.clone()).width() + 3 + enter.chars().count();
-    if one_line <= width {
-        let mut row = choices;
-        row.push(Span::styled(
-            format!("   {enter}"),
-            Style::default().fg(Color::DarkGray),
-        ));
-        lines.push(Line::from(row));
-    } else {
-        lines.push(Line::from(choices));
-        lines.push(Line::styled(enter, Style::default().fg(Color::DarkGray)));
-    }
-
-    let waiting = app.cards.len().saturating_sub(1);
-    let mut status = match card.armed_at {
-        Some(at) if now < at => "Read the request; it takes an answer in a moment.".to_string(),
-        _ => "Type y and Enter to approve; n, a reason, or anything else refuses.".to_string(),
+    let instruction = match card.armed_at {
+        Some(at) if now < at => "Read the request; it takes an answer in a moment.",
+        _ => "Type y and Enter to approve; n, a reason, or anything else refuses.",
     };
-    if let Some(at) = card.expires_at {
-        status.push_str(&format!(
-            " Closes in {}s.",
+    let instruction = wrap(instruction, inner);
+    // The notice that takes the instruction's place on a cut card,
+    // counted with the widest count it could say.
+    let notice = |cut: usize| {
+        [
+            format!("Card cut: {cut} rows do not fit this window, so it cannot be approved here."),
+            "Enlarge the window to approve. Until then only a refusal is accepted.".to_string(),
+        ]
+    };
+    let countdown = card.expires_at.map(|at| {
+        format!(
+            "Closes in {}s.",
             at.saturating_duration_since(now).as_secs()
-        ));
+        )
+    });
+    let waiting = app.cards.len().saturating_sub(1);
+    let countdown = match (waiting, countdown) {
+        (0, c) => c,
+        (n, Some(c)) => Some(format!("{n} more waiting · {c}")),
+        (n, None) => Some(format!("{n} more waiting")),
+    };
+
+    // What fits: the whole card, then the card without its spacer, then
+    // the card with long values cut, then one line.
+    let fields_rows: usize = fields.iter().map(|f| f.rows.len()).sum();
+    let claim_rows = claim.as_ref().map_or(0, |c| 1 + c.len());
+    let fixed = 1 + 3;
+    let body = usize::from(area.height);
+    let natural = fixed + fields_rows + claim_rows + 1 + instruction.len();
+    let notice_rows: usize = notice(999).iter().map(|s| wrap(s, inner).len()).sum();
+    let fit = if window_rows < CARD_MIN_ROWS {
+        CardFit::OneLine
+    } else if natural <= body {
+        CardFit::Whole { spacer: true }
+    } else if natural - 1 <= body {
+        CardFit::Whole { spacer: false }
+    } else {
+        let mut need = (fixed + fields_rows + claim_rows + notice_rows).saturating_sub(body);
+        let mut rows: Vec<(&'static str, usize)> = fields
+            .iter()
+            .map(|f| (f.label, f.rows.len()))
+            .chain(claim.as_ref().map(|c| (CUT_ORDER[2], c.len())))
+            .collect();
+        let mut cut = 0;
+        for label in CUT_ORDER {
+            if let Some((_, n)) = rows.iter_mut().find(|(l, _)| *l == label) {
+                let take = need.min(n.saturating_sub(1));
+                *n -= take;
+                need -= take;
+                cut += take;
+            }
+        }
+        if need > 0 {
+            CardFit::OneLine
+        } else {
+            CardFit::Cut { rows, cut }
+        }
+    };
+
+    if let CardFit::OneLine = fit {
+        // The transcript, and under it one line that says the card cannot
+        // be answered here, but for a refusal.
+        let [above, line] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+        draw_transcript(frame, app, above, true);
+        let mut said = " This request cannot be approved at this size. Enter refuses.".to_string();
+        if let Some(c) = &countdown {
+            said.push(' ');
+            said.push_str(c);
+        }
+        frame.render_widget(
+            Paragraph::new(Line::styled(said, Style::default().fg(BG).bg(AMBER))),
+            line,
+        );
+        app.card_cut.set(true);
+        app.card_one_line.set(true);
+        return HINTS_CARD_ONE_LINE;
     }
-    if waiting > 0 {
-        status.push_str(&format!(" {waiting} more waiting."));
+    app.card_one_line.set(false);
+
+    let allowed = |label: &str, n: usize| match &fit {
+        CardFit::Cut { rows, .. } => rows
+            .iter()
+            .find(|(l, _)| *l == label)
+            .map_or(n, |(_, a)| *a),
+        _ => n,
+    };
+    // The last row a cut value keeps, with what it gave up at its end.
+    let with_count = |row: &str, room: usize, gone: usize| -> (String, String) {
+        let count = format!(" … +{gone} row{}", if gone == 1 { "" } else { "s" });
+        let keep = room.saturating_sub(width_of(&count));
+        let text: String = row.chars().take(keep).collect();
+        let pad = keep.saturating_sub(width_of(&text));
+        (format!("{text}{}", " ".repeat(pad)), count)
+    };
+
+    let cut_total = match &fit {
+        CardFit::Cut { cut, .. } => Some(*cut),
+        _ => None,
+    };
+    let title = format!(
+        "approval needed · {} · {}",
+        tier_words(&ask.tier),
+        sanitize(&ask.tool_name)
+    );
+    let mut lines = vec![card_title(
+        &title,
+        cut_total.map(|n| format!("{n} row{} cut", if n == 1 { "" } else { "s" })),
+        inner,
+    )];
+    for field in &fields {
+        let keep = allowed(field.label, field.rows.len());
+        let gone = field.rows.len() - keep;
+        for (i, row) in field.rows.iter().take(keep).enumerate() {
+            let lead = if i == 0 {
+                format!("{:<CARD_LABEL$}", format!("{}:", field.label))
+            } else {
+                " ".repeat(CARD_LABEL)
+            };
+            let mut spans = vec![Span::styled(lead, on_bg(GRAY))];
+            let (text, count) = if gone > 0 && i + 1 == keep {
+                let (t, c) = with_count(row, value_room, gone);
+                (t, Some(c))
+            } else {
+                (row.clone(), None)
+            };
+            match field.kind {
+                FieldKind::Code => spans.push(Span::styled(text, on_bg(WHITE))),
+                FieldKind::Plain => spans.push(Span::styled(text, on_bg(TEXT))),
+                FieldKind::Request => {
+                    let tier = format!("({})", sanitize(&ask.tier));
+                    match text.rfind(&tier) {
+                        Some(at) => {
+                            let (before, rest) = text.split_at(at);
+                            let (tier_text, after) = rest.split_at(tier.len());
+                            spans.push(Span::styled(before.to_string(), on_bg(TEXT)));
+                            spans.push(Span::styled(tier_text.to_string(), amber));
+                            spans.push(Span::styled(after.to_string(), on_bg(TEXT)));
+                        }
+                        None => spans.push(Span::styled(text, on_bg(TEXT))),
+                    }
+                }
+            }
+            if let Some(count) = count {
+                spans.push(Span::styled(count, amber));
+            }
+            lines.push(card_row(spans, inner));
+        }
     }
-    // Wrapped, not cut: the last line is how the card is answered, and
-    // it is read whole or the card takes no answer.
-    for row in wrap(&status, width) {
-        lines.push(Line::styled(row, Style::default().fg(Color::Yellow)));
+    // The model's claim, last, under its own rule.
+    if let Some(claim) = &claim {
+        lines.push(Line::from(vec![
+            Span::styled("╟ ", amber),
+            Span::styled("model's claim ", on_bg(GRAY)),
+            Span::styled("(unverified)", amber),
+            Span::styled(": ", on_bg(GRAY)),
+            Span::styled(
+                "─".repeat(inner.saturating_sub(width_of("model's claim (unverified): ") + 1)),
+                on_bg(RULE),
+            ),
+            Span::styled("╢", amber),
+        ]));
+        let keep = allowed(CUT_ORDER[2], claim.len());
+        let gone = claim.len() - keep;
+        for (i, row) in claim.iter().take(keep).enumerate() {
+            let mut spans = vec![Span::styled("  ", on_bg(CYAN))];
+            if gone > 0 && i + 1 == keep {
+                let (text, count) = with_count(row, inner.saturating_sub(2), gone);
+                spans.push(Span::styled(text, on_bg(CYAN)));
+                spans.push(Span::styled(count, amber));
+            } else {
+                spans.push(Span::styled(row.clone(), on_bg(CYAN)));
+            }
+            lines.push(card_row(spans, inner));
+        }
     }
-    (lines, arguments_cut)
+    match &fit {
+        CardFit::Cut { cut, .. } => {
+            for (i, sentence) in notice(*cut).iter().enumerate() {
+                let style = if i == 0 { amber } else { on_bg(WHITE) };
+                for row in wrap(sentence, inner) {
+                    lines.push(card_row(vec![Span::styled(row, style)], inner));
+                }
+            }
+        }
+        CardFit::Whole { spacer } => {
+            if *spacer {
+                lines.push(card_row(Vec::new(), inner));
+            }
+            for row in &instruction {
+                lines.push(card_row(
+                    vec![Span::styled(row.clone(), on_bg(WHITE))],
+                    inner,
+                ));
+            }
+        }
+        CardFit::OneLine => {}
+    }
+    lines.push(card_rule("your answer", countdown.as_deref(), inner, amber));
+    let answer: String = sanitize(&app.answer);
+    lines.push(card_row(
+        vec![Span::styled(answer.clone(), on_bg(WHITE))],
+        inner,
+    ));
+    lines.push(card_bottom(inner));
+
+    let card_rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let card_area = place_card(frame, app, area, lines);
+    let answer_y = card_area.bottom().saturating_sub(2);
+    let x = card_area.x + 1 + u16::try_from(width(&answer)).unwrap_or(0);
+    frame.set_cursor_position(Position::new(
+        x.min(card_area.right().saturating_sub(2)),
+        answer_y,
+    ));
+    app.card_cut.set(matches!(fit, CardFit::Cut { .. }));
+    if area.height.saturating_sub(card_rows) >= 3 {
+        HINTS_CARD
+    } else {
+        HINTS_CARD_HIDDEN
+    }
+}
+
+/// Draw `lines`, a card, at the bottom of `area`, and the transcript in
+/// the rows above it: a box with the meter where three rows or more are
+/// left, else one row saying the conversation is put away. Returns where
+/// the card is.
+fn place_card(frame: &mut Frame<'_>, app: &App, area: Rect, lines: Vec<Line<'static>>) -> Rect {
+    use palette::{GRAY, RULE, on_bg};
+    let rows = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let spare = area.height - rows;
+    let card_area = Rect::new(area.x, area.bottom() - rows, area.width, rows);
+    if spare >= 3 {
+        draw_transcript(
+            frame,
+            app,
+            Rect::new(area.x, area.y, area.width, spare),
+            true,
+        );
+    } else if spare >= 1 {
+        let note = " conversation hidden while this card is open ";
+        let mut spans = vec![Span::styled("─", on_bg(RULE))];
+        spans.extend(meter_title(app).spans);
+        let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
+        let fill = usize::from(area.width).saturating_sub(used + width_of(note) + 1);
+        spans.push(Span::styled("─".repeat(fill), on_bg(RULE)));
+        spans.push(Span::styled(note, on_bg(GRAY)));
+        spans.push(Span::styled("─", on_bg(RULE)));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+    frame.render_widget(Paragraph::new(lines), card_area);
+    card_area
+}
+
+/// The card's top: `title` and, at the right, what was cut.
+fn card_title(title: &str, right: Option<String>, inner: usize) -> Line<'static> {
+    let amber = palette::on_bg(palette::AMBER);
+    let title = format!(" {title} ");
+    let right = right.map(|r| format!(" {r} ")).unwrap_or_default();
+    let fill = inner.saturating_sub(width_of(&title) + width_of(&right));
+    Line::from(vec![
+        Span::styled("╔", amber),
+        Span::styled(title, amber),
+        Span::styled("═".repeat(fill), amber),
+        Span::styled(right, amber),
+        Span::styled("╗", amber),
+    ])
+}
+
+/// A rule across the card naming the row under it, `right` at its end.
+fn card_rule(name: &str, right: Option<&str>, inner: usize, rule: Style) -> Line<'static> {
+    use palette::{AMBER, WHITE, on_bg};
+    let name = format!(" {name} ");
+    let right = right.map(|r| format!(" {r} ")).unwrap_or_default();
+    let fill = inner.saturating_sub(width_of(&name) + width_of(&right));
+    Line::from(vec![
+        Span::styled("╟", on_bg(AMBER)),
+        Span::styled(name, on_bg(WHITE)),
+        Span::styled("─".repeat(fill), rule),
+        Span::styled(right, on_bg(WHITE)),
+        Span::styled("╢", on_bg(AMBER)),
+    ])
+}
+
+/// One row inside the card: `spans`, padded to the card's width.
+fn card_row(mut spans: Vec<Span<'static>>, inner: usize) -> Line<'static> {
+    let amber = palette::on_bg(palette::AMBER);
+    let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
+    spans.insert(0, Span::styled("║", amber));
+    spans.push(Span::styled(
+        " ".repeat(inner.saturating_sub(used)),
+        palette::on_bg(palette::TEXT),
+    ));
+    spans.push(Span::styled("║", amber));
+    Line::from(spans)
+}
+
+fn card_bottom(inner: usize) -> Line<'static> {
+    let amber = palette::on_bg(palette::AMBER);
+    Line::from(vec![
+        Span::styled("╚", amber),
+        Span::styled("═".repeat(inner), amber),
+        Span::styled("╝", amber),
+    ])
 }
 
 #[cfg(test)]
@@ -1280,20 +1540,24 @@ mod tests {
     fn the_card_says_how_to_answer_it_in_full_at_each_size() {
         let now = Instant::now();
         let later = now + std::time::Duration::from_secs(2);
-        // 64 columns is the narrowest layout with the panels: a card of 38.
         for (w, h) in [(80u16, 24u16), (120, 24), (120, 40), (64, 30)] {
             let mut app = App::new(Some("default".into()), "c-1".into());
             pipeline_card(&mut app, now);
             let buffer = drawn(&app, later, w, h);
             let words = all_text(&buffer)
-                .replace(['│', '└', '┘', '─', '┌', '┐'], " ")
+                .replace(
+                    [
+                        '║', '╔', '╗', '╚', '╝', '═', '╟', '╢', '─', '│', '┌', '┐', '└', '┘',
+                    ],
+                    " ",
+                )
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
             for whole in [
                 "Type y and Enter to approve; n, a reason, or anything else refuses.",
-                "Closes in",
-                "[y] approve [n] refuse Enter alone refuses.",
+                "your answer Closes in",
+                "approval needed · tier 3 · exec",
             ] {
                 assert!(
                     words.contains(whole),
@@ -1303,7 +1567,7 @@ mod tests {
             }
             assert!(
                 !app.card_cut.get(),
-                "{w}x{h}: a card shown whole takes no answer"
+                "{w}x{h}: a card shown whole takes an answer"
             );
         }
     }
@@ -1431,7 +1695,12 @@ mod tests {
             }),
             now,
         );
-        let shown = screen(&app, now);
+        // Labels sit in a column of their own: compare with the spacing
+        // folded.
+        let shown = screen(&app, now)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for part in [
             "request: agent default requests exec (tier2)",
             "action key: shell:ls",
@@ -1637,27 +1906,32 @@ mod tests {
     }
 
     #[test]
-    fn approve_and_refuse_are_drawn_alike() {
+    fn the_answer_rule_is_stated_once_and_approving_stays_typed() {
         let now = Instant::now();
-        // 80 columns: the narrow panels take 24, and the hint fits the rest.
-        let buffer = drawn(&card_app(now), now, 80, 30);
-        let approve = styles_of(&buffer, "[y] approve");
-        let refuse = styles_of(&buffer, "[n] refuse");
-        assert!(approve.iter().all(|s| *s == approve[0]));
-        assert!(refuse.iter().all(|s| *s == refuse[0]));
-        assert_eq!(approve[0], refuse[0], "neither answer is emphasised");
-        find(&buffer, "Enter alone refuses.");
+        let later = now + crate::commands::chat::app::ARMING;
+        let shown = text_of(&drawn(&card_app(now), later, 80, 30));
+        assert_eq!(
+            shown.matches("Type y and Enter to approve").count(),
+            1,
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("[y] approve") && !shown.contains("y approves"),
+            "{shown}"
+        );
+        assert!(shown.contains("your answer"), "{shown}");
     }
 
     #[test]
     fn the_models_words_are_labeled_a_claim_and_the_gateways_are_not() {
         let now = Instant::now();
         let buffer = drawn(&card_app(now), now, 80, 30);
-        let claim = styles_of(&buffer, "model's claim (unverified): Only reading");
+        // The claim comes last, under its own rule, in the agent's color.
+        find(&buffer, "╟ model's claim (unverified): ─");
         assert!(
-            claim
+            styles_of(&buffer, "Only reading")
                 .iter()
-                .all(|s| s.add_modifier.contains(Modifier::ITALIC)),
+                .all(|s| s.fg == Some(palette::CYAN)),
             "the claim is set apart"
         );
         for established in [
@@ -1669,7 +1943,7 @@ mod tests {
             assert!(
                 styles_of(&buffer, established)
                     .iter()
-                    .all(|s| !s.add_modifier.contains(Modifier::ITALIC)),
+                    .all(|s| s.fg != Some(palette::CYAN)),
                 "{established} is drawn as established, not as a claim"
             );
         }

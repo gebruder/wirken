@@ -200,18 +200,27 @@ needs is asked on a card at the terminal whose message started the turn
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
 The card takes no keys for its first 0.7 seconds. Only a lone `y` or `yes`
 approves; anything else refuses, and text after `n` or `no`, or anything
-else typed, is recorded as the reason. Enter alone refuses, and
-the two answers are drawn alike, so approving is never the default. The card
-is the one every surface renders, line by line: the request, the action key,
-the arguments that will run, where an `exec` runs, the runtime it runs under
-and the message the turn replies to as the gateway established them; what
-the model said beside the call is drawn apart and labeled `model's claim
-(unverified)`. A draft being typed when a card
+else typed, is recorded as the reason. Enter alone refuses, so approving is
+never the default. The card is the one every surface renders, line by line:
+the request, the action key, the arguments that will run, where an `exec`
+runs, the runtime it runs under and the message the turn replies to as the
+gateway established them; what the model said beside the call comes last,
+under its own rule labeled `model's claim (unverified):`, indented and in the
+agent's color. A draft being typed when a card
 arrives is set aside and comes back once the cards are answered; cards that
-arrive together are asked in order. Every line of the card wraps to its
-width, the line saying how to answer included; a card that is not on the
-screen whole, a line cut or its last line below the edge, takes no approval
-and says so. The decision is recorded with
+arrive together are asked in order.
+
+While a card is open it spans the window at every width: the sidebar and the
+panels are put away, its title rule names the tier and the tool, every field
+wraps, the instruction is stated once, and `Closes in Ns.` is on the rule over
+the answer. The transcript keeps the rows the card leaves, with the meter in
+its top border, or one row saying the conversation is hidden. A card that does
+not fit gives up its spacer row, then cuts its long values, the reply-to
+first and the arguments last, each with a count such as `… +2 rows`; its title
+rule says how many rows were cut, and a two-row notice takes the
+instruction's place. A cut card takes a refusal only. Under 15 rows of window
+the card is one line, `This request cannot be approved at this size. Enter
+refuses.`, and Enter there refuses with no reason. The decision is recorded with
 `approved_via` / `denied_via` `{"kind":"channel_adapter","channel":"terminal"}`
 and, for an approval, `approved_by` `<user> (operator key <key id>)`.
 

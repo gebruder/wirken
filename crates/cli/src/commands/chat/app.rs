@@ -219,6 +219,10 @@ pub(crate) struct App {
     /// or its bottom off the screen. Set by the view on each draw. A
     /// card in that state takes a refusal and no approval.
     pub card_cut: std::cell::Cell<bool>,
+    /// Whether the card in front was last drawn as one line, the window
+    /// too short for it. It then takes Enter as a refusal and nothing
+    /// typed.
+    pub card_one_line: std::cell::Cell<bool>,
 }
 
 impl App {
@@ -236,6 +240,7 @@ impl App {
             show_panels: true,
             pending_panel: None,
             card_cut: std::cell::Cell::new(false),
+            card_one_line: std::cell::Cell::new(false),
             searching: false,
             columns: 0,
             overlay: None,
@@ -740,6 +745,23 @@ impl App {
 
         if let Some(card) = self.cards.front() {
             if card.armed_at.is_none_or(|at| now < at) {
+                return None;
+            }
+            // The one line a short window shows has no answer field:
+            // Enter refuses, without a reason, and typing goes nowhere.
+            if self.card_one_line.get() {
+                if key.code == KeyCode::Enter {
+                    self.answer.clear();
+                    let card = self.cards.pop_front().expect("a card is in front");
+                    self.entries
+                        .push(Entry::Note(format!("Refused {}.", card.ask.tool_name)));
+                    self.show_next(now);
+                    return Some(Outgoing::Decision {
+                        request_id: card.ask.request_id,
+                        approve: false,
+                        reason: None,
+                    });
+                }
                 return None;
             }
             match key.code {

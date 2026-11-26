@@ -1,0 +1,22 @@
+80x10
+┌ wirken · default · ollama/llama3.2:3b ──── ctx 4% · 14 audit rows · 1 denied ┐
+│you                                                                           │
+│  How many of the old log files have errors in them?                          │
+│                                                                              │
+│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ This request cannot be approved at this size. Enter refuses. Closes in 42s.    
+ PgUp/PgDn scroll · Ctrl+K verify chain                             Ctrl+G keys 
+
+- ...... - CCCCCCC - gggggggggggggggggg ---- ggg gg - gg ggggg gggg - g gggggg -
+-WWW                                                                           -
+-  ... .... .. ... ... ... ..... .... ...... .. .....                          -
+-                                                                              -
+-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░-
+-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░-
+-                                                                              -
+--------------------------------------------------------------------------------
+ YYYY YYYYYYY YYYYYY YY YYYYYYYY YY YYYY YYYYY YYYYY YYYYYYYY YYYYYY YY YYYY    
+ KKKKKKKKK kkkkkk r KKKKKK kkkkkk kkkkk                             SSSSSS SSSS 
