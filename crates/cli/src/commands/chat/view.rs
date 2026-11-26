@@ -445,7 +445,16 @@ fn draw_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(on_bg(RULE))
-                .title(Line::styled(" agents ", on_bg(palette::TEXT))),
+                .title(Line::styled(" agents ", on_bg(palette::TEXT)))
+                .title_bottom(
+                    Line::from(vec![
+                        Span::styled(" ", on_bg(RULE)),
+                        Span::styled("Ctrl+B", on_bg(BLUE)),
+                        Span::styled(" hide", on_bg(GRAY)),
+                        Span::styled(" ", on_bg(RULE)),
+                    ])
+                    .right_aligned(),
+                ),
         ),
         area,
     );
@@ -793,7 +802,9 @@ fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let rule = |title: &str, right: Option<(&str, &str)>, top: bool| -> Line<'static> {
         let (left, end) = if top { ("┌", "┐") } else { ("├", "┤") };
         let title = format!(" {title} ");
-        let right_width = right.map_or(0, |(k, w)| width_of(k) + 1 + width_of(w) + 2);
+        let right_width = right.map_or(0, |(k, w)| {
+            width_of(k) + if w.is_empty() { 0 } else { 1 + width_of(w) } + 2
+        });
         let fill = inner.saturating_sub(width_of(&title) + right_width);
         let mut spans = vec![
             Span::styled(left, on_bg(RULE)),
@@ -843,12 +854,15 @@ fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let sections = shown.len();
     for (i, panel) in shown.into_iter().enumerate() {
         let is_tools = panel.title == "Tools";
-        lines.push(rule(
-            panel.title,
-            is_tools.then_some(("/tools", "")),
-            i == 0,
-        ));
+        let hint = match panel.title {
+            "Tools" => Some(("/tools", "")),
+            "Audit" => Some(("Ctrl+K", "verify")),
+            _ => None,
+        };
+        lines.push(rule(panel.title, hint, i == 0));
         let mut texts: Vec<String> = panel.lines.iter().map(|l| sanitize(l)).collect();
+        // The key is on the Audit rule; the line that names it goes.
+        texts.retain(|l| l != VERIFY_LINE);
         match panel.title {
             // The mode goes on the runtime's line, which wraps under
             // its label.
@@ -917,12 +931,39 @@ fn draw_panels(frame: &mut Frame<'_>, app: &App, area: Rect) {
         lines.push(row(Vec::new()));
     }
     lines.truncate(height.saturating_sub(1));
-    lines.push(Line::styled(
-        format!("└{}┘", "─".repeat(inner)),
-        on_bg(RULE),
-    ));
+    lines.push(bottom_hint(inner, &[("Ctrl+P", "hide")]));
     frame.render_widget(Paragraph::new(lines), area);
 }
+
+/// A frame's bottom border of `inner` cells between its corners, the
+/// `hints` at its right end, key and what it does, ` · ` between them.
+/// Without room for them the border is plain.
+fn bottom_hint(inner: usize, hints: &[(&str, &str)]) -> Line<'static> {
+    use palette::{BLUE, GRAY, RULE, on_bg};
+    let mut spans = Vec::new();
+    for (i, (key, what)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", on_bg(RULE)));
+        }
+        spans.push(Span::styled(key.to_string(), on_bg(BLUE)));
+        spans.push(Span::styled(format!(" {what}"), on_bg(GRAY)));
+    }
+    let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
+    if hints.is_empty() || used + 3 > inner {
+        return Line::styled(format!("└{}┘", "─".repeat(inner)), on_bg(RULE));
+    }
+    let mut line = vec![Span::styled(
+        format!("└{} ", "─".repeat(inner - used - 2)),
+        on_bg(RULE),
+    )];
+    line.extend(spans);
+    line.push(Span::styled(" ┘", on_bg(RULE)));
+    Line::from(line)
+}
+
+/// The Audit panel's line naming Ctrl+K, which the frame beside the
+/// transcript puts on the section's rule instead.
+const VERIFY_LINE: &str = "Ctrl+K verifies the chain";
 
 /// Cells an Environment line's name takes before its value.
 const ENV_LABEL: usize = 7;
@@ -1214,7 +1255,20 @@ fn draw_conversation(
     let (start, end) = view_window(lines.len(), height, app.scroll);
     let (above, below) = (start, lines.len() - end);
 
-    frame.render_widget(transcript_block(app, frame.area().width < WIDE_COLS), area);
+    let compact = frame.area().width < WIDE_COLS;
+    frame.render_widget(transcript_block(app, compact), area);
+    if compact && area.height > 2 {
+        // In the compact layout the keys to the columns put away sit on
+        // the bottom border.
+        let bottom = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+        frame.render_widget(
+            Paragraph::new(bottom_hint(
+                usize::from(area.width.saturating_sub(2)),
+                &[("Ctrl+B", "conversations"), ("Ctrl+P", "panels")],
+            )),
+            bottom,
+        );
+    }
     let content = Rect::new(
         area.x + 1,
         area.y + 1,

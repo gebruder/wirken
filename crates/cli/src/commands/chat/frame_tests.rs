@@ -767,3 +767,42 @@ fn the_sidebar_uses_its_width() {
     );
     assert_eq!(cut_middle("ollama/llama3.2:3b", 21), "ollama/llama3.2:3b");
 }
+
+/// 10: the keys that hide the columns and verify the chain sit on the
+/// frames they act on; in the compact layout the keys to the columns put
+/// away sit on the transcript's bottom border.
+#[test]
+fn hints_sit_on_the_borders_they_act_on() {
+    let now = now();
+    let cases: [Case; 9] = [
+        (
+            "first-start-80x24",
+            frame!("first-start-80x24"),
+            first_start,
+            0,
+        ),
+        (
+            "first-start-120x24",
+            frame!("first-start-120x24"),
+            first_start,
+            0,
+        ),
+        (
+            "first-start-120x40",
+            frame!("first-start-120x40"),
+            first_start,
+            0,
+        ),
+        ("long-80x24", frame!("long-80x24"), long_conversation, 10),
+        ("long-120x24", frame!("long-120x24"), long_conversation, 10),
+        ("long-120x40", frame!("long-120x40"), long_conversation, 10),
+        ("refusal-80x24", frame!("refusal-80x24"), refusal, 0),
+        ("refusal-120x24", frame!("refusal-120x24"), refusal, 0),
+        ("refusal-120x40", frame!("refusal-120x40"), refusal, 0),
+    ];
+    for (name, design, make, scroll) in cases {
+        let mut app = make();
+        app.scroll = scroll;
+        assert_drawn(name, &render(&app, now, design.w, design.h), &design);
+    }
+}

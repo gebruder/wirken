@@ -95,6 +95,14 @@ tagged.
   search, no longer a row of the list. A search that matches nothing says
   so and shows Esc to clear it (`the_sidebar_uses_its_width`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- The keys of `wirken chat`'s columns sit on the frames they act on:
+  `Ctrl+B hide` on the sidebar's bottom border, `Ctrl+P hide` on the
+  panels', and `Ctrl+K verify` on the Audit rule, which loses its line
+  naming the key. In the compact layout the transcript's bottom border
+  reads `Ctrl+B conversations · Ctrl+P panels`. A Tools rule with no
+  word after its key was a cell short
+  (`hints_sit_on_the_borders_they_act_on`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

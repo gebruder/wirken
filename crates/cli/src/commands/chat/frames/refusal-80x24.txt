@@ -21,7 +21,7 @@
 │                                                                              │
 ├ message ─────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-
+└──────────────────────────────────────── Ctrl+B conversations · Ctrl+P panels ┘
  Enter send · Ctrl+J new line · PgUp/PgDn scroll · / commands       Ctrl+G keys 
 
 - ...... - CCCCCCC - gggggggggggggggggg ---- ggg gg - gg ggggg gggg - g gggggg -
@@ -46,5 +46,5 @@
 -                                                                              -
 - ggggggg ----------------------------------------------------------------------
 -                                                                              -
-
+----------------------------------------- BBBBBB ggggggggggggg - BBBBBB gggggg -
  KKKKK kkkk r KKKKKK kkk kkkk r KKKKKKKKK kkkkkk r K kkkkkkkk       SSSSSS SSSS 

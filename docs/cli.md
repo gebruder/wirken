@@ -258,10 +258,12 @@ gateway over the terminal connection.
 
 The panels take 36 columns and the sidebar 30, and the transcript keeps
 at least 54, so from 120 columns both sit beside the transcript. Both
-start shown; Ctrl+B and Ctrl+P hide and show them. Narrower is the compact
-layout: the transcript takes the whole width, and its top border carries a
-meter of three numbers from the panels, the context used, the audit rows
-and the refusals when there are any. Ctrl+B and Ctrl+F open the agents and
+start shown; Ctrl+B and Ctrl+P hide and show them, and each says so on its
+column's bottom border. Ctrl+K sits on the Audit section's rule. Narrower
+is the compact layout: the transcript takes the whole width, its top
+border carries a meter of three numbers from the panels, the context used,
+the audit rows and the refusals when there are any, and its bottom border
+reads `Ctrl+B conversations · Ctrl+P panels`. Ctrl+B and Ctrl+F open the agents and
 conversations over the transcript, with the search and what is typed in
 it, and Ctrl+P opens the panels; Esc closes either. A search open when the
 window narrows or widens moves with it.
