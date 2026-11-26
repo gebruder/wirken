@@ -71,17 +71,51 @@ pub(crate) enum Outgoing {
 }
 
 /// A new conversation's id: `c-` and 12 hex digits.
-/// The `/help` note: the command table, then the keys.
+/// Every key the chat takes, as `/help` lists it; `docs/cli.md` names
+/// each in its key table, which a test holds it to.
+pub(crate) const KEYS: &[(&str, &str)] = &[
+    (
+        "Enter",
+        "send; answer a card; in search, open the conversation",
+    ),
+    ("Ctrl+J", "new line in the draft"),
+    (
+        "↑ ↓ wheel",
+        "scroll a few rows; in search, move the selection",
+    ),
+    ("PgUp PgDn", "scroll a page (Fn+↑ Fn+↓ on a Mac laptop)"),
+    (
+        "End",
+        "scrolled up, the latest row; else the end of the draft",
+    ),
+    ("Home", "the start of the draft"),
+    ("Ctrl+A Ctrl+E", "the start / the end of the draft"),
+    ("← →", "move in the draft"),
+    ("Backspace Delete", "delete before / after the cursor"),
+    ("Ctrl+U", "clear the draft, or the card's answer"),
+    ("Ctrl+F", "search the sidebar"),
+    ("Esc", "leave the search; put away an expired card"),
+    ("Ctrl+N", "new conversation"),
+    ("Ctrl+B", "show or hide the sidebar"),
+    ("Ctrl+P", "show or hide the panels"),
+    ("Ctrl+K", "verify this conversation's chain"),
+    ("Ctrl+C", "leave the chat"),
+    (
+        "y",
+        "on a card, approves; n, a reason or anything else refuses",
+    ),
+];
+
+/// The `/help` note: the command table, then every key.
 fn help_text() -> String {
     let mut lines = vec!["commands".to_string()];
     for (name, what) in super::slash::COMMANDS {
         lines.push(format!("  {name:<12}{what}"));
     }
-    lines.push(
-        "keys: Enter send · Ctrl+J newline · ↑↓ or wheel scroll · PgUp/PgDn page · End latest or end of draft · Ctrl+F search · Ctrl+N new · Ctrl+B sidebar · \
-         Ctrl+P panels · Ctrl+K verify · Ctrl+C quit"
-            .into(),
-    );
+    lines.push("keys".to_string());
+    for (keys, what) in KEYS {
+        lines.push(format!("  {keys:<17}{what}"));
+    }
     lines.join("\n")
 }
 
@@ -1199,6 +1233,33 @@ mod tests {
         };
         for (name, _) in super::super::slash::COMMANDS {
             assert!(help.contains(name), "{name} missing from {help}");
+        }
+        for (keys, _) in KEYS {
+            assert!(help.contains(keys), "{keys} missing from {help}");
+        }
+    }
+
+    /// Every key `/help` lists is in the key table of `docs/cli.md`, and
+    /// the keys that went unlisted are among them.
+    #[test]
+    fn the_docs_key_table_names_every_key_help_lists() {
+        let docs = include_str!("../../../../../docs/cli.md");
+        let start = docs.find("| Key | Action |").expect("the key table");
+        let table = &docs[start..start + docs[start..].find("\n\n").unwrap()];
+        for (keys, _) in KEYS {
+            for key in keys.split_whitespace() {
+                assert!(
+                    table.contains(key),
+                    "{key} is not in docs/cli.md's key table"
+                );
+            }
+        }
+        for key in ["Esc", "Ctrl+U", "Ctrl+A", "Ctrl+E"] {
+            assert!(
+                KEYS.iter()
+                    .any(|(k, _)| k.split_whitespace().any(|w| w == key)),
+                "{key}"
+            );
         }
     }
 

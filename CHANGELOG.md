@@ -29,6 +29,13 @@ tagged.
   line are cut does (`the_card_says_how_to_answer_it_in_full_at_each_size`,
   `a_card_without_room_for_its_last_line_takes_no_approval`,
   `crates/cli/src/commands/chat/view.rs`).
+- `/help` in `wirken chat` lists every key the chat takes, one per line:
+  Esc, Ctrl+U, Ctrl+A and Ctrl+E were missing from it, and Ctrl+A and
+  Ctrl+E from the key table in `docs/cli.md` too, with the arrows, Backspace
+  and Delete and the card's answers. The list is one table in the code that
+  `/help` prints, and a test holds `docs/cli.md` to it
+  (`the_docs_key_table_names_every_key_help_lists`,
+  `crates/cli/src/commands/chat/app.rs`).
 - `wirken chat` scrolls with the arrow keys, the mouse wheel and the
   trackpad. Only PgUp and PgDn scrolled the transcript, which on a Mac
   laptop are Fn+↑ and Fn+↓, so a long reply could not be read back the way

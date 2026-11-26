@@ -262,12 +262,17 @@ needs. Both start shown; Ctrl+B and Ctrl+P toggle them.
 | PgUp / PgDn | Scroll the transcript a page; on a Mac laptop, Fn+↑ / Fn+↓ |
 | End | Scrolled up, back to the latest row; the transcript's lower edge says how many rows are below while it is scrolled. At the latest row, the end of the draft |
 | Home | The start of the draft |
-| Ctrl+U | Clear the message or the answer |
+| Ctrl+A / Ctrl+E | The start / the end of the draft |
+| ← / → | Move in the draft |
+| Backspace / Delete | Delete before / after the cursor |
+| Ctrl+U | Clear the draft, or the card's answer |
 | Ctrl+F | Search the sidebar; arrows select, Enter opens, Esc leaves. Where the screen is too narrow to draw the sidebar the search does not open, and the status line says how many columns it needs |
 | Ctrl+N | New conversation with the same agent |
 | Ctrl+B / Ctrl+P | Show or hide the sidebar / the panels |
 | Ctrl+K | Verify this conversation's chain |
 | Ctrl+C | Leave the chat |
+| Esc | Leave the sidebar search; put away an expired card |
+| y | On a card, with Enter, approves; n, a reason or anything else refuses, and Enter alone refuses |
 
 The chat takes no mouse capture, so text is selected and copied as in any
 terminal. A selection runs the width of the screen, so it takes in the
