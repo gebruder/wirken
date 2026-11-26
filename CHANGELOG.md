@@ -67,6 +67,13 @@ tagged.
   shared card changes
   (`the_card_spans_the_window_and_says_when_it_cannot_be_approved`,
   `crates/cli/src/commands/chat/frame_tests.rs`).
+- A cut card in `wirken chat` is tested at every height from 15 rows: the
+  transcript's rows go first, then the spacer, then rows of the long values
+  in order, the reply-to, the runs, the claim and the arguments last; the
+  title, the first row of every field, the countdown and the answer field
+  stay. Its notice says a single cut row as one
+  (`a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops`,
+  `crates/cli/src/commands/chat/frame_tests.rs`).
 
 ### Fixed
 

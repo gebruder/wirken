@@ -514,3 +514,102 @@ fn the_card_spans_the_window_and_says_when_it_cannot_be_approved() {
         "{sent:?}"
     );
 }
+
+/// 06: a card that does not fit gives up the transcript's rows, then its
+/// spacer, then rows of its long values in order: the reply-to, the runs,
+/// the claim, the arguments last. The title, the first row of every
+/// field, the countdown and the answer field stay at every height down
+/// to 15 rows, and a cut card takes a refusal only.
+#[test]
+fn a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops() {
+    let t0 = Instant::now();
+    let later = t0 + Duration::from_secs(1);
+    let text = |b: &Buffer| -> String {
+        (0..b.area.height)
+            .map(|y| {
+                (0..b.area.width)
+                    .map(|x| b[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    // The long card at 80 columns is 29 rows whole and 28 without its
+    // spacer. Cut, the two-row notice takes the one-row instruction's
+    // place, so the first cut is two rows.
+    let row_of = |shown: &str, label: &str| -> String {
+        shown
+            .lines()
+            .find(|l| l.contains(label))
+            .unwrap_or_default()
+            .to_string()
+    };
+    for (h, runs, claim, args) in [
+        (30, "", "", ""),
+        (29, "", "", ""),
+        (28, "… +1 row", "… +1 row", ""),
+        (27, "… +1 row", "… +2 rows", ""),
+        (26, "… +1 row", "… +2 rows", "… +1 row"),
+    ] {
+        let app = long_card(t0);
+        let shown = text(&render(&app, later, 80, h));
+        assert_eq!(app.card_cut.get(), !runs.is_empty(), "80x{h}:\n{shown}");
+        let claim_row: String = shown
+            .lines()
+            .skip_while(|l| !l.contains("model's claim"))
+            .skip(1)
+            .take_while(|l| !l.contains("Card cut") && !l.contains("Type y"))
+            .collect();
+        let args_rows: String = shown
+            .lines()
+            .skip_while(|l| !l.contains("arguments:"))
+            .take_while(|l| !l.contains("runs:"))
+            .collect();
+        for (what, row, want) in [
+            ("runs", row_of(&shown, "runs:"), runs),
+            ("claim", claim_row, claim),
+            ("arguments", args_rows, args),
+        ] {
+            if want.is_empty() {
+                assert!(!row.contains("… +"), "80x{h}: {what} cut:\n{shown}");
+            } else {
+                assert!(row.contains(want), "80x{h}: {what} not {want:?}:\n{shown}");
+            }
+        }
+    }
+    // Every height from 15 rows keeps the title, the first row of each
+    // field, the countdown and the answer field.
+    for h in 15..=40 {
+        let app = long_card(t0);
+        let shown = text(&render(&app, later, 80, h));
+        for kept in [
+            "approval needed · tier 3 · exec",
+            "request:",
+            "action key:",
+            "arguments:",
+            "runs:",
+            "runtime:",
+            "in reply to:",
+            "model's claim (unverified):",
+            "your answer",
+            "Closes in 42s.",
+        ] {
+            assert!(shown.contains(kept), "80x{h}: {kept:?} dropped:\n{shown}");
+        }
+    }
+    // The reply-to gives up its rows before anything else.
+    let mut app = waiting_card(
+        "Clean up the new CSV exports, tell me what you changed, and keep a copy of every \
+         original file somewhere I can find it afterward.",
+        LONG_COMMAND,
+        "I'll clean the files.",
+        t0,
+    );
+    let shown = text(&render(&app, later, 80, 24));
+    assert!(
+        row_of(&shown, "in reply to:").contains("… +1 row"),
+        "{shown}"
+    );
+    assert!(shown.contains("Card cut: "), "{shown}");
+    app.cards.clear();
+}

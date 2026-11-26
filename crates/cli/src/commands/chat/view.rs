@@ -1187,7 +1187,13 @@ fn draw_card_screen(
     // counted with the widest count it could say.
     let notice = |cut: usize| {
         [
-            format!("Card cut: {cut} rows do not fit this window, so it cannot be approved here."),
+            match cut {
+                1 => "Card cut: 1 row does not fit this window, so it cannot be approved here."
+                    .to_string(),
+                n => format!(
+                    "Card cut: {n} rows do not fit this window, so it cannot be approved here."
+                ),
+            },
             "Enlarge the window to approve. Until then only a refusal is accepted.".to_string(),
         ]
     };
