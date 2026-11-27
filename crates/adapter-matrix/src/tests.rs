@@ -880,6 +880,7 @@ fn the_approval_message_is_the_shared_card() {
     assert_eq!(
         text,
         "request: agent default requests exec (tier2)\n\
+         request id: 0f9d3c52-1234-5678-9abc-deadbeef0001\n\
          action key: shell:ls\n\
          arguments: {\"command\":\"ls ~\"}\n\
          runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\

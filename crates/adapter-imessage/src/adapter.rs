@@ -17,7 +17,7 @@ use crate::error::IMessageError;
 use wirken_adapter_core::approval_card::CardStyle;
 use wirken_adapter_core::text_command::{self as commands, CommandKind};
 
-/// Per-process map from 8-hex-char `request_id` prefix to the
+/// Per-process map from a `request_id`'s answer code to the
 /// list of full `request_id`s sharing that prefix. The adapter
 /// inserts on outbound `ApprovalRequest` send and looks up on
 /// inbound `!approve <prefix>` / `!deny <prefix> [reason]`
@@ -307,39 +307,28 @@ async fn forward_approval_decision(
         CommandKind::Approve { prefix } => (prefix.clone(), true, None),
         CommandKind::Deny { prefix, reason } => (prefix.clone(), false, reason.clone()),
     };
-    let request_id = {
+    let found = {
         let mut map = approval_map.lock().await;
-        match map.get(&prefix) {
-            Some(matches) if matches.len() == 1 => {
-                let r = matches[0].clone();
-                map.remove(&prefix);
-                r
-            }
-            Some(matches) if matches.is_empty() => {
-                tracing::debug!(
-                    sender = %msg.sender_handle,
-                    prefix = %prefix,
-                    "imessage approval: empty match list for prefix; dropping"
-                );
-                return;
-            }
-            Some(matches) => {
-                tracing::debug!(
-                    sender = %msg.sender_handle,
-                    prefix = %prefix,
-                    count = matches.len(),
-                    "imessage approval: prefix collision; dropping (operator needs a longer prefix)"
-                );
-                return;
-            }
-            None => {
-                tracing::debug!(
-                    sender = %msg.sender_handle,
-                    prefix = %prefix,
-                    "imessage approval: no pending approval for prefix; dropping"
-                );
-                return;
-            }
+        commands::take(&mut map, &prefix)
+    };
+    let request_id = match found {
+        commands::Lookup::One(id) => id,
+        commands::Lookup::Many(count) => {
+            tracing::debug!(
+                sender = %msg.sender_handle,
+                prefix = %prefix,
+                count,
+                "imessage approval: prefix collision; dropping (operator needs a longer prefix)"
+            );
+            return;
+        }
+        commands::Lookup::None => {
+            tracing::debug!(
+                sender = %msg.sender_handle,
+                prefix = %prefix,
+                "imessage approval: no pending approval for prefix; dropping"
+            );
+            return;
         }
     };
     let mut capnp_msg = capnp::message::Builder::new_default();
@@ -481,7 +470,7 @@ enum FrameAction {
 /// normalize). The trailing instruction line carries the iMessage-
 /// specific text-command shape so the operator knows how to reply.
 ///
-/// On success, the 8-hex-char prefix of `request_id` is inserted
+/// On success, the answer code of `request_id` is inserted
 /// into `approval_map`, mapping to the full `request_id` for later
 /// `!approve <prefix>` / `!deny <prefix>` resolution. The
 /// adapter intentionally does NOT capture the BlueBubbles
@@ -593,14 +582,10 @@ async fn emit_approval_failure(
     }
 }
 
-/// The prefix an operator types after `!approve` / `!deny`: the first
-/// eight bytes of `request_id`, lower-cased. An id shorter than that,
-/// or one whose eighth byte falls inside a character, is used whole.
+/// The code an operator types after `!approve` / `!deny`: the first
+/// [`commands::CODE_LEN`] hex characters of `request_id`.
 pub(crate) fn approval_prefix(request_id: &str) -> String {
-    request_id
-        .get(..8)
-        .unwrap_or(request_id)
-        .to_ascii_lowercase()
+    commands::answer_code(request_id)
 }
 
 /// Classify a BlueBubbles REST API error response into a stable

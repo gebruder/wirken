@@ -1674,7 +1674,7 @@ fn indented(lines: &mut Vec<Line<'static>>, text: &str, width: usize, style: Sty
 /// Cells a card's labels take before their values.
 const CARD_LABEL: usize = 13;
 /// Windows shorter than this show a card as one line, refusal only.
-const CARD_MIN_ROWS: u16 = 15;
+const CARD_MIN_ROWS: u16 = 16;
 
 /// One field of the card: its label, its value's rows, and how the value
 /// is drawn.
@@ -1776,11 +1776,13 @@ fn draw_card_screen(
         });
     }
     let instruction = match card.and_then(|c| c.armed_at) {
-        _ if look.expired => "This request closed before it was answered. It was not approved.",
-        Some(at) if now < at => "Read the request; it takes an answer in a moment.",
-        _ => "Type y and Enter to approve; n, a reason, or anything else refuses.",
+        _ if look.expired => {
+            "This request closed before it was answered. It was not approved.".to_string()
+        }
+        Some(at) if now < at => "Read the request; it takes an answer in a moment.".to_string(),
+        _ => approve_instruction(&ask.request_id),
     };
-    let instruction = wrap(instruction, inner);
+    let instruction = wrap(&instruction, inner);
     // The notice that takes the instruction's place on a cut card,
     // counted with the widest count it could say.
     let notice = |cut: usize| {
@@ -2198,6 +2200,15 @@ fn card_bottom(inner: usize, right: Vec<Span<'static>>, look: CardLook) -> Line<
     Line::from(spans)
 }
 
+/// What a card says to type: `y` and the code the request id begins
+/// with, then Enter.
+pub(crate) fn approve_instruction(request_id: &str) -> String {
+    format!(
+        "Type y {} and Enter to approve; n, a reason, or anything else refuses.",
+        sanitize(&wirken_adapter_core::text_command::answer_code(request_id))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2235,7 +2246,7 @@ mod tests {
     fn pipeline_card(app: &mut App, now: Instant) {
         app.on_server(
             ServerEvent::Approval(ApprovalAsk {
-                request_id: "r1".into(),
+                request_id: "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into(),
                 tool_name: "exec".into(),
                 action_key: "shell::pipeline:".into(),
                 tier: "tier3".into(),
@@ -2273,7 +2284,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ");
             for whole in [
-                "Type y and Enter to approve; n, a reason, or anything else refuses.",
+                "Type y 3f9a and Enter to approve; n, a reason, or anything else refuses.",
                 "your answer Closes in",
                 "approval needed · tier 3 · exec",
             ] {
@@ -2301,7 +2312,9 @@ mod tests {
         pipeline_card(&mut app, now);
         drawn(&app, later, 120, 14);
         assert!(app.card_cut.get(), "the card's last line is off the screen");
-        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), later);
+        for c in "y 3f9a".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), later);
+        }
         let sent = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), later);
         assert!(
             !matches!(
@@ -2399,7 +2412,7 @@ mod tests {
         let mut app = App::new(Some("default".into()), "c-1".into());
         app.on_server(
             ServerEvent::Approval(ApprovalAsk {
-                request_id: "r1".into(),
+                request_id: "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into(),
                 tool_name: "exec".into(),
                 action_key: "shell:ls".into(),
                 tier: "tier2".into(),
@@ -2447,7 +2460,7 @@ mod tests {
         let command = format!("ls {}{tail}", "a".repeat(chars - tail.len() - 3));
         app.on_server(
             ServerEvent::Approval(ApprovalAsk {
-                request_id: "r1".into(),
+                request_id: "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into(),
                 tool_name: "exec".into(),
                 action_key: "shell::pipeline:".into(),
                 tier: "tier3".into(),
@@ -2466,7 +2479,9 @@ mod tests {
 
     fn enter_y(app: &mut App, t: Instant) -> Option<crate::commands::chat::app::Outgoing> {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), t);
+        for c in "y 3f9a".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), t);
+        }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), t)
     }
 
@@ -2517,7 +2532,7 @@ mod tests {
         let mut app = App::new(Some("default".into()), "c-1".into());
         app.on_server(
             ServerEvent::Approval(ApprovalAsk {
-                request_id: "r1".into(),
+                request_id: "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into(),
                 tool_name: "exec".into(),
                 action_key: "shell:ls".into(),
                 tier: "tier2".into(),
@@ -2661,7 +2676,7 @@ mod tests {
         let later = now + crate::commands::chat::app::ARMING;
         let shown = text_of(&drawn(&card_app(now), later, 80, 30));
         assert_eq!(
-            shown.matches("Type y and Enter to approve").count(),
+            shown.matches("Type y 3f9a and Enter to approve").count(),
             1,
             "{shown}"
         );

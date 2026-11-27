@@ -437,8 +437,10 @@ the prompt was posted in (`wrong_conversation`). The gateway reads both settings
 so a change applies to the next one without a restart: an approver removed
 while `wirken run` is up cannot answer the next prompt.
 
-The prompt shows a prefix. Reply in the approval chat with `!approve <prefix>`
-or `!deny <prefix> [reason]`.
+The prompt shows the request id and, under the card, the code to reply with:
+the id's first four hex characters. Reply in the approval chat with
+`!approve <code>` or `!deny <code> [reason]`. When two pending requests share
+a code, the reply says so and answers neither; type more of the request id.
 
 To talk to the agent from your own number, message yourself (Note to Self).
 signal-cli, linked to your number, sees those as sync messages from your phone
@@ -508,10 +510,10 @@ echo "+15551234567,+15559876543,group-abc-xyz=" \
   messages rather than forwarding any twice.
 - **Approval is coarse.** Tier 2 shell approvals key on the first token of the
   command; finer-grained patterns are not supported.
-- **Approvals pending at a restart are lost.** The prefix map behind
-  `!approve <prefix>` is held in memory. After the adapter restarts, a prefix
-  from an earlier prompt is answered with `no pending request matching
-  prefix` and the request waits out its timeout.
+- **Approvals pending at a restart are lost.** The map behind
+  `!approve <code>` is held in memory. After the adapter restarts, a code
+  from an earlier prompt is answered with `no pending request matching` and
+  the request waits out its timeout.
 - **No rate limiting on the adapter.** An allowlisted sender spamming messages
   spams the LLM and the API bill. Add external rate limiting if more than a
   handful of people can reach it.

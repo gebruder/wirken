@@ -422,7 +422,7 @@ fn waiting_card(asked: &str, command: &str, claim: &str, t0: Instant) -> App {
     });
     app.on_server(
         super::wire::ServerEvent::Approval(super::wire::ApprovalAsk {
-            request_id: "r1".into(),
+            request_id: "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into(),
             tool_name: "exec".into(),
             action_key: "shell::pipeline:".into(),
             tier: "tier3".into(),
@@ -468,7 +468,7 @@ type CardCase = (&'static str, Design, fn(Instant) -> App, bool);
 /// 05: a card spans the window at every width, its fields wrapped and
 /// none cut, the model's claim last under its own rule, the answer rule
 /// once, and the countdown on the rule over the answer. A card that does
-/// not fit says how many rows it cut and takes only a refusal; under 15
+/// not fit says how many rows it cut and takes only a refusal; under 16
 /// rows it is one line.
 #[test]
 fn the_card_spans_the_window_and_says_when_it_cannot_be_approved() {
@@ -502,8 +502,9 @@ fn the_card_spans_the_window_and_says_when_it_cannot_be_approved() {
         let mut app = make(t0);
         assert_drawn(name, &render(&app, later, design.w, design.h), &design);
         assert_eq!(app.card_cut.get(), refusal_only, "{name}");
-        // A card drawn whole takes y; one cut or one line does not.
-        typed(&mut app, "y", later);
+        // A card drawn whole takes y and its code; one cut or one line
+        // does not.
+        typed(&mut app, "y 3f9a", later);
         let sent = app.on_key(key(crossterm::event::KeyCode::Enter), later);
         let approved = matches!(
             sent,
@@ -532,7 +533,7 @@ fn the_card_spans_the_window_and_says_when_it_cannot_be_approved() {
 /// spacer, then rows of its long values in order: the reply-to, the runs,
 /// the claim, the arguments last. The title, the first row of every
 /// field, the countdown and the answer field stay at every height down
-/// to 15 rows, and a cut card takes a refusal only.
+/// to 16 rows, and a cut card takes a refusal only.
 #[test]
 fn a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops() {
     let t0 = Instant::now();
@@ -547,7 +548,7 @@ fn a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    // The long card at 80 columns is 29 rows whole and 28 without its
+    // The long card at 80 columns is 30 rows whole and 29 without its
     // spacer. Cut, the two-row notice takes the one-row instruction's
     // place, so the first cut is two rows.
     let row_of = |shown: &str, label: &str| -> String {
@@ -558,11 +559,11 @@ fn a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops() {
             .to_string()
     };
     for (h, runs, claim, args) in [
+        (31, "", "", ""),
         (30, "", "", ""),
-        (29, "", "", ""),
-        (28, "… +1 row", "… +1 row", ""),
-        (27, "… +1 row", "… +2 rows", ""),
-        (26, "… +1 row", "… +2 rows", "… +1 row"),
+        (29, "… +1 row", "… +1 row", ""),
+        (28, "… +1 row", "… +2 rows", ""),
+        (27, "… +1 row", "… +2 rows", "… +1 row"),
     ] {
         let app = long_card(t0);
         let shown = text(&render(&app, later, 80, h));
@@ -590,14 +591,15 @@ fn a_card_that_does_not_fit_cuts_in_order_and_keeps_what_never_drops() {
             }
         }
     }
-    // Every height from 15 rows keeps the title, the first row of each
+    // Every height from 16 rows keeps the title, the first row of each
     // field, the countdown and the answer field.
-    for h in 15..=40 {
+    for h in 16..=40 {
         let app = long_card(t0);
         let shown = text(&render(&app, later, 80, h));
         for kept in [
             "approval needed · tier 3 · exec",
             "request:",
+            "request id:",
             "action key:",
             "arguments:",
             "runs:",
@@ -900,7 +902,7 @@ fn an_expired_card_holds_until_esc() {
         let mut app = tier3_card(t0);
         app.on_server(
             super::wire::ServerEvent::Approval(super::wire::ApprovalAsk {
-                request_id: "r2".into(),
+                request_id: "b71e0d44-5c2a-4f8e-8d31-2a6c9e0f1b37".into(),
                 tool_name: "exec".into(),
                 action_key: "shell:ls".into(),
                 tier: "tier3".into(),
@@ -925,7 +927,7 @@ fn an_expired_card_holds_until_esc() {
     }
     let mut app = make();
     let entries = app.entries.len();
-    typed(&mut app, "y", late);
+    typed(&mut app, "y 3f9a", late);
     assert_eq!(app.on_key(key(KeyCode::Enter), late), None);
     assert!(app.expired.is_some() && app.entries.len() == entries);
     assert_eq!(app.on_key(key(KeyCode::Esc), late), None);
@@ -935,7 +937,7 @@ fn an_expired_card_holds_until_esc() {
     );
     assert_eq!(
         app.front_card().map(|c| c.ask.request_id.as_str()),
-        Some("r2")
+        Some("b71e0d44-5c2a-4f8e-8d31-2a6c9e0f1b37")
     );
 }
 
@@ -961,7 +963,7 @@ fn more_than_one_card_says_so_on_the_bottom_border() {
             });
             app.on_server(
                 super::wire::ServerEvent::Approval(super::wire::ApprovalAsk {
-                    request_id: format!("r{n}"),
+                    request_id: format!("{n:08x}-0000-4000-8000-000000000000"),
                     tool_name: "exec".into(),
                     action_key: "shell:ls".into(),
                     tier: "tier3".into(),

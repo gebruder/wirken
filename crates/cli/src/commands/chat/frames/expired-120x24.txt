@@ -6,10 +6,10 @@
 │  tool exec {"command":"find /workspace/logs -name '*.log' -mtime +7 -print0 | xargs -0 grep -l 'ERROR' | sort |      │
 │    uniq | wc -l"} expired                                                                                            │
 │                                                                                                                      │
-│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ approval expired · tier 3 · exec ────────────────────────────────────────────────────────────────────────────────────┐
 │request:     agent default requests exec (tier3)                                                                      │
+│request id:  3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d                                                                     │
 │action key:  shell::pipeline:                                                                                         │
 │arguments:   {"command":"find /workspace/logs -name '*.log' -mtime +7 -print0 | xargs -0 grep -l 'ERROR' | sort |     │
 │             uniq | wc -l"}                                                                                           │
@@ -31,10 +31,10 @@
 -  .... .... ................ ............... ..... ....... ...... .. ....... . ..... .. .... .. ....... . .... .      -
 -    .... . .. .... RRRRRRR                                                                                            -
 -                                                                                                                      -
--                                                                                                                      -
 ------------------------------------------------------------------------------------------------------------------------
 - WWWWWWWW WWWWWWW W WWWW W W WWWW -------------------------------------------------------------------------------------
 -dddddddd     ggggg ggggggg gggggggg gggg ggggggg                                                                      -
+-ddddddd ddd  gggggggggggggggggggggggggggggggggggg                                                                     -
 -dddddd dddd  gggggggggggggggg                                                                                         -
 -dddddddddd   gggggggggggggggg ggggggggggggggg ggggg ggggggg gggggg gg ggggggg g ggggg gg gggg gg ggggggg g gggg g     -
 -             gggg g gg gggg                                                                                           -

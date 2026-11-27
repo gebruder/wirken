@@ -204,11 +204,13 @@ its row is on the chain and again when it finishes. An approval the turn
 needs is asked on a card at the terminal whose message started the turn
 (`TerminalApprovalGate`), with the lines every approval surface shows; see
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
-The card takes no keys for its first 0.7 seconds. Only a lone `y` or `yes`
-approves; anything else refuses, and text after `n` or `no`, or anything
+The card takes no keys for its first 0.7 seconds. Only `y` or `yes` followed
+by the card's code approves: the first four hex characters of its request
+id, which the instruction names, as in `y 3f9a`. A lone `y` approves
+nothing. Anything else refuses, and text after `n` or `no`, or anything
 else typed, is recorded as the reason. Enter alone refuses, so approving is
 never the default. The card is the one every surface renders, line by line:
-the request, the action key, the arguments that will run, where an `exec`
+the request, its request id, the action key, the arguments that will run, where an `exec`
 runs, the runtime it runs under and the message the turn replies to as the
 gateway established them; what the model said beside the call comes last,
 under its own rule labeled `model's claim (unverified):`, indented and in the
@@ -224,7 +226,7 @@ its top border, or one row saying the conversation is hidden. A card that does
 not fit gives up its spacer row, then cuts its long values, the reply-to
 first and the arguments last, each with a count such as `… +2 rows`; its title
 rule says how many rows were cut, and a two-row notice takes the
-instruction's place. A cut card takes a refusal only. Under 15 rows of window
+instruction's place. A cut card takes a refusal only. Under 16 rows of window
 the card is one line, `This request cannot be approved at this size. Enter
 refuses.`, and Enter there refuses with no reason. The decision is recorded with
 `approved_via` / `denied_via` `{"kind":"channel_adapter","channel":"terminal"}`
@@ -320,7 +322,7 @@ than the answer, which the card states.
 | Ctrl+G / F1 | The keys screen: every key and command in groups, over the whole screen. Typing filters it, ↑ and ↓ scroll it, Esc or Ctrl+G closes it; keys that do not apply now are dimmed. The key bar keeps Ctrl+G at its right at every width |
 | Ctrl+C | Leave the chat |
 | Esc | Leave the sidebar search; put away an expired card |
-| y | On a card, with Enter, approves; n, a reason or anything else refuses, and Enter alone refuses |
+| y | On a card, with the card's code and Enter, approves; n, a reason or anything else refuses, and Enter alone refuses |
 
 The chat takes no mouse capture, so text is selected and copied as in any
 terminal. A selection runs the width of the screen, so it takes in the

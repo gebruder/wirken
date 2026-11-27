@@ -897,9 +897,12 @@ function oneLine(v) {
 function approvalCardLines(ev) {
   const lines = [
     ['request', 'agent ' + String(ev.triggering_agent || '') + ' requests ' + String(ev.tool_name || '') + ' (' + String(ev.requested_tier || '') + ')'],
+  ];
+  if (ev.request_id) lines.push(['request id', String(ev.request_id)]);
+  lines.push(
     ['action key', String(ev.action_key || '')],
     ['arguments', ev.arguments ? ev.arguments : '(none; the action key is the whole ask)'],
-  ];
+  );
   if (ev.exec_location) lines.push(['runs', ev.exec_location]);
   if (ev.exec_runtime) lines.push(['runtime', runtimeWords(ev.exec_runtime)]);
   if (ev.trigger_message) lines.push(['in reply to', ev.trigger_message]);

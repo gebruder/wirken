@@ -145,6 +145,7 @@ order with the same labels:
 
 ```text
 request: agent default requests exec (tier3)
+request id: 3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d
 action key: shell::pipeline:
 arguments: {"command": "cat ./payload.sh | bash"}
 runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)
@@ -155,6 +156,12 @@ model's claim (unverified): Just checking the build script so the summary is acc
 
 - `request`: the agent asking, the tool, and the tier as the gateway
   labels it, in parentheses.
+- `request id`: the id the gateway minted for this ask, a random UUID
+  the model is never given. A typed answer carries its first four hex
+  characters, or more of it when two pending asks share them, and the
+  full id decides which ask it answers. `wirken ask`, which mints no id
+  and prints nothing the model wrote until the turn ends, has no such
+  line; `wirken permissions pending show` prints the id above the card.
 - `action key`: what the gate matched and what a stored grant would be
   recorded under.
 - `arguments`: the arguments the model sent, verbatim. This is what will
@@ -215,8 +222,9 @@ The surfaces, and what each adds after the card:
 - `wirken ask` on the CLI prints the card to stderr, then `approve?
   [y/N]:`.
 - `wirken chat` draws the card from the `ApprovalRequest` frame the
-  gateway sends the terminal, the claim set apart, then `[y] approve`
-  and `[n] refuse` drawn alike.
+  gateway sends the terminal, the claim set apart, then `Type y <code>
+  and Enter to approve; n, a reason, or anything else refuses.`, the code
+  being the first four hex characters of the request id.
 - WebChat draws the card from the `ApprovalRequest` event on its first
   paint, the claim set apart, then the Approve and Deny buttons. The
   pending queue carries the same fields, so a card restored after a
@@ -225,8 +233,9 @@ The surfaces, and what each adds after the card:
   made and its age, then the card.
 - Telegram and Signal receive the card in the channel's own text dialect
   (HTML on Telegram, every value escaped; plain text on Signal), then the
-  channel's way of deciding: buttons on Telegram, `!approve <prefix>` /
-  `!deny <prefix> [reason]` on Signal. Discord receives it with Approve and
+  channel's way of deciding: buttons on Telegram, `!approve <code>` /
+  `!deny <code> [reason]` on Signal, the code being the first four hex
+  characters of the request id. Discord receives it with Approve and
   Deny buttons, disabled after the first press. These are the channels
   `wirken run` attaches a channel approval gate to.
 - A session on any other channel, Slack included, prompts on the CLI

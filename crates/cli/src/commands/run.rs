@@ -11520,6 +11520,66 @@ mod terminal_channel_tests {
         assert!(gw.queue.is_empty());
     }
 
+    /// The id an approval is answered by is a random v4 UUID the
+    /// gateway mints for each ask, and the model is never sent it, not
+    /// before the decision and not after. A card the model writes into
+    /// its own text cannot carry the id, nor the code a typed answer
+    /// takes from the id's first hex characters.
+    #[tokio::test]
+    async fn an_approval_id_is_random_and_never_reaches_the_model() {
+        let (model, received) = super::scripted_model::serve_recording(vec![
+            tool_call_body("exec", r#"{"command":"ls"}"#),
+            tool_call_body("exec", r#"{"command":"pwd"}"#),
+            text_body(&["Not run."]),
+        ])
+        .await;
+        let (mut gw, client) = Gateway::start(model).await;
+        let (mut reader, mut writer) = split_stream(client);
+        wirken_ipc::perform_terminal_handshake(&mut reader, &mut writer, &gw.operator, "default")
+            .await
+            .unwrap();
+        send_message(&mut writer, "c-3", "list the files").await;
+        let mut ids = Vec::new();
+        loop {
+            match next(&mut reader).await {
+                Seen::Approval { request_id, .. } => {
+                    // What the model has been sent so far, before the
+                    // decision.
+                    let before = received.lock().unwrap().len();
+                    ids.push((request_id.clone(), before));
+                    send_decision(&mut writer, &request_id, false).await;
+                }
+                Seen::Reply(_) => break,
+                refused @ Seen::Refused { .. } => panic!("unexpected {refused:?}"),
+                _ => {}
+            }
+        }
+        drop((reader, writer));
+        gw.finish().await.unwrap();
+
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert_ne!(ids[0].0, ids[1].0, "each ask has its own id");
+        let bodies: Vec<String> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| b.to_string().to_ascii_lowercase())
+            .collect();
+        assert_eq!(bodies.len(), 3);
+        for (id, before) in &ids {
+            let parsed = uuid::Uuid::parse_str(id).expect("the id is a UUID");
+            assert_eq!(parsed.get_version(), Some(uuid::Version::Random), "{id}");
+            assert!(*before >= 1, "the model was called before the ask");
+            let hex = wirken_adapter_core::text_command::id_hex(id);
+            for (n, body) in bodies.iter().enumerate() {
+                assert!(
+                    !body.contains(&id.to_ascii_lowercase()) && !body.contains(&hex),
+                    "request {n} to the model carries the id {id}: {body}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn an_approval_granted_at_the_terminal_names_the_operator_key() {
         let model = super::scripted_model::serve(vec![

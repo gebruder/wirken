@@ -14,7 +14,7 @@
 │ Ctrl+N       new conversation          /approvals   approvals waiting on you │
 │ Ctrl+F       search conversations      /audit       audit trail and chain    │
 │ APPROVALS · none waiting               /verify      check the chain          │
-│ y Enter      approve the card          /clear       new conversation         │
+│ y code Enter approve the card          /clear       new conversation         │
 │ n or Enter   refuse; so does a reason  /help        this screen              │
 │ Esc          put away an expired card  /quit /exit  leave the chat           │
 │ Ctrl+K       verify the audit chain    MOUSE                                 │
@@ -39,7 +39,7 @@
 - BBBBBB       ... ............          BBBBBBBBBB   ......... ....... .. ... -
 - BBBBBB       ...... .............      BBBBBB       ..... ..... ... .....    -
 - WWWWWWWWW d dddd ddddddd               BBBBBBB      ..... ... .....          -
-- d ddddd      ddddddd ddd dddd          BBBBBB       ... ............         -
+- d dddd ddddd ddddddd ddd dddd          BBBBBB       ... ............         -
 - d dd ddddd   ddddddd dd dddd d dddddd  BBBBB        .... ......              -
 - ddd          ddd dddd dd ddddddd dddd  BBBBB BBBBB  ..... ... ....           -
 - BBBBBB       ...... ... ..... .....    WWWWW                                 -

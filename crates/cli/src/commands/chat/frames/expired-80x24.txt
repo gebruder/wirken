@@ -1,6 +1,5 @@
 80x24
 ┌ wirken · default · ollama/llama3.2:3b ──── ctx 4% · 14 audit rows · 1 denied ┐
-│you                                                                           │
 │  How many of the old log files have errors in them?                          │
 │                                                                              │
 │  tool exec {"command":"find /workspace/logs -name '*.log' -mtime +7          │
@@ -8,6 +7,7 @@
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ approval expired · tier 3 · exec ────────────────────────────────────────────┐
 │request:     agent default requests exec (tier3)                              │
+│request id:  3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d                             │
 │action key:  shell::pipeline:                                                 │
 │arguments:   {"command":"find /workspace/logs -name '*.log' -mtime +7 -print0 │
 │             | xargs -0 grep -l 'ERROR' | sort | uniq | wc -l"}               │
@@ -25,7 +25,6 @@
  PgUp/PgDn scroll · Ctrl+K verify chain                             Ctrl+G keys 
 
 - ...... - CCCCCCC - gggggggggggggggggg ---- ggg gg - gg ggggg gggg - g gggggg -
--WWW                                                                           -
 -  ... .... .. ... ... ... ..... .... ...... .. .....                          -
 -                                                                              -
 -  .... .... ................ ............... ..... ....... ...... ..          -
@@ -33,6 +32,7 @@
 --------------------------------------------------------------------------------
 - WWWWWWWW WWWWWWW W WWWW W W WWWW ---------------------------------------------
 -dddddddd     ggggg ggggggg gggggggg gggg ggggggg                              -
+-ddddddd ddd  gggggggggggggggggggggggggggggggggggg                             -
 -dddddd dddd  gggggggggggggggg                                                 -
 -dddddddddd   gggggggggggggggg ggggggggggggggg ggggg ggggggg gggggg gg ggggggg -
 -             g ggggg gg gggg gg ggggggg g gggg g gggg g gg gggg               -

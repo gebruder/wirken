@@ -146,14 +146,23 @@ pub(crate) enum Answer {
     Deny(Option<String>),
 }
 
-/// Only a lone `y` or `yes`, in any case, approves. `n` or `no`
-/// followed by text denies with that text as the reason; anything else
-/// denies with what was typed as the reason, and an empty answer
-/// denies with none. `y please` denies: an answer that is more than the
-/// one word is not read as consent.
-pub(crate) fn parse_answer(input: &str) -> Answer {
+/// Only `y` or `yes`, in any case, then the card's code approves: the
+/// first [`wirken_adapter_core::text_command::CODE_LEN`] hex characters
+/// of the request id the gateway minted, or more of them. The model is
+/// never given the id, so a card it writes into the conversation
+/// cannot name the code, and the answer binds to the card that drew
+/// it. A lone `y` approves nothing. `n` or `no` followed by text
+/// denies with that text as the reason; anything else denies with what
+/// was typed as the reason, and an empty answer denies with none.
+/// `y please` denies: an answer that is not consent and the code is
+/// not read as consent.
+pub(crate) fn parse_answer(input: &str, request_id: &str) -> Answer {
     let typed = input.trim();
-    if typed.eq_ignore_ascii_case("y") || typed.eq_ignore_ascii_case("yes") {
+    let mut words = typed.split_whitespace();
+    if let (Some(yes), Some(code), None) = (words.next(), words.next(), words.next())
+        && (yes.eq_ignore_ascii_case("y") || yes.eq_ignore_ascii_case("yes"))
+        && wirken_adapter_core::text_command::answers(code, request_id)
+    {
         return Answer::Approve;
     }
     if typed.is_empty() {
@@ -185,22 +194,44 @@ mod tests {
         assert_eq!(sanitize("héllo 世界 🙂\nnext"), "héllo 世界 🙂\nnext");
     }
 
+    const ID: &str = "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d";
+
     #[test]
-    fn only_a_lone_y_or_yes_approves() {
-        for yes in ["y", "Y", "yes", " YES ", "Yes\n"] {
-            assert_eq!(parse_answer(yes), Answer::Approve, "{yes:?}");
+    fn only_y_and_the_cards_code_approves() {
+        for yes in [
+            "y 3f9a",
+            "Y 3F9A",
+            "yes 3f9a52",
+            " YES  3f9a ",
+            "y 3f9a52c10b7e\n",
+        ] {
+            assert_eq!(parse_answer(yes, ID), Answer::Approve, "{yes:?}");
         }
-        for not in ["y please", "yes!", "yy", "ye", "ok", "sure", "yes yes"] {
-            assert!(matches!(parse_answer(not), Answer::Deny(_)), "{not:?}");
+        for not in [
+            "y",
+            "Y",
+            "yes",
+            "3f9a",
+            "y 3f9",
+            "y 3f9b",
+            "y 0000",
+            "y 3f9a please",
+            "y please",
+            "yes!",
+            "yy 3f9a",
+            "ok",
+            "yes yes",
+        ] {
+            assert!(matches!(parse_answer(not, ID), Answer::Deny(_)), "{not:?}");
         }
-        assert_eq!(parse_answer(""), Answer::Deny(None));
-        assert_eq!(parse_answer("n"), Answer::Deny(None));
+        assert_eq!(parse_answer("", ID), Answer::Deny(None));
+        assert_eq!(parse_answer("n", ID), Answer::Deny(None));
         assert_eq!(
-            parse_answer("no  not on prod"),
+            parse_answer("no  not on prod", ID),
             Answer::Deny(Some("not on prod".into()))
         );
         assert_eq!(
-            parse_answer("y please"),
+            parse_answer("y please", ID),
             Answer::Deny(Some("y please".into()))
         );
     }

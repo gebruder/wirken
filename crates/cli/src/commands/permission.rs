@@ -243,6 +243,8 @@ fn render_pending_detail(d: &wirken_ipc::permissions::PendingDetail) -> String {
     let _ = writeln!(out, "Age:           {}s", d.summary.age_seconds);
     let _ = writeln!(out);
     let card = ApprovalCard {
+        // Printed above, with the queue's other facts.
+        request_id: None,
         agent: d.summary.agent_id.clone(),
         tool_name: d.summary.tool_name.clone(),
         tier: d.summary.requested_tier.clone(),

@@ -733,19 +733,13 @@ fn classify_send_error_maps_bluebubbles_4006_status_to_chat_not_found() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn approval_prefix_takes_eight_bytes_lowercased() {
+fn approval_prefix_is_the_ids_first_four_hex_characters() {
     use crate::adapter::approval_prefix;
-    assert_eq!(approval_prefix("ABCDEF0123456789"), "abcdef01");
-    assert_eq!(approval_prefix("abc"), "abc");
-}
-
-#[test]
-fn approval_prefix_keeps_an_id_split_mid_character_whole() {
-    use crate::adapter::approval_prefix;
-    // Byte 8 falls inside the two-byte character at offsets 7..9.
-    let id = "aaaaaaa\u{e9}a";
-    assert!(!id.is_char_boundary(8));
-    assert_eq!(approval_prefix(id), id);
+    assert_eq!(approval_prefix("ABCDEF01-2345-6789"), "abcd");
+    assert_eq!(
+        approval_prefix("0f9d3c52-1234-5678-9abc-deadbeef0001"),
+        "0f9d"
+    );
 }
 
 /// The approval message is the card every surface renders: the tier
@@ -778,22 +772,23 @@ fn the_approval_message_is_the_shared_card() {
         "docker",
     ));
     let fields = convert::parse_approval_request(&reader).unwrap();
-    let text = crate::adapter::approval_text(&fields, "0f9d3c52");
+    let text = crate::adapter::approval_text(&fields, "0f9d");
     assert_eq!(
         text,
         "request: agent default requests exec (tier2)\n\
+         request id: 0f9d3c52-1234-5678-9abc-deadbeef0001\n\
          action key: shell:ls\n\
          arguments: {\"command\":\"ls ~\"}\n\
          runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\
          runtime: Docker default runtime (runc)\n\
          in reply to: run ls ~\n\
          model's claim (unverified): Listing your home directory.\n\
-         Reply !approve 0f9d3c52 to approve or !deny 0f9d3c52 [reason] to deny."
+         Reply !approve 0f9d to approve or !deny 0f9d [reason] to deny."
     );
 
     let reader = serialize_and_read(&build("", ""));
     let fields = convert::parse_approval_request(&reader).unwrap();
-    let text = crate::adapter::approval_text(&fields, "0f9d3c52");
+    let text = crate::adapter::approval_text(&fields, "0f9d");
     assert!(!text.contains("runs:"), "{text}");
     assert!(!text.contains("runtime:"), "{text}");
 }

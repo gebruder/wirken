@@ -501,7 +501,7 @@ pub(crate) fn approval_body(fields: &convert::ApprovalRequestFields) -> Vec<serd
         .into_iter()
         .map(|line| {
             let mut value = serde_json::json!({ "type": "TextRun", "text": line.value });
-            if CODE_LABELS.contains(&line.label) {
+            if wirken_adapter_core::approval_card::CODE_LABELS.contains(&line.label) {
                 value["fontType"] = "Monospace".into();
             }
             if line.is_model_claim {
@@ -517,10 +517,6 @@ pub(crate) fn approval_body(fields: &convert::ApprovalRequestFields) -> Vec<serd
         })
         .collect()
 }
-
-/// The lines whose value is the key the gate matched or the arguments
-/// that will run, as the shared card names them.
-const CODE_LABELS: [&str; 2] = ["action key", "arguments"];
 
 async fn send_approval_request(
     http: &reqwest::Client,

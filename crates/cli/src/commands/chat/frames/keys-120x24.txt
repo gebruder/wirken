@@ -1,7 +1,7 @@
 120x24
 ┌ keys and commands ───────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ SCROLL                                  APPROVALS · none waiting               COMMANDS                              │
-│ PgUp PgDn    ░░░░░░░░░░░░░░░            y Enter      approve the card          /status      every panel, as of now   │
+│ PgUp PgDn    ░░░░░░░░░░░░░░░            y code Enter approve the card          /status      every panel, as of now   │
 │ ↑ ↓ wheel    scroll 3 rows              n or Enter   refuse; so does a reason  /context     the context window       │
 │ End          back to the latest row     Esc          put away an expired card  /cost        tokens and cost          │
 │                                         Ctrl+K       verify the audit chain    /tools       tools this agent can use │
@@ -26,7 +26,7 @@
 
 - WWWW WWW WWWWWWWW ----------------------------------------------------------------------------------------------------
 - WWWWWW                                  WWWWWWWWW d dddd ddddddd               WWWWWWWW                              -
-- BBBB BBBB    ░░░░░░░░░░░░░░░            d ddddd      ddddddd ddd dddd          BBBBBBB      ..... ...... .. .. ...   -
+- BBBB BBBB    ░░░░░░░░░░░░░░░            d dddd ddddd ddddddd ddd dddd          BBBBBBB      ..... ...... .. .. ...   -
 - B B BBBBB    ...... . ....              d dd ddddd   ddddddd dd dddd d dddddd  BBBBBBBB     ... ....... ......       -
 - BBB          .... .. ... ...... ...     ddd          ddd dddd dd ddddddd dddd  BBBBB        ...... ... ....          -
 -                                         BBBBBB       ...... ... ..... .....    BBBBBB       ..... .... ..... ... ... -

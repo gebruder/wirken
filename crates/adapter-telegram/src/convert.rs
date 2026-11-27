@@ -213,6 +213,7 @@ impl ApprovalRequestFields {
     pub fn card(&self) -> wirken_adapter_core::approval_card::ApprovalCard {
         let present = |s: &String| (!s.is_empty()).then(|| s.clone());
         wirken_adapter_core::approval_card::ApprovalCard {
+            request_id: Some(self.request_id.clone()),
             agent: self.triggering_agent.clone(),
             tool_name: self.tool_name.clone(),
             tier: self.requested_tier.clone(),

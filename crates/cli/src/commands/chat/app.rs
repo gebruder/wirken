@@ -118,7 +118,7 @@ pub(crate) const KEYS: &[KeyGroup] = &[
     KeyGroup {
         title: "APPROVALS",
         keys: &[
-            ("y Enter", "approve the card"),
+            ("y code Enter", "approve the card"),
             ("n or Enter", "refuse; so does a reason"),
             ("Esc", "put away an expired card"),
             ("Ctrl+K", "verify the audit chain"),
@@ -803,7 +803,15 @@ impl App {
             }
             match key.code {
                 KeyCode::Enter => {
-                    let answer = parse_answer(&std::mem::take(&mut self.answer));
+                    let answer = parse_answer(
+                        &std::mem::take(&mut self.answer),
+                        &self
+                            .cards
+                            .front()
+                            .expect("a card is in front")
+                            .ask
+                            .request_id,
+                    );
                     // An approval is of what was shown. A card drawn
                     // with its arguments cut stays in front and takes a
                     // refusal only.
@@ -968,12 +976,12 @@ mod tests {
     fn an_empty_enter_refuses() {
         let now = Instant::now();
         let mut app = App::new(Some("default".into()), "c-1".into());
-        app.on_server(ask("r1", 0), now);
+        app.on_server(ask("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d", 0), now);
         let t = now + ARMING;
         assert_eq!(
             app.on_key(key(KeyCode::Enter), t),
             Some(Outgoing::Decision {
-                request_id: "r1".into(),
+                request_id: "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into(),
                 approve: false,
                 reason: None
             })
@@ -1187,7 +1195,7 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new(Some("default".into()), "c-1".into());
         typed(&mut app, "half a thought", now);
-        app.on_server(ask("r1", 300), now);
+        app.on_server(ask("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d", 300), now);
         assert!(app.draft.is_empty(), "the draft is set aside");
         // Typed in the habit of answering something else.
         assert!(typed(&mut app, "y", now).is_empty());
@@ -1195,11 +1203,11 @@ mod tests {
         assert!(app.answer.is_empty());
 
         let later = now + ARMING;
-        typed(&mut app, "y", later);
+        typed(&mut app, "y 3f9a", later);
         assert_eq!(
             app.on_key(key(KeyCode::Enter), later),
             Some(Outgoing::Decision {
-                request_id: "r1".into(),
+                request_id: "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into(),
                 approve: true,
                 reason: None
             })
@@ -1211,14 +1219,14 @@ mod tests {
     fn cards_are_answered_in_order_and_anything_but_y_refuses() {
         let now = Instant::now();
         let mut app = App::new(Some("default".into()), "c-1".into());
-        app.on_server(ask("r1", 0), now);
-        app.on_server(ask("r2", 0), now);
+        app.on_server(ask("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d", 0), now);
+        app.on_server(ask("b71e0d44-5c2a-4f8e-8d31-2a6c9e0f1b37", 0), now);
         let t = now + ARMING;
         typed(&mut app, "y please", t);
         assert_eq!(
             app.on_key(key(KeyCode::Enter), t),
             Some(Outgoing::Decision {
-                request_id: "r1".into(),
+                request_id: "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into(),
                 approve: false,
                 reason: Some("y please".into())
             })
@@ -1226,15 +1234,37 @@ mod tests {
         // The next card arms from when it came to the front.
         assert!(typed(&mut app, "y", t).is_empty());
         let t2 = t + ARMING;
-        typed(&mut app, "yes", t2);
+        typed(&mut app, "yes b71e", t2);
         assert_eq!(
             app.on_key(key(KeyCode::Enter), t2),
             Some(Outgoing::Decision {
-                request_id: "r2".into(),
+                request_id: "b71e0d44-5c2a-4f8e-8d31-2a6c9e0f1b37".into(),
                 approve: true,
                 reason: None
             })
         );
+    }
+
+    /// A lone `y`, and `y` with another card's code, refuse: the answer
+    /// has to carry the code of the card in front.
+    #[test]
+    fn y_without_the_cards_code_refuses() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_server(ask("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d", 0), now);
+        app.on_server(ask("b71e0d44-5c2a-4f8e-8d31-2a6c9e0f1b37", 0), now);
+        let t = now + ARMING;
+        typed(&mut app, "y", t);
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), t),
+            Some(Outgoing::Decision { approve: false, .. })
+        ));
+        let t2 = t + ARMING;
+        typed(&mut app, "y 3f9a", t2);
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), t2),
+            Some(Outgoing::Decision { approve: false, .. })
+        ));
     }
 
     #[test]
@@ -1242,7 +1272,7 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new(Some("default".into()), "c-1".into());
         typed(&mut app, "draft", now);
-        app.on_server(ask("r1", 10), now);
+        app.on_server(ask("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d", 10), now);
         let t = now + ARMING;
         typed(&mut app, "y", t);
         app.tick(now + Duration::from_secs(10));
@@ -1264,8 +1294,8 @@ mod tests {
     fn an_expired_card_stays_in_front_of_live_ones_until_esc() {
         let now = Instant::now();
         let mut app = App::new(Some("default".into()), "c-1".into());
-        app.on_server(ask("r1", 10), now);
-        app.on_server(ask("r2", 60), now);
+        app.on_server(ask("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d", 10), now);
+        app.on_server(ask("b71e0d44-5c2a-4f8e-8d31-2a6c9e0f1b37", 60), now);
         app.tick(now + Duration::from_secs(10));
         assert!(app.expired.is_some() && app.front_card().is_none());
         let late = now + Duration::from_secs(11);
@@ -1287,7 +1317,7 @@ mod tests {
         let front = app
             .front_card()
             .expect("the live card is in front after Esc");
-        assert_eq!(front.ask.request_id, "r2");
+        assert_eq!(front.ask.request_id, "b71e0d44-5c2a-4f8e-8d31-2a6c9e0f1b37");
         assert!(app.answer.is_empty());
     }
 
@@ -1382,7 +1412,7 @@ mod tests {
     fn ctrl_c_quits_from_anywhere() {
         let now = Instant::now();
         let mut app = App::new(Some("default".into()), "c-1".into());
-        app.on_server(ask("r1", 0), now);
+        app.on_server(ask("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d", 0), now);
         app.on_key(ctrl('c'), now);
         assert!(app.quit);
     }

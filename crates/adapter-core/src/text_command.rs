@@ -9,13 +9,15 @@
 //! !deny <prefix> [reason text]
 //! ```
 //!
-//! `<prefix>` is the first 8 hex characters of the `request_id`
-//! UUID embedded in the bot's approval message. The prefix is
-//! short enough to type on a phone keyboard, long enough that
-//! collisions are rare with the small set of in-flight approvals
-//! typical for this surface. A collision is handled by the
-//! approval-command handler in each adapter (zero/multi-match ->
-//! clarification message, no resolve); this module only parses.
+//! `<prefix>` is the start of the `request_id` the gateway minted
+//! for the ask and the approval card shows: its first
+//! [`CODE_LEN`] hex characters, which the card's instruction names,
+//! or more of them. The code is short enough to type on a phone; the
+//! full id decides, so a typed prefix answers only the pending ask
+//! whose id it begins, and a prefix two pending asks share answers
+//! neither until more of the id is typed. A model never sees the id,
+//! so a card it writes into a reply cannot name the code a real ask
+//! takes. [`parse_command`] parses; [`take`] resolves.
 //!
 //! ## Factoring history
 //!
@@ -33,6 +35,70 @@
 //! The richer comments below are from the Signal version; the
 //! iMessage clone trimmed them when cloning. The full prose is
 //! the original intent.
+
+use std::collections::HashMap;
+
+/// Hex characters of a request id the operator types to answer it.
+pub const CODE_LEN: usize = 4;
+
+/// A request id as hex: its dashes out, lower case.
+pub fn id_hex(request_id: &str) -> String {
+    request_id
+        .chars()
+        .filter(|c| *c != '-')
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// The code an answer to `request_id` carries: its first
+/// [`CODE_LEN`] hex characters.
+pub fn answer_code(request_id: &str) -> String {
+    id_hex(request_id).chars().take(CODE_LEN).collect()
+}
+
+/// Whether `typed` answers `request_id`: at least [`CODE_LEN`] hex
+/// characters, in any case, that the id begins with.
+pub fn answers(typed: &str, request_id: &str) -> bool {
+    let typed = typed.to_ascii_lowercase();
+    typed.len() >= CODE_LEN
+        && typed.chars().all(|c| c.is_ascii_hexdigit())
+        && id_hex(request_id).starts_with(&typed)
+}
+
+/// What a typed prefix finds among the pending asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    /// No pending ask's id begins with it.
+    None,
+    /// One does, and it is taken off the list.
+    One(String),
+    /// This many do; none is taken.
+    Many(usize),
+}
+
+/// Find the pending ask `typed` answers in `pending`, a map from each
+/// ask's [`answer_code`] to the ids that share it, and take it off the
+/// map when it is the only one. Every other ask stays pending.
+pub fn take(pending: &mut HashMap<String, Vec<String>>, typed: &str) -> Lookup {
+    let code: String = typed.to_ascii_lowercase().chars().take(CODE_LEN).collect();
+    let Some(ids) = pending.get_mut(&code) else {
+        return Lookup::None;
+    };
+    let found: Vec<usize> = (0..ids.len())
+        .filter(|&i| answers(typed, &ids[i]))
+        .collect();
+    match found.as_slice() {
+        [] => Lookup::None,
+        [one] => {
+            let id = ids.remove(*one);
+            if ids.is_empty() {
+                pending.remove(&code);
+            }
+            Lookup::One(id)
+        }
+        many => Lookup::Many(many.len()),
+    }
+}
 
 /// Parsed approval command. Returned by [`parse_command`] when the
 /// message body matches the wire format above. Anything else
@@ -141,6 +207,38 @@ fn rest_after_prefix<'a>(rest: &'a str, prefix: &str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const A: &str = "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d";
+    const B: &str = "3f9a77d0-1111-4222-8333-444455556666";
+
+    #[test]
+    fn the_code_is_the_ids_first_four_hex_characters() {
+        assert_eq!(answer_code(A), "3f9a");
+        assert_eq!(answer_code("3F9A52C1-0000"), "3f9a");
+        assert!(answers("3f9a", A) && answers("3F9A52", A) && answers(&id_hex(A), A));
+        for no in ["3f9", "3f9b", "3f9a53", "", "zz9a"] {
+            assert!(!answers(no, A), "{no}");
+        }
+    }
+
+    #[test]
+    fn a_code_answers_only_the_ask_it_begins_and_a_shared_one_answers_neither() {
+        let mut pending: HashMap<String, Vec<String>> = HashMap::new();
+        for id in [A, B] {
+            pending
+                .entry(answer_code(id))
+                .or_default()
+                .push(id.to_string());
+        }
+        assert_eq!(take(&mut pending, "3f9a"), Lookup::Many(2));
+        assert_eq!(take(&mut pending, "0000"), Lookup::None);
+        assert_eq!(take(&mut pending, "3f9a5"), Lookup::One(A.to_string()));
+        // The other ask is still pending, and now its code alone
+        // answers it.
+        assert_eq!(take(&mut pending, "3f9a"), Lookup::One(B.to_string()));
+        assert!(pending.is_empty());
+        assert_eq!(take(&mut pending, "3f9a"), Lookup::None);
+    }
 
     #[test]
     fn approve_with_lowercase_prefix() {

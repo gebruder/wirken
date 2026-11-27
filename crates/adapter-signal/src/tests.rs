@@ -1893,7 +1893,7 @@ async fn approval_prefix_miss_does_not_remove_other_entries() {
     {
         let mut map = adapter.approval_prefix_map_for_test().await;
         map.insert(
-            "aaaa0000".into(),
+            "aaaa".into(),
             vec!["aaaa0000-1234-1234-1234-aaaa00000000".into()],
         );
     }
@@ -1912,8 +1912,45 @@ async fn approval_prefix_miss_does_not_remove_other_entries() {
     adapter.route_approval_command_for_test(&inbound, cmd).await;
     let map = adapter.approval_prefix_map_for_test().await;
     assert!(
-        map.contains_key("aaaa0000"),
+        map.contains_key("aaaa"),
         "miss-path must not touch unrelated entries"
+    );
+}
+
+/// A code two pending asks share answers neither. More of the id
+/// answers one, and the other stays pending, answered by the code
+/// alone from then on.
+#[tokio::test]
+async fn more_of_the_id_answers_one_of_two_asks_sharing_a_code() {
+    let adapter = test_adapter(SignalAllowlist::from_csv(fixtures::FIXTURE_SOURCE).unwrap());
+    {
+        let mut map = adapter.approval_prefix_map_for_test().await;
+        map.insert(
+            "abcd".into(),
+            vec![
+                "abcd1234-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+                "abcd9876-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into(),
+            ],
+        );
+    }
+    let inbound = SignalInbound {
+        message_id: "m".into(),
+        sender: fixtures::FIXTURE_SOURCE.into(),
+        sender_name: "Alice".into(),
+        text: "!approve abcd12".into(),
+        timestamp: 1,
+        sender_uuid: None,
+        group_id: None,
+    };
+    let cmd = wirken_adapter_core::text_command::CommandKind::Approve {
+        prefix: "abcd12".into(),
+    };
+    adapter.route_approval_command_for_test(&inbound, cmd).await;
+    let map = adapter.approval_prefix_map_for_test().await;
+    assert_eq!(
+        map.get("abcd").map(Vec::as_slice),
+        Some(&["abcd9876-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string()][..]),
+        "the other ask stays pending"
     );
 }
 
@@ -1923,7 +1960,7 @@ async fn approval_prefix_collision_does_not_consume_entries() {
     {
         let mut map = adapter.approval_prefix_map_for_test().await;
         map.insert(
-            "abcd1234".into(),
+            "abcd".into(),
             vec![
                 "abcd1234-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
                 "abcd1234-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into(),
@@ -1934,17 +1971,17 @@ async fn approval_prefix_collision_does_not_consume_entries() {
         message_id: "m".into(),
         sender: fixtures::FIXTURE_SOURCE.into(),
         sender_name: "Alice".into(),
-        text: "!approve abcd1234".into(),
+        text: "!approve abcd".into(),
         timestamp: 1,
         sender_uuid: None,
         group_id: None,
     };
     let cmd = wirken_adapter_core::text_command::CommandKind::Approve {
-        prefix: "abcd1234".into(),
+        prefix: "abcd".into(),
     };
     adapter.route_approval_command_for_test(&inbound, cmd).await;
     let map = adapter.approval_prefix_map_for_test().await;
-    let entries = map.get("abcd1234").expect("collision must not consume");
+    let entries = map.get("abcd").expect("collision must not consume");
     assert_eq!(entries.len(), 2, "neither request resolved");
 }
 
@@ -2000,7 +2037,7 @@ async fn approval_round_trip_via_text_command() {
     // Pick a request_id whose first 8 hex chars form a unique
     // prefix the adapter will render.
     let request_id = "0f9d3c52-1234-5678-9abc-deadbeef0001";
-    let expected_prefix = "0f9d3c52";
+    let expected_prefix = "0f9d";
 
     let fake_signal = tokio::spawn(async move {
         let (stream, _) = signal_listener.accept().await.unwrap();
@@ -2209,7 +2246,7 @@ async fn mid_session_reconnect_delivers_queued_frame() {
     let captured_send_for_fake = captured_send.clone();
 
     let request_id = "abcd1234-1234-5678-9abc-deadbeef0042";
-    let expected_prefix = "abcd1234";
+    let expected_prefix = "abcd";
     let signal_group_id = "group-reconnect-happy==";
 
     // Cross-task sync: fake_signal fires `conn1_closed_tx` after
@@ -2527,22 +2564,23 @@ fn the_approval_message_is_the_shared_card() {
         "docker",
     ));
     let fields = convert::parse_approval_request(&reader).unwrap();
-    let text = crate::adapter::approval_body(&fields, "0f9d3c52");
+    let text = crate::adapter::approval_body(&fields, "0f9d");
     assert_eq!(
         text,
         "request: agent default requests exec (tier2)\n\
+         request id: 0f9d3c52-1234-5678-9abc-deadbeef0001\n\
          action key: shell:ls\n\
          arguments: {\"command\":\"ls ~\"}\n\
          runs: runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\
          runtime: Docker default runtime (runc)\n\
          in reply to: run ls ~\n\
          model's claim (unverified): Listing your home directory.\n\
-         Reply !approve 0f9d3c52 to approve or !deny 0f9d3c52 [reason] to deny."
+         Reply !approve 0f9d to approve or !deny 0f9d [reason] to deny."
     );
 
     let reader = serialize_and_read(&build("", ""));
     let fields = convert::parse_approval_request(&reader).unwrap();
-    let text = crate::adapter::approval_body(&fields, "0f9d3c52");
+    let text = crate::adapter::approval_body(&fields, "0f9d");
     assert!(!text.contains("runs:"), "{text}");
     assert!(!text.contains("runtime:"), "{text}");
 }

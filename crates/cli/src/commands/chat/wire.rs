@@ -35,6 +35,7 @@ impl ApprovalAsk {
     pub(crate) fn card(&self) -> ApprovalCard {
         let present = |s: &String| (!s.is_empty()).then(|| s.clone());
         ApprovalCard {
+            request_id: present(&self.request_id),
             agent: self.agent.clone(),
             tool_name: self.tool_name.clone(),
             tier: self.tier.clone(),
@@ -293,7 +294,7 @@ mod tests {
             let mut r = msg
                 .init_root::<frame::Builder<'_>>()
                 .init_approval_request();
-            r.set_request_id("r1");
+            r.set_request_id("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d");
             r.set_tool_name("exec");
             r.set_arguments("{}");
             r.set_timeout_secs(300);
@@ -301,7 +302,7 @@ mod tests {
         }
         match round_trip(&msg) {
             ServerEvent::Approval(ask) => {
-                assert_eq!(ask.request_id, "r1");
+                assert_eq!(ask.request_id, "3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d");
                 assert_eq!(ask.arguments, "{}");
                 assert_eq!(ask.timeout_secs, 300);
                 assert_eq!(ask.exec_runtime, "gvisor");

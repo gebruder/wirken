@@ -229,12 +229,6 @@ impl SignalAdapter {
         })
     }
 
-    /// Length in hex characters of the prefix the operator types
-    /// to disambiguate a pending approval. The full request_id is
-    /// also included in the approval message body for operators
-    /// who hit a collision; 8 is the typing-ergonomic default.
-    pub(crate) const PREFIX_LEN: usize = 8;
-
     /// Run the adapter to completion (or indefinitely). Opens the
     /// signal-cli socket, handles the gateway handshake once, subscribes
     /// on that first signal-cli connection, then spawns the long-lived
@@ -680,43 +674,38 @@ impl SignalAdapter {
             .clone()
             .unwrap_or_else(|| inbound.sender.clone());
 
-        let matches: Vec<String> = {
-            let map = self.approval_prefix_map.lock().await;
-            map.get(&prefix).cloned().unwrap_or_default()
-        };
-
-        if matches.is_empty() {
-            let _ = self
-                .send_message(
-                    &reply_conversation,
-                    &format!("no pending request matching prefix `{prefix}`."),
-                )
-                .await;
-            return;
-        }
-        if matches.len() > 1 {
-            let count = matches.len();
-            let _ = self
-                .send_message(
-                    &reply_conversation,
-                    &format!(
-                        "prefix `{prefix}` matches {count} pending requests; use a longer \
-                         prefix or paste the full request id from the approval message."
-                    ),
-                )
-                .await;
-            return;
-        }
-
-        let request_id = matches.into_iter().next().expect("len == 1");
-        // Drop the prefix entry now so a duplicate command from
-        // another allowlisted operator doesn't double-resolve.
-        // The gateway's authorization step still gates the
-        // resolve; this just avoids redundant work on the wire.
-        {
+        // The one pending ask the prefix answers comes off the map, so
+        // a second command from another allowlisted operator does not
+        // resolve it twice. Every other ask stays. The gateway's
+        // authorization step still gates the resolve.
+        let found = {
             let mut map = self.approval_prefix_map.lock().await;
-            map.remove(&prefix);
-        }
+            wirken_adapter_core::text_command::take(&mut map, &prefix)
+        };
+        let request_id = match found {
+            wirken_adapter_core::text_command::Lookup::One(id) => id,
+            wirken_adapter_core::text_command::Lookup::None => {
+                let _ = self
+                    .send_message(
+                        &reply_conversation,
+                        &format!("no pending request matching `{prefix}`."),
+                    )
+                    .await;
+                return;
+            }
+            wirken_adapter_core::text_command::Lookup::Many(count) => {
+                let _ = self
+                    .send_message(
+                        &reply_conversation,
+                        &format!(
+                            "`{prefix}` matches {count} pending requests; type more of the \
+                             request id from the approval message."
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
 
         let (is_allow, deny_reason_wire): (bool, String) = match cmd {
             wirken_adapter_core::text_command::CommandKind::Approve { .. } => (true, String::new()),
@@ -1047,13 +1036,7 @@ async fn send_approval_request(
     writer: &Arc<Mutex<IpcFrameWriter>>,
     fields: convert::ApprovalRequestFields,
 ) {
-    let prefix: String = fields
-        .request_id
-        .chars()
-        .filter(|c| *c != '-')
-        .take(SignalAdapter::PREFIX_LEN)
-        .collect::<String>()
-        .to_ascii_lowercase();
+    let prefix = wirken_adapter_core::text_command::answer_code(&fields.request_id);
 
     // Register the prefix BEFORE sending so a fast operator who
     // reads the message and responds within microseconds finds

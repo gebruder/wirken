@@ -1,6 +1,5 @@
 120x24
 ┌ wirken · default · ollama/llama3.2:3b ──────────────────────────────────────────── ctx 4% · 14 audit rows · 1 denied ┐
-│                                                                                                                      │
 │  tool exec {"command":"find /workspace/logs -name '*.log' -mtime +7 -print0 | xargs -0 grep -l 'ERROR' | sort |      │
 │    uniq | wc -l"} needs approval                                                                                     │
 │  tool exec {"command":"ls -la"} needs approval                                                                       │
@@ -8,6 +7,7 @@
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ╔ approval needed · tier 3 · exec ═════════════════════════════════════════════════════════════════════════════════════╗
 ║request:     agent default requests exec (tier3)                                                                      ║
+║request id:  3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d                                                                     ║
 ║action key:  shell::pipeline:                                                                                         ║
 ║arguments:   {"command":"find /workspace/logs -name '*.log' -mtime +7 -print0 | xargs -0 grep -l 'ERROR' | sort |     ║
 ║             uniq | wc -l"}                                                                                           ║
@@ -18,14 +18,13 @@
 ║  I'll count the log files older than a week that mention an error, so we know how much there is to clean up. This    ║
 ║  only reads files; nothing is changed or deleted.                                                                    ║
 ║                                                                                                                      ║
-║Type y and Enter to approve; n, a reason, or anything else refuses.                                                   ║
+║Type y 3f9a and Enter to approve; n, a reason, or anything else refuses.                                              ║
 ╟ your answer ───────────────────────────────────────────────────────────────────────────────────────── Closes in 42s. ╢
 ║                                                                                                                      ║
 ╚═══════════════════════════════════════════════════════════════════════════════════════ 2 more waiting after this one ╝
  PgUp/PgDn scroll · Ctrl+U clear answer · Ctrl+K verify chain                                               Ctrl+G keys 
 
 - ...... - CCCCCCC - gggggggggggggggggg -------------------------------------------- ggg gg - gg ggggg gggg - g gggggg -
--                                                                                                                      -
 -  .... .... ................ ............... ..... ....... ...... .. ....... . ..... .. .... .. ....... . .... .      -
 -    .... . .. .... AAAAA AAAAAAAA                                                                                     -
 -  .... .... .............. ..... AAAAA AAAAAAAA                                                                       -
@@ -33,6 +32,7 @@
 ------------------------------------------------------------------------------------------------------------------------
 A AAAAAAAA AAAAAA A AAAA A A AAAA AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 Agggggggg     ..... ....... ........ .... AAAAAAA                                                                      A
+Aggggggg ggg  ....................................                                                                     A
 Agggggg gggg  WWWWWWWWWWWWWWWW                                                                                         A
 Agggggggggg   WWWWWWWWWWWWWWWW WWWWWWWWWWWWWWW WWWWW WWWWWWW WWWWWW WW WWWWWWW W WWWWW WW WWWW WW WWWWWWW W WWWW W     A
 A             WWWW W WW WWWW                                                                                           A
@@ -43,7 +43,7 @@ A ggggggg ggggg AAAAAAAAAAAAg --------------------------------------------------
 A  CCCC CCCCC CCC CCC CCCCC CCCCC CCCC C CCCC CCCC CCCCCCC CC CCCCCC CC CC CCCC CCC CCCC CCCCC CC CC CCCCC CCC CCCC    A
 A  CCCC CCCCC CCCCCC CCCCCCC CC CCCCCCC CC CCCCCCCC                                                                    A
 A                                                                                                                      A
-AWWWW W WWW WWWWW WW WWWWWWWW WW W WWWWWWW WW WWWWWWWW WWWW WWWWWWWW                                                   A
+AWWWW W WWWW WWW WWWWW WW WWWWWWWW WW W WWWWWWW WW WWWWWWWW WWWW WWWWWWWW                                              A
 A WWWW WWWWWW AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA WWWWWW WW WWWW A
 A                                                                                                                      A
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA A AAAA AAAAAAA AAAAA AAAA AAA A

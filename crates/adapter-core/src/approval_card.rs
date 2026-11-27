@@ -51,8 +51,8 @@ pub const CLAIM_LABEL: &str = "model's claim (unverified)";
 pub const NO_ARGUMENTS: &str = "(none; the action key is the whole ask)";
 
 /// The lines whose value is shown as code where a style has it: the
-/// key the gate matched and the arguments that will run.
-const CODE_LABELS: [&str; 2] = ["action key", "arguments"];
+/// ask's id, the key the gate matched and the arguments that will run.
+pub const CODE_LABELS: [&str; 3] = ["request id", "action key", "arguments"];
 
 /// What an approval is about, as the gateway established it.
 ///
@@ -64,6 +64,13 @@ const CODE_LABELS: [&str; 2] = ["action key", "arguments"];
 /// empty to `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApprovalCard {
+    /// The id the gateway minted for this ask. An answer typed on a
+    /// channel carries its first [`crate::text_command::CODE_LEN`] hex
+    /// characters, and the full id decides which ask it answers. The
+    /// model is never given it, so a card a model writes cannot show
+    /// it. `None` for a surface that asks with no id, the terminal
+    /// prompt of `wirken ask`.
+    pub request_id: Option<String>,
     /// The agent asking, by its id.
     pub agent: String,
     pub tool_name: String,
@@ -125,16 +132,19 @@ impl ApprovalCard {
             value,
             is_model_claim: false,
         };
-        let mut lines = vec![
-            line(
-                "request",
-                format!(
-                    "agent {} requests {} ({})",
-                    one_line(&self.agent),
-                    one_line(&self.tool_name),
-                    one_line(&self.tier)
-                ),
+        let mut lines = vec![line(
+            "request",
+            format!(
+                "agent {} requests {} ({})",
+                one_line(&self.agent),
+                one_line(&self.tool_name),
+                one_line(&self.tier)
             ),
+        )];
+        if let Some(id) = present(&self.request_id) {
+            lines.push(line("request id", one_line(id)));
+        }
+        lines.extend([
             line("action key", one_line(&self.action_key)),
             line(
                 "arguments",
@@ -143,7 +153,7 @@ impl ApprovalCard {
                     None => NO_ARGUMENTS.to_string(),
                 },
             ),
-        ];
+        ]);
         if let Some(location) = present(&self.exec_location) {
             lines.push(line("runs", one_line(location)));
         }
@@ -349,6 +359,7 @@ mod tests {
 
     fn exec_card() -> ApprovalCard {
         ApprovalCard {
+            request_id: Some("3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d".into()),
             agent: "default".into(),
             tool_name: "exec".into(),
             tier: "tier2".into(),
@@ -368,6 +379,7 @@ mod tests {
             labels,
             [
                 "request",
+                "request id",
                 "action key",
                 "arguments",
                 "runs",
@@ -446,6 +458,7 @@ mod tests {
         assert_eq!(
             exec_card().render(CardStyle::Plain),
             "request: agent default requests exec (tier2)\n\
+             request id: 3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d\n\
              action key: shell:ls\n\
              arguments: {\"command\":\"ls -la\"}\n\
              runs: runs on this host as davi\n\
@@ -467,13 +480,17 @@ mod tests {
             rows[0],
             "<b>request:</b> agent default requests exec (tier2)"
         );
-        assert_eq!(rows[1], "<b>action key:</b> shell:ls");
         assert_eq!(
-            rows[2],
+            rows[1],
+            "<b>request id:</b> 3f9a52c1-0b7e-4c2d-9a10-5e6f7a8b9c0d"
+        );
+        assert_eq!(rows[2], "<b>action key:</b> shell:ls");
+        assert_eq!(
+            rows[3],
             "<b>arguments:</b> {\"command\":\"echo &lt;br&gt;&lt;b&gt;x&lt;/b&gt; &amp;amp;\"}"
         );
         assert_eq!(
-            rows[6],
+            rows[7],
             "<b>model's claim (unverified):</b> <i>ok&lt;br&gt;&lt;b&gt;action key:&lt;/b&gt; shell:ls</i>"
         );
         assert!(!text.contains('\n'));

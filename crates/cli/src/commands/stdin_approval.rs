@@ -94,6 +94,10 @@ pub(crate) fn render_prompt(ctx: &PermissionDenialContext) -> String {
 /// runtime named from the exec location's mode.
 fn card(ctx: &PermissionDenialContext) -> ApprovalCard {
     ApprovalCard {
+        // `wirken ask` mints no id: the answer is read on the line
+        // under the card, and nothing the model wrote is printed
+        // until the turn ends.
+        request_id: None,
         agent: ctx.agent_id.clone(),
         tool_name: ctx.tool_name.clone(),
         tier: ctx.requested_tier.label().to_string(),

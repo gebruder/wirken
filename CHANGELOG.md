@@ -12,6 +12,13 @@ tagged.
 
 ### Security
 
+- Every approval card shows the request id the gateway minted for the ask,
+  a random UUID the model is never sent. A typed answer carries its first
+  four hex characters: `!approve <code>` and `!deny <code>` on Signal and
+  iMessage, where the code was eight characters and longer ones still
+  answer, and `y <code>` in `wirken chat`, where a lone `y` now approves
+  nothing. A code two pending requests share answers neither until more of
+  the id is typed, and answering one leaves the other pending.
 - Approval cards write out as a code point each character that reorders
   or hides text: bidirectional overrides, isolates and marks, zero-width
   and tag characters, and the line and paragraph separators. Teams cards
