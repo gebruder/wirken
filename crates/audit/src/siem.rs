@@ -3294,3 +3294,48 @@ mod delivery_status_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod model_summary_row_tests {
+    use super::*;
+    use crate::session_log::SessionEvent;
+
+    /// A model's compaction summary is a `Compaction` row, the variant
+    /// a trim round writes, not a new one: it is named, kept off the
+    /// default forward and attributed to its agent as every compaction
+    /// row is, and an operator's include list can still send it.
+    #[test]
+    fn a_model_summary_row_is_a_compaction_row_to_the_siem() {
+        let summary = SessionEvent::Compaction {
+            spans: Vec::new(),
+            extracts: serde_json::json!({ "summary": "the earlier turns listed the files" }),
+            via_model: true,
+            agent_id: "default".into(),
+            provider: Some("ollama".into()),
+            model: Some("scripted".into()),
+        };
+        assert_eq!(crate::siem_typed::variant_kind(&summary), "compaction");
+
+        let mut config = SiemConfig {
+            target: SiemTarget::Datadog,
+            endpoint: "http://127.0.0.1:0/x".into(),
+            api_key: String::new(),
+            service: "wirken".into(),
+            environment: "test".into(),
+            hmac_secret: None,
+            sentinel_typed: None,
+            typed_include_variants: None,
+            typed_exclude_variants: None,
+            typed_forwarding_enabled: None,
+            typed_poll_interval_ms: None,
+        };
+        assert!(!crate::siem_typed::should_forward(&summary, &config));
+        config.typed_include_variants = Some(vec!["compaction".into()]);
+        assert!(crate::siem_typed::should_forward(&summary, &config));
+
+        assert_eq!(
+            extract_identity_for_sentinel(&summary),
+            (None, None, Some("default".into()))
+        );
+    }
+}
