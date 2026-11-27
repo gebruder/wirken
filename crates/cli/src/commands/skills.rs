@@ -548,8 +548,16 @@ pub(crate) enum VerifyOutcome {
     Fail,
 }
 
-pub(crate) fn decide_verify_outcome(result: &VerifyResult, strict: bool) -> VerifyOutcome {
+pub(crate) fn decide_verify_outcome(
+    result: &VerifyResult,
+    delegated: bool,
+    strict: bool,
+) -> VerifyOutcome {
     match result {
+        // Delegated by the registry root this host loads skills under:
+        // the signer is the one that root names, which is the anchor
+        // --strict asks for.
+        VerifyResult::Valid { .. } if delegated => VerifyOutcome::Ok,
         VerifyResult::Valid { .. } => {
             // Self-signed only proves internal consistency. Without a
             // registry-anchored expected key the signer is whoever
@@ -572,13 +580,40 @@ pub(crate) fn decide_verify_outcome(result: &VerifyResult, strict: bool) -> Veri
     }
 }
 
+/// The registry root this host loads skills under (the operator's, else
+/// the compiled one), when `dir`'s signer is delegated by it. `None`
+/// when there is no usable root, or the bundle carries no delegation
+/// that root signed.
+fn delegating_root(dir: &std::path::Path, skill_md: &[u8]) -> Option<String> {
+    let root = match skill_registry::registry_root_state(&super::config().data_dir) {
+        skill_registry::RegistryRootState::Pinned(root)
+        | skill_registry::RegistryRootState::Compiled(root) => root,
+        _ => return None,
+    };
+    match skill_registry::verify_skill_delegated(dir, skill_md, &root) {
+        Ok(VerifyResult::Valid { .. }) => {
+            Some(root.to_bytes().iter().map(|b| format!("{b:02x}")).collect())
+        }
+        _ => None,
+    }
+}
+
 pub async fn verify(dir: &str, strict: bool) -> Result<()> {
     let skill_dir = std::path::Path::new(dir);
     let skill_md = skill_registry::read_skill_md(&skill_dir.join("SKILL.md"))?;
     let result = skill_registry::verify_skill_self_signed(skill_dir, &skill_md)?;
-    let outcome = decide_verify_outcome(&result, strict);
+    let root = match result {
+        VerifyResult::Valid { .. } => delegating_root(skill_dir, &skill_md),
+        _ => None,
+    };
+    let outcome = decide_verify_outcome(&result, root.is_some(), strict);
 
     match &result {
+        VerifyResult::Valid { signer } if root.is_some() => {
+            println!("  Signature: DELEGATED (signer delegated by the registry root)");
+            println!("  Signer: {signer}");
+            println!("  Root: {}", root.as_deref().unwrap_or_default());
+        }
         VerifyResult::Valid { signer } => {
             println!("  Signature: SELF-SIGNED (bundle key matches bundle signature)");
             println!("  Signer: {signer}");
@@ -953,18 +988,34 @@ mod verify_outcome_tests {
 
     #[test]
     fn valid_non_strict_passes() {
-        assert_eq!(decide_verify_outcome(&valid(), false), VerifyOutcome::Ok);
+        assert_eq!(
+            decide_verify_outcome(&valid(), false, false),
+            VerifyOutcome::Ok
+        );
+    }
+
+    #[test]
+    fn delegated_passes_in_both_modes() {
+        for strict in [false, true] {
+            assert_eq!(
+                decide_verify_outcome(&valid(), true, strict),
+                VerifyOutcome::Ok
+            );
+        }
     }
 
     #[test]
     fn valid_strict_fails() {
-        assert_eq!(decide_verify_outcome(&valid(), true), VerifyOutcome::Fail);
+        assert_eq!(
+            decide_verify_outcome(&valid(), false, true),
+            VerifyOutcome::Fail
+        );
     }
 
     #[test]
     fn invalid_non_strict_fails() {
         assert_eq!(
-            decide_verify_outcome(&VerifyResult::Invalid, false),
+            decide_verify_outcome(&VerifyResult::Invalid, false, false),
             VerifyOutcome::Fail
         );
     }
@@ -972,7 +1023,7 @@ mod verify_outcome_tests {
     #[test]
     fn invalid_strict_fails() {
         assert_eq!(
-            decide_verify_outcome(&VerifyResult::Invalid, true),
+            decide_verify_outcome(&VerifyResult::Invalid, false, true),
             VerifyOutcome::Fail
         );
     }
@@ -980,7 +1031,7 @@ mod verify_outcome_tests {
     #[test]
     fn unsigned_non_strict_passes() {
         assert_eq!(
-            decide_verify_outcome(&VerifyResult::Unsigned, false),
+            decide_verify_outcome(&VerifyResult::Unsigned, false, false),
             VerifyOutcome::Ok
         );
     }
@@ -988,7 +1039,7 @@ mod verify_outcome_tests {
     #[test]
     fn unsigned_strict_fails() {
         assert_eq!(
-            decide_verify_outcome(&VerifyResult::Unsigned, true),
+            decide_verify_outcome(&VerifyResult::Unsigned, false, true),
             VerifyOutcome::Fail
         );
     }

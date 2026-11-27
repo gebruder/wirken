@@ -434,7 +434,10 @@ returns 404, and both commands stop with an error naming it.
 signature passed: `delegated`, `shipped` for a bundled preset skill, `staged`,
 `self-signed` or `no` in a build without a compiled root. One that did not load shows `refused:` and the reason, and a bundled
 copy that `restore-bundled` would fix says so.
-`--strict` on `verify` treats a self-signed bundle as a failure and exits 1.
+`verify` reports a bundle whose signer the registry root in effect (the
+operator's, else the compiled one) delegated as `DELEGATED`, and it passes in
+both modes. `--strict` treats a self-signed-only or unsigned bundle as a
+failure and exits 1.
 `trust-root` installs an operator root in place of the compiled one. It
 first lists the installed skills that would stop loading under that root and
 asks for confirmation; `--yes` skips the question. `restore-bundled` gives

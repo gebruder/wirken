@@ -10,6 +10,12 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- `wirken skills verify --strict` passes a bundle whose signer is delegated by
+  the registry root in effect, the operator's or else the compiled one, and
+  reports it as `DELEGATED` (`skills_verify_strict_reads_the_delegation`).
+
 ## [3.6.2] - 2026-11-27
 
 ### Operator notes

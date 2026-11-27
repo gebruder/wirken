@@ -901,10 +901,11 @@ enum SkillCommands {
     Verify {
         /// Path to skill directory
         dir: String,
-        /// Treat self-signed bundles as a verification failure. The
-        /// default verifies the bundle is internally consistent; in
-        /// `--strict` mode an unsigned or only-self-signed bundle
-        /// exits 1, requiring out-of-band trust anchoring.
+        /// Fail on a bundle no registry root anchors. A bundle whose
+        /// signer is delegated by the registry root this host loads
+        /// skills under (the operator's, else the compiled one) passes
+        /// in both modes; in `--strict` mode an unsigned or
+        /// only-self-signed bundle exits 1.
         #[arg(long)]
         strict: bool,
     },
