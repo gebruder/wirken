@@ -2314,6 +2314,7 @@ mod tests {
                 success,
                 output: output.to_string(),
                 ran: true,
+                timed_out: false,
             });
         }
 
@@ -2797,6 +2798,7 @@ mod tests {
                 success,
                 output: output.to_string(),
                 ran: true,
+                timed_out: false,
             });
         };
         add(
@@ -3760,6 +3762,7 @@ mod tests {
             success: true,
             output: "x".into(),
             ran: true,
+            timed_out: false,
         });
         save_observed(&dir, &Layout::for_reproduction(RUN, REL, REPRO), &observed).unwrap();
         let saved: Vec<Observed> =
@@ -3921,6 +3924,7 @@ mod tests {
                     success: out.status.success(),
                     output,
                     ran: true,
+                    timed_out: false,
                 });
                 out.status.success()
             }

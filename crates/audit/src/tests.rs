@@ -3539,6 +3539,7 @@ fn every_session_event() -> Vec<SessionEvent> {
                 runtime: crate::session_log::SandboxRuntimeLabel::Host,
                 container_id: None,
                 limits: None,
+                timed_out: false,
             },
             agent_id: String::new(),
             adapter_id: None,

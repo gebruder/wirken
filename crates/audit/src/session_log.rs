@@ -627,6 +627,13 @@ pub struct SandboxProvenance {
     /// an earlier build wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<SandboxLimits>,
+    /// The command was stopped at its time limit, so it ran but did
+    /// not finish. Set by the branch that stopped it, never read from
+    /// what the command printed. Absent when false, so a row for a
+    /// command that finished is byte for byte the row an earlier build
+    /// wrote.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
 }
 
 /// Non-default limits an `exec` ran under.

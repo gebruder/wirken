@@ -947,6 +947,7 @@ mod tests {
                 runtime: crate::session_log::SandboxRuntimeLabel::Host,
                 container_id: None,
                 limits: None,
+                timed_out: false,
             },
             agent_id: "slackbot".into(),
             adapter_id: Some("slack".into()),

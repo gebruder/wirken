@@ -61,6 +61,7 @@ fn write_session(data: &Path, ran: (SandboxModeLabel, SandboxRuntimeLabel)) {
                 runtime: ran.1,
                 container_id: None,
                 limits: None,
+                timed_out: false,
             }),
             agent_id: "narrow".into(),
             adapter_id: None,

@@ -70,6 +70,10 @@ pub struct Observed {
     /// run.
     #[serde(default)]
     pub ran: bool,
+    /// Whether the command was stopped at its time limit, as the result
+    /// row's run record says. Never read from the output.
+    #[serde(default)]
+    pub timed_out: bool,
 }
 
 /// The `exec` calls in `events`, in order, each with the result the
@@ -111,6 +115,7 @@ pub fn observed_execs<'a>(events: impl IntoIterator<Item = &'a SessionEvent>) ->
                         success: *success,
                         output: output.clone(),
                         ran: sandbox.is_some(),
+                        timed_out: sandbox.as_ref().is_some_and(|s| s.timed_out),
                     });
                 }
             }
@@ -157,10 +162,7 @@ impl Log<'_> {
         let Some(first) = runs.first() else {
             return if asked { Run::Refused } else { Run::Never };
         };
-        if runs
-            .iter()
-            .any(|o| o.output.starts_with("Command timed out"))
-        {
+        if runs.iter().any(|o| o.timed_out) {
             return Run::TimedOut;
         }
         if runs.iter().any(|o| o.success != first.success) {
@@ -1028,7 +1030,7 @@ fn successes(log: &Log, command: &str) -> Vec<usize> {
 }
 
 fn as_run(o: &Observed) -> Run {
-    if o.output.starts_with("Command timed out") {
+    if o.timed_out {
         Run::TimedOut
     } else {
         Run::Done {
@@ -2233,6 +2235,7 @@ mod tests {
                 success,
                 output: output.to_string(),
                 ran: true,
+                timed_out: false,
             });
             self
         }
@@ -2341,6 +2344,34 @@ mod tests {
             log.run("sh check.sh")
         );
         assert_eq!(log.run("sh other.sh"), Run::Refused);
+    }
+
+    /// A timeout is read from the row's run record. A command that
+    /// prints a timeout's words is a failed run; one the sandbox cut is
+    /// a timeout whatever it printed.
+    #[test]
+    fn a_timeout_is_read_from_the_row_not_from_the_output() {
+        let events: Vec<SessionEvent> = serde_json::from_value(serde_json::json!([
+            {"kind": "assistant_tool_calls", "calls": [
+                {"id": "c1", "name": "exec", "arguments": "{\"command\":\"sh printed.sh\"}"},
+                {"id": "c2", "name": "exec", "arguments": "{\"command\":\"sh cut.sh\"}"}
+            ]},
+            {"kind": "tool_result", "call_id": "c1", "tool_name": "exec",
+             "output": "Command timed out after 300s (sandbox)", "success": false,
+             "sandbox": {"mode": "exec_only", "runtime": "docker"}},
+            {"kind": "tool_result", "call_id": "c2", "tool_name": "exec",
+             "output": "partial output", "success": false,
+             "sandbox": {"mode": "exec_only", "runtime": "docker", "timed_out": true}}
+        ]))
+        .expect("session events parse");
+        let seen = observed_execs(&events);
+        let log = Log(&seen);
+        assert!(
+            matches!(log.run("sh printed.sh"), Run::Done { success: false, .. }),
+            "{:?}",
+            log.run("sh printed.sh")
+        );
+        assert_eq!(log.run("sh cut.sh"), Run::TimedOut);
     }
 
     #[test]

@@ -754,6 +754,7 @@ impl DockerSandbox {
             runtime,
             container_id: Some(container.id.clone()),
             limits: self.config.non_default_limits(),
+            timed_out: false,
         };
 
         // Attached before the start, so nothing the command prints is
@@ -834,7 +835,10 @@ impl DockerSandbox {
                         self.config.timeout_secs
                     ),
                     success: false,
-                    sandbox: Some(provenance),
+                    sandbox: Some(wirken_audit::SandboxProvenance {
+                        timed_out: true,
+                        ..provenance
+                    }),
                 });
             }
         };

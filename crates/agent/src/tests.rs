@@ -14515,18 +14515,21 @@ fn the_row_carries_what_the_dispatch_reported() {
             runtime: SandboxRuntimeLabel::Docker,
             container_id: Some("70f792320e59".into()),
             limits: None,
+            timed_out: false,
         },
         SandboxProvenance {
             mode: SandboxModeLabel::Gvisor,
             runtime: SandboxRuntimeLabel::Gvisor,
             container_id: Some("abc123abc123".into()),
             limits: None,
+            timed_out: false,
         },
         SandboxProvenance {
             mode: SandboxModeLabel::Off,
             runtime: SandboxRuntimeLabel::Host,
             container_id: None,
             limits: None,
+            timed_out: false,
         },
     ] {
         assert_eq!(
@@ -14607,6 +14610,19 @@ async fn a_host_exec_that_times_out_still_records_the_host() {
     assert_eq!(provenance.mode, wirken_audit::SandboxModeLabel::Off);
     assert_eq!(provenance.runtime, wirken_audit::SandboxRuntimeLabel::Host);
     assert_eq!(provenance.container_id, None);
+    assert!(provenance.timed_out, "the row says the command was cut");
+
+    // A command that prints the same words and exits is a command that
+    // finished: the record, not the output, says it was cut.
+    let printed = tools
+        .execute(
+            "exec",
+            r#"{"command":"echo 'Command timed out after 1s'; exit 1"}"#,
+        )
+        .await
+        .expect("a result");
+    assert!(printed.output.contains("Command timed out after 1s"));
+    assert!(!printed.sandbox.expect("it ran").timed_out);
 }
 
 // --- Text arriving beside tool calls, one fixture per parse site ---
@@ -16360,6 +16376,7 @@ mod exec_location_disagreements {
                 runtime,
                 container_id: None,
                 limits: None,
+                timed_out: false,
             }),
             agent_id: "slackbot".into(),
             adapter_id: None,

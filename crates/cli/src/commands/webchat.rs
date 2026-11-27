@@ -9972,6 +9972,7 @@ mod tests {
                     runtime: SandboxRuntimeLabel::Docker,
                     container_id: Some("70f792320e59".into()),
                     limits: None,
+                    timed_out: false,
                 }),
             ),
             (
@@ -9981,6 +9982,7 @@ mod tests {
                     runtime: SandboxRuntimeLabel::Gvisor,
                     container_id: Some("abc123abc123".into()),
                     limits: None,
+                    timed_out: false,
                 }),
             ),
             (
@@ -9990,6 +9992,7 @@ mod tests {
                     runtime: SandboxRuntimeLabel::Host,
                     container_id: None,
                     limits: None,
+                    timed_out: false,
                 }),
             ),
             ("in-process", None),
