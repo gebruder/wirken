@@ -12,6 +12,19 @@ tagged.
 
 ### Security
 
+- `wirken lyrik` reads its run config, supplied patches and supplied
+  reproductions from `<data_dir>/lyrik/targets/<key>/`, keyed by the
+  target's canonical path, where no run can write. A `.lyrik/config.json`,
+  `.lyrik/fix-patches/` or `.lyrik/fix-reproductions/` in the assessed tree
+  is no longer read; a run with no config in the inputs directory stops and
+  names the path. Move existing files there.
+- Lyrik labels evidence the code under test can write as in band: an arm
+  whose state rests on a run's output, exit status or reach value has basis
+  `in_band`. A root-cause claim is `confirmed_by_executed_poc` only when the
+  runner's tracer records the origin line executing, `named_in_output` (label
+  `in_band_root_cause`) when the baseline output names the origin, and
+  `asserted_only` otherwise. The root-cause arm passes on the same runs as
+  before.
 - Every `exec` is given a fresh value in `LYRIK_REACHED`. Its result row
   records `reached` in the `sandbox` record when stdout carried the value on
   a line of its own, and the line is taken out of the recorded output. Lyrik
