@@ -62,7 +62,7 @@ fn accepted(run: &str) {
         "provider": "ollama", "model": "scripted", "base_url": model.base_url, "temperature": 0.0,
     });
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(&data, &target),
         serde_json::json!({"bench_mode": true, "phases": {"framing": pin}}).to_string(),
     )
     .unwrap();
@@ -132,7 +132,7 @@ fn unsafe_run_ids_are_refused_before_anything_is_created() {
     std::fs::create_dir_all(&home).unwrap();
     let target = target(tmp.path());
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(&data, &target),
         serde_json::json!({"bench_mode": true, "phases": {"framing": {
             "provider": "ollama", "model": "scripted", "base_url": "http://127.0.0.1:9",
         }}})

@@ -36,7 +36,7 @@ fn finding() -> String {
 const TEAM_RUBRIC: &str = "# Team rubric\n\nHIGH: anything reaching auth.\n";
 const TEAM_CONTEXT: &str = "# Team context\n";
 
-fn write_target(target: &Path, model: &ScriptedModel, walks: Option<&[&str]>) {
+fn write_target(data: &Path, target: &Path, model: &ScriptedModel, walks: Option<&[&str]>) {
     std::fs::create_dir_all(target.join("src")).unwrap();
     std::fs::write(target.join("src/auth.c"), "int check(void) { return 0; }\n").unwrap();
     let pin = serde_json::json!({
@@ -51,7 +51,7 @@ fn write_target(target: &Path, model: &ScriptedModel, walks: Option<&[&str]>) {
         config["walks"] = serde_json::json!(walks);
     }
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
-    std::fs::write(target.join(".lyrik/config.json"), config.to_string()).unwrap();
+    std::fs::write(common::lyrik_config(data, target), config.to_string()).unwrap();
     std::fs::write(target.join(".lyrik/rubric.md"), TEAM_RUBRIC).unwrap();
     std::fs::write(target.join(".lyrik/context.md"), TEAM_CONTEXT).unwrap();
 }
@@ -125,7 +125,7 @@ fn single_call_writes_to_the_committed_rubric_are_refused_and_sections_are_propo
         ),
         serde_json::json!({"role": "assistant", "content": "Findings emitted to staging."}),
     ]);
-    write_target(&target, &model, None);
+    write_target(&data, &target, &model, None);
 
     let (ok, report) = run(&data, &home, &target, RUN);
     assert!(ok, "{report}");
@@ -199,7 +199,7 @@ fn a_walk_cannot_write_the_committed_context() {
         ),
         serde_json::json!({"role": "assistant", "content": "Done."}),
     ]);
-    write_target(&target, &model, Some(&["sink-walk"]));
+    write_target(&data, &target, &model, Some(&["sink-walk"]));
 
     let (ok, report) = run(&data, &home, &target, RUN);
     assert!(ok, "{report}");
@@ -259,7 +259,7 @@ fn a_committed_team_rubric_is_what_the_model_scores_against() {
         ),
         serde_json::json!({"role": "assistant", "content": "Findings emitted to staging."}),
     ]);
-    write_target(&target, &model, None);
+    write_target(&data, &target, &model, None);
     // The config carries this run's model port, so it stays out of the
     // commit; the rubric and context are committed.
     setup_git(&target, &["init", "-q"]);

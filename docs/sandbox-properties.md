@@ -223,7 +223,7 @@ process cap, and `timeout_secs` the wall-clock limit on one command. Each is
 optional; absent means the default (512 MB, 256 processes, 300 seconds). A
 value that is not a positive whole number is refused when the file is read.
 The limits are the operator's alone: they are read from `sandbox.json` in the
-data directory and nowhere else. A target's `.lyrik/config.json`, a skill's
+data directory and nowhere else. The run config, a skill's
 frontmatter and a tool call's arguments have no field that sets or raises
 them (`exec_limits_come_only_from_the_data_directory`,
 `crates/cli/src/commands/mod.rs`). When any limit is off its default,

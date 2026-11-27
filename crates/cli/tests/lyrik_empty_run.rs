@@ -18,7 +18,7 @@ fn call(name: &str, args: serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn write_target(target: &Path, model: &ScriptedModel) {
+fn write_target(data: &Path, target: &Path, model: &ScriptedModel) {
     std::fs::create_dir_all(target.join("src")).unwrap();
     std::fs::write(target.join("src/auth.c"), "int check(void) { return 0; }\n").unwrap();
     let pin = serde_json::json!({
@@ -30,7 +30,7 @@ fn write_target(target: &Path, model: &ScriptedModel) {
         "phases": {"framing": pin},
     });
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
-    std::fs::write(target.join(".lyrik/config.json"), config.to_string()).unwrap();
+    std::fs::write(common::lyrik_config(data, target), config.to_string()).unwrap();
 }
 
 const RUN: &str = "clean";
@@ -75,7 +75,7 @@ fn run_with(script: Vec<serde_json::Value>) -> (bool, String, std::path::PathBuf
     let (home, data, target) = (tmp.join("home"), tmp.join("data"), tmp.join("target"));
     std::fs::create_dir_all(&home).unwrap();
     let model = ScriptedModel::start(script);
-    write_target(&target, &model);
+    write_target(&data, &target, &model);
     let out = wirken(&data)
         .env("HOME", &home)
         .args(["lyrik", "run", "--bench", "--target"])
@@ -139,4 +139,44 @@ fn a_marker_beside_a_finding_fails_the_run() {
     ]);
     assert!(!ok, "{report}");
     assert!(report.contains("contradicts staged findings"), "{report}");
+}
+
+/// A run reads its configuration from the operator's inputs directory
+/// for the target. A `.lyrik/config.json` in the assessed tree, which
+/// the tree's authors can write, is not read: the run stops before any
+/// model call and names where the configuration belongs.
+#[test]
+fn a_config_in_the_assessed_tree_is_not_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, data, target) = (
+        tmp.path().join("home"),
+        tmp.path().join("data"),
+        tmp.path().join("target"),
+    );
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(target.join(".lyrik")).unwrap();
+    std::fs::write(
+        target.join(".lyrik/config.json"),
+        r#"{"bench_mode":true,"scope":{"include":["**/*"],"exclude":[]}}"#,
+    )
+    .unwrap();
+    let out = wirken(&data)
+        .env("HOME", &home)
+        .args(["lyrik", "run", "--bench", "--target"])
+        .arg(&target)
+        .args(["--run", RUN])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    let inputs = common::lyrik_config(&data, &target);
+    assert!(stderr.contains(&inputs.display().to_string()), "{stderr}");
+    assert!(
+        stderr.contains("is in the assessed tree and is not read"),
+        "{stderr}"
+    );
+    assert!(
+        !target.join(".lyrik/state").exists(),
+        "the run made nothing"
+    );
 }

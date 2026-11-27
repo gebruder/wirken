@@ -80,7 +80,7 @@ fn run_pinned(
     .unwrap();
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(&data, &target),
         serde_json::json!({
             "scope": {"include": ["src/**/*"], "exclude": []},
             "phases": {

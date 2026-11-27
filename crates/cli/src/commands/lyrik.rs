@@ -335,11 +335,25 @@ pub async fn run(
         tracing::info!("removed {swept} exec container(s) an earlier run left behind");
     }
 
-    let config_path = target.join(".lyrik").join("config.json");
+    // The run's configuration is the operator's, kept under the data
+    // directory for this target. The target's own `.lyrik/` is where
+    // the run writes; nothing there is read as configuration.
+    let inputs_dir = lyrik_fix::target_inputs_dir(&super::config().data_dir, target)?;
+    let config_path = inputs_dir.join(lyrik_fix::CONFIG_FILE);
     if !config_path.exists() {
+        let in_target = target.join(".lyrik").join("config.json");
         anyhow::bail!(
-            "missing {} (see wirken/docs/lyrik.md for the schema)",
-            config_path.display()
+            "missing {}: a run reads its configuration for this target from there (see \
+             wirken/docs/lyrik.md for the schema){}",
+            config_path.display(),
+            if in_target.exists() {
+                format!(
+                    ". {} is in the assessed tree and is not read; move it there",
+                    in_target.display()
+                )
+            } else {
+                String::new()
+            }
         );
     }
 
@@ -352,7 +366,7 @@ pub async fn run(
         .with_context(|| format!("parse {}", config_path.display()))?;
     // The fix step's inputs from the target, read here, once, before
     // any agent exists. Nothing reads them again but to compare.
-    let fix_inputs = lyrik_fix::FixInputs::capture(target, &config_body, &config);
+    let fix_inputs = lyrik_fix::FixInputs::capture(&inputs_dir, target, &config_body, &config);
     super::lyrik_walks::refuse_target_walks_dir(&config, &super::config().data_dir)?;
     // Whether the sign-off is skipped is the operator's to say, on the
     // command line. The config is a file in the assessed repository,
@@ -1099,7 +1113,7 @@ fn record_signoff(chain: &RunChain, summary: &str, answer: &Signoff) -> Result<u
 
 /// Team-owned files under `.lyrik/` that a run leaves as it found
 /// them. The run reads them; it never writes them.
-const LOCKED_FILES: &[&str] = &["rubric.md", "context.md", "config.json"];
+const LOCKED_FILES: &[&str] = &["rubric.md", "context.md"];
 
 /// What a run proposes in place of a team-owned file. Written under
 /// `<run-dir>/proposed/`; promoting one is an operator step.
@@ -1516,7 +1530,7 @@ async fn dispatch_via_agent_runtime(
             Err(e) => anyhow::bail!(
                 "API key '{cred_name}' missing from vault: {e}; \
                  add it with `wirken credentials add {cred_name}` \
-                 or change the target's .lyrik/config.json pin"
+                 or change the pin in the run's config.json"
             ),
         }
     } else {
@@ -3889,7 +3903,7 @@ async fn dispatch_fixes(
     // The inputs read at run start against what is on disk now. A
     // difference means something wrote there mid-run; the arms that
     // rested on the input are withdrawn.
-    let changes = inputs.changes(&target);
+    let changes = inputs.changes();
     if changes.any() {
         audit.emit(
             "lyrik.fix.input_changed",

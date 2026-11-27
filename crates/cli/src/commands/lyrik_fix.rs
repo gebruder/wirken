@@ -59,13 +59,34 @@ pub const FIX_EXEC_COMMANDS: &[&str] = &["mkdir", "git archive", "tar", "cp", "g
 pub const FIX_SKILLS: [&str; 3] = ["fix", "fix-attack", "fix-recheck"];
 
 /// Where an operator puts a patch to be checked in place of Lyrik's
-/// own, relative to the target root: `<slug>.patch` per finding.
-pub const SUPPLIED_PATCH_DIR: &str = ".lyrik/fix-patches";
+/// own, relative to the target's inputs directory
+/// ([`target_inputs_dir`]): `<slug>.patch` per finding.
+pub const SUPPLIED_PATCH_DIR: &str = "fix-patches";
 
-/// Where an operator puts a reproduction for a finding:
-/// `<slug>.sh` or `<slug>.py`, under the same rules as a supplied
-/// patch. Read once at run start; what is there later is only compared.
-pub const SUPPLIED_REPRODUCTION_DIR: &str = ".lyrik/fix-reproductions";
+/// Where an operator puts a reproduction for a finding, relative to
+/// the target's inputs directory: `<slug>.sh` or `<slug>.py`, under
+/// the same rules as a supplied patch. Read once at run start; what is
+/// there later is only compared.
+pub const SUPPLIED_REPRODUCTION_DIR: &str = "fix-reproductions";
+
+/// The run's configuration, in the target's inputs directory.
+pub const CONFIG_FILE: &str = "config.json";
+
+/// Where the operator's inputs for `target` live: the run's
+/// `config.json`, and the patches and reproductions it supplies. Under
+/// the data directory, keyed by the target's canonical path, so no run
+/// can write them, and nothing the assessed tree holds is read as the
+/// operator's: the target's own `.lyrik/` is where a run writes its
+/// outputs, and nothing read from there decides a verdict or a command.
+pub fn target_inputs_dir(data_dir: &Path, target: &Path) -> Result<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(target)
+        .with_context(|| format!("resolve target {}", target.display()))?;
+    let key: String = sha256_hex(canonical.to_string_lossy().as_bytes())
+        .chars()
+        .take(32)
+        .collect();
+    Ok(data_dir.join("lyrik").join("targets").join(key))
+}
 
 /// A finding the fix step takes on, with the reproduction that confirms it.
 #[derive(Debug, Clone, PartialEq)]
@@ -963,8 +984,8 @@ pub fn confirm_with_supplied(
     })
 }
 
-fn read_supplied_reproductions(target: &Path) -> BTreeMap<String, SuppliedReproduction> {
-    let dir = target.join(SUPPLIED_REPRODUCTION_DIR);
+fn read_supplied_reproductions(inputs: &Path) -> BTreeMap<String, SuppliedReproduction> {
+    let dir = inputs.join(SUPPLIED_REPRODUCTION_DIR);
     let mut out = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return out;
@@ -1006,15 +1027,17 @@ pub struct SuppliedPatch {
     pub sha256: String,
 }
 
-/// The inputs the fix step takes from the target: the functionality
-/// commands in `.lyrik/config.json` and the patches under
-/// [`SUPPLIED_PATCH_DIR`]. Both sit in the tree an approved `exec`
-/// can write, so they are read once, at run start, before any agent
-/// runs, and nothing reads them again except to see whether they
-/// changed. What a walk or a fix agent writes there during the run is
-/// never used.
+/// The inputs the fix step takes from the operator: the functionality
+/// commands in the run's `config.json`, and the patches and
+/// reproductions under [`SUPPLIED_PATCH_DIR`] and
+/// [`SUPPLIED_REPRODUCTION_DIR`], all in the target's inputs directory
+/// ([`target_inputs_dir`]). They are read once, at run start, before
+/// any agent runs, and nothing reads them again except to see whether
+/// they changed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixInputs {
+    /// The target's inputs directory they were read from.
+    pub dir: std::path::PathBuf,
     pub config_sha256: String,
     pub functionality: FunctionalityConfig,
     /// By slug.
@@ -1048,8 +1071,8 @@ impl InputChanges {
     }
 }
 
-fn read_supplied_patches(target: &Path) -> BTreeMap<String, SuppliedPatch> {
-    let dir = target.join(SUPPLIED_PATCH_DIR);
+fn read_supplied_patches(inputs: &Path) -> BTreeMap<String, SuppliedPatch> {
+    let dir = inputs.join(SUPPLIED_PATCH_DIR);
     let mut out = BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return out;
@@ -1081,23 +1104,26 @@ fn read_supplied_patches(target: &Path) -> BTreeMap<String, SuppliedPatch> {
 impl FixInputs {
     /// Read the inputs. `config_body` is the bytes of
     /// `.lyrik/config.json` the run parsed `config` from.
-    pub fn capture(target: &Path, config_body: &str, config: &Value) -> Self {
+    /// `dir` is the target's inputs directory ([`target_inputs_dir`]).
+    pub fn capture(dir: &Path, target: &Path, config_body: &str, config: &Value) -> Self {
         Self {
+            dir: dir.to_path_buf(),
             config_sha256: sha256_hex(config_body.as_bytes()),
             functionality: functionality_config(config),
-            patches: read_supplied_patches(target),
-            reproductions: read_supplied_reproductions(target),
+            patches: read_supplied_patches(dir),
+            reproductions: read_supplied_reproductions(dir),
             tree: super::lyrik_git::tree_fingerprint(target),
             opt_outs: explicit_opt_outs(config),
         }
     }
 
     /// Compare what is on disk now with what was read.
-    pub fn changes(&self, target: &Path) -> InputChanges {
-        let config = std::fs::read(target.join(".lyrik").join("config.json"))
+    pub fn changes(&self) -> InputChanges {
+        let dir = &self.dir;
+        let config = std::fs::read(dir.join(CONFIG_FILE))
             .map(|b| sha256_hex(&b) != self.config_sha256)
             .unwrap_or(true);
-        let now = read_supplied_patches(target);
+        let now = read_supplied_patches(dir);
         let patches = self
             .patches
             .keys()
@@ -1107,7 +1133,7 @@ impl FixInputs {
             })
             .cloned()
             .collect();
-        let now = read_supplied_reproductions(target);
+        let now = read_supplied_reproductions(dir);
         let reproductions = self
             .reproductions
             .keys()
@@ -1248,7 +1274,7 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         arms::functionality_arm(&log, &layout, &recheck, &shape, &input.inputs.functionality);
     // The commands this arm ran came from the configuration read at run
     // start. If the file differs now, something wrote it mid-run.
-    const CONFIG_CHANGED: &str = ".lyrik/config.json changed during the run";
+    const CONFIG_CHANGED: &str = "the run's config.json changed during the run";
     let functionality = if input.changes.config {
         functionality.withheld(CONFIG_CHANGED)
     } else {
@@ -2393,6 +2419,7 @@ mod tests {
     /// Run inputs holding, at most, a patch supplied for the one finding.
     fn inputs(supplied: Option<&str>) -> FixInputs {
         FixInputs {
+            dir: std::path::PathBuf::new(),
             config_sha256: sha256_hex(b"{}"),
             functionality: FunctionalityConfig::default(),
             patches: supplied
@@ -3050,13 +3077,13 @@ mod tests {
         let dir = tmp.path().join(SUPPLIED_REPRODUCTION_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(tmp.path().join(".lyrik")).unwrap();
-        std::fs::write(tmp.path().join(".lyrik/config.json"), "{}").unwrap();
+        std::fs::write(tmp.path().join(CONFIG_FILE), "{}").unwrap();
         std::fs::write(dir.join("auth-src-a.rs-10.sh"), "echo first\n").unwrap();
         std::fs::write(dir.join("auth-src-b.rs-5.py"), "print(1)\n").unwrap();
         std::fs::write(dir.join("notes.txt"), "not a script").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("/etc/hostname", dir.join("auth-src-c.rs-1.sh")).unwrap();
-        let inputs = FixInputs::capture(tmp.path(), "{}", &serde_json::json!({}));
+        let inputs = FixInputs::capture(tmp.path(), tmp.path(), "{}", &serde_json::json!({}));
         let keys: Vec<&String> = inputs.reproductions.keys().collect();
         assert_eq!(keys, ["auth-src-a.rs-10", "auth-src-b.rs-5"]);
         let a = &inputs.reproductions["auth-src-a.rs-10"];
@@ -3075,10 +3102,10 @@ mod tests {
         );
         // Nothing changed yet; then the script is edited mid-run and
         // another appears.
-        assert!(!inputs.changes(tmp.path()).any());
+        assert!(!inputs.changes().any());
         std::fs::write(dir.join("auth-src-a.rs-10.sh"), "echo second\n").unwrap();
         std::fs::write(dir.join("auth-src-d.rs-2.sh"), "echo new\n").unwrap();
-        let changes = inputs.changes(tmp.path());
+        let changes = inputs.changes();
         assert!(changes.any());
         let changed: Vec<&String> = changes.reproductions.iter().collect();
         assert_eq!(changed, ["auth-src-a.rs-10", "auth-src-d.rs-2"]);
@@ -3498,13 +3525,14 @@ mod tests {
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(config).unwrap();
-        let inputs = FixInputs::capture(tmp.path(), config, &parsed);
+        // The inputs directory is its own; here it sits beside the tree.
+        let inputs = FixInputs::capture(&lyrik, tmp.path(), config, &parsed);
         (tmp, inputs)
     }
 
     #[test]
     fn run_inputs_are_read_once_at_run_start_with_their_digests() {
-        let (tmp, inputs) = target_with_inputs();
+        let (_tmp, inputs) = target_with_inputs();
         assert_eq!(
             inputs.functionality.test_command.as_deref(),
             Some("make check")
@@ -3513,15 +3541,15 @@ mod tests {
         let patch = &inputs.patches["auth-src-a.rs-10"];
         assert_eq!(patch.bytes, ORIGIN_PATCH.as_bytes());
         assert_eq!(patch.sha256, sha256_hex(ORIGIN_PATCH.as_bytes()));
-        assert!(!inputs.changes(tmp.path()).any());
+        assert!(!inputs.changes().any());
     }
 
     #[test]
     fn a_config_an_agent_wrote_during_the_run_is_refused() {
-        let (tmp, inputs) = target_with_inputs();
+        let (_tmp, inputs) = target_with_inputs();
         // Mid-run, something writes a test command of its own choosing.
         std::fs::write(
-            tmp.path().join(".lyrik/config.json"),
+            inputs.dir.join(CONFIG_FILE),
             r#"{"mode":"defender","fix":{"test_command":"true","coverage_command":"echo src/len.rs 100%"}}"#,
         )
         .unwrap();
@@ -3531,7 +3559,7 @@ mod tests {
             Some("make check")
         );
         assert_eq!(inputs.functionality.coverage_command, None);
-        let changes = inputs.changes(tmp.path());
+        let changes = inputs.changes();
         assert!(changes.config);
         assert!(changes.patches.is_empty());
         // Even a suite that ran green in both copies under the written
@@ -3557,7 +3585,7 @@ mod tests {
         assert_eq!(functionality.state, ArmState::Inconclusive);
         assert_eq!(
             functionality.reasons[0],
-            ".lyrik/config.json changed during the run"
+            "the run's config.json changed during the run"
         );
         assert!(out.labels.contains(&"functionality_unverified"));
         assert_eq!(out.verdict, Verdict::Inconclusive);
@@ -3565,14 +3593,14 @@ mod tests {
         // The other arms rested on nothing in the config and stand.
         assert_eq!(arm(&out, "variant").state, ArmState::Pass);
         // A config that went away is a change too.
-        std::fs::remove_file(tmp.path().join(".lyrik/config.json")).unwrap();
-        assert!(inputs.changes(tmp.path()).config);
+        std::fs::remove_file(inputs.dir.join(CONFIG_FILE)).unwrap();
+        assert!(inputs.changes().config);
     }
 
     #[test]
     fn a_patch_written_into_the_supplied_directory_during_the_run_is_refused() {
-        let (tmp, inputs) = target_with_inputs();
-        let dir = tmp.path().join(".lyrik/fix-patches");
+        let (_tmp, inputs) = target_with_inputs();
+        let dir = inputs.dir.join(SUPPLIED_PATCH_DIR);
         // A patch for another finding appears, and the supplied one is edited.
         std::fs::write(dir.join("auth-src-b.rs-5.patch"), SINK_PATCH).unwrap();
         std::fs::write(dir.join("auth-src-a.rs-10.patch"), SINK_PATCH).unwrap();
@@ -3582,7 +3610,7 @@ mod tests {
             inputs.patches["auth-src-a.rs-10"].bytes,
             ORIGIN_PATCH.as_bytes()
         );
-        let changes = inputs.changes(tmp.path());
+        let changes = inputs.changes();
         assert!(!changes.config);
         assert_eq!(
             changes
@@ -3605,7 +3633,7 @@ mod tests {
         {
             std::fs::remove_file(dir.join("auth-src-b.rs-5.patch")).unwrap();
             std::os::unix::fs::symlink("/etc/hostname", dir.join("auth-src-b.rs-5.patch")).unwrap();
-            assert!(!read_supplied_patches(tmp.path()).contains_key("auth-src-b.rs-5"));
+            assert!(!read_supplied_patches(&inputs.dir).contains_key("auth-src-b.rs-5"));
         }
     }
 

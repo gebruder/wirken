@@ -167,15 +167,14 @@ pub fn default_walks_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("lyrik").join("walks")
 }
 
-/// Refuse a target's `.lyrik/config.json` that sets `walks_dir`. A
-/// target is input that may try to steer the run, and a directory it
-/// chose would let its own text be staged as a walk; where walks come
-/// from is the operator's setting alone.
+/// Refuse a run configuration that sets `walks_dir`. Where walks come
+/// from is the operator's setting in `lyrik.json` alone, one place for
+/// every target.
 pub fn refuse_target_walks_dir(config: &serde_json::Value, data_dir: &Path) -> Result<()> {
     if config.get("walks_dir").is_some() {
         anyhow::bail!(
             "config.walks_dir is not accepted: a target does not choose where walks come from. \
-             Remove it from .lyrik/config.json; the operator sets `walks_dir` in {}",
+             Remove it from the run's config.json; the operator sets `walks_dir` in {}",
             operator_settings_path(data_dir).display()
         );
     }

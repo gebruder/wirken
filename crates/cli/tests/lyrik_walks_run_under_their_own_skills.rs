@@ -24,7 +24,7 @@ fn call(name: &str, args: serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn write_target(target: &Path, model: &ScriptedModel) {
+fn write_target(data: &Path, target: &Path, model: &ScriptedModel) {
     std::fs::create_dir_all(target.join("src")).unwrap();
     std::fs::write(target.join("src/auth.c"), "int check(void) { return 0; }\n").unwrap();
     let pin = serde_json::json!({
@@ -32,7 +32,7 @@ fn write_target(target: &Path, model: &ScriptedModel) {
     });
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(data, target),
         serde_json::json!({
             "bench_mode": true,
             "scope": {"include": ["src/**/*"], "exclude": []},
@@ -105,7 +105,7 @@ fn a_refused_exec_is_skipped_and_writes_stay_under_lyrik() {
         ),
         serde_json::json!({"role": "assistant", "content": "Done."}),
     ]);
-    write_target(&target, &model);
+    write_target(&data, &target, &model);
 
     let out = wirken(&data)
         .env("HOME", &home)
@@ -240,7 +240,7 @@ fn a_walk_stopped_at_the_round_limit_reports_its_refused_calls() {
     ];
     replies.extend((0..19).map(|_| call("list_files", serde_json::json!({}))));
     let model = ScriptedModel::start(replies);
-    write_target(&target, &model);
+    write_target(&data, &target, &model);
 
     let out = wirken(&data)
         .env("HOME", &home)
@@ -303,7 +303,7 @@ fn model_call_rows_name_the_walk_they_were_made_for() {
         call("list_files", serde_json::json!({})),
         serde_json::json!({"role": "assistant", "content": "Done."}),
     ]);
-    write_target(&target, &model);
+    write_target(&data, &target, &model);
 
     let out = wirken(&data)
         .env("HOME", &home)
@@ -379,7 +379,7 @@ fn a_walks_round_limit_is_the_operators_setting() {
         replies.extend((0..calls).map(|_| call("list_files", serde_json::json!({}))));
         replies.push(serde_json::json!({"role": "assistant", "content": "Done."}));
         let model = ScriptedModel::start(replies);
-        write_target(&target, &model);
+        write_target(&data, &target, &model);
         let out = wirken(&data)
             .env("HOME", &home)
             .args(["lyrik", "run", "--bench", "--target"])

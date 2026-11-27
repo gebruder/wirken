@@ -161,7 +161,7 @@ fn run(run: &str, harness: &str) -> Option<Outcome> {
     });
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(&data, &target),
         serde_json::json!({"phases": {"framing": pin}, "walks": ["sink-walk"]}).to_string(),
     )
     .unwrap();

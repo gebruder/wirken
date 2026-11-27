@@ -60,9 +60,8 @@ scorers into a consensus, and does not send findings to any delivery channel.
   file tools write only the walk's own staging directory
   ([the exec envelope](#the-exec-envelope)); the single call's `exec` and the
   fix step's run with the target mounted read-write, so the hash check below
-  is the control on that path. The runner never writes `.lyrik/rubric.md`,
-  `.lyrik/context.md` or `.lyrik/config.json`. It hashes all three at run
-  start and end; if one changed, it records `lyrik.locked_file.changed` with
+  is the control on that path. The runner never writes `.lyrik/rubric.md` or
+  `.lyrik/context.md`. It hashes both at run start and end; if one changed, it records `lyrik.locked_file.changed` with
   the file and both sha256 values and the run fails.
 - **Two-pass scoring.** In single-call mode the skill scores each finding in
   two independent passes (`skills/lyrik/SKILL.md`); when they disagree by more
@@ -142,7 +141,11 @@ scorers into a consensus, and does not send findings to any delivery channel.
 
 1. Install Wirken and configure the provider that `phases.framing` names.
    See [getting-started.md](getting-started.md).
-2. Write `.lyrik/config.json` in the assessed repo.
+2. Write the run config, `config.json`, in the target's inputs directory:
+   `<data_dir>/lyrik/targets/<key>/`, where `<key>` is the first 32 hex
+   characters of the SHA-256 of the target's canonical path. A run with no
+   config there stops and prints the path. A `.lyrik/config.json` in the
+   assessed tree is not read.
 3. Commit the team's rubric as `.lyrik/rubric.md`, and project context as
    `.lyrik/context.md` if you have one, or pass files outside the repo with
    `--rubric` and `--context`. See
@@ -175,8 +178,11 @@ scorers into a consensus, and does not send findings to any delivery channel.
 ## What lives where
 
 Operator-level state stays where it already lives in Wirken; the Lyrik config
-does not duplicate or override it. The team's files in `.lyrik/` are
-committed; run state lives under `.lyrik/state/`.
+does not duplicate or override it. The operator's inputs for a target, the run
+config and anything supplied to the fix step, live under the data directory,
+where no run can write and nothing in the assessed tree is taken for them. The
+team's files in `.lyrik/` are committed; run state lives under
+`.lyrik/state/`.
 
 | Lives at | What |
 |---|---|
@@ -184,19 +190,20 @@ committed; run state lives under `.lyrik/state/`.
 | `<data_dir>/sandbox.json` | sandbox mode |
 | `<data_dir>/lyrik.json` | the operator's `walks_dir`, `walk_tool_rounds`, `fix_tool_rounds`, `walk_continuations`, `transport_retries`, `run_ceiling_usd`, `run_ceiling_model_seconds`, `run_ceiling_model_calls` and `plan_child_binary` |
 | `<data_dir>/lyrik/walks/` | installed walk skills, by default |
-| `<repo>/.lyrik/config.json` | scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode |
+| `<data_dir>/lyrik/targets/<key>/config.json` | the run config: scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode, `fix` |
+| `<data_dir>/lyrik/targets/<key>/fix-patches/<slug>.patch` | optional: a patch for the defender fix step to check in place of writing one |
+| `<data_dir>/lyrik/targets/<key>/fix-reproductions/<slug>.sh` or `.py` | optional: a reproduction for the defender fix step |
 | `<repo>/.lyrik/rubric.md` | the team's severity rubric |
-| `<repo>/.lyrik/fix-patches/<slug>.patch` | optional: a patch for the defender fix step to check in place of writing one |
 | `<repo>/.lyrik/context.md` | the team's project context |
 | `<repo>/THREAT_MODEL.md`, else `<repo>/docs/threat-model.md` | the target's own threat model, loaded when committed and unmodified. The first of the two that exists is the one checked; when it is uncommitted or modified it is skipped with its reason and the other path is not tried (`load_target_threat_model`, `crates/cli/src/commands/lyrik.rs`); see [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) |
 | `<repo>/.lyrik/ledger/` | what earlier runs established about the target, one JSON record per claim; written by the runner, never by a run's agents |
 | `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may `write_file` |
 
-`.lyrik/config.json` names the provider, not its key:
+The run config names the provider, not its key:
 `phases.framing.provider: "privatemode"` resolves through the vault. Lyrik
 never sees a credential.
 
-## `.lyrik/config.json`
+## The run config (`config.json`)
 
 A sample is at [`lyrik.example.json`](lyrik.example.json).
 
@@ -281,9 +288,8 @@ home directory, else `<data_dir>/lyrik/walks`.
 { "walks_dir": "~/walks" }
 ```
 
-A `.lyrik/config.json` that sets `walks_dir` is refused before the run
-starts. A target is input that may try to steer the run, and a directory it
-chose would let its own text be staged as a walk. The runner reads the
+A run config that sets `walks_dir` is refused before the run starts: where
+walks come from is set once, in `lyrik.json`, for every target. The runner reads the
 installed walk files and never writes them; each run stages its own copy
 under the run directory.
 
@@ -357,7 +363,7 @@ read off the target, not fixed: `sink-walk` is offered `git log` and
 `git blame` when the target is a git checkout; `crypto-walk` is offered
 `cargo audit` when the target has a `Cargo.toml`; `fuzz-walk` and
 `invariant-walk` are offered the target's test command, which is
-`fix.test_command` from `.lyrik/config.json` when set and otherwise the usual
+`fix.test_command` from the run config when set and otherwise the usual
 one for the language at the target's root (`cargo test`, `npm test`,
 `go test ./...`, `python3 -m pytest`), or none. A shell project is not offered
 `cargo test`. Every walk is also told it may ask to run a script it wrote
@@ -368,7 +374,7 @@ expected, not a limit. The section
 also tells the walk how many tool rounds its turn has: 20, or
 `walk_tool_rounds` in the data directory's `lyrik.json` when the operator set
 one (`{ "walk_tool_rounds": 60 }`; zero is read as the default, and a
-target's `.lyrik/config.json` does not set it). The number is on
+run config does not set it). The number is on
 `lyrik.dispatch.started`. A walk whose turn ends
 with a reply is recorded on `lyrik.walk.completed` with status `turn_ended`,
 which says the turn ended and nothing about what the walk staged;
@@ -474,8 +480,8 @@ writes a `lyrik.phase_0.signoff` row before dispatch and a
 `lyrik.high_severity_review.signoff` row after the walks and the locked-file
 check succeed, both with `decision: "auto_bench"`, so bench runs are
 distinguishable after the
-fact. A `bench_mode` key in `.lyrik/config.json` is not read: the config is a
-file in the assessed repository, and the run says so when it finds the key set.
+fact. A `bench_mode` key in the run config is not read: only the flag skips
+the sign-off, and the run says so when it finds the key set.
 Without the flag, the run asks at the terminal (see [Setup](#setup)); without
 a terminal it writes a `lyrik.phase_0.signoff` row with `decision:
 "pending_adapter_route"` and exits non-zero before dispatch. `scoring_disagreement` has no bench handling and no routing; a
@@ -494,8 +500,8 @@ reply ends with stop reason `max_tokens`, the runner keeps what is staged,
 records the walk as truncated with the number of findings kept, and sends a
 continuation turn in the same conversation that names the kept records. The
 operator caps continuations with `walk_continuations` in the data directory's
-`lyrik.json`; the default is 2 and 0 sends none. A target's
-`.lyrik/config.json` does not set it.
+`lyrik.json`; the default is 2 and 0 sends none. The run config does not set
+it.
 
 ```json
 { "walk_continuations": 3 }
@@ -611,7 +617,7 @@ Before a run's walks start, the runner reads the ledger and writes each walk
 `staging/<walk>/ledger.json`:
 
 - `area`: the full records, not stale, for the files of the run's area. The
-  area is `scope` in `.lyrik/config.json`: a file an `include` pattern matches
+  area is `scope` in the run config: a file an `include` pattern matches
   and no `exclude` pattern does; every file when there is no `include`.
 - `index`: one line for every other record, stale ones included, with `id`,
   `key`, `evidence` and `stale`. A walk reads one of these whole at
@@ -781,14 +787,13 @@ with the repository or ignored; delete it to start over.
 
 A run has three ceilings, each set in the data directory's `lyrik.json` and
 each optional: recorded cost (`run_ceiling_usd`), model time
-(`run_ceiling_model_seconds`) and model calls (`run_ceiling_model_calls`). A
-target's `.lyrik/config.json` sets none of them. The run stops at the first
+(`run_ceiling_model_seconds`) and model calls (`run_ceiling_model_calls`). The
+run config sets none of them. The run stops at the first
 one it reaches.
 
 **A ceiling on a run's cost.** `run_ceiling_usd` in the data directory's
 `lyrik.json` is the most a run may spend, in USD of recorded cost. There is no
-ceiling unless the operator sets one. A target's `.lyrik/config.json` does not
-set it.
+ceiling unless the operator sets one. The run config does not set it.
 
 ```json
 { "run_ceiling_usd": 25 }
@@ -870,8 +875,8 @@ absolute path:
 "phases": { "framing": { "provider": "anthropic", "auth": "plan", "model": "<model id>" } }
 ```
 
-The pin takes no `base_url` and no `credential`. A target's
-`.lyrik/config.json` cannot set the binary. On this route:
+The pin takes no `base_url` and no `credential`. The run config cannot set
+the binary. On this route:
 
 - Wirken makes no model call and holds no credential. The child runs the
   model loop with the operator's sign-in.
@@ -982,7 +987,7 @@ rejects a fix by itself.
 
 **Any patch.** The arms take a patch and return a verdict. To check a patch
 Lyrik did not write (a maintainer's, an upstream fix), put it at
-`.lyrik/fix-patches/<slug>.patch` in the target, where `<slug>` is the
+`fix-patches/<slug>.patch` in the target's inputs directory, where `<slug>` is the
 finding's `stable_id` with every run of bytes outside `[A-Za-z0-9._]` replaced
 by `-`. The run checks that patch in place of writing one, records
 `patch_source` `supplied` (`generated` for a patch the fix agent wrote) and
@@ -991,26 +996,26 @@ known fix earns nothing: in the 1Password study the reference fix itself
 carried an off-by-one that a third of the generated patches reproduced and the
 grader took as equivalent ([FLAWED] 4.4).
 
-**Run inputs.** The fix step takes three inputs from the target: the `fix`
-keys in `.lyrik/config.json` (`test_command`, `coverage_command`,
-`explicit_opt_outs`), the patches under `.lyrik/fix-patches/`, and the
-reproductions under `.lyrik/fix-reproductions/`. All are read once, at run
-start, before any agent runs, and nothing reads them again except to compare.
-A patch, a reproduction or a command that appears there during the run is
-never used. `write_file` cannot
-reach either path: every staged skill's `write_paths` is the run's own
-directory. An approved `exec` runs with the target mounted read-write, so
-after the fix agents finish the runner hashes both again. A changed
-`.lyrik/config.json` makes the functionality arm `inconclusive`; a changed,
-added or removed patch for a finding makes every arm of that finding
-`inconclusive`, and so does a changed supplied reproduction the arms ran on;
-the run records `lyrik.fix.input_changed`. A changed
-`.lyrik/config.json` also fails the run, as it always has. Each fix record
+**Run inputs.** The fix step takes three inputs from the operator, all in the
+target's inputs directory under the data directory: the `fix` keys in the run
+config (`test_command`, `coverage_command`, `explicit_opt_outs`), the patches
+under `fix-patches/`, and the reproductions under `fix-reproductions/`.
+Nothing in the assessed tree is read as one of them: the target's `.lyrik/` is
+where a run writes, and nothing read from it decides a verdict or a command.
+All are read once, at run start, before any agent runs, and nothing reads them
+again except to compare. A patch, a reproduction or a command that appears
+there during the run is never used. No run can write the inputs directory: it
+is outside the target, which is all an agent's file tools and an `exec` see.
+After the fix agents finish the runner hashes the inputs again. A changed run
+config makes the functionality arm `inconclusive`; a changed, added or removed
+patch for a finding makes every arm of that finding `inconclusive`, and so
+does a changed supplied reproduction the arms ran on; the run records
+`lyrik.fix.input_changed`. Each fix record
 carries `inputs` with `config_sha256` and, for a supplied patch,
 `supplied_patch_sha256`, and for a supplied reproduction
 `supplied_reproduction_sha256`, as read at run start; the `lyrik.fix.started`
 and `lyrik.fix.verdict` rows carry the config and patch digests. A link under
-`.lyrik/fix-patches/` or `.lyrik/fix-reproductions/` is not read.
+`fix-patches/` or `fix-reproductions/` is not read.
 
 **The contract for a command that shows a defect.** It prints the value of the
 `LYRIK_REACHED` environment variable on a line of its own on stdout
@@ -1144,7 +1149,7 @@ The arms, in `arms` order:
   the arm cannot pass: a re-walk that reports nothing is a model's reading,
   and the arm is `inconclusive`, `model_judged`.
 - **Functionality.** The suite and coverage commands come from `fix` in
-  `.lyrik/config.json` when set; otherwise the `fix-recheck` agent picks the
+  the run config when set; otherwise the `fix-recheck` agent picks the
   project's own. A suite that fails in both copies attributes nothing and is
   `inconclusive`. A patch that edits test files cannot pass on the suite.
   With no coverage report listing each patched file above zero the arm
@@ -1201,7 +1206,7 @@ the tree state was unknown.
 
 **Tool rounds.** Each of the three agents may make 60 model calls in its
 turn. The operator sets another number as `fix_tool_rounds` in the data
-directory's `lyrik.json`; a target's `.lyrik/config.json` does not set it.
+directory's `lyrik.json`; the run config does not set it.
 `agents` on the record lists each agent's `rounds`, `round_limit` and
 `incomplete`. An agent stopped at the limit is recorded on its
 `lyrik.fix.completed` row with `status` `incomplete` and the counts, and
@@ -1450,7 +1455,8 @@ member patches applied together to one copy, with the arms run on the union.
 ### How-to: check your own patch, or an upstream fix
 
 The arms take any patch, not only one Lyrik wrote. Put it at
-`.lyrik/fix-patches/<slug>.patch` in the target, where `<slug>` is the
+`fix-patches/<slug>.patch` in the target's inputs directory
+(`<data_dir>/lyrik/targets/<key>/`), where `<slug>` is the
 finding's `stable_id` with every run of bytes outside `[A-Za-z0-9._]` replaced
 by `-` (the run prints each finding's `stable_id`). The run checks that patch
 in place of writing one, records `patch_source` `supplied`, and runs the same
@@ -1460,7 +1466,8 @@ the runs.
 ### How-to: supply a reproduction
 
 When you already have a script that shows a defect, give it to the run. Put it
-at `.lyrik/fix-reproductions/<slug>.sh` (or `<slug>.py`) in the target, with
+at `fix-reproductions/<slug>.sh` (or `<slug>.py`) in the target's inputs
+directory, with
 `<slug>` formed as for a supplied patch. It follows the same contract as any
 proof of concept: it prints the value of `$LYRIK_REACHED` on its own line on stdout once the
 code under test has run, then exits non-zero when the defect shows and zero
@@ -1488,7 +1495,7 @@ the same finding can be used together.
 
 ### How-to: the test and coverage commands
 
-Set them under `fix` in `.lyrik/config.json`:
+Set them under `fix` in the run config:
 
 ```json
 "fix": {
@@ -1923,9 +1930,9 @@ binary with a scripted model doing what a steered model would.
 
 - **Writes confined to the run's directory.** A run's agents may write only
   under `.lyrik/state/runs/<run-id>/`; a write to `.lyrik/rubric.md`,
-  `.lyrik/context.md`, `.lyrik/config.json`, another run's directory or the
-  source tree is refused. The runner hashes the three team files at start and
-  end and fails the run if one changed. `lyrik_team_files_stay_locked.rs`.
+  `.lyrik/context.md`, another run's directory or the source tree is refused,
+  and the run config is outside the target. The runner hashes the two team
+  files at start and end and fails the run if one changed. `lyrik_team_files_stay_locked.rs`.
 - **No network but the model provider.** `http_request`, `web_search`,
   `generate_image` and MCP tools are not offered to a run's agents; a call to
   one is refused at the tool gate, recorded on the chain, and the turn carries

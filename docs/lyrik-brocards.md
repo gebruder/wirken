@@ -65,7 +65,7 @@ Only `python3 <path under the walk's harness/>`, with or without `-I`, against a
 
 ## Modes
 
-The `mode` key in `.lyrik/config.json` chooses what a rejection does to the finding. It defaults to `"pentest"`. Any other value fails the run before any walk runs.
+The `mode` key in the run config chooses what a rejection does to the finding. It defaults to `"pentest"`. Any other value fails the run before any walk runs.
 
 - **`pentest`** keeps the finding in `findings.json` and halves its grade once per distinct rule that applied. Two rules halve it twice. There is no floor, and a positive grade never reaches zero. A finding with no numeric grade is kept unchanged.
 - **`defender`** removes the finding from `findings.json`. The rejection record stays. The funnel counts removed candidates as `brocard_removed`. After aggregation, defender mode runs the fix step on each confirmed finding; see [Defender fix step](lyrik.md#defender-fix-step).

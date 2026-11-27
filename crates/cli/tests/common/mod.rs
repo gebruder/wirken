@@ -360,3 +360,23 @@ pub fn serve_dir(root: std::path::PathBuf) -> String {
     });
     base_url
 }
+
+/// Where a Lyrik run reads its configuration for `target`: the target's
+/// inputs directory under the data directory, keyed by the target's
+/// canonical path, as `lyrik_fix::target_inputs_dir` keys it. The
+/// directory is made.
+pub fn lyrik_config(data_dir: impl AsRef<Path>, target: impl AsRef<Path>) -> std::path::PathBuf {
+    use sha2::Digest;
+    let canonical = std::fs::canonicalize(target.as_ref()).unwrap();
+    let key: String = sha2::Sha256::digest(canonical.to_string_lossy().as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let dir = data_dir
+        .as_ref()
+        .join("lyrik")
+        .join("targets")
+        .join(&key[..32]);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("config.json")
+}

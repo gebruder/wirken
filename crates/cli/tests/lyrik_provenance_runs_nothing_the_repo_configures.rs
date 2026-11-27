@@ -111,7 +111,7 @@ fn provenance_is_recorded_and_no_repo_configured_program_runs() {
     });
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(&data, &target),
         serde_json::json!({"bench_mode": true, "phases": {"framing": pin}}).to_string(),
     )
     .unwrap();
@@ -223,7 +223,7 @@ fn a_non_git_target_records_why_provenance_is_missing() {
     });
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(&data, &target),
         serde_json::json!({"bench_mode": true, "phases": {"framing": pin}}).to_string(),
     )
     .unwrap();

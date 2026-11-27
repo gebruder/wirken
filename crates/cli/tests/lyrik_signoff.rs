@@ -64,7 +64,7 @@ fn scene(run: &str, bench_mode: bool) -> Scene {
     });
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(&data, &target),
         serde_json::json!({"bench_mode": bench_mode, "phases": {"framing": pin}}).to_string(),
     )
     .unwrap();
@@ -295,7 +295,7 @@ fn the_summary_names_each_walks_model_when_one_is_overridden() {
         "provider": "ollama", "model": "scripted", "base_url": s.model.base_url,
     });
     std::fs::write(
-        s.target.join(".lyrik/config.json"),
+        common::lyrik_config(&s.data, &s.target),
         serde_json::json!({
             "phases": {"framing": pin, "sink-walk": {"model": "scripted-small"}},
             "walks": ["sink-walk", "chain-walk"],

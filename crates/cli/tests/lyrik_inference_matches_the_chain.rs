@@ -83,7 +83,7 @@ fn run_once(home: &Path, data: &Path, target: &Path) -> (serde_json::Value, Stri
         "provider": "ollama", "model": "scripted", "base_url": model.base_url, "temperature": 0.0,
     });
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(data, target),
         serde_json::json!({"bench_mode": true, "phases": {"framing": pin}}).to_string(),
     )
     .unwrap();

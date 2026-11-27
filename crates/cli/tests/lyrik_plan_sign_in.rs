@@ -14,7 +14,7 @@ use common::wirken;
 
 const PASSPHRASE: &str = "lyrik-plan-test-passphrase";
 
-fn write_target(target: &Path) {
+fn write_target(data: &Path, target: &Path) {
     std::fs::create_dir_all(target.join("src")).unwrap();
     std::fs::write(target.join("src/auth.c"), "int check(void) { return 0; }\n").unwrap();
     let config = serde_json::json!({
@@ -22,7 +22,7 @@ fn write_target(target: &Path) {
         "phases": {"framing": {"provider": "openai", "auth": "plan", "model": "gpt-plan"}},
     });
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
-    std::fs::write(target.join(".lyrik/config.json"), config.to_string()).unwrap();
+    std::fs::write(common::lyrik_config(data, target), config.to_string()).unwrap();
 }
 
 /// Run the plan-pinned target with `settings` as the data directory's
@@ -36,7 +36,7 @@ fn run(settings: Option<&str>) -> (bool, String, std::path::PathBuf) {
     if let Some(settings) = settings {
         std::fs::write(data.join("lyrik.json"), settings).unwrap();
     }
-    write_target(&target);
+    write_target(&data, &target);
     let out = wirken(&data)
         .env("HOME", &home)
         .env("WIRKEN_VAULT_PASSPHRASE", PASSPHRASE)

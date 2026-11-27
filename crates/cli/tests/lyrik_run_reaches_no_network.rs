@@ -113,7 +113,7 @@ fn run_scenario(walk: bool) {
         config["walks"] = serde_json::json!(["sink-walk"]);
     }
     std::fs::create_dir_all(target.join(".lyrik")).unwrap();
-    std::fs::write(target.join(".lyrik/config.json"), config.to_string()).unwrap();
+    std::fs::write(common::lyrik_config(&data, &target), config.to_string()).unwrap();
 
     let out = wirken(&data)
         .env("HOME", &home)

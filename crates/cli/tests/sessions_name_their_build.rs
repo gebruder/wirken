@@ -45,7 +45,7 @@ fn a_sessions_opening_head_names_the_build() {
         "provider": "ollama", "model": "scripted", "base_url": model.base_url, "temperature": 0.0,
     });
     std::fs::write(
-        target.join(".lyrik/config.json"),
+        common::lyrik_config(&data, &target),
         serde_json::json!({"bench_mode": true, "phases": {"framing": pin}}).to_string(),
     )
     .unwrap();
