@@ -611,6 +611,22 @@ pub fn envelope_collision_check(
     path: &Path,
 ) -> Result<(), AgentError> {
     const TOKENS: &[&str] = &["BEGIN UNTRUSTED SKILL", "END UNTRUSTED SKILL"];
+    // The compaction fence tags too: a skill body sits in the system
+    // message, which is not passed through
+    // `crate::conversation::without_compaction_fence`, and a tag there
+    // would read as the harness's record of earlier turns.
+    for (field, text) in [("name", name), ("body", body), ("description", description)] {
+        if crate::conversation::carries_compaction_fence(text) {
+            tracing::warn!(
+                "refusing skill at {}: {field} contains a compaction fence tag",
+                path.display()
+            );
+            return Err(AgentError::EnvelopeCollision {
+                name: name.to_string(),
+                field,
+            });
+        }
+    }
     for token in TOKENS {
         if name.contains(token) {
             tracing::warn!(

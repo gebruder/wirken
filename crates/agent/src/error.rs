@@ -92,7 +92,8 @@ pub enum AgentError {
 
     #[error(
         "skill {name} contains an envelope-collision substring in {field} \
-         and would forge the BEGIN/END UNTRUSTED SKILL boundary"
+         and would forge the BEGIN/END UNTRUSTED SKILL boundary or a \
+         compaction fence"
     )]
     EnvelopeCollision { name: String, field: &'static str },
 

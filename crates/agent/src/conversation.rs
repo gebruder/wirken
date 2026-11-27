@@ -42,6 +42,57 @@ pub const COMPACTION_FENCE_OPEN: &str = "<|compaction|>";
 /// Closing tag for the compaction fence.
 pub const COMPACTION_FENCE_CLOSE: &str = "<|/compaction|>";
 
+/// `content` with every compaction fence tag in it broken, so text
+/// that did not come from the harness cannot open or close a fence.
+///
+/// The default system prompt tells the model that a fenced block is
+/// the harness's record of earlier turns. A tool result, an inbound
+/// message, a model reply or a summary that carried the tag itself
+/// would be read as that record, so every message that enters the
+/// conversation passes through here first, and the only fence the
+/// model sees is the one a provider adapter wraps around a
+/// [`Role::Compaction`] message. The tag is matched without regard
+/// to ASCII case and a space is written after its `<`. No tag can
+/// come out that did not go in: the characters after a `<|` that is
+/// left alone are unchanged, since neither tag's remainder holds a
+/// `<`.
+///
+/// The system message is not passed through: it is the operator's
+/// prompt, which names the tags, and the skill bodies spliced into
+/// it, which [`crate::skill::envelope_collision_check`] refuses when
+/// they carry a tag.
+#[allow(
+    clippy::string_slice,
+    reason = "every offset is at a `<` or just after one, an ASCII byte, so on a char boundary"
+)]
+pub fn without_compaction_fence(content: &str) -> std::borrow::Cow<'_, str> {
+    if !content.contains("<|") {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    // Lowercasing ASCII keeps every byte offset.
+    let folded = content.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut from = 0;
+    for (at, _) in folded.match_indices("<|") {
+        let rest = &folded[at + 2..];
+        if rest.starts_with("compaction|>") || rest.starts_with("/compaction|>") {
+            out.push_str(&content[from..=at]);
+            out.push(' ');
+            from = at + 1;
+        }
+    }
+    if from == 0 {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    out.push_str(&content[from..]);
+    std::borrow::Cow::Owned(out)
+}
+
+/// Whether `text` carries a compaction fence tag, in any ASCII case.
+pub fn carries_compaction_fence(text: &str) -> bool {
+    matches!(without_compaction_fence(text), std::borrow::Cow::Owned(_))
+}
+
 /// A tool call request from the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequest {
@@ -92,7 +143,7 @@ impl Conversation {
     pub fn add_user_message(&mut self, content: &str) {
         self.messages.push(Message {
             role: Role::User,
-            content: content.to_string(),
+            content: without_compaction_fence(content).into_owned(),
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
@@ -103,7 +154,7 @@ impl Conversation {
     pub fn add_assistant_message(&mut self, content: &str) {
         self.messages.push(Message {
             role: Role::Assistant,
-            content: content.to_string(),
+            content: without_compaction_fence(content).into_owned(),
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
@@ -125,7 +176,7 @@ impl Conversation {
     pub fn add_tool_result(&mut self, tool_call_id: &str, tool_name: &str, result: &str) {
         self.messages.push(Message {
             role: Role::Tool,
-            content: result.to_string(),
+            content: without_compaction_fence(result).into_owned(),
             tool_call_id: Some(tool_call_id.to_string()),
             tool_name: Some(tool_name.to_string()),
             tool_calls: None,
@@ -203,7 +254,10 @@ impl Conversation {
     /// end. Used by [`crate::context::ContextEngine::fit`] to
     /// inject a [`Role::Compaction`] summary at position 1,
     /// immediately after the system prompt.
-    pub fn insert_at(&mut self, idx: usize, message: Message) {
+    pub fn insert_at(&mut self, idx: usize, mut message: Message) {
+        if message.role != Role::System {
+            message.content = without_compaction_fence(&message.content).into_owned();
+        }
         let pos = idx.min(self.messages.len());
         self.messages.insert(pos, message);
     }
@@ -222,7 +276,11 @@ impl Conversation {
     /// tool_calls fields. Out-of-range indices are silently ignored.
     pub fn replace_content(&mut self, idx: usize, new_content: String) {
         if let Some(msg) = self.messages.get_mut(idx) {
-            msg.content = new_content;
+            msg.content = if msg.role == Role::System {
+                new_content
+            } else {
+                without_compaction_fence(&new_content).into_owned()
+            };
         }
     }
 
