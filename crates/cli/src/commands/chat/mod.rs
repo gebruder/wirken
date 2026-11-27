@@ -223,8 +223,17 @@ async fn chat(
 
     let outcome = event_loop(&mut screen, link, &socket, &key, &mut keys, app).await;
 
+    // The reader sees `stop` within one poll. On a terminal that hung
+    // up, crossterm's poll never returns: it retries the EOF read in a
+    // loop. That thread is left to the process exit, never joined.
     stop_keys.store(true, Ordering::Relaxed);
-    let _ = keys_thread.join();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !keys_thread.is_finished() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    if keys_thread.is_finished() {
+        let _ = keys_thread.join();
+    }
     screen.leave();
     outcome
 }
