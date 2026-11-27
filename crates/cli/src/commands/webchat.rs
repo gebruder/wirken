@@ -1149,6 +1149,8 @@ async function send() {
             renderMarkdown(liveAssistant, liveReceived);
             setTurn(approvalCurrent ? 'turn open · agent holding on your decision' : 'turn open');
             scrollToEnd();
+          } else if (event.type === 'thinking') {
+            if (!liveAssistant && !approvalCurrent) setTurn('turn open · the model is thinking');
           } else if (event.type === 'error') {
             terminal = true;
             const msg = String(event.text || '');
@@ -3346,6 +3348,9 @@ async fn run_turn(turn: AcceptedTurn, stream: &mut tokio::net::TcpStream, shared
                                         "data: {}\n\n",
                                         serde_json::json!({"type": "delta", "text": text})
                                     )
+                                }
+                                wirken_agent::llm_stream::StreamEvent::Thinking => {
+                                    format!("data: {}\n\n", serde_json::json!({"type": "thinking"}))
                                 }
                                 wirken_agent::llm_stream::StreamEvent::Done(_) => break,
                                 // The page reads tool activity off the
@@ -8490,7 +8495,10 @@ mod tests {
         say("default/webchat/c-older#sub-1", "a sub-agent's lane");
         drop(log);
 
-        let rows = crate::commands::webchat::past_conversation_rows(&cfg, &["default/webchat/c-active".to_string()]);
+        let rows = crate::commands::webchat::past_conversation_rows(
+            &cfg,
+            &["default/webchat/c-active".to_string()],
+        );
         let ids: Vec<&str> = rows.iter().map(|r| r["log_id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["default/webchat/c-newer", "default/webchat/c-older"]);
         assert_eq!(rows[1]["first_message"], "the older one");
@@ -8498,6 +8506,17 @@ mod tests {
         assert_eq!(rows[1]["channel"], "webchat");
         assert!(rows[1]["message_count"].is_null());
         assert!(rows[1]["last_activity"].as_str().unwrap().ends_with('Z'));
+    }
+
+    /// A model that thinks before it answers says so on the turn's
+    /// status, until its first words or a card take over.
+    #[test]
+    fn the_page_says_the_model_is_thinking() {
+        let script = page_script();
+        assert!(script.contains("} else if (event.type === 'thinking') {"));
+        assert!(script.contains(
+            "if (!liveAssistant && !approvalCurrent) setTurn('turn open · the model is thinking');"
+        ));
     }
 
     /// The rail exists when there is more than one destination: a

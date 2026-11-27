@@ -290,7 +290,10 @@ window narrows or widens moves with it.
 The transcript and the draft are one box, with the draft under a rule.
 Once the conversation is taller than the window, a thumb in the box's right
 border shows where the view is, and the rule's right end says how many rows
-are above and below, and names End, the key back to the latest row.
+are above and below, and names End, the key back to the latest row. While a
+reply is on its way the rule reads `waiting for the reply`, and `the model is
+thinking` once a model that reasons before it answers has started to; its
+reasoning itself is not shown. The web chat says the same on its turn status.
 
 The bottom row is the key bar, across the whole width at every size. It shows
 the keys for what is on screen, most needed first, and drops them from the

@@ -66,6 +66,8 @@ pub(crate) enum Query {
 pub(crate) enum ServerEvent {
     /// Reply text as the model writes it.
     Chunk(String),
+    /// The model began to think before answering.
+    Thinking,
     /// The model's stream failed.
     StreamError(String),
     ToolCall {
@@ -114,6 +116,7 @@ pub(crate) fn parse(
         frame::LlmChunk(c) => match c?.which() {
             Ok(llm_chunk::Data(d)) => ServerEvent::Chunk(text(d)?),
             Ok(llm_chunk::Error(e)) => ServerEvent::StreamError(text(e)?),
+            Ok(llm_chunk::Thinking(())) => ServerEvent::Thinking,
             _ => ServerEvent::Other,
         },
         frame::ToolActivity(t) => {
@@ -260,6 +263,12 @@ mod tests {
             .init_llm_chunk()
             .set_data("Hel");
         assert_eq!(round_trip(&msg), ServerEvent::Chunk("Hel".into()));
+
+        let mut msg = Builder::new_default();
+        msg.init_root::<frame::Builder<'_>>()
+            .init_llm_chunk()
+            .set_thinking(());
+        assert_eq!(round_trip(&msg), ServerEvent::Thinking);
 
         let mut msg = Builder::new_default();
         {

@@ -36,6 +36,11 @@ pub(crate) fn sse_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
 pub enum StreamEvent {
     /// A chunk of text from the assistant.
     TextDelta(String),
+    /// The model began to think before answering. Sent once, at the
+    /// first piece of its reasoning, and with none of it: the reasoning
+    /// is the model's own and is not shown, only that it is under way,
+    /// so a screen waiting on a long think can say so.
+    Thinking,
     /// The complete response, matching non-streaming behavior.
     Done(LlmResponse),
     /// An error during streaming.
@@ -160,7 +165,12 @@ impl LlmClient {
                         content.push_str(piece);
                         let _ = tx.send(StreamEvent::TextDelta(piece.to_string())).await;
                     }
-                    if let Some(piece) = message.get("thinking").and_then(|t| t.as_str()) {
+                    if let Some(piece) = message.get("thinking").and_then(|t| t.as_str())
+                        && !piece.is_empty()
+                    {
+                        if thinking.is_empty() {
+                            let _ = tx.send(StreamEvent::Thinking).await;
+                        }
                         thinking.push_str(piece);
                     }
                     if let Some(calls) = message.get("tool_calls").and_then(|t| t.as_array()) {
@@ -306,6 +316,9 @@ impl LlmClient {
                             .and_then(|c| c.get("delta"))
                         {
                             if let Some(thought) = crate::llm::message_reasoning(delta) {
+                                if reasoning.is_empty() && !thought.is_empty() {
+                                    let _ = tx.send(StreamEvent::Thinking).await;
+                                }
                                 reasoning.push_str(&thought);
                             }
                             if let Some(content) = delta.get("content").and_then(|c| c.as_str())
@@ -643,6 +656,9 @@ impl LlmClient {
                             } else if dt == "thinking_delta"
                                 && let Some(text) = delta.get("thinking").and_then(|t| t.as_str())
                             {
+                                if reasoning_parts.is_empty() {
+                                    let _ = tx.send(StreamEvent::Thinking).await;
+                                }
                                 reasoning_parts.push(text.to_string());
                             } else if dt == "input_json_delta"
                                 && let Some(partial) =

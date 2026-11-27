@@ -10948,12 +10948,19 @@ mod openai_compat_stub {
         assert_eq!(body["options"]["num_ctx"], 32_768);
 
         let mut deltas = String::new();
+        let mut thinking = 0;
         while let Ok(event) = rx.try_recv() {
-            if let StreamEvent::TextDelta(piece) = event {
-                deltas.push_str(&piece);
+            match event {
+                StreamEvent::TextDelta(piece) => deltas.push_str(&piece),
+                StreamEvent::Thinking => {
+                    assert!(deltas.is_empty(), "thinking is said before the text");
+                    thinking += 1;
+                }
+                _ => {}
             }
         }
         assert_eq!(deltas, "I'll read the deploy log.");
+        assert_eq!(thinking, 1, "said once, at the first piece of reasoning");
         match response {
             LlmResponse::ToolCalls {
                 calls,

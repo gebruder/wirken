@@ -6442,6 +6442,7 @@ fn turn_event_frame(
     let fb = message.init_root::<frame::Builder<'_>>();
     match event {
         StreamEvent::TextDelta(text) => fb.init_llm_chunk().set_data(&text),
+        StreamEvent::Thinking => fb.init_llm_chunk().set_thinking(()),
         StreamEvent::Error(error) => fb.init_llm_chunk().set_error(&error),
         StreamEvent::ToolCall {
             id,

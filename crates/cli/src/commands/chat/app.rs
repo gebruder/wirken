@@ -203,6 +203,8 @@ pub(crate) struct App {
     streaming: bool,
     /// A message was sent and its reply has not come back.
     pub busy: bool,
+    /// The model is thinking and has written nothing yet this round.
+    pub thinking: bool,
     pub draft: String,
     /// Byte offset in `draft`, on a grapheme boundary.
     pub cursor: usize,
@@ -259,6 +261,7 @@ impl App {
             selected: 0,
             entries: Vec::new(),
             streaming: false,
+            thinking: false,
             busy: false,
             draft: String::new(),
             cursor: 0,
@@ -340,6 +343,7 @@ impl App {
     fn end_turn(&mut self, now: Instant) -> Vec<Outgoing> {
         self.streaming = false;
         self.busy = false;
+        self.thinking = false;
         if !self.cards.is_empty() {
             self.cards.clear();
             self.answer.clear();
@@ -357,7 +361,9 @@ impl App {
     /// Take in a frame from the gateway. Returns what to ask next.
     pub fn on_server(&mut self, event: ServerEvent, now: Instant) -> Vec<Outgoing> {
         match event {
+            ServerEvent::Thinking => self.thinking = self.busy,
             ServerEvent::Chunk(text) => {
+                self.thinking = false;
                 match (self.streaming, self.entries.last_mut()) {
                     (true, Some(Entry::Agent(reply))) => reply.push_str(&text),
                     _ => self.entries.push(Entry::Agent(text)),
@@ -375,6 +381,7 @@ impl App {
                 arguments,
             } => {
                 self.streaming = false;
+                self.thinking = false;
                 self.entries.push(Entry::Tool {
                     id,
                     name,
@@ -1154,6 +1161,25 @@ mod tests {
         app.on_server(ServerEvent::Reply("Hello".into()), now);
         assert!(!app.busy);
         assert_eq!(app.entries.last(), Some(&Entry::Agent("Hello".into())));
+    }
+
+    /// While the model thinks before its first word, the screen says
+    /// so; its first piece of text, a tool call or the reply ends it.
+    #[test]
+    fn the_rule_says_the_model_is_thinking_until_it_writes() {
+        let now = Instant::now();
+        let mut app = App::new(Some("default".into()), "c-1".into());
+        app.on_server(ServerEvent::Thinking, now);
+        assert!(!app.thinking, "no turn, nothing to think about");
+        typed(&mut app, "one plus one?", now);
+        app.on_key(key(KeyCode::Enter), now);
+        app.on_server(ServerEvent::Thinking, now);
+        assert!(app.thinking);
+        app.on_server(ServerEvent::Chunk("Two.".into()), now);
+        assert!(!app.thinking);
+        app.on_server(ServerEvent::Thinking, now);
+        app.on_server(ServerEvent::Reply("Two.".into()), now);
+        assert!(!app.thinking, "the reply ends it");
     }
 
     #[test]

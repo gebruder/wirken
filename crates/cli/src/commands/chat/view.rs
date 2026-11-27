@@ -270,7 +270,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: Instant) {
     let shown_rows = input_rows.len().min(INPUT_ROWS);
     let first_row = (cursor_row + 1).saturating_sub(shown_rows);
     let input_height = u16::try_from(shown_rows + 2).unwrap_or(u16::MAX);
-    let input_title = if app.busy {
+    let input_title = if app.busy && app.thinking {
+        "the model is thinking"
+    } else if app.busy {
         "waiting for the reply"
     } else {
         "message"

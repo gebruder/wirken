@@ -4093,10 +4093,17 @@ impl Agent {
                 let mut held = wirken_gateway::leak::HeldStream::new(self.leak_matcher.clone());
                 let forward_handle = tokio::spawn(async move {
                     while let Some(event) = round_rx.recv().await {
-                        if let StreamEvent::TextDelta(piece) = event
-                            && let Some(safe) = held.push(&piece)
-                        {
-                            let _ = forward_tx.send(StreamEvent::TextDelta(safe)).await;
+                        match event {
+                            StreamEvent::TextDelta(piece) => {
+                                if let Some(safe) = held.push(&piece) {
+                                    let _ = forward_tx.send(StreamEvent::TextDelta(safe)).await;
+                                }
+                            }
+                            // Carries no text, so nothing to hold back.
+                            StreamEvent::Thinking => {
+                                let _ = forward_tx.send(StreamEvent::Thinking).await;
+                            }
+                            _ => {}
                         }
                     }
                     if let Some(rest) = held.finish() {

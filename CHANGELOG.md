@@ -10,6 +10,26 @@ tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- While a model thinks before it answers, `wirken chat` says so: the rule
+  over the draft reads `the model is thinking` instead of `waiting for the
+  reply`, from the first piece of its reasoning until its first words, a
+  tool call or the reply. The web chat's turn status reads `turn open · the
+  model is thinking`. A thinking model can take a minute before its first
+  word, and both screens showed nothing to tell it from a stalled one. The
+  reasoning itself is not shown. The gateway sends a new `thinking` member
+  of the IPC `LlmChunk` union, which an older `wirken chat` skips. It comes
+  from ollama, OpenAI-compatible and Anthropic streams
+  (`streaming_ollama_asks_its_own_endpoint_for_the_context_window`,
+  `crates/agent/src/tests.rs`;
+  `the_rule_says_the_model_is_thinking_until_it_writes`,
+  `crates/cli/src/commands/chat/app.rs`;
+  `the_events_the_screen_reads_are_parsed`,
+  `crates/cli/src/commands/chat/wire.rs`;
+  `the_page_says_the_model_is_thinking`,
+  `crates/cli/src/commands/webchat.rs`).
+
 ### Fixed
 
 - A streamed reply from an ollama model, in `wirken chat` and the web

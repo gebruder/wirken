@@ -120,6 +120,9 @@ struct LlmChunk {
     # An error that terminated the stream.
     done @2 :Void;
     # Signal that the stream is complete.
+    thinking @3 :Void;
+    # The model began to think before answering; none of its reasoning.
+    # A reader that predates it sees an unknown member and skips it.
   }
 }
 
