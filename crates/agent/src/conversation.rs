@@ -45,47 +45,76 @@ pub const COMPACTION_FENCE_CLOSE: &str = "<|/compaction|>";
 /// `content` with every compaction fence tag in it broken, so text
 /// that did not come from the harness cannot open or close a fence.
 ///
-/// The default system prompt tells the model that a fenced block is
-/// the harness's record of earlier turns. A tool result, an inbound
-/// message, a model reply or a summary that carried the tag itself
-/// would be read as that record, so every message that enters the
-/// conversation passes through here first, and the only fence the
-/// model sees is the one a provider adapter wraps around a
-/// [`Role::Compaction`] message. The tag is matched without regard
-/// to ASCII case and a space is written after its `<`. No tag can
-/// come out that did not go in: the characters after a `<|` that is
-/// left alone are unchanged, since neither tag's remainder holds a
-/// `<`.
+/// The default system prompt tells the model that a fenced block
+/// stands in for earlier turns. A tool result, an inbound message, a
+/// model reply or a summary that carried the tag itself would be read
+/// as that block, so every message that enters the conversation passes
+/// through here first, and the only fence the model sees is the one a
+/// provider adapter wraps around a [`Role::Compaction`] message.
+///
+/// A tag is `<`, `|`, an optional `/`, `compaction`, `|` and `>`, in
+/// any ASCII case, with any run of whitespace, line breaks included,
+/// or of characters that draw nothing (the zero-width and bidi
+/// controls) between any two of its characters. A backslash is written
+/// after its `<`. No tag can come out that did not go in: a backslash
+/// is neither of those, so a broken tag no longer matches, and the
+/// characters after a `<` that is left alone are unchanged, since no
+/// tag's remainder holds a `<`.
+///
+/// A tag split across two messages is not joined into one: each
+/// message is its own content in the request, and the one place
+/// contents are joined, the system slot, puts the harness's own
+/// opening tag between the system text and a compaction message.
 ///
 /// The system message is not passed through: it is the operator's
 /// prompt, which names the tags, and the skill bodies spliced into
 /// it, which [`crate::skill::envelope_collision_check`] refuses when
 /// they carry a tag.
-#[allow(
-    clippy::string_slice,
-    reason = "every offset is at a `<` or just after one, an ASCII byte, so on a char boundary"
-)]
 pub fn without_compaction_fence(content: &str) -> std::borrow::Cow<'_, str> {
-    if !content.contains("<|") {
+    if !content.contains('<') {
         return std::borrow::Cow::Borrowed(content);
     }
-    // Lowercasing ASCII keeps every byte offset.
-    let folded = content.to_ascii_lowercase();
+    let chars: Vec<char> = content.chars().collect();
     let mut out = String::new();
-    let mut from = 0;
-    for (at, _) in folded.match_indices("<|") {
-        let rest = &folded[at + 2..];
-        if rest.starts_with("compaction|>") || rest.starts_with("/compaction|>") {
-            out.push_str(&content[from..=at]);
-            out.push(' ');
-            from = at + 1;
+    let mut broke = false;
+    for (i, c) in chars.iter().enumerate() {
+        out.push(*c);
+        if *c == '<' && tag_at(&chars, i) {
+            out.push('\\');
+            broke = true;
         }
     }
-    if from == 0 {
-        return std::borrow::Cow::Borrowed(content);
+    if broke {
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(content)
     }
-    out.push_str(&content[from..]);
-    std::borrow::Cow::Owned(out)
+}
+
+/// Whether a fence tag starts at the `<` at `at`.
+fn tag_at(chars: &[char], at: usize) -> bool {
+    let ignorable =
+        |c: char| c.is_whitespace() || wirken_adapter_core::approval_card::shown_as_code_point(c);
+    let mut j = at + 1;
+    let mut next = |want: &dyn Fn(char) -> bool, optional: bool| -> bool {
+        while chars.get(j).is_some_and(|c| ignorable(*c)) {
+            j += 1;
+        }
+        match chars.get(j) {
+            Some(c) if want(*c) => {
+                j += 1;
+                true
+            }
+            _ => optional,
+        }
+    };
+    next(&|c| c == '|', false)
+        && next(&|c| c == '/', true)
+        && "compaction"
+            .chars()
+            .all(|l| next(&|c| c.eq_ignore_ascii_case(&l), false))
+        && next(&|c| c == '|', false)
+        && next(&|c| c == '>', false)
 }
 
 /// Whether `text` carries a compaction fence tag, in any ASCII case.

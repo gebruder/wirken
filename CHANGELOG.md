@@ -19,8 +19,12 @@ tagged.
   Google Chat cards escape each value (`crates/adapter-core/src/approval_card.rs`,
   `tests/hostile/corpus.jsonl`).
 - The compaction fence tags are broken in every message that enters an
-  agent's conversation, so only the harness writes a fence. A skill whose
-  name, description or body carries a tag is refused at load.
+  agent's conversation, in any case and with whitespace or characters
+  that draw nothing between their parts, so only the harness writes a
+  fence. A skill whose name, description or body carries a tag is refused
+  at load. The default system prompt says a summary in a fence is
+  model-written from earlier turns, tool results included, and is no
+  instruction.
 - A model summary of trimmed messages is a `compaction` row with
   `via_model: true` and the summary in `extracts.summary`, written before
   the summary is placed in the context.
