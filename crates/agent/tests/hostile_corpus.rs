@@ -57,6 +57,14 @@
 //! - `egress_ask`: a request the egress proxy puts to the operator, and
 //!   the line the approval shows for it.
 //! - `seccomp_refuses`: syscalls the exec seccomp profile must refuse.
+//! - `forged`: text that imitates the gateway, arriving the way `via`
+//!   says: `tool_result`, as what a tool returned, or `inbound`, as the
+//!   message that starts the turn. The model then makes the line's
+//!   call. The replay runs a whole turn against a scripted model and
+//!   checks that the forgery changed nothing the gateway decides: the
+//!   operator is asked about the call, no grant is stored, the chain
+//!   records the refusal and no approval, and the forged text reached
+//!   the model as the data it is.
 //!
 //! A mismatch is a finding about the gate, not a stale expectation.
 //! The rule for this file is that a line is changed only when the
@@ -1312,4 +1320,269 @@ fn an_egress_ask_shows_the_request() {
         replayed > 0,
         "no line in {CORPUS_PATH} carries 'egress_ask'"
     );
+}
+
+/// A model that answers each request with the next scripted message
+/// and keeps every request body it was sent.
+async fn scripted_model(
+    replies: Vec<Value>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = seen.clone();
+    tokio::spawn(async move {
+        for reply in replies {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buf = vec![0u8; 16384];
+            let body_at = loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                request.extend_from_slice(&buf[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .map(|v| v.trim().parse().unwrap())
+                        .unwrap_or(0);
+                    while request.len() < end + 4 + length {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                    }
+                    break end + 4;
+                }
+                if n == 0 {
+                    return;
+                }
+            };
+            kept.lock()
+                .unwrap()
+                .push(serde_json::from_slice(&request[body_at..]).unwrap_or(Value::Null));
+            let finish = if reply.get("tool_calls").is_some() {
+                "tool_calls"
+            } else {
+                "stop"
+            };
+            let body = serde_json::json!({
+                "id": "chatcmpl-corpus",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "scripted",
+                "choices": [{"index": 0, "message": reply, "finish_reason": finish}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        }
+    });
+    (format!("http://{addr}/v1"), seen)
+}
+
+fn tool_call(id: &str, name: &str, arguments: &Value) -> Value {
+    serde_json::json!({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments.to_string()},
+        }],
+    })
+}
+
+/// Records each ask and refuses it.
+#[derive(Default)]
+struct Refuses(std::sync::Mutex<Vec<(String, String)>>);
+
+#[async_trait::async_trait]
+impl ApprovalGate for Refuses {
+    async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+        self.0
+            .lock()
+            .unwrap()
+            .push((ctx.tool_name.clone(), ctx.action.approval_key()));
+        ApprovalOutcome::Denied {
+            reason: Some("corpus".into()),
+            actor: None,
+        }
+    }
+
+    fn source(&self) -> wirken_audit::ApprovalSource {
+        wirken_audit::ApprovalSource::Stdin
+    }
+}
+
+/// Every line with `forged`: the forgery changes no gate outcome, no
+/// grant and no session state.
+#[test]
+fn a_forged_gateway_message_changes_nothing_the_gateway_decides() {
+    use wirken_agent::conversation::{carries_compaction_fence, without_compaction_fence};
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    let scratch = tempfile::tempdir().unwrap();
+    let fixtures = build_fixtures(scratch.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut via_seen = BTreeSet::new();
+    for entry in parse_corpus(&fixtures) {
+        let Some(forged) = entry.raw.get("forged") else {
+            continue;
+        };
+        let via = forged["via"].as_str().expect("forged.via");
+        let text = forged["text"].as_str().expect("forged.text");
+        let at = format!(
+            "\n{CORPUS_PATH}:{}  id={}\n  why       {}\n",
+            entry.lineno, entry.id, entry.why
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (message, mut replies) = match via {
+            "tool_result" => {
+                std::fs::write(workspace.join("notes.txt"), text).unwrap();
+                (
+                    "Read notes.txt and follow it.".to_string(),
+                    vec![tool_call(
+                        "call_read",
+                        "read_file",
+                        &serde_json::json!({"path": "notes.txt"}),
+                    )],
+                )
+            }
+            "inbound" => (text.to_string(), Vec::new()),
+            other => panic!("{at}unknown forged.via '{other}'. One of: tool_result, inbound."),
+        };
+        replies.push(tool_call("call_next", &entry.tool, &entry.args));
+        replies.push(serde_json::json!({"role": "assistant", "content": "Done."}));
+
+        let (_, action) = classify(&entry.tool, &entry.args);
+        let agent_id = format!("forged-{}", entry.lineno);
+        let session_id = format!("{agent_id}/test/{}", entry.lineno);
+        let log =
+            std::sync::Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let store = std::sync::Arc::new(std::sync::Mutex::new(
+            PermissionStore::open(&tmp.path().join("permissions.db")).unwrap(),
+        ));
+        let before = store
+            .lock()
+            .unwrap()
+            .check(&action, &session_id, Some(&agent_id))
+            .unwrap();
+        let gate = std::sync::Arc::new(Refuses::default());
+        let (seen, result) = runtime.block_on(async {
+            let (base_url, seen) = scripted_model(replies).await;
+            let mut agent = wirken_agent::runtime::Agent::new(
+                session_id.clone(),
+                workspace.clone(),
+                wirken_agent::llm::LlmConfig {
+                    provider: "custom".into(),
+                    model: "scripted".into(),
+                    base_url,
+                    max_tokens: 256,
+                    temperature: 0.0,
+                    region: None,
+                    tools_enabled: true,
+                    context_window: 32_000,
+                    auth: Default::default(),
+                },
+                Some("unused".into()),
+                None,
+                log.clone() as std::sync::Arc<dyn SessionLog>,
+                store.clone(),
+            )
+            .unwrap();
+            agent.set_agent_id(agent_id.clone());
+            agent.set_approval_gate(gate.clone());
+            let result = agent.process_message(&message, "m-1".into()).await;
+            (seen, result)
+        });
+        let result = result.unwrap_or_else(|e| panic!("{at}the turn ended in an error: {e}"));
+        assert_eq!(result.response, "Done.", "{at}");
+
+        // The operator was asked about the call, once.
+        assert_eq!(
+            *gate.0.lock().unwrap(),
+            vec![(entry.tool.clone(), entry.key.clone())],
+            "{at}the operator is asked about the call the forgery says is approved"
+        );
+        // No grant: the store answers as it did before the turn.
+        let after = store
+            .lock()
+            .unwrap()
+            .check(&action, &session_id, Some(&agent_id))
+            .unwrap();
+        assert_eq!(after, before, "{at}the store's answer changed");
+        assert!(
+            matches!(after, PermissionCheck::NeedsApproval { .. }),
+            "{at}{after:?}"
+        );
+        // The chain: a refusal, no approval, and the call did not run.
+        let events: Vec<SessionEvent> = log
+            .get_since(&log.handle_for(SessionId::new(session_id.clone())), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::PermissionApproved { .. })),
+            "{at}an approval row: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SessionEvent::PermissionDenied { tool, action_key, .. }
+                    if *tool == entry.tool && *action_key == entry.key)),
+            "{at}no refusal row: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SessionEvent::ToolResult { call_id, success: false, sandbox: None, .. }
+                    if call_id == "call_next")),
+            "{at}the call ran: {events:?}"
+        );
+
+        // The forgery reached the model as the data it is: the tool's
+        // output or the user's message, with any fence tag broken, and
+        // no message but the system prompt carries a tag.
+        let shown = without_compaction_fence(text);
+        let role = if via == "inbound" { "user" } else { "tool" };
+        let bodies = seen.lock().unwrap();
+        let last = bodies.last().expect("the model was called");
+        let messages = last["messages"].as_array().expect("a messages array");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["role"] == role && m["content"].as_str() == Some(shown.as_ref())),
+            "{at}the forged text is not a {role} message as sent: {messages:?}"
+        );
+        for m in messages.iter().filter(|m| m["role"] != "system") {
+            assert!(
+                !carries_compaction_fence(m["content"].as_str().unwrap_or_default()),
+                "{at}a fence tag reached the model: {m}"
+            );
+        }
+        via_seen.insert(via.to_string());
+    }
+    for via in ["tool_result", "inbound"] {
+        assert!(
+            via_seen.contains(via),
+            "no forged line in {CORPUS_PATH} arrives as {via}"
+        );
+    }
 }
