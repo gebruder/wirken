@@ -6,7 +6,7 @@ operational differences. The instructions below are for Linux and macOS.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh
+curl -fsSL https://wirken.ai/install.sh | sh
 ```
 
 Pin the installer before piping it; the README carries the committed SHA-256
