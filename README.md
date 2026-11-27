@@ -72,21 +72,26 @@ container unless its `mcp.json` entry sets `"sandbox": "off"` to run it on the
 host ([docs/mcp.md](docs/mcp.md)).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh
+curl -fsSL https://wirken.ai/install.sh | sh
 
 wirken setup
 wirken run
 ```
 
-Pin the installer before piping. The committed `install.sh` has this SHA-256:
+Pin the installer before piping. `wirken.ai/install.sh` serves the committed
+`install.sh`, which has this SHA-256:
 
 ```
 085faf0359384403e4e80d1e75734b84cec7ce92182d9012c7879f9bc681fb70
 ```
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sha256sum
+curl -fsSL https://wirken.ai/install.sh | sha256sum
 ```
+
+The same file is at
+`https://raw.githubusercontent.com/gebruder/wirken/main/install.sh`. A daily
+check fails when what `wirken.ai` serves is not the file this pin names.
 
 What the installer verifies, and how to check a release by hand:
 [docs/signing.md](docs/signing.md#release-signing).
