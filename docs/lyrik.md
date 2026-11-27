@@ -3,8 +3,8 @@
 <img src="img/lyrik-wirken.png" alt="Lyrik" width="360" align="right">
 
 Lyrik audits a codebase against a scoring guide your team has written: a file
-named with `--rubric`, else the `.lyrik/rubric.md` committed in the assessed
-repo, else the rubric built into the skill. The findings it keeps go to
+named with `--rubric`, else the `rubric.md` in the target's inputs directory
+under the data directory, else the rubric built into the skill. The findings it keeps go to
 `findings.json`, with a funnel that accounts for every finding the run staged.
 What it sets aside goes to the per-run audit log, one row each: scanner
 candidates the model declined, with the model's reason, or left unaddressed,
@@ -60,8 +60,9 @@ scorers into a consensus, and does not send findings to any delivery channel.
   file tools write only the walk's own staging directory
   ([the exec envelope](#the-exec-envelope)); the single call's `exec` and the
   fix step's run with the target mounted read-write, so the hash check below
-  is the control on that path. The runner never writes `.lyrik/rubric.md` or
-  `.lyrik/context.md`. It hashes both at run start and end; if one changed, it records `lyrik.locked_file.changed` with
+  is the control on that path. The operator's rubric, context and run config
+  sit in the target's inputs directory, outside the target, and the runner
+  never writes them. It hashes all three at run start and end; if one changed, it records `lyrik.locked_file.changed` with
   the file and both sha256 values and the run fails.
 - **Two-pass scoring.** In single-call mode the skill scores each finding in
   two independent passes (`skills/lyrik/SKILL.md`); when they disagree by more
@@ -146,8 +147,9 @@ scorers into a consensus, and does not send findings to any delivery channel.
    characters of the SHA-256 of the target's canonical path. A run with no
    config there stops and prints the path. A `.lyrik/config.json` in the
    assessed tree is not read.
-3. Commit the team's rubric as `.lyrik/rubric.md`, and project context as
-   `.lyrik/context.md` if you have one, or pass files outside the repo with
+3. Put the team's rubric at `rubric.md`, and project context at `context.md`
+   if you have one, in the same inputs directory, or pass files outside the
+   repo with
    `--rubric` and `--context`. See
    [Writing the scoring guide](#writing-the-scoring-guide).
 4. Run `wirken lyrik run --target <repo> --run <run-id>` from a terminal. The
@@ -170,10 +172,11 @@ scorers into a consensus, and does not send findings to any delivery channel.
    context or rubric sections under `staging/context/` and `staging/rubric/`,
    the runner joins them into `.lyrik/state/runs/<run-id>/proposed/context.md`
    and `proposed/rubric.md` and prints their paths; it never writes over the
-   committed files. Sections a walk writes under `staging/<walk>/context/` and
+   operator's files. Sections a walk writes under `staging/<walk>/context/` and
    `staging/<walk>/rubric/` are not aggregated (`aggregate_phase0_section`
    calls in `crates/cli/src/commands/lyrik.rs`).
-   Promoting a proposal is a commit the team makes.
+   Promoting a proposal is the operator's step: copy it into the inputs
+   directory.
 
 ## What lives where
 
@@ -181,8 +184,9 @@ Operator-level state stays where it already lives in Wirken; the Lyrik config
 does not duplicate or override it. The operator's inputs for a target, the run
 config and anything supplied to the fix step, live under the data directory,
 where no run can write and nothing in the assessed tree is taken for them. The
-team's files in `.lyrik/` are committed; run state lives under
-`.lyrik/state/`.
+target's `.lyrik/` holds what a run writes: run state under `.lyrik/state/`.
+Nothing read from it decides a verdict or a command, and a rubric, context or
+config found there is not read.
 
 | Lives at | What |
 |---|---|
@@ -193,8 +197,8 @@ team's files in `.lyrik/` are committed; run state lives under
 | `<data_dir>/lyrik/targets/<key>/config.json` | the run config: scope, the run's model pin (`phases`), walks, scanner, bench mode, brocard mode, `fix` |
 | `<data_dir>/lyrik/targets/<key>/fix-patches/<slug>.patch` | optional: a patch for the defender fix step to check in place of writing one |
 | `<data_dir>/lyrik/targets/<key>/fix-reproductions/<slug>.sh` or `.py` | optional: a reproduction for the defender fix step |
-| `<repo>/.lyrik/rubric.md` | the team's severity rubric |
-| `<repo>/.lyrik/context.md` | the team's project context |
+| `<data_dir>/lyrik/targets/<key>/rubric.md` | the team's severity rubric |
+| `<data_dir>/lyrik/targets/<key>/context.md` | the team's project context |
 | `<repo>/THREAT_MODEL.md`, else `<repo>/docs/threat-model.md` | the target's own threat model, loaded when committed and unmodified. The first of the two that exists is the one checked; when it is uncommitted or modified it is skipped with its reason and the other path is not tried (`load_target_threat_model`, `crates/cli/src/commands/lyrik.rs`); see [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) |
 | `<repo>/.lyrik/ledger/` | what earlier runs established about the target, one JSON record per claim; written by the runner, never by a run's agents |
 | `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may `write_file` |
@@ -1576,9 +1580,13 @@ agent configuration in a format other than those listed are not reported.
 
 ## Writing the scoring guide
 
-A markdown file at `.lyrik/rubric.md` in the repo being assessed, or a file
-outside it named with `--rubric`. The team owns it, commits it, and reviews it
-in PR like any other artifact. It is not
+A markdown file at `rubric.md` in the target's inputs directory, or a file
+outside the target named with `--rubric`. The team owns it and reviews it
+like any other artifact; a team that versions it keeps it in its own
+repository and puts the reviewed copy there. It reaches the model as the
+operator's guidance, so the assessed tree cannot supply it: a
+`.lyrik/rubric.md` in the tree is not read, committed or not, and the run
+says so. It is not
 CVSS-shaped (CVSS produces a number; a rubric produces tier definitions
 specific to the software), not a compliance checklist, and not universal:
 different projects need different rubrics, and the same project needs a
@@ -1594,24 +1602,18 @@ would otherwise emit, rather than getting an invented one.
 The run picks its rubric in this order:
 
 1. `--rubric <path>`, a file outside the target. A path inside the target is
-   refused, since it would skip the check below.
-2. `.lyrik/rubric.md`, when it is committed and its bytes match HEAD. An
-   untracked or modified file is not used, nor one git would convert (a
-   filter, LFS, line-ending or encoding conversion), whose bytes cannot be
-   compared with HEAD; the run prints why and records it.
+   refused: the assessed tree can write it.
+2. `rubric.md` in the target's inputs directory.
 3. The inline rubric in the bundled `SKILL.md`.
 
-Project context follows the same order with `--context` and
-`.lyrik/context.md`, and is absent when neither applies. Whether a file
-matches HEAD is decided by hashing it in-process against the blob HEAD
-records, so no program the repository configures runs (see
-[Reports and audit](#reports-and-audit)).
+Project context follows the same order with `--context` and `context.md`, and
+is absent when neither applies.
 
 In single-call mode the team rubric takes the place of the inline rubric
 section in the run's staged copy of the skill, followed by the context; in
 walk mode each staged walk carries both after its run section. `findings.json`
 records what was used as `rubric` and `context`, each `{source, path,
-sha256}` with `source` one of `flag`, `team` or `inline`, and the per-run log
+sha256}` with `source` one of `flag`, `operator` or `inline`, and the per-run log
 records the same as `lyrik.rubric.loaded`, with any skipped file and the
 reason. For a flag file, `findings.json` carries the file name only, and the
 full path stays in the per-run log.
@@ -1929,10 +1931,10 @@ by the runner or the gateway, and each has a test that drives the `wirken`
 binary with a scripted model doing what a steered model would.
 
 - **Writes confined to the run's directory.** A run's agents may write only
-  under `.lyrik/state/runs/<run-id>/`; a write to `.lyrik/rubric.md`,
-  `.lyrik/context.md`, another run's directory or the source tree is refused,
-  and the run config is outside the target. The runner hashes the two team
-  files at start and end and fails the run if one changed. `lyrik_team_files_stay_locked.rs`.
+  under `.lyrik/state/runs/<run-id>/`; a write to another run's directory or
+  the source tree is refused, and the operator's rubric, context and run
+  config are outside the target. The runner hashes the three at start and end
+  and fails the run if one changed. `lyrik_team_files_stay_locked.rs`.
 - **No network but the model provider.** `http_request`, `web_search`,
   `generate_image` and MCP tools are not offered to a run's agents; a call to
   one is refused at the tool gate, recorded on the chain, and the turn carries
