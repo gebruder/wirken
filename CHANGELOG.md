@@ -28,8 +28,9 @@ tagged.
 - A model summary of trimmed messages is a `compaction` row with
   `via_model: true` and the summary in `extracts.summary`, written before
   the summary is placed in the context.
-- `wirken lyrik` reads a call as refused at the gate only when its result
-  row records no run.
+- `wirken lyrik` reads a call as refused before it ran from its result
+  row alone: a row with no record of where the command ran. What the
+  command printed never marks it.
 
 ## [3.6.1] - 2026-11-27
 

@@ -64,10 +64,10 @@ pub struct Observed {
     pub success: bool,
     pub output: String,
     /// Whether the command ran: the result row says where it ran. A
-    /// call the gate refused has no such record, and nothing a command
-    /// prints can give it one, so a command whose output reads like a
-    /// refusal is still a run. Absent from a file saved before the
-    /// field, which reads as not run.
+    /// call refused before it ran has no such record, and nothing a
+    /// command prints can give it one. This alone decides a refusal.
+    /// Absent from a file saved before the field, which reads as not
+    /// run.
     #[serde(default)]
     pub ran: bool,
 }
@@ -125,7 +125,8 @@ pub fn observed_execs<'a>(events: impl IntoIterator<Item = &'a SessionEvent>) ->
 pub enum Run {
     /// No call of it is on the log.
     Never,
-    /// Every call of it was refused at the gate.
+    /// Every call of it was refused before it ran: by the gate, or by
+    /// the sandbox when its runtime could not start a container.
     Refused,
     TimedOut,
     /// It ran more than once and the exit statuses differ. The first
@@ -173,10 +174,11 @@ impl Log<'_> {
     }
 }
 
-/// A call the gate refused: it did not run, and its result is the
-/// refusal the runtime writes.
+/// A call refused before it ran: its result row records no run. The
+/// row's record decides, never the output: a command can print a
+/// refusal's words, and a refusal's words change between releases.
 fn refused(o: &Observed) -> bool {
-    !o.ran && !o.success && o.output.starts_with("Permission denied")
+    !o.ran
 }
 
 /// Whether the marker is on a line of its own on stdout. `exec` puts
@@ -202,7 +204,7 @@ pub enum Poc {
 pub fn poc(run: &Run) -> Poc {
     match run {
         Run::Never => Poc::NotRun("not run".into()),
-        Run::Refused => Poc::NotRun("refused at the gate".into()),
+        Run::Refused => Poc::NotRun("refused before it ran".into()),
         Run::TimedOut => Poc::Inconclusive("timed out".into()),
         Run::Disagree => Poc::Inconclusive("its runs disagree".into()),
         Run::Done {
@@ -1009,7 +1011,7 @@ fn setup(log: &Log, command: &str, what: &str, reasons: &mut Vec<String>) -> (Op
         Run::Done { success: true, .. } => {}
         Run::Done { .. } => reasons.push(format!("{what} failed")),
         Run::Never => reasons.push(format!("{what} was not run")),
-        Run::Refused => reasons.push(format!("{what} was refused at the gate")),
+        Run::Refused => reasons.push(format!("{what} was refused before it ran")),
         Run::TimedOut => reasons.push(format!("{what} timed out")),
         Run::Disagree => reasons.push(format!("{what} ran more than once with different results")),
     }
@@ -1927,7 +1929,7 @@ pub fn functionality_arm(
     };
     let why = |r: &Run| match r {
         Run::Never => "was not run",
-        Run::Refused => "was refused at the gate",
+        Run::Refused => "was refused before it ran",
         Run::TimedOut => "timed out",
         Run::Disagree => "ran more than once with different results",
         Run::Done { success: true, .. } => "passed",
@@ -2281,7 +2283,8 @@ mod tests {
                 {"id": "c2", "name": "read_file", "arguments": "{\"path\":\"x\"}"},
                 {"id": "c3", "name": "exec", "arguments": "{\"command\":[\"ls\",\"b\"]}"}
             ]},
-            {"kind": "tool_result", "call_id": "c1", "tool_name": "exec", "output": "x", "success": true},
+            {"kind": "tool_result", "call_id": "c1", "tool_name": "exec", "output": "x", "success": true,
+             "sandbox": {"mode": "exec_only", "runtime": "docker"}},
             {"kind": "tool_result", "call_id": "c2", "tool_name": "read_file", "output": "y", "success": true},
             {"kind": "tool_result", "call_id": "c3", "tool_name": "exec",
              "output": "Permission denied: 'exec' was not executed", "success": false}
@@ -2319,6 +2322,18 @@ mod tests {
         .expect("session events parse");
         let seen = observed_execs(&events);
         assert!(seen[0].ran && !seen[1].ran, "{seen:?}");
+        // The record decides alone: a row with no run is a refusal
+        // whatever it says, and one with a run is a run whatever it
+        // says.
+        let mut other = seen.clone();
+        other[1].output = "sandbox runtime unavailable: runsc not found".into();
+        other[0].output = "Command finished.".into();
+        let log = Log(&other);
+        assert_eq!(log.run("sh other.sh"), Run::Refused);
+        assert!(matches!(
+            log.run("sh check.sh"),
+            Run::Done { success: false, .. }
+        ));
         let log = Log(&seen);
         assert!(
             matches!(log.run("sh check.sh"), Run::Done { success: false, .. }),
@@ -2569,7 +2584,7 @@ mod tests {
             "{:?}",
             out.arm.reasons
         );
-        // Every command refused at the gate.
+        // Every command refused before it ran.
         let mut r = Runs::good();
         for o in &mut r.0 {
             o.success = false;
