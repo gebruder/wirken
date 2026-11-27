@@ -210,6 +210,10 @@ pub fn sign(server: &str, agent: Option<&str>) -> Result<()> {
         .get(server)
         .ok_or_else(|| anyhow::anyhow!("server '{server}' not found in {}", mcp_path.display()))?;
 
+    if let Some(why) = entry.exchange_problem() {
+        anyhow::bail!("server '{server}': {why}");
+    }
+
     let key_path = cfg.data_dir.join("signing-key.hex");
     let signing_key = load_or_create_signing_key(&key_path)?;
 

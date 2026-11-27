@@ -119,6 +119,11 @@ pub enum McpServerConfig {
         /// expensive, not metering.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         tool_costs: HashMap<String, u64>,
+        /// Each call a proxy client makes carries a token exchanged for
+        /// that client's person, in place of `auth`. See
+        /// [`ExchangeConfig`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exchange: Option<ExchangeConfig>,
     },
     /// Stdio transport: spawn a process and communicate over stdin/stdout.
     Stdio {
@@ -149,7 +154,35 @@ pub enum McpServerConfig {
         /// cannot be widened on a signed entry without re-signing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sandbox: Option<Box<StdioSandbox>>,
+        /// See [`Self::Http::exchange`]. On a stdio server the
+        /// exchanged token is what its injected route sets, so the
+        /// entry needs a `sandbox` block with `inject`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exchange: Option<ExchangeConfig>,
     },
+}
+
+/// A server that acts for the person behind a proxy client, not for
+/// the connector.
+///
+/// A call a client of the proxy's MCP endpoint makes with a JWT of the
+/// organization's identity provider is made with a token the gateway
+/// got for that JWT at the provider's token endpoint (RFC 8693),
+/// scoped to `audience`. An HTTP server gets it as the bearer of the
+/// call; a contained stdio server's injected route sets it in place of
+/// the entry's credential while the call runs. A call made with a
+/// token Wirken issued is refused, and so is one whose exchange fails:
+/// neither falls back to the entry's own credential. Calls the agent's
+/// own model makes are not exchanged.
+///
+/// Inside the signed envelope: an entry signed without it, or for
+/// another audience, does not verify with it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExchangeConfig {
+    /// The audience the token is asked for, as the identity provider
+    /// names the downstream system.
+    pub audience: String,
 }
 
 /// Where a stdio server runs.
@@ -296,6 +329,41 @@ impl McpServerConfig {
             Self::Http { tool_costs, .. } | Self::Stdio { tool_costs, .. } => tool_costs,
         }
     }
+
+    /// The token exchange the entry asks for, if it asks for one.
+    pub fn exchange(&self) -> Option<&ExchangeConfig> {
+        match self {
+            Self::Http { exchange, .. } | Self::Stdio { exchange, .. } => exchange.as_ref(),
+        }
+    }
+
+    /// Why the entry's `exchange` cannot be served, if it cannot: an
+    /// audience that is empty or not one printable word, or a stdio
+    /// server with no injected route to set the token on.
+    pub fn exchange_problem(&self) -> Option<String> {
+        let exchange = self.exchange()?;
+        let audience = &exchange.audience;
+        if audience.is_empty()
+            || audience.len() > 256
+            || !audience.chars().all(|c| c.is_ascii_graphic())
+        {
+            return Some(format!(
+                "exchange.audience {audience:?} is not one word of printable ASCII"
+            ));
+        }
+        match self {
+            Self::Http { .. } => None,
+            Self::Stdio { sandbox, .. } => match sandbox.as_deref() {
+                Some(StdioSandbox::Container(block)) if block.inject.is_some() => None,
+                _ => Some(
+                    "exchange on a stdio server needs a sandbox block with inject: the \
+                     exchanged token is set by the injected route, and the server never holds \
+                     it"
+                    .into(),
+                ),
+            },
+        }
+    }
 }
 
 /// Tag type for the HTTP transport variant. Forces the JSON value
@@ -354,6 +422,66 @@ impl McpConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An exchange is served on an HTTP server, and on a stdio server
+    /// only where an injected route can set the token.
+    #[test]
+    fn an_exchange_is_served_where_something_can_set_the_token() {
+        let server =
+            |json: serde_json::Value| -> McpServerConfig { serde_json::from_value(json).unwrap() };
+        let exchange = serde_json::json!({"audience": "crm-api"});
+        let http = server(serde_json::json!({
+            "transport": "http", "url": "https://crm.example.com/mcp", "exchange": exchange,
+        }));
+        assert_eq!(
+            http.exchange().map(|e| e.audience.as_str()),
+            Some("crm-api")
+        );
+        assert_eq!(http.exchange_problem(), None);
+
+        let inject = serde_json::json!({
+            "credential_env": "CRM_TOKEN", "host": "api.crm.example.com",
+            "header": "authorization", "scheme": "Bearer", "base_url_env": "CRM_URL",
+            "paths": [{"from": "/", "to": "/"}],
+        });
+        let contained = server(serde_json::json!({
+            "command": "node", "env": {"CRM_TOKEN": "vault:crm-token"},
+            "sandbox": {"image": "node:22-slim", "inject": inject}, "exchange": exchange,
+        }));
+        assert_eq!(contained.exchange_problem(), None);
+
+        for sandbox in [
+            serde_json::json!("off"),
+            serde_json::json!({"image": "node:22-slim"}),
+            serde_json::Value::Null,
+        ] {
+            let mut entry = serde_json::json!({"command": "node", "exchange": exchange});
+            if !sandbox.is_null() {
+                entry["sandbox"] = sandbox;
+            }
+            let problem = server(entry)
+                .exchange_problem()
+                .expect("no route for the token");
+            assert!(problem.contains("inject"), "{problem}");
+        }
+
+        for audience in ["", "crm api", "crm\u{7f}"] {
+            let entry = server(serde_json::json!({
+                "transport": "http", "url": "https://crm.example.com/mcp",
+                "exchange": {"audience": audience},
+            }));
+            assert!(entry.exchange_problem().is_some(), "{audience:?}");
+        }
+        // No field the block does not define: a misspelt one is not
+        // taken as an exchange with nothing set.
+        assert!(
+            serde_json::from_value::<McpServerConfig>(serde_json::json!({
+                "transport": "http", "url": "https://crm.example.com/mcp",
+                "exchange": {"audience": "crm-api", "scopes": "read"},
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn parses_legacy_stdio_without_transport_field() {

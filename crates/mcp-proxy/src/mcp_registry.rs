@@ -50,6 +50,9 @@ pub const REFUSED_IMAGE_UNAVAILABLE: &str = "image_unavailable";
 /// `McpEntryRefused` reason: the block lists egress hosts and the
 /// runtime cannot proxy them.
 pub const REFUSED_EGRESS_UNSUPPORTED_RUNTIME: &str = "egress_unsupported_runtime";
+/// `McpEntryRefused` reason: the entry asks for a token exchange it
+/// cannot be given, as [`McpServerConfig::exchange_problem`] says.
+pub const REFUSED_EXCHANGE_INVALID: &str = "exchange_invalid";
 
 /// The refusals that come from the stdio sandbox rather than the
 /// signature check. An entry refused for one of these verified.
@@ -319,6 +322,21 @@ impl ProxyRegistry {
                         signer: signer.clone(),
                     },
                 );
+            }
+            if let Some(why) = server_config.exchange_problem() {
+                tracing::warn!(
+                    agent_id,
+                    server = name,
+                    "MCP server '{name}' (agent '{agent_id}') not started: {why}"
+                );
+                record(
+                    audit,
+                    SessionEvent::McpEntryRefused {
+                        server_name: name.clone(),
+                        reason: REFUSED_EXCHANGE_INVALID.to_string(),
+                    },
+                );
+                continue;
             }
 
             match server_config {
@@ -1195,6 +1213,30 @@ mod start_tests {
             "{events:?}"
         );
         assert_eq!(refused(&events), [REFUSED_SANDBOX_CONFIG_INVALID]);
+    }
+
+    /// An entry asking for an exchange nothing can set the token for
+    /// is refused before anything starts, whatever its sandbox says.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn an_exchange_with_no_route_for_the_token_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (loaded, events) = load(
+            host(dir.path(), None),
+            serde_json::json!({
+                "command": "/bin/true", "sandbox": "off",
+                "exchange": {"audience": "crm-api"},
+            }),
+        )
+        .await;
+        assert_eq!(loaded, 0);
+        assert_eq!(refused(&events), [REFUSED_EXCHANGE_INVALID]);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::McpServerUnsandboxed { .. })),
+            "{events:?}"
+        );
     }
 
     #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]

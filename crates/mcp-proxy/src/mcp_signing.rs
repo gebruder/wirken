@@ -202,6 +202,13 @@ pub fn hash_mcp_entry(name: &str, config: &McpServerConfig) -> Vec<u8> {
         }
     }
     hasher.update(&cost_suffix);
+    // As the costs: absent contributes nothing, so entries signed
+    // before the field existed keep their signatures, and adding one,
+    // or changing the audience, needs a new signature.
+    if let Some(exchange) = config.exchange() {
+        hasher.update(b"exchange\0");
+        write_len_prefixed(&mut hasher, exchange.audience.as_bytes());
+    }
     hasher.finalize().to_vec()
 }
 
@@ -485,6 +492,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            exchange: None,
             sandbox: None,
         }
     }
@@ -498,6 +506,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            exchange: None,
         }
     }
 
@@ -585,6 +594,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            exchange: None,
             sandbox: None,
         };
         let cfg_b = McpServerConfig::Stdio {
@@ -596,6 +606,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            exchange: None,
             sandbox: None,
         };
 
@@ -626,6 +637,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            exchange: None,
             sandbox: None,
         };
         let cfg_b = McpServerConfig::Stdio {
@@ -637,6 +649,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            exchange: None,
             sandbox: None,
         };
 
@@ -662,6 +675,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            exchange: None,
         };
         let key = random_signing_key();
         let sig = sign_mcp_entry("s", &cfg_none, &key);
@@ -765,6 +779,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            exchange: None,
             sandbox: None,
         };
         let mut with_empty_map = std::collections::HashMap::new();
@@ -778,6 +793,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: with_empty_map,
+            exchange: None,
             sandbox: None,
         };
         assert_eq!(hash_mcp_entry("vendor", &a), hash_mcp_entry("vendor", &b));
@@ -800,6 +816,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: costs,
+            exchange: None,
             sandbox: None,
         };
         let none = base(Default::default());
@@ -823,6 +840,40 @@ mod tests {
         assert_ne!(h_one, h_rename, "renaming the tool must change the hash");
     }
 
+    /// The audience a token is exchanged for is inside the signed
+    /// envelope: an entry signed without an exchange, or for another
+    /// audience, does not verify with this one.
+    #[test]
+    fn the_exchange_audience_is_covered_by_the_signature() {
+        let key = random_signing_key();
+        for entry in [stdio_entry(), http_entry()] {
+            let with = |audience: Option<&str>| {
+                let mut entry = entry.clone();
+                let exchange = audience.map(|a| crate::mcp_config::ExchangeConfig {
+                    audience: a.to_string(),
+                });
+                match &mut entry {
+                    McpServerConfig::Stdio { exchange: e, .. }
+                    | McpServerConfig::Http { exchange: e, .. } => *e = exchange,
+                }
+                entry
+            };
+            let (none, crm, other) = (with(None), with(Some("crm-api")), with(Some("crm-apj")));
+            assert_eq!(hash_mcp_entry("crm", &none), hash_mcp_entry("crm", &entry));
+            assert_ne!(hash_mcp_entry("crm", &none), hash_mcp_entry("crm", &crm));
+            assert_ne!(hash_mcp_entry("crm", &crm), hash_mcp_entry("crm", &other));
+
+            let signature = sign_mcp_entry("crm", &crm, &key);
+            let signer = hex_encode(&key.verifying_key().to_bytes());
+            let verdict = |config: &McpServerConfig| {
+                verify_mcp_entry("crm", config, Some(&signature), Some(&signer), None, None)
+            };
+            assert!(matches!(verdict(&crm), McpVerifyResult::Valid { .. }));
+            assert_eq!(verdict(&none), McpVerifyResult::Invalid);
+            assert_eq!(verdict(&other), McpVerifyResult::Invalid);
+        }
+    }
+
     /// Map iteration order does not move the hash.
     #[test]
     fn tool_cost_hashing_is_order_independent() {
@@ -834,6 +885,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            exchange: None,
         };
         let a = build(vec![("alpha", 1), ("beta", 2), ("gamma", 3)]);
         let b = build(vec![("gamma", 3), ("alpha", 1), ("beta", 2)]);
@@ -897,6 +949,7 @@ mod tests {
                 signer_key: Some(signer),
                 signer_key_delegation,
                 tool_costs,
+                exchange: None,
                 sandbox,
             },
             other => other,
