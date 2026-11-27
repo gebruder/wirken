@@ -2939,7 +2939,7 @@ mod identity_tests {
             ),
             (
                 SessionEvent::ProxyTokenExchanged {
-                    token_id: "u0123456789abcdef".into(),
+                    token_id: "usubject".into(),
                     agent_id: "default".into(),
                     mcp_session: "m1".into(),
                     server: "crm".into(),
@@ -2954,7 +2954,7 @@ mod identity_tests {
                     },
                 },
                 None,
-                Some("proxy-token:u0123456789abcdef"),
+                Some("proxy-token:usubject"),
                 Some("default"),
             ),
             (

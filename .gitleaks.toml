@@ -40,6 +40,12 @@ regexes = [
   # still present in history and flagged by generic-api-key.
   '''0123456789abcdef0123456789abcdef''',
 
+  # A subject id in the SIEM identity test of the proxy token exchange
+  # row (commit 3111facf): `u` and sixteen sequential hex digits, the
+  # shape of a subject id, not a token. Superseded in the working tree
+  # by a low-entropy fixture, but still present in history.
+  '''u0123456789abcdef''',
+
   # The name of the cipher used by the vault crate. Appears in
   # the crate description and ambient docs; the generic-api-key
   # rule matches on its entropy. `XChaCha20-Poly1305` is a
