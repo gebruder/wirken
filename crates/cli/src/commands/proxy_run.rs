@@ -511,9 +511,41 @@ fn run_labels(instance: &str, token_id: &str) -> HashMap<String, String> {
     ])
 }
 
+/// The name of a run's broker socket directory: the data directory's
+/// instance, the run's process, and the route's id. The process is in
+/// the name so a run killed outright, which cannot remove its own, can
+/// be told apart from one still running.
+fn socket_dir_name(instance: &str, pid: u32, id: &str) -> String {
+    format!("wirken-run-egress-{instance}-{pid}-{id}")
+}
+
+/// The socket directories under `tmp` that runs of `instance` left when
+/// their process went away. Only a real directory this user owns is
+/// one: `tmp` is shared, and a name alone proves nothing.
+fn left_socket_dirs(tmp: &Path, instance: &str) -> Vec<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    let prefix = format!("wirken-run-egress-{instance}-");
+    // SAFETY: `geteuid` is always-safe FFI; documented as never failing.
+    let uid = unsafe { libc::geteuid() };
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let rest = name.strip_prefix(&prefix)?;
+            let pid: u32 = rest.split_once('-')?.0.parse().ok()?;
+            let meta = std::fs::symlink_metadata(entry.path()).ok()?;
+            (meta.is_dir() && meta.uid() == uid && !alive(pid)).then(|| entry.path())
+        })
+        .collect()
+}
+
 /// Remove what runs of this data directory left behind when their
-/// process went away without ending them: containers, networks, and
-/// the tokens they held. Returns how many runs were cleared.
+/// process went away without ending them: containers, networks, broker
+/// socket directories, and the tokens they held. Returns how many runs
+/// were cleared.
 async fn reap(docker: &Docker, data_dir: &Path, instance: &str) -> usize {
     use bollard::query_parameters::{
         ListContainersOptionsBuilder, ListNetworksOptionsBuilder, RemoveContainerOptionsBuilder,
@@ -567,6 +599,14 @@ async fn reap(docker: &Docker, data_dir: &Path, instance: &str) -> usize {
     for token in tokens.iter().filter(|t| !t.is_empty()) {
         if let Err(e) = super::proxy::revoke_recorded(data_dir, token) {
             tracing::warn!("proxy run: a token a run left could not be revoked: {e:#}");
+        }
+    }
+    for dir in left_socket_dirs(&std::env::temp_dir(), instance) {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(
+                "proxy run: a socket directory a run left could not be removed: {}: {e}",
+                dir.display()
+            );
         }
     }
     tokens.len()
@@ -776,7 +816,11 @@ async fn contained(
     let id = random_id();
     let spec = wirken_sandbox::egress_net::SidecarSpec {
         name_prefix: "wirken-run-egress".into(),
-        socket_dir: std::env::temp_dir().join(format!("wirken-run-egress-{}-{id}", host.instance)),
+        socket_dir: std::env::temp_dir().join(socket_dir_name(
+            &host.instance,
+            std::process::id(),
+            &id,
+        )),
         id: id.clone(),
         image: plan.image.clone(),
         binary: relay.to_path_buf(),
@@ -1269,6 +1313,31 @@ mod tests {
                 .check("example.com", 443, RequestKind::Connect)
                 .allowed
         );
+    }
+
+    /// A socket directory is left behind when its run's process is gone,
+    /// is this data directory's, and is a directory of this user's. A
+    /// live run's, another instance's, a file and a link are not.
+    #[test]
+    fn only_socket_directories_of_runs_that_are_gone_are_left_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A process that has exited, so its pid names no process.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let gone = child.id();
+        child.wait().unwrap();
+        let mine = std::process::id();
+        let make = |name: String| {
+            std::fs::create_dir(tmp.path().join(&name)).unwrap();
+            tmp.path().join(name)
+        };
+        let left = make(socket_dir_name("i1", gone, "a"));
+        make(socket_dir_name("i1", mine, "b"));
+        make(socket_dir_name("i2", gone, "c"));
+        make("wirken-run-egress-i1-notapid-d".to_string());
+        std::fs::write(tmp.path().join(socket_dir_name("i1", gone, "e")), "").unwrap();
+        std::os::unix::fs::symlink(&left, tmp.path().join(socket_dir_name("i1", gone, "f")))
+            .unwrap();
+        assert_eq!(left_socket_dirs(tmp.path(), "i1"), [left]);
     }
 
     /// One home per workspace, and the same one each time.

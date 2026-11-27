@@ -22,7 +22,8 @@ tagged.
   token issue` and revoked when the run ends, and no provider key. Each run
   is a `proxy_run_started` and a `proxy_run_ended` row on its token's lane,
   with each sidecar request a `sandbox_egress_verdict` row. A run killed
-  outright is cleared, container and token, by the next. What the client
+  outright is cleared by the next: its container, networks, broker socket
+  directory and token. What the client
   runs inside the container is not gated one command at a time
   (`a_run_reaches_the_listener_and_nothing_it_was_not_given`,
   `a_run_killed_outright_is_cleared_by_the_next`,

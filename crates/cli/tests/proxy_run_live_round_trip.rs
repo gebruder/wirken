@@ -498,6 +498,20 @@ fn a_run_killed_outright_is_cleared_by_the_next() {
         !labelled(&label).is_empty(),
         "the killed run's container is left"
     );
+    // The run's broker socket directory, named for its process.
+    let left_behind = || -> Vec<String> {
+        std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.starts_with("wirken-run-egress-") && n.contains(&format!("-{pid}-")))
+            .collect()
+    };
+    assert_eq!(
+        left_behind().len(),
+        1,
+        "the killed run's socket directory is left"
+    );
 
     let (status, printed) = at_terminal(
         &rig.data,
@@ -520,6 +534,11 @@ fn a_run_killed_outright_is_cleared_by_the_next() {
     assert!(
         labelled(&label).is_empty(),
         "the killed run's container is gone"
+    );
+    let socket_dirs = left_behind();
+    assert!(
+        socket_dirs.is_empty(),
+        "the killed run's socket directory is gone: {socket_dirs:?}"
     );
     let listed = wirken(&rig.data)
         .args(["proxy", "token", "list"])

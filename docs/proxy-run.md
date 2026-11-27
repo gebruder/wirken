@@ -101,8 +101,11 @@ The client's model and tool calls are on the token's conversation lanes,
 terminal goes away, stops the container and then ends the run as above.
 Ctrl-C at the terminal goes to the client, not to the run. A run killed outright (`SIGKILL`) leaves its
 container running with its token live. The next `wirken proxy run` of the
-data directory removes every container and network a run left whose process
-is gone, and revokes their tokens, before it starts its own.
+data directory removes every container, network and broker socket directory
+a run left whose process is gone, and revokes their tokens, before it starts
+its own. A socket directory is named for its run's process, and only a
+directory of the operator's under the system's temporary directory is
+removed.
 
 ## What it does not do
 
