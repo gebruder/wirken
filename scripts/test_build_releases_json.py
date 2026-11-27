@@ -72,6 +72,17 @@ class Changelog(unittest.TestCase):
         self.assertLessEqual(len(cut), module.MAX_SUMMARY)
         self.assertTrue(cut.endswith("word..."), cut)
 
+    def test_security_sentences_past_the_limit_are_kept_whole_or_left_out(self):
+        first, second, third = "a" * 90 + ".", "b" * 90 + ".", "c" * 40 + "."
+        body = f"### Security\n\n- {first} More.\n- {second}\n- {third}\n"
+        self.assertEqual(module.summary(body), f"{first} {second[:-1]}...")
+
+    def test_a_first_security_sentence_past_the_limit_is_cut_between_words(self):
+        body = "### Security\n\n- " + " ".join(["abcdefgh"] * 40) + ".\n- Short.\n"
+        cut = module.summary(body)
+        self.assertLessEqual(len(cut), module.MAX_SUMMARY)
+        self.assertTrue(cut.endswith("abcdefgh..."), cut)
+
     def test_one_word_longer_than_the_limit_is_cut_to_fit(self):
         cut = module.fit("x" * 300)
         self.assertEqual(cut, "x" * (module.MAX_SUMMARY - 3) + "...")

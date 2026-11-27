@@ -138,9 +138,26 @@ def summary(body):
     Any other release by the first sentence of its first bullet."""
     fixes = first_sentences(security_lines(body))
     if fixes:
-        return fit(" ".join(fixes))
+        return whole_sentences(fixes)
     first = first_sentences(body.splitlines())
     return fit(first[0]) if first else ""
+
+
+def whole_sentences(sentences):
+    """`sentences` joined, or where that is longer than MAX_SUMMARY as
+    many of them, in order, as fit whole with an ellipsis marking the
+    rest. A first sentence too long on its own is cut by fit()."""
+    joined = " ".join(sentences)
+    if len(joined) <= MAX_SUMMARY:
+        return joined
+    kept = []
+    for s in sentences:
+        if len(" ".join(kept + [s])) > MAX_SUMMARY - 3:
+            break
+        kept.append(s)
+    if not kept:
+        return fit(joined)
+    return " ".join(kept).rstrip(".") + "..."
 
 
 def fit(sentence):
