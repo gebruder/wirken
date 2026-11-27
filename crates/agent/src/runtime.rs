@@ -4902,9 +4902,7 @@ impl Agent {
                 wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNREGISTERED_HOOKS");
             if !allow_unregistered {
                 return Ok(crate::tool::ToolResult {
-                    output: "veto hook timed out (production fail-closed); \
-                            set WIRKEN_ALLOW_UNREGISTERED_HOOKS=1 for dev fail-open"
-                        .to_string(),
+                    output: "a veto hook timed out; the call is refused".to_string(),
                     success: false,
                     sandbox: None,
                 });
@@ -5250,9 +5248,7 @@ impl Agent {
                 );
                 (outcome.final_bytes.clone(), result.success, None)
             } else {
-                let placeholder = "(egress hook timed out; production fail-closed; \
-                                       set WIRKEN_ALLOW_UNREGISTERED_HOOKS=1 for dev fail-open)"
-                    .to_string();
+                let placeholder = "(egress hook timed out; output withheld)".to_string();
                 (
                     placeholder.into_bytes(),
                     false,

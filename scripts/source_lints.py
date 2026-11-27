@@ -174,10 +174,55 @@ def every_keychain_probe_reads_the_passphrase_from_an_approved_supplier():
         )
 
 
+def no_text_sent_to_a_model_names_an_override():
+    """No tool result or placeholder text names an environment variable.
+
+    What a tool call returns is read by the model. Text there that names
+    an override (`WIRKEN_ALLOW_...=1`) tells a model what to ask for, or
+    what to set in an `exec`, to turn a refusal off. The operator learns
+    of an override from the logs and the docs; the model is told that
+    the call was refused.
+
+    Read: every string literal written as a tool result's `output`, and
+    every one assigned to a `placeholder`, in the crates whose results
+    reach a model.
+    """
+    literal = r'(?:format!\(\s*)?"((?:[^"\\]|\\.)*)"'
+    shapes = [
+        re.compile(r"\boutput:\s*" + literal, re.S),
+        re.compile(r"\bplaceholder\s*=\s*" + literal, re.S),
+    ]
+    named = re.compile(r"WIRKEN_[A-Z_]+|[A-Z_]{4,}=1\b")
+    seen = 0
+    for crate in ("agent", "gateway", "mcp-proxy", "sandbox"):
+        for path in rust_files(f"crates/{crate}/src"):
+            if path.name == "tests.rs" or path.name.endswith("_tests.rs"):
+                continue
+            text = path.read_text()
+            tests = re.search(r"#\[cfg\(test\)\]\s*(?:pub(?:\(crate\))?\s+)?mod\s", text)
+            body = text if tests is None else text[: tests.start()]
+            for shape in shapes:
+                for m in shape.finditer(body):
+                    seen += 1
+                    if named.search(m.group(1)):
+                        fail(
+                            path,
+                            body[: m.start()].count("\n") + 1,
+                            "text a model reads names an environment variable or an "
+                            "override. Say what was refused; leave the override to "
+                            "the logs and the docs.",
+                        )
+    if seen < 20:
+        FAILURES.append(
+            f"the tool-result walker saw too little to be trusted: {seen} literals"
+        )
+
+
 CHECKS = (
     no_test_reads_rust_source,
     no_model_name_is_stored_in_the_config_paths,
     every_keychain_probe_reads_the_passphrase_from_an_approved_supplier,
+    no_text_sent_to_a_model_names_an_override,
 )
 
 
