@@ -101,6 +101,7 @@ pub async fn probe_tool_calling(
         tool_call_id: None,
         tool_name: None,
         tool_calls: None,
+        trimmed: false,
     }];
     let tools = vec![ToolDef {
         name: PROBE_TOOL_NAME.into(),

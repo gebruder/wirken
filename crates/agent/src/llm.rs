@@ -2583,6 +2583,7 @@ mod redirect_tests {
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
+            trimmed: false,
         }]
     }
 

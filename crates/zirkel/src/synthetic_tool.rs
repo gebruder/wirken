@@ -240,6 +240,7 @@ pub async fn call_structured<T: DeserializeOwned>(
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
+            trimmed: false,
         },
         Message {
             role: Role::User,
@@ -247,6 +248,7 @@ pub async fn call_structured<T: DeserializeOwned>(
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
+            trimmed: false,
         },
     ];
     let (resp, _usage) = llm

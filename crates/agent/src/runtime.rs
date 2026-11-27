@@ -2931,6 +2931,7 @@ impl Agent {
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
+            trimmed: false,
         }];
 
         // This call runs before the turn's budget gate. A plan-mode call

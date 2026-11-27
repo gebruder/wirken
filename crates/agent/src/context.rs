@@ -263,11 +263,10 @@ impl ContextEngine {
             .iter()
             .filter_map(|&idx| {
                 let msg = conversation.messages().get(idx)?;
-                // Only capture substantive content, not already-trimmed
-                // placeholders from a prior round.
-                if msg.content.starts_with(TRIMMED_TOOL_RESULT_PREFIX)
-                    || msg.content.starts_with(TRIMMED_TEXT_PREFIX)
-                {
+                // Only capture substantive content, not the placeholder
+                // a prior round left. The flag says which; the content
+                // does not, since a result can begin like a placeholder.
+                if msg.trimmed {
                     return None;
                 }
                 Some(TrimmedMessage {
@@ -397,6 +396,7 @@ impl ContextEngine {
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
+            trimmed: false,
         }))
     }
 
@@ -516,7 +516,7 @@ impl TrimPlan {
     fn apply(self, conversation: &mut Conversation) -> usize {
         let total_bytes: usize = self.trimmed_bytes.values().sum();
         for (idx, new_content) in self.replacements {
-            conversation.replace_content(idx, new_content);
+            conversation.trim_content(idx, new_content);
         }
         total_bytes
     }

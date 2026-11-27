@@ -15,6 +15,13 @@ pub struct Message {
     /// Tool calls requested by the assistant
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallRequest>>,
+    /// Whether the context engine replaced this message's content with
+    /// a placeholder. Set only by [`Conversation::trim_content`], never
+    /// read from the content, which a tool or a sender can make look
+    /// like a placeholder. Not serialized: what the provider is sent
+    /// and what a request's `messages_hash` covers are unchanged.
+    #[serde(skip)]
+    pub trimmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +171,7 @@ impl Conversation {
                 tool_call_id: None,
                 tool_name: None,
                 tool_calls: None,
+                trimmed: false,
             },
         );
     }
@@ -176,6 +184,7 @@ impl Conversation {
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
+            trimmed: false,
         });
     }
 
@@ -187,6 +196,7 @@ impl Conversation {
             tool_call_id: None,
             tool_name: None,
             tool_calls: None,
+            trimmed: false,
         });
     }
 
@@ -198,6 +208,7 @@ impl Conversation {
             tool_call_id: None,
             tool_name: None,
             tool_calls: Some(tool_calls),
+            trimmed: false,
         });
     }
 
@@ -209,6 +220,7 @@ impl Conversation {
             tool_call_id: Some(tool_call_id.to_string()),
             tool_name: Some(tool_name.to_string()),
             tool_calls: None,
+            trimmed: false,
         });
     }
 
@@ -303,6 +315,15 @@ impl Conversation {
     /// message body for a `[trimmed: N bytes]` placeholder while
     /// preserving the message's role, tool_call_id, tool_name, and
     /// tool_calls fields. Out-of-range indices are silently ignored.
+    /// Replace message `idx`'s content with the context engine's
+    /// placeholder for it, and mark it trimmed.
+    pub fn trim_content(&mut self, idx: usize, placeholder: String) {
+        self.replace_content(idx, placeholder);
+        if let Some(msg) = self.messages.get_mut(idx) {
+            msg.trimmed = true;
+        }
+    }
+
     pub fn replace_content(&mut self, idx: usize, new_content: String) {
         if let Some(msg) = self.messages.get_mut(idx) {
             msg.content = if msg.role == Role::System {
