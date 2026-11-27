@@ -29,22 +29,40 @@ Three changes can need operator action.
 
 ### Security
 
-- `wirken lyrik` reads the rubric and context from the target's inputs
-  directory, beside the run config, and the ledger is kept there too. A
-  `.lyrik/rubric.md`, `.lyrik/context.md` or `.lyrik/ledger/` in the assessed
-  tree is not read, and the run says so. Walks read a copy of the ledger
-  staged into the run's directory; the refusal to register a settled place
-  reads the inputs directory's ledger, which only the runner writes. Move
-  existing files there; `findings.json` records an operator rubric's
-  `source` as `operator`.
-- A root-cause claim the runner's trace confirms passes the root-cause arm
-  wherever output naming the origin would.
+- The inference proxy refuses provider-run tools. This is the fix listed under
+  3.6.1, which was tagged and not published; 3.6.2 is the first release that
+  carries it.
+- Typed approvals need the card's code. Every approval card shows the request
+  id the gateway minted for the ask, a random UUID the model is never sent. A
+  typed answer carries its first four hex characters: `!approve <code>` and
+  `!deny <code>` on Signal and iMessage, where the code was eight characters
+  and longer ones still answer, and `y <code>` in `wirken chat`, where a lone
+  `y` now approves nothing. A code two pending requests share answers neither
+  until more of the id is typed, and answering one leaves the other pending.
+- No decision reads a marker from model-writable text. Where the gateway holds
+  the answer, it reads its own record: the context engine marks a trimmed
+  message with a field instead of reading its `[trimmed: ` prefix, an `exec`
+  result row records `timed_out` in its `sandbox` record and Lyrik reads the
+  timeout there, verify takes a turn for a `wirken ask` only when its row
+  names no adapter, a conversation id that carries the sub-agent marker is
+  written as `%23sub-` in its session id, and Lyrik's `detection_source` is
+  always the seed set's.
+- Lyrik reads its config and ledger from the data directory. `wirken lyrik`
+  reads the rubric and context from the target's inputs directory, beside the
+  run config, and the ledger is kept there too. A `.lyrik/rubric.md`,
+  `.lyrik/context.md` or `.lyrik/ledger/` in the assessed tree is not read,
+  and the run says so. Walks read a copy of the ledger staged into the run's
+  directory; the refusal to register a settled place reads the inputs
+  directory's ledger, which only the runner writes. Move existing files there;
+  `findings.json` records an operator rubric's `source` as `operator`.
 - `wirken lyrik` reads its run config, supplied patches and supplied
   reproductions from `<data_dir>/lyrik/targets/<key>/`, keyed by the
   target's canonical path, where no run can write. A `.lyrik/config.json`,
   `.lyrik/fix-patches/` or `.lyrik/fix-reproductions/` in the assessed tree
   is no longer read; a run with no config in the inputs directory stops and
   names the path. Move existing files there.
+- A root-cause claim the runner's trace confirms passes the root-cause arm
+  wherever output naming the origin would.
 - Lyrik labels evidence the code under test can write as in band: an arm
   whose state rests on a run's output, exit status or reach value has basis
   `in_band`. A root-cause claim is `confirmed_by_executed_poc` only when the
@@ -61,25 +79,10 @@ Three changes can need operator action.
 - An MCP scope-error hint names the server that reported it, keeps the
   server's own error text under it, and names a scope only when the
   provider's catalog defines it.
-- No decision reads a marker from text a model, a tool or a channel can
-  write where the gateway holds the answer: the context engine marks a
-  trimmed message with a field instead of reading its `[trimmed: ` prefix,
-  an `exec` result row records `timed_out` in its `sandbox` record and
-  Lyrik reads the timeout there, verify takes a turn for a `wirken ask`
-  only when its row names no adapter, a conversation id that carries the
-  sub-agent marker is written as `%23sub-` in its session id, and Lyrik's
-  `detection_source` is always the seed set's.
 - The text a model reads when a veto or egress hook times out names no
   override. Each log event prints on one line, so a value a model chose
   cannot print a line of its own beside an approval prompt.
 - The default system prompt no longer says who writes the compaction tags.
-- Every approval card shows the request id the gateway minted for the ask,
-  a random UUID the model is never sent. A typed answer carries its first
-  four hex characters: `!approve <code>` and `!deny <code>` on Signal and
-  iMessage, where the code was eight characters and longer ones still
-  answer, and `y <code>` in `wirken chat`, where a lone `y` now approves
-  nothing. A code two pending requests share answers neither until more of
-  the id is typed, and answering one leaves the other pending.
 - Approval cards write out as a code point each character that reorders
   or hides text: bidirectional overrides, isolates and marks, zero-width
   and tag characters, and the line and paragraph separators. Teams cards
