@@ -3106,6 +3106,12 @@ pub enum ProxyRefusal {
     JwtNoGrant,
     /// A verified JWT that mappings give more than one grant set.
     JwtAmbiguousGrant,
+    /// The request asks the provider to act on the client's behalf:
+    /// a tool the provider runs (a web search, a fetch, code
+    /// execution), a remote MCP server it calls, or a search option.
+    /// Such an action reaches the network from the provider, past
+    /// every gate the proxy keeps.
+    ProviderTool,
 }
 
 impl ProxyRefusal {
@@ -3128,6 +3134,7 @@ impl ProxyRefusal {
             Self::JwtKeysUnavailable => "jwt_keys_unavailable",
             Self::JwtNoGrant => "jwt_no_grant",
             Self::JwtAmbiguousGrant => "jwt_ambiguous_grant",
+            Self::ProviderTool => "provider_tool",
         }
     }
 }

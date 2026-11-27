@@ -202,6 +202,50 @@ fn error_reply(
 }
 
 /// The token a client presented, from the header its SDK uses.
+/// What in `body` asks the provider to act for the client, if
+/// anything does: a tool the provider runs, a remote MCP server it
+/// calls, or a search option.
+///
+/// The tools a request may name are the ones the client runs: those
+/// with no `type`, a `custom` or `function` one, and, in the Anthropic
+/// shape, the tools the client executes from a definition the provider
+/// publishes (`bash_*`, `text_editor_*`, `computer_*`, `memory_*`).
+/// Any other type is refused, one the proxy has not heard of included,
+/// since a new server tool is how a provider would add one.
+fn provider_acts(shape: ProxyShape, body: &serde_json::Value) -> Option<String> {
+    // An empty list names nothing. Any other value is a request: an
+    // empty `web_search_options` turns search on with its defaults.
+    let present = |field: &str| match &body[field] {
+        serde_json::Value::Null => false,
+        serde_json::Value::Array(a) => !a.is_empty(),
+        _ => true,
+    };
+    let fields: &[&str] = match shape {
+        // The MCP connector: the provider calls the servers named.
+        ProxyShape::AnthropicMessages => &["mcp_servers"],
+        // A search model's option, and a router's web plugin.
+        ProxyShape::OpenaiChat => &["web_search_options", "plugins"],
+    };
+    if let Some(field) = fields.iter().find(|f| present(f)) {
+        return Some(format!("`{field}`"));
+    }
+    let client_runs = |kind: &str| match shape {
+        ProxyShape::AnthropicMessages => {
+            kind == "custom"
+                || ["bash_", "text_editor_", "computer_", "memory_"]
+                    .iter()
+                    .any(|p| kind.starts_with(p))
+        }
+        ProxyShape::OpenaiChat => matches!(kind, "function" | "custom"),
+    };
+    let tools = body["tools"].as_array()?;
+    tools.iter().find_map(|tool| match &tool["type"] {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(kind) if client_runs(kind) => None,
+        other => Some(format!("a tool of type {other}")),
+    })
+}
+
 pub(super) fn presented_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         return Some(value.trim().to_string());
@@ -803,6 +847,21 @@ impl ProxyState {
                 ProxyRefusal::ModelNotAllowed,
                 StatusCode::FORBIDDEN,
                 &format!("{} may not ask for model {model}", token.held_by()),
+            );
+        }
+        if let Some(what) = parsed.as_ref().and_then(|v| provider_acts(shape, v)) {
+            return self.refuse(
+                &session,
+                Some(&token),
+                Some(shape),
+                Some(&model),
+                ProxyRefusal::ProviderTool,
+                StatusCode::FORBIDDEN,
+                &format!(
+                    "the request asks the provider to act for the client ({what}), which would \
+                     reach the network past the proxy's gates. Tools reach the client's side \
+                     only: call them at the MCP endpoint, or run them in the client"
+                ),
             );
         }
         if let Some(why) = self.over_budget(&token, &provider, &model) {
@@ -1527,6 +1586,121 @@ mod tests {
         let identity = identity.as_ref().unwrap();
         assert_eq!(identity.subject.as_deref(), Some("alice@example.com"));
         assert!(identity.subject_hash.is_none());
+    }
+
+    /// A request may name the tools the client runs. One that asks the
+    /// provider to act (a server tool, the MCP connector, a search
+    /// option or plugin, a tool type nobody has heard of) is refused.
+    #[test]
+    fn only_tools_the_client_runs_may_be_named() {
+        use ProxyShape::{AnthropicMessages as A, OpenaiChat as O};
+        let acts = |shape, body: serde_json::Value| provider_acts(shape, &body);
+        let tools = |list: serde_json::Value| serde_json::json!({"model": "m", "tools": list});
+        for (shape, body) in [
+            (A, serde_json::json!({"model": "m", "messages": []})),
+            (
+                A,
+                tools(serde_json::json!([{"name": "f", "input_schema": {}}])),
+            ),
+            (
+                A,
+                tools(serde_json::json!([{"type": "custom", "name": "f"}])),
+            ),
+            (
+                A,
+                tools(serde_json::json!([{"type": "bash_20250124", "name": "bash"}])),
+            ),
+            (
+                A,
+                tools(serde_json::json!([{"type": "text_editor_20250728"}])),
+            ),
+            (A, tools(serde_json::json!([{"type": "computer_20250124"}]))),
+            (A, serde_json::json!({"model": "m", "mcp_servers": []})),
+            (
+                O,
+                tools(serde_json::json!([{"type": "function", "function": {"name": "f"}}])),
+            ),
+            (O, serde_json::json!({"model": "m", "plugins": []})),
+        ] {
+            assert_eq!(acts(shape, body.clone()), None, "{body}");
+        }
+        for (shape, body, names) in [
+            (
+                A,
+                tools(serde_json::json!([{"name": "f"}, {"type": "web_search_20250305"}])),
+                "web_search_20250305",
+            ),
+            (
+                A,
+                tools(serde_json::json!([{"type": "web_fetch_20250910"}])),
+                "web_fetch",
+            ),
+            (
+                A,
+                tools(serde_json::json!([{"type": "code_execution_20250825"}])),
+                "code_execution",
+            ),
+            (
+                A,
+                tools(serde_json::json!([{"type": "a_tool_from_next_year"}])),
+                "next_year",
+            ),
+            (A, tools(serde_json::json!([{"type": 7}])), "7"),
+            (
+                A,
+                serde_json::json!({"model": "m", "mcp_servers": [{"url": "https://x"}]}),
+                "mcp_servers",
+            ),
+            (
+                O,
+                serde_json::json!({"model": "m", "web_search_options": {}}),
+                "web_search_options",
+            ),
+            (
+                O,
+                serde_json::json!({"model": "m", "plugins": [{"id": "web"}]}),
+                "plugins",
+            ),
+            (
+                O,
+                tools(serde_json::json!([{"type": "web_search_preview"}])),
+                "web_search",
+            ),
+            // The two shapes do not lend each other their exceptions.
+            (
+                O,
+                tools(serde_json::json!([{"type": "bash_20250124"}])),
+                "bash",
+            ),
+        ] {
+            let what = acts(shape, body.clone()).unwrap_or_else(|| panic!("{body}"));
+            assert!(what.contains(names), "{what}");
+        }
+    }
+
+    /// Refused before anything is sent, on the token's lane, with its
+    /// reason: the provider never sees the request.
+    #[tokio::test]
+    async fn a_request_that_asks_the_provider_to_act_is_not_sent() {
+        let (upstream, got) = provider(json_reply("{}")).await;
+        let rig = rig(vec![("messages", "anthropic", upstream, None)]).await;
+        let (token, value) = rig.issue_with(TokenGrant {
+            name: "laptop".into(),
+            upstreams: vec!["messages".into()],
+            ..Default::default()
+        });
+        let body = r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}],
+            "tools":[{"type":"web_search_20250305","name":"web_search","max_uses":5}]}"#;
+        let refused = rig.post(MESSAGES, &value, body).await;
+        assert_eq!(refused.status(), 403);
+        let text = refused.text().await.unwrap();
+        assert!(text.contains("provider_tool"), "{text}");
+        assert!(text.contains("web_search_20250305"), "{text}");
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(
+            rig.refusals(&proxy_session(&token.id, None)),
+            [ProxyRefusal::ProviderTool]
+        );
     }
 
     /// A grant set's ceiling is each subject's own: one subject at its

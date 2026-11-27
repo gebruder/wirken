@@ -500,7 +500,12 @@ What each control leaves outside it, stated once. Other pages link here.
   process that can read the client's traffic reads its token, and on a wider
   bind the network does.
 - Only what goes through the listener is recorded and gated. A client's own
-  tools, shell and files are outside Wirken.
+  tools, shell and files are outside Wirken. A request that asks the provider
+  to act for the client (a tool the provider runs, a remote MCP server it
+  calls) is refused, because that action would be outside it too. A tool type
+  a provider adds later is refused until it is known to run on the client;
+  a model whose name alone makes the provider search is held back only by
+  the token's model list.
 - The approver of a client's tool call is the operator, who is not the person
   at the client and sees no message that led to the call.
 - The archive bucket holds no plaintext. Without any key it shows, for each

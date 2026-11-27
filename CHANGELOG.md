@@ -10,6 +10,23 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- The inference proxy refuses a request that asks the provider to act for
+  the client: a tool the provider runs (`web_search`, `web_fetch`,
+  `code_execution`), a tool of any type not known to run on the client,
+  `mcp_servers`, and `web_search_options` or `plugins` in the OpenAI shape.
+  Such a request was forwarded, and the provider then reached the network,
+  or called the remote MCP servers the client named with a token it
+  supplied, where the proxy gates and records nothing. It is now a
+  `proxy_refused` row with reason `provider_tool`, 403, and is not sent.
+  Tools a client defines and runs itself, including Anthropic's `bash`,
+  `text_editor`, `computer` and `memory` definitions, pass as before
+  (`only_tools_the_client_runs_may_be_named`,
+  `a_request_that_asks_the_provider_to_act_is_not_sent`,
+  `crates/cli/src/commands/proxy_server.rs`;
+  [docs/inference-proxy.md](docs/inference-proxy.md#what-is-forwarded)).
+
 ### Added
 
 - An MCP server can act for the person behind a call at the proxy's MCP

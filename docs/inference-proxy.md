@@ -158,6 +158,20 @@ A request is forwarded in the shape it arrives in, byte for byte, to the
 first of the token's upstreams whose provider takes that shape. The response
 is passed back byte for byte, a stream chunk by chunk. Nothing is translated.
 
+A request that asks the provider to act for the client is not forwarded:
+`provider_tool`, 403. The tools a request may name are the ones the client
+runs: a tool with no `type`, a `custom` or `function` one, and, in the
+Anthropic shape, the tools the client executes from a definition the
+provider publishes (`bash_*`, `text_editor_*`, `computer_*`, `memory_*`).
+Refused are a tool the provider runs itself (`web_search_*`, `web_fetch_*`,
+`code_execution_*`), any tool type not in that list, `mcp_servers` (the
+provider would call those servers), and `web_search_options` and `plugins`
+in the OpenAI shape. Each of them reaches the network from the provider,
+where the proxy gates and records nothing. A tool a client wants run on its
+behalf is called at the MCP endpoint ([proxy-mcp.md](proxy-mcp.md)). A
+model whose name makes the provider search (an `:online` suffix, a search
+model) is held back by the token's `--model` list.
+
 | Provider | OpenAI chat completions | Anthropic messages |
 |---|---|---|
 | `openai`, `custom`, `hetzner`, `infomaniak`, `tinfoil` | yes | no |
@@ -196,6 +210,7 @@ and `complete: false`.
 | `malformed` | The body is not a JSON object with a `model`, or is over `max_body_bytes`. | 400, 413 |
 | `shape_not_spoken` | None of the token's upstreams takes the request's shape. | 400 |
 | `model_not_allowed` | The model is not on the token's list. | 403 |
+| `provider_tool` | The request asks the provider to act for the client: a tool the provider runs, a tool type not known to run on the client, `mcp_servers`, `web_search_options` or `plugins` ([what is forwarded](#what-is-forwarded)). | 403 |
 | `budget_exceeded` | A ceiling is reached, the ledger cannot be read, or the token has a spend ceiling and the model has no price. | 429 |
 | `leak_refused` | The body carries a stored secret. | 400 |
 | `credential_refused` | The upstream's key is gone, or may not be sent to it. | 502 |
