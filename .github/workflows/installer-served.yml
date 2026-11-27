@@ -39,10 +39,16 @@ jobs:
             echo "Could not find a 64-char hex SHA in README.md" >&2
             exit 1
           fi
-          # HTTPS only, redirects included, and no more of them than the
-          # one the domain answers with today.
-          SERVED=$(curl -fsSL --proto '=https' --proto-redir '=https' --max-redirs 3 \
-            https://wirken.ai/install.sh | sha256sum | awk '{print $1}')
+          # HTTPS only, and no redirect: wirken.ai serves the installer
+          # itself, so an answer that sends the client elsewhere is a
+          # change to look at, not one to follow.
+          SERVED_FILE="$RUNNER_TEMP/install.sh"
+          if ! curl -fsSL --proto '=https' --max-redirs 0 -o "$SERVED_FILE" https://wirken.ai/install.sh; then
+            echo "::error::wirken.ai/install.sh did not answer 200 without a redirect"
+            curl -sI --proto '=https' https://wirken.ai/install.sh | grep -i -E '^HTTP|^location' >&2 || true
+            exit 1
+          fi
+          SERVED=$(sha256sum "$SERVED_FILE" | awk '{print $1}')
           echo "README pin: $PINNED"
           echo "served:     $SERVED"
           if [ "$SERVED" != "$PINNED" ]; then
