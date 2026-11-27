@@ -351,7 +351,11 @@ fn composite_session_id(cfg: &wirken_gateway::config::GatewayConfig, session_id:
                         .unwrap_or_else(|| "default".into()),
                     Err(_) => "default".into(),
                 };
-                format!("{}/{}/{}", agent_id, sess.channel, sess.conversation_id)
+                wirken_agent::factory::session_id_for(
+                    &agent_id,
+                    &sess.channel,
+                    &sess.conversation_id,
+                )
             }
             None => session_id.to_string(),
         }

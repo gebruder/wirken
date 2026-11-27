@@ -65,7 +65,14 @@ const DEFAULT_CACHE_CAPACITY: usize = 64;
 /// concern in practice. Reserved sentinels `__system__` and
 /// `__pre_migration__` are unaffected: they don't go through this
 /// helper.
+///
+/// A sub-agent's session is its parent's id plus a `#sub-N` suffix,
+/// and the id is read for that suffix: the budget a session is charged
+/// to and how deep it nests. A conversation id is the channel's, so a
+/// marker in one is written as `%23sub-` and a channel's session never
+/// reads as a sub-agent's.
 pub fn session_id_for(agent_id: &str, channel: &str, conversation_id: &str) -> String {
+    let conversation_id = conversation_id.replace(SUBAGENT_SESSION_MARKER, "%23sub-");
     format!("{agent_id}/{channel}/{conversation_id}")
 }
 
@@ -1386,6 +1393,15 @@ mod replay_tests {
         let path = tmp.into_temp_path();
         let perm_path = path.keep().unwrap();
         Arc::new(StdMutex::new(PermissionStore::open(&perm_path).unwrap()))
+    }
+
+    #[test]
+    fn a_conversation_id_cannot_make_a_channel_session_a_sub_agents() {
+        let session = session_id_for("default", "telegram", "c1#sub-0");
+        assert_eq!(session, "default/telegram/c1%23sub-0");
+        assert_eq!(root_session_id(&session), session);
+        assert_eq!(budget_agent_for("default", &session), "default");
+        assert!(!session.contains(SUBAGENT_SESSION_MARKER));
     }
 
     #[test]
