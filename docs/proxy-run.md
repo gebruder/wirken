@@ -12,7 +12,7 @@ wirken proxy run --image my-agent-image \
     --workspace ~/src/project --read-only ~/src/docs \
     --egress registry.npmjs.org \
     --upstream anthropic --ceiling-usd 5 \
-    -- claude
+    -- my-agent
 ```
 
 The run attaches the container to the terminal it was started at, and ends

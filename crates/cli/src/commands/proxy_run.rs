@@ -1024,7 +1024,7 @@ mod tests {
             read_only: vec![dirs.join("docs")],
             egress: vec!["registry.npmjs.org".into(), "*.github.com".into()],
             grant: TokenGrant::default(),
-            command: vec!["claude".into()],
+            command: vec!["my-agent".into()],
         }
     }
 
@@ -1181,7 +1181,7 @@ mod tests {
                 "--to",
                 "172.18.0.2:3129",
                 "--",
-                "claude"
+                "my-agent"
             ]
         );
         assert_eq!(body.tty, Some(true));
