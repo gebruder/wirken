@@ -12,6 +12,15 @@ tagged.
 
 ### Security
 
+- Every `exec` is given a fresh value in `LYRIK_REACHED`. Its result row
+  records `reached` in the `sandbox` record when stdout carried the value on
+  a line of its own, and the line is taken out of the recorded output. Lyrik
+  reads a harness as having reached its assertion from that record alone.
+  A harness prints the variable's value (`echo "$LYRIK_REACHED"`); one that
+  prints the fixed word `LYRIK_REACHED`, as before, is now `inconclusive`.
+- An MCP scope-error hint names the server that reported it, keeps the
+  server's own error text under it, and names a scope only when the
+  provider's catalog defines it.
 - No decision reads a marker from text a model, a tool or a channel can
   write where the gateway holds the answer: the context engine marks a
   trimmed message with a field instead of reading its `[trimmed: ` prefix,
