@@ -10,6 +10,23 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- Approval cards write out as a code point each character that reorders
+  or hides text: bidirectional overrides, isolates and marks, zero-width
+  and tag characters, and the line and paragraph separators. Teams cards
+  carry each value in a text run, which Teams does not read as Markdown;
+  Google Chat cards escape each value (`crates/adapter-core/src/approval_card.rs`,
+  `tests/hostile/corpus.jsonl`).
+- The compaction fence tags are broken in every message that enters an
+  agent's conversation, so only the harness writes a fence. A skill whose
+  name, description or body carries a tag is refused at load.
+- A model summary of trimmed messages is a `compaction` row with
+  `via_model: true` and the summary in `extracts.summary`, written before
+  the summary is placed in the context.
+- `wirken lyrik` reads a call as refused at the gate only when its result
+  row records no run.
+
 ## [3.6.1] - 2026-11-27
 
 ### Security
