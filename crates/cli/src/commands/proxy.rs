@@ -177,7 +177,7 @@ pub(super) fn check_grant(data_dir: &std::path::Path, grant: &TokenGrant) -> Res
 /// The grants the flags of `token issue` and `identity grant-set set`
 /// describe, for a `what` (a token, a grant set) named `name`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn grant_from_flags(
+pub(crate) fn grant_from_flags(
     what: &str,
     name: &str,
     upstreams: &[String],

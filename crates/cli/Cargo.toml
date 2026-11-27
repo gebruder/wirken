@@ -18,6 +18,7 @@ wirken-agent = { path = "../agent" }
 wirken-zirkel = { path = "../zirkel" }
 wirken-ipc = { path = "../ipc" }
 wirken-mcp-proxy = { path = "../mcp-proxy" }
+wirken-sandbox = { path = "../sandbox" }
 wirken-adapter-telegram = { path = "../adapter-telegram" }
 wirken-adapter-discord = { path = "../adapter-discord" }
 wirken-adapter-slack = { path = "../adapter-slack" }
@@ -63,6 +64,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 zeroize = { workspace = true }
 hmac = { workspace = true }
 rand = { workspace = true }
+bollard = { workspace = true }
 tracing = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tracing-subscriber = { workspace = true }

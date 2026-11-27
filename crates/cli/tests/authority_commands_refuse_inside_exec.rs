@@ -21,6 +21,20 @@ const INVOCATIONS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "proxy",
+        "run",
+        &[
+            "proxy",
+            "run",
+            "--image",
+            "python:3.12-slim",
+            "--upstream",
+            "local",
+            "--",
+            "true",
+        ],
+    ),
+    (
+        "proxy",
         "archive redact",
         &[
             "proxy",

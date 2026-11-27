@@ -49,6 +49,7 @@ pub mod proxy_exchange;
 pub mod proxy_identity;
 pub mod proxy_mcp;
 pub mod proxy_oidc;
+pub mod proxy_run;
 pub mod proxy_server;
 pub mod run;
 pub mod senders;

@@ -1499,6 +1499,53 @@ enum ProxyCommands {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Start a client in a container that reaches the proxy listener
+    /// and the --egress hosts, and nothing else, with a token minted
+    /// for the run and revoked when it ends. Run at a terminal.
+    Run {
+        /// The image the client runs in. It must be on this host: a
+        /// run does not pull.
+        #[arg(long)]
+        image: String,
+        /// A folder the client reads and writes, at /workspace.
+        #[arg(long)]
+        workspace: Option<std::path::PathBuf>,
+        /// A folder the client may read, at /mnt/ro/<its name>. Repeat
+        /// for more, up to eight.
+        #[arg(long = "read-only")]
+        read_only: Vec<std::path::PathBuf>,
+        /// A host the client may reach through its sidecar, HTTPS on
+        /// 443 or HTTP on 80: a domain name, *.<domain>, or *. Repeat
+        /// for more. Without it the client reaches the listener only.
+        #[arg(long = "egress")]
+        egress: Vec<String>,
+        /// An upstream from proxy.json the run's token may reach.
+        /// Repeat for more.
+        #[arg(long = "upstream")]
+        upstreams: Vec<String>,
+        /// A model the run's token may ask for. Repeat for more.
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// Spend ceiling over the window, in US dollars.
+        #[arg(long)]
+        ceiling_usd: Option<f64>,
+        /// Call ceiling over the window.
+        #[arg(long)]
+        ceiling_calls: Option<u64>,
+        /// The window the ceilings apply over: hour, day or week.
+        #[arg(long, default_value = "day")]
+        window: String,
+        /// An MCP server whose tools the run may call at the MCP
+        /// endpoint. Its entry must be signed. Repeat for more.
+        #[arg(long = "mcp-server")]
+        mcp_servers: Vec<String>,
+        /// The agent whose MCP servers --mcp-server names.
+        #[arg(long, default_value = "default")]
+        agent: String,
+        /// The client's command and arguments, after --.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1795,6 +1842,7 @@ fn authority_change(command: &Commands) -> Option<(&'static str, &'static str)> 
                 ProxyTokenCommands::List => return None,
             },
         ),
+        Commands::Proxy(ProxyCommands::Run { .. }) => ("proxy", "run"),
         Commands::Proxy(ProxyCommands::Archive(ProxyArchiveCommands::Redact { .. })) => {
             ("proxy", "archive redact")
         }
@@ -2446,6 +2494,42 @@ async fn main() -> Result<()> {
             session,
             reason,
         })) => commands::proxy::archive_redact(sha256.as_deref(), session.as_deref(), &reason),
+        Commands::Proxy(ProxyCommands::Run {
+            image,
+            workspace,
+            read_only,
+            egress,
+            upstreams,
+            models,
+            ceiling_usd,
+            ceiling_calls,
+            window,
+            mcp_servers,
+            agent,
+            command,
+        }) => {
+            let grant = commands::proxy::grant_from_flags(
+                "run",
+                "run",
+                &upstreams,
+                &models,
+                ceiling_usd,
+                ceiling_calls,
+                &window,
+                &mcp_servers,
+                &agent,
+            )?;
+            let code = commands::proxy_run::run(commands::proxy_run::RunRequest {
+                image,
+                workspace,
+                read_only,
+                egress,
+                grant,
+                command,
+            })
+            .await?;
+            std::process::exit(code);
+        }
         Commands::Proxy(ProxyCommands::Sessions { token }) => {
             commands::proxy::sessions(token.as_deref())
         }
