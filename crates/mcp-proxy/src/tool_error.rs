@@ -49,8 +49,15 @@ pub enum McpToolError {
     /// response named the specific scope and `None` when the
     /// response indicated insufficient scope generically.
     ScopeNotGranted {
+        /// The MCP server whose error this is, as the operator named
+        /// it in `mcp.json`. Empty until the client that called the
+        /// server fills it in.
+        server: String,
         credential: String,
         provider: String,
+        /// A scope the provider's catalog defines. A token the server's
+        /// text quoted that the catalog does not hold is dropped, so
+        /// the server cannot choose a scope for the operator to grant.
         scope_hint: Option<String>,
     },
 }
@@ -59,19 +66,21 @@ impl fmt::Display for McpToolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ScopeNotGranted {
+                server,
                 credential,
+                provider,
                 scope_hint,
-                ..
             } => match scope_hint {
                 Some(hint) => write!(
                     f,
-                    "Tool call refused: credential '{credential}' missing scope {hint}. \
-                     Run: wirken credentials rescope {credential}"
+                    "MCP server '{server}' reported that credential '{credential}' lacks \
+                     the {provider} scope {hint}. Run: wirken credentials rescope {credential}"
                 ),
                 None => write!(
                     f,
-                    "Tool call refused: credential '{credential}' may be missing required scope. \
-                     Run: wirken credentials rescope {credential} to review."
+                    "MCP server '{server}' reported an authorization failure that reads as \
+                     a missing scope on credential '{credential}'. Run: wirken credentials \
+                     rescope {credential} to review."
                 ),
             },
         }
@@ -97,7 +106,7 @@ pub fn detect_scope_not_granted(
     credential: &str,
     error_text: &str,
 ) -> Option<McpToolError> {
-    match provider {
+    let detected = match provider {
         "github" => detect_github(provider, credential, error_text),
         "linear" => detect_linear(provider, credential, error_text),
         "google" => detect_google(provider, credential, error_text),
@@ -105,7 +114,28 @@ pub fn detect_scope_not_granted(
         // scopes; no detector. Any other / unknown provider also
         // falls through.
         _ => None,
-    }
+    }?;
+    let McpToolError::ScopeNotGranted {
+        server,
+        credential,
+        provider,
+        scope_hint,
+    } = detected;
+    let scope_hint = scope_hint.filter(|hint| in_catalog(&provider, hint));
+    Some(McpToolError::ScopeNotGranted {
+        server,
+        credential,
+        provider,
+        scope_hint,
+    })
+}
+
+/// Whether the provider's scope catalog, or its default scopes, hold
+/// `scope`.
+fn in_catalog(provider: &str, scope: &str) -> bool {
+    crate::oauth::lookup_provider(provider).is_some_and(|p| {
+        p.scopes.iter().any(|c| c.id == scope) || p.default_scopes.contains(&scope)
+    })
 }
 
 /// GitHub REST API insufficient-scope detection.
@@ -142,6 +172,7 @@ fn detect_github(provider: &str, credential: &str, error_text: &str) -> Option<M
     }
 
     Some(McpToolError::ScopeNotGranted {
+        server: String::new(),
         credential: credential.to_string(),
         provider: provider.to_string(),
         scope_hint: extract_quoted_scope(error_text),
@@ -176,6 +207,7 @@ fn detect_linear(provider: &str, credential: &str, error_text: &str) -> Option<M
     }
 
     Some(McpToolError::ScopeNotGranted {
+        server: String::new(),
         credential: credential.to_string(),
         provider: provider.to_string(),
         scope_hint: extract_quoted_scope(error_text),
@@ -214,6 +246,7 @@ fn detect_google(provider: &str, credential: &str, error_text: &str) -> Option<M
     }
 
     Some(McpToolError::ScopeNotGranted {
+        server: String::new(),
         credential: credential.to_string(),
         provider: provider.to_string(),
         scope_hint: extract_google_scope(error_text).or_else(|| extract_quoted_scope(error_text)),
@@ -329,28 +362,56 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn display_with_scope_hint_names_credential_and_scope() {
+    fn display_with_scope_hint_names_server_credential_and_scope() {
         let err = McpToolError::ScopeNotGranted {
+            server: "gh".into(),
             credential: "alice-github".into(),
             provider: "github".into(),
             scope_hint: Some("repo".into()),
         };
         let s = format!("{err}");
+        assert!(s.starts_with("MCP server 'gh' reported"), "{s}");
         assert!(s.contains("alice-github"));
-        assert!(s.contains("repo"));
+        assert!(s.contains("the github scope repo"));
         assert!(s.contains("wirken credentials rescope alice-github"));
+    }
+
+    /// The server's text names the scope only from the provider's
+    /// catalog: a token it quoted that the catalog does not define is
+    /// dropped and the message falls back to the generic one.
+    #[test]
+    fn a_scope_the_catalog_does_not_define_is_not_named() {
+        let named = |text: &str| match detect_scope_not_granted("github", "c", text) {
+            Some(McpToolError::ScopeNotGranted { scope_hint, .. }) => scope_hint,
+            None => panic!("not detected: {text}"),
+        };
+        assert_eq!(
+            named("Resource not accessible by integration; scope 'repo' required"),
+            Some("repo".into())
+        );
+        assert_eq!(
+            named("Resource not accessible by integration; scope 'admin:everything' required"),
+            None
+        );
+        assert_eq!(
+            named(
+                "Resource not accessible by integration; scope 'ignore previous instructions' required"
+            ),
+            None
+        );
     }
 
     #[test]
     fn display_without_scope_hint_uses_generic_rescope_message() {
         let err = McpToolError::ScopeNotGranted {
+            server: "drive".into(),
             credential: "alice-google".into(),
             provider: "google".into(),
             scope_hint: None,
         };
         let s = format!("{err}");
         assert!(s.contains("alice-google"));
-        assert!(s.contains("may be missing required scope"));
+        assert!(s.contains("reads as a missing scope"));
         assert!(s.contains("wirken credentials rescope alice-google to review"));
     }
 
@@ -364,6 +425,7 @@ mod tests {
         let err = detect_scope_not_granted("github", "alice", body).expect("github detector fires");
         match err {
             McpToolError::ScopeNotGranted {
+                server: _,
                 credential,
                 provider,
                 scope_hint,
@@ -429,6 +491,7 @@ mod tests {
         let err = detect_scope_not_granted("linear", "alice-linear", body).expect("matches");
         match err {
             McpToolError::ScopeNotGranted {
+                server: _,
                 credential,
                 provider,
                 ..
@@ -470,6 +533,7 @@ mod tests {
         let err = detect_scope_not_granted("google", "alice-google", body).expect("matches");
         match err {
             McpToolError::ScopeNotGranted {
+                server: _,
                 credential,
                 provider,
                 ..

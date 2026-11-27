@@ -175,12 +175,9 @@ impl McpClient {
 
         if let Some(ref err) = resp.error {
             let raw_output = format!("MCP tool error: {} ({})", err.message, err.code);
-            let error_kind = classify_error(&oauth_ctx, &err.message);
+            let error_kind = classify_error(&self.name, &oauth_ctx, &err.message);
             return Ok(McpToolResult {
-                output: error_kind
-                    .as_ref()
-                    .map(|e| e.to_string())
-                    .unwrap_or(raw_output),
+                output: classified_output(&error_kind, raw_output),
                 success: false,
                 error_kind,
             });
@@ -215,16 +212,13 @@ impl McpClient {
             output
         };
         let error_kind = if is_error {
-            classify_error(&oauth_ctx, &raw_output)
+            classify_error(&self.name, &oauth_ctx, &raw_output)
         } else {
             None
         };
 
         Ok(McpToolResult {
-            output: error_kind
-                .as_ref()
-                .map(|e| e.to_string())
-                .unwrap_or(raw_output),
+            output: classified_output(&error_kind, raw_output),
             success: !is_error,
             error_kind,
         })
@@ -260,9 +254,34 @@ impl McpClient {
 /// providers, or response shapes the detector cannot match with
 /// confidence. The caller substitutes the typed message into
 /// `output` when this is `Some`.
-fn classify_error(oauth_ctx: &Option<(String, String)>, error_text: &str) -> Option<McpToolError> {
+fn classify_error(
+    server: &str,
+    oauth_ctx: &Option<(String, String)>,
+    error_text: &str,
+) -> Option<McpToolError> {
     let (credential, provider) = oauth_ctx.as_ref()?;
-    detect_scope_not_granted(provider, credential, error_text)
+    let McpToolError::ScopeNotGranted {
+        credential,
+        provider,
+        scope_hint,
+        ..
+    } = detect_scope_not_granted(provider, credential, error_text)?;
+    Some(McpToolError::ScopeNotGranted {
+        server: server.to_string(),
+        credential,
+        provider,
+        scope_hint,
+    })
+}
+
+/// A tool result for an error a detector classified: the gateway's
+/// reading of it, then the server's own text, so the row keeps what
+/// the server said and the reading names the server it came from.
+fn classified_output(error_kind: &Option<McpToolError>, raw_output: String) -> String {
+    match error_kind {
+        Some(kind) => format!("{kind}\nThe server's error: {raw_output}"),
+        None => raw_output,
+    }
 }
 
 #[cfg(all(test, unix))]

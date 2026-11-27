@@ -291,20 +291,24 @@ or replace a credential with no terminal.
 If a tool call fails because the OAuth credential is missing a
 scope the tool needs, wirken detects the failure at the MCP
 transport layer and surfaces a typed error to the agent. The
-tool result reads:
+tool result, which is also the call's `tool_result` row, reads:
 
 ```
-Tool call refused: credential '<name>' missing scope <hint>.
-Run: wirken credentials rescope <name>
+MCP server '<server>' reported that credential '<name>' lacks the
+<provider> scope <hint>. Run: wirken credentials rescope <name>
+The server's error: <what the server sent>
 ```
 
-When the provider's response named the specific scope, `<hint>`
-carries the scope id. When the response indicated insufficient
-scope generically, the message reads:
+`<server>` is the entry's name in `mcp.json`. `<hint>` is named only
+when the server's text quotes a scope the provider's catalog defines;
+a token the catalog does not hold is dropped, so the server cannot
+choose the scope the message asks for. Otherwise the message reads:
 
 ```
-Tool call refused: credential '<name>' may be missing required
-scope. Run: wirken credentials rescope <name> to review.
+MCP server '<server>' reported an authorization failure that reads
+as a missing scope on credential '<name>'. Run: wirken credentials
+rescope <name> to review.
+The server's error: <what the server sent>
 ```
 
 Detection is per-provider: GitHub REST 403 responses (e.g.
