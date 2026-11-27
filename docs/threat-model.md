@@ -500,7 +500,12 @@ What each control leaves outside it, stated once. Other pages link here.
   process that can read the client's traffic reads its token, and on a wider
   bind the network does.
 - Only what goes through the listener is recorded and gated. A client's own
-  tools, shell and files are outside Wirken. A request that asks the provider
+  tools, shell and files are outside Wirken. A client `wirken proxy run`
+  starts reaches only the listener and the hosts named for it, and only its
+  workspace, its read-only folders and its home; what it runs inside that is
+  not gated or recorded, and an allowed host or registry serves whatever it
+  serves. A run killed outright leaves its container and its token live until
+  the next run clears them ([proxy-run.md](proxy-run.md)). A request that asks the provider
   to act for the client (a tool the provider runs, a remote MCP server it
   calls) is refused, because that action would be outside it too. A tool type
   a provider adds later is refused until it is known to run on the client;

@@ -311,7 +311,7 @@ In defender mode Lyrik also checks a fix. For each confirmed finding it writes (
 [Multiple agents](docs/multi-agent.md) ·
 [Credentials and OAuth scopes](docs/credentials.md) ·
 [Cost monitoring](docs/cost-monitoring.md) ·
-[Proxy mode](docs/proxy.md) (other clients' model calls and tool calls through Wirken: [inference](docs/inference-proxy.md), [MCP tools](docs/proxy-mcp.md), [JWTs from an identity provider](docs/proxy-identity.md), [archive, redaction and export](docs/proxy-archive.md)) ·
+[Proxy mode](docs/proxy.md) (other clients' model calls and tool calls through Wirken: [inference](docs/inference-proxy.md), [MCP tools](docs/proxy-mcp.md), [JWTs from an identity provider](docs/proxy-identity.md), [contained runs](docs/proxy-run.md), [archive, redaction and export](docs/proxy-archive.md)) ·
 [Getting the chain out](docs/siem-forwarder.md) (SIEM, hooks, OpenTelemetry) ·
 [Imported archives](docs/imported-archives.md)
 

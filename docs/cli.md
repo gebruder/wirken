@@ -478,10 +478,16 @@ wirken proxy identity grant-set remove <NAME>
 wirken proxy identity map <GRANT-SET> (--claim-value <VALUE> | --subject <SUB>)
 wirken proxy identity unmap (--claim-value <VALUE> | --subject <SUB>)
 wirken proxy identity list
+wirken proxy run --image <IMAGE> [--workspace DIR] [--read-only DIR]... [--egress HOST]...
+                 [--upstream U] [--model M] [--ceiling-usd N] [--ceiling-calls N]
+                 [--window hour|day|week] [--mcp-server S] [--agent A] -- <COMMAND>...
 ```
 
-`issue`, `revoke`, `redact` and every `identity` subcommand but `list` run at
-a terminal and refuse inside a Wirken `exec`. A token or a grant set needs
+`issue`, `revoke`, `redact`, `run` and every `identity` subcommand but `list`
+run at a terminal and refuse inside a Wirken `exec`. `run` starts a client in
+a container that reaches the listener and the `--egress` hosts only, with a
+token minted for the run and revoked when it ends
+([proxy-run.md](proxy-run.md)). A token or a grant set needs
 `--upstream`, `--mcp-server` or both. See
 [inference-proxy.md](inference-proxy.md), for `--mcp-server`
 [proxy-mcp.md](proxy-mcp.md), and for `identity`

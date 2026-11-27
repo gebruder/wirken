@@ -10,6 +10,26 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `wirken proxy run` starts a proxy client in a container whose only ways
+  out are the proxy listener, on the container's own loopback, and the hosts
+  named with `--egress`, through its sidecar. A coding agent's own shell,
+  files and network were outside Wirken when it ran beside it; in a run they
+  are bounded by the exec sandbox's hardening, a workspace at `/workspace`,
+  read-only folders at `/mnt/ro`, and a home kept per workspace. The client
+  holds one token, minted for the run from the same grant flags as `proxy
+  token issue` and revoked when the run ends, and no provider key. Each run
+  is a `proxy_run_started` and a `proxy_run_ended` row on its token's lane,
+  with each sidecar request a `sandbox_egress_verdict` row. A run killed
+  outright is cleared, container and token, by the next. What the client
+  runs inside the container is not gated one command at a time
+  (`a_run_reaches_the_listener_and_nothing_it_was_not_given`,
+  `a_run_killed_outright_is_cleared_by_the_next`,
+  `crates/cli/tests/proxy_run_live_round_trip.rs`;
+  `crates/cli/src/commands/proxy_run.rs`;
+  [docs/proxy-run.md](docs/proxy-run.md)).
+
 ### Security
 
 - The inference proxy refuses a request that asks the provider to act for

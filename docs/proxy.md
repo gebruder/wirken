@@ -19,6 +19,9 @@ where it starts.
 Nothing else is served. The client's own built-in tools, its shell and its
 files stay on its side, where Wirken sees and gates nothing: only what goes
 through the listener is recorded, and only tools reached at `/mcp` are gated.
+`wirken proxy run` starts a client in a container whose only ways out are
+the listener and the hosts named for it, which bounds its shell and its files
+too ([proxy-run.md](proxy-run.md)).
 
 ## Turning it on
 
