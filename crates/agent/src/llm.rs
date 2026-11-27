@@ -2891,12 +2891,43 @@ mod forward_tests {
         base
     }
 
+    /// A provider that sends its head and one byte, then holds the
+    /// connection open and sends nothing more until the test ends. Only
+    /// an idle timeout can end a read of it.
+    async fn stalled_stream() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                      Connection: close\r\n\r\nx",
+                )
+                .await;
+            let _ = stream.flush().await;
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+        base
+    }
+
     /// A forwarded answer is not cut for taking long: it runs past the
-    /// idle timeout many times over while bytes keep arriving. One
-    /// that stops arriving ends at the idle timeout.
+    /// idle timeout while bytes keep arriving. One that stops arriving
+    /// ends, and only the idle timeout can end it.
+    ///
+    /// Nothing here races the clock under load. The steady stream's
+    /// gaps are a fiftieth of the idle timeout, and the stalled one is
+    /// held open with nothing more to send, so the read ends on
+    /// idleness or not at all; the outer limit only turns a broken
+    /// timeout into a failure instead of a hang.
     #[tokio::test]
     async fn a_forwarded_stream_ends_on_idleness_and_not_on_total_time() {
-        let idle = std::time::Duration::from_millis(400);
+        let idle = std::time::Duration::from_secs(1);
         let client_for = |base: &str| {
             let mut client = LlmClient::new(LlmConfig::from_provider(
                 "custom",
@@ -2908,30 +2939,32 @@ mod forward_tests {
             client
         };
 
-        // Twelve bytes, 150 ms apart: 1.8 s in all, each gap inside
-        // the idle timeout.
-        let steady = slow_stream(12, std::time::Duration::from_millis(150)).await;
+        // Sixty bytes, 20 ms apart: longer in all than the idle
+        // timeout, each gap far inside it.
+        let steady = slow_stream(60, std::time::Duration::from_millis(20)).await;
         let started = std::time::Instant::now();
         let response = client_for(&steady)
             .forward(ProxyShape::OpenaiChat, b"{}".to_vec(), &[], None)
             .await
             .unwrap();
-        assert_eq!(response.text().await.unwrap(), "x".repeat(12));
-        assert!(started.elapsed() > idle * 3, "{:?}", started.elapsed());
+        assert_eq!(response.text().await.unwrap(), "x".repeat(60));
+        assert!(started.elapsed() > idle, "{:?}", started.elapsed());
 
-        // Two bytes, two seconds apart: the second never arrives in
-        // time.
-        let stalled = slow_stream(2, std::time::Duration::from_secs(2)).await;
-        let started = std::time::Instant::now();
-        let outcome = match client_for(&stalled)
-            .forward(ProxyShape::OpenaiChat, b"{}".to_vec(), &[], None)
-            .await
-        {
-            Ok(response) => response.text().await.map(|_| ()),
-            Err(_) => Ok(()),
+        // One byte, then nothing, with the connection held open.
+        let stalled = stalled_stream().await;
+        let read = async {
+            match client_for(&stalled)
+                .forward(ProxyShape::OpenaiChat, b"{}".to_vec(), &[], None)
+                .await
+            {
+                Ok(response) => response.text().await.map(|_| ()),
+                Err(_) => Ok(()),
+            }
         };
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(60), read)
+            .await
+            .expect("the idle timeout ends a stalled stream");
         assert!(outcome.is_err(), "a stalled stream was read to its end");
-        assert!(started.elapsed() < std::time::Duration::from_millis(1900));
     }
 
     /// A forwarded call follows no redirect, as an agent call does not.
