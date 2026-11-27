@@ -946,6 +946,9 @@ async fn attached(
     let mut winch = signal(SignalKind::window_change()).context("watch the terminal's size")?;
     let mut term = signal(SignalKind::terminate()).context("watch for SIGTERM")?;
     let mut hup = signal(SignalKind::hangup()).context("watch for SIGHUP")?;
+    // The terminal is raw, so Ctrl-C goes to the client; a SIGINT here
+    // came from elsewhere, and stops the run as SIGTERM does.
+    let mut int = signal(SignalKind::interrupt()).context("watch for SIGINT")?;
     let mut waited = docker.wait_container(
         container,
         None::<bollard::query_parameters::WaitContainerOptions>,
@@ -979,6 +982,7 @@ async fn attached(
             _ = winch.recv() => resize(docker, container).await,
             _ = term.recv() => { stopped = true; break None; }
             _ = hup.recv() => { stopped = true; break None; }
+            _ = int.recv() => { stopped = true; break None; }
         }
     };
     drop(raw);
