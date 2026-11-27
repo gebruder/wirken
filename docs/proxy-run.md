@@ -41,6 +41,14 @@ The client finds the listener and its token in its environment:
 The MCP endpoint is at `$WIRKEN_PROXY_URL/mcp`, with the token as its bearer,
 for a client given `--mcp-server` ([proxy-mcp.md](proxy-mcp.md)).
 
+The client holds the token itself, not a placeholder for it. A client that
+sends it to an `--egress` host gives away something the listener accepts
+only on this host's loopback, and only until the run ends. A placeholder,
+swapped for the token on the host side, would not narrow that further: the
+container runs as the operator's uid, so the operator's own processes can
+read the client's environment, as they could read the token from the process
+that would hold it instead.
+
 A client that signs in to a subscription in place of an API key is not
 served: the run holds no provider credential to give it, and a sign-in would
 need a host the run does not reach.

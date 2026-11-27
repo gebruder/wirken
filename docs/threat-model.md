@@ -504,8 +504,11 @@ What each control leaves outside it, stated once. Other pages link here.
   starts reaches only the listener and the hosts named for it, and only its
   workspace, its read-only folders and its home; what it runs inside that is
   not gated or recorded, and an allowed host or registry serves whatever it
-  serves. A run killed outright leaves its container and its token live until
-  the next run clears them ([proxy-run.md](proxy-run.md)). A request that asks the provider
+  serves. The client holds its run token in its environment: usable against
+  the listener on this host's loopback only, and only until the run ends, by
+  the client or by any process of the operator's uid. A run killed outright
+  leaves its container and its token live until the next run clears them
+  ([proxy-run.md](proxy-run.md#what-the-client-gets)). A request that asks the provider
   to act for the client (a tool the provider runs, a remote MCP server it
   calls) is refused, because that action would be outside it too. A tool type
   a provider adds later is refused until it is known to run on the client;
