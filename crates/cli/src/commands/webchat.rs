@@ -4751,6 +4751,7 @@ pub fn session_events(
             SessionEvent::ProxyToolsListed { .. } => None,
             SessionEvent::ProxyToolCall { .. } => None,
             SessionEvent::ProxyToolRefused { .. } => None,
+            SessionEvent::ProxyTokenExchanged { .. } => None,
             SessionEvent::ProxyArchiveRedacted { .. } => None,
             SessionEvent::McpCredentialRefreshDiscarded { .. } => None,
             // What the session has read, for the http_request gate; the

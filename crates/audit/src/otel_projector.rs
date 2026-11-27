@@ -589,6 +589,7 @@ impl OtelProjector {
             SessionEvent::ProxyToolsListed { .. } => Vec::new(),
             SessionEvent::ProxyToolCall { .. } => Vec::new(),
             SessionEvent::ProxyToolRefused { .. } => Vec::new(),
+            SessionEvent::ProxyTokenExchanged { .. } => Vec::new(),
             SessionEvent::ProxyArchiveRedacted { .. } => Vec::new(),
             SessionEvent::McpCredentialRefreshDiscarded { .. } => Vec::new(),
             SessionEvent::CredentialDestinationRefused { .. }

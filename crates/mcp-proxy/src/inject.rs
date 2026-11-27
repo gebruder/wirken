@@ -594,6 +594,7 @@ impl Injector {
                 host: self.plan.host.clone(),
                 method: seen.method.clone(),
                 path: row_path(url.path()),
+                exchanged_for: None,
             }) {
                 tracing::error!("MCP injected route: request not recorded, so not made: {e}");
                 return self.refuse(&seen, McpInjectRefusal::RecordFailed);
@@ -1250,7 +1251,9 @@ mod tests {
                         host,
                         method,
                         path,
+                        exchanged_for,
                     } => {
+                        assert_eq!(exchanged_for, None);
                         assert_eq!(
                             (server_name.as_str(), agent_id.as_str()),
                             ("github", "agent-1")

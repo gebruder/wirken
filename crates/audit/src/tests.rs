@@ -3927,6 +3927,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             host: String::new(),
             method: String::new(),
             path: String::new(),
+            exchanged_for: None,
         },
         SessionEvent::McpInjectRefused {
             server_name: String::new(),
@@ -4006,6 +4007,21 @@ fn every_session_event() -> Vec<SessionEvent> {
             tool: None,
             reason: crate::session_log::ProxyToolRefusal::NotGranted,
             identity: None,
+        },
+        SessionEvent::ProxyTokenExchanged {
+            token_id: String::new(),
+            agent_id: String::new(),
+            mcp_session: String::new(),
+            server: String::new(),
+            audience: String::new(),
+            expires_at: wirken_time::Timestamp::UNIX_EPOCH,
+            identity: crate::session_log::ProxyIdentity {
+                issuer: String::new(),
+                grant_set: None,
+                jti: None,
+                subject_hash: None,
+                subject: None,
+            },
         },
         SessionEvent::ProxyArchiveRedacted {
             sha256: HashHex(String::new()),
@@ -4277,6 +4293,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::ProxyToolsListed { .. } => "ProxyToolsListed",
         SessionEvent::ProxyToolCall { .. } => "ProxyToolCall",
         SessionEvent::ProxyToolRefused { .. } => "ProxyToolRefused",
+        SessionEvent::ProxyTokenExchanged { .. } => "ProxyTokenExchanged",
         SessionEvent::ProxyArchiveRedacted { .. } => "ProxyArchiveRedacted",
         SessionEvent::LeakRefused { .. } => "LeakRefused",
         SessionEvent::LlmRequestFailed { .. } => "LlmRequestFailed",
@@ -4285,7 +4302,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 102;
+const SESSION_EVENT_VARIANTS: usize = 103;
 
 /// The list covers the enum.
 #[test]

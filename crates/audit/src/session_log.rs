@@ -2318,6 +2318,11 @@ pub enum SessionEvent {
         host: String,
         method: String,
         path: String,
+        /// The audience of the token exchanged for the caller of the
+        /// call under way, set in place of `credential`. Absent when
+        /// `credential` itself was set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exchanged_for: Option<String>,
     },
     /// A request a contained server sent to its injected route was
     /// refused, and no credential was set on it. `path` is the path
@@ -2475,6 +2480,25 @@ pub enum SessionEvent {
         /// from the identity provider in place of a token.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity: Option<ProxyIdentity>,
+    },
+    /// The proxy exchanged the JWT a client presented at the MCP
+    /// endpoint for a token of `audience` at the identity provider's
+    /// token endpoint (RFC 8693), for a call to `server`. One row per
+    /// exchange: a call made with a token still held writes none.
+    /// Neither token is on the row. On the subject's lane, before the
+    /// call is handed to the gate.
+    ProxyTokenExchanged {
+        token_id: String,
+        agent_id: String,
+        mcp_session: String,
+        server: String,
+        audience: String,
+        /// When the exchanged token expires, as the provider said.
+        #[serde(with = "wirken_time::serde_z")]
+        expires_at: Timestamp,
+        /// Whose JWT was exchanged: the issuer and the subject, as on
+        /// every row of the call.
+        identity: ProxyIdentity,
     },
     /// The key an archived body was encrypted under was destroyed. The
     /// object stays in the bucket for its retention period and can no
@@ -3154,6 +3178,13 @@ pub enum ProxyToolRefusal {
     RecordFailed,
     /// A body could not be written to the archive, so nothing ran.
     ArchiveFailed,
+    /// The tool's server takes a token exchanged for the caller, and
+    /// the caller presented a token Wirken issued, which has no person
+    /// to exchange for.
+    ExchangeRequired,
+    /// The exchange at the identity provider's token endpoint did not
+    /// give a token, so the call was not made.
+    ExchangeFailed,
 }
 
 impl ProxyToolRefusal {
@@ -3166,6 +3197,8 @@ impl ProxyToolRefusal {
             Self::Unavailable => "unavailable",
             Self::RecordFailed => "record_failed",
             Self::ArchiveFailed => "archive_failed",
+            Self::ExchangeRequired => "exchange_required",
+            Self::ExchangeFailed => "exchange_failed",
         }
     }
 }

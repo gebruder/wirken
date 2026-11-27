@@ -972,6 +972,13 @@ fn extract_identity_for_sentinel(
         SessionEvent::ProxyToolRefused {
             token_id, agent_id, ..
         } => (None, Some(proxy_token_actor(token_id)), agent_id.clone()),
+        SessionEvent::ProxyTokenExchanged {
+            token_id, agent_id, ..
+        } => (
+            None,
+            Some(proxy_token_actor(token_id)),
+            Some(agent_id.clone()),
+        ),
         // A body hash and an operator; none of the three.
         SessionEvent::ProxyArchiveRedacted { .. } => (None, None, None),
         // A credential name; none of the three.
@@ -1459,6 +1466,17 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             "proxy_tool_refused token={token_id} tool={} reason={}",
             tool.as_deref().unwrap_or("none"),
             reason.as_str()
+        ),
+        SessionEvent::ProxyTokenExchanged {
+            token_id,
+            server,
+            audience,
+            expires_at,
+            ..
+        } => format!(
+            "proxy_token_exchanged token={token_id} server={server} audience={audience} \
+             expires_at={}",
+            expires_at.to_rfc3339()
         ),
         SessionEvent::ProxyArchiveRedacted {
             sha256, operator, ..
@@ -2814,6 +2832,7 @@ mod identity_tests {
                     host: "api.github.com".into(),
                     method: "GET".into(),
                     path: "/user".into(),
+                    exchanged_for: None,
                 },
                 None,
                 None,
@@ -2917,6 +2936,26 @@ mod identity_tests {
                 None,
                 Some("proxy-token:tok1"),
                 None,
+            ),
+            (
+                SessionEvent::ProxyTokenExchanged {
+                    token_id: "u0123456789abcdef".into(),
+                    agent_id: "default".into(),
+                    mcp_session: "m1".into(),
+                    server: "crm".into(),
+                    audience: "crm-api".into(),
+                    expires_at: wirken_time::Timestamp::UNIX_EPOCH,
+                    identity: crate::ProxyIdentity {
+                        issuer: "https://idp.example.com".into(),
+                        grant_set: Some("engineers".into()),
+                        jti: None,
+                        subject_hash: Some("00".repeat(32)),
+                        subject: None,
+                    },
+                },
+                None,
+                Some("proxy-token:u0123456789abcdef"),
+                Some("default"),
             ),
             (
                 SessionEvent::ProxyArchiveRedacted {

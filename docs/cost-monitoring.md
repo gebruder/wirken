@@ -70,6 +70,7 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
         "proxy_tools_listed",
         "proxy_tool_call",
         "proxy_tool_refused",
+        "proxy_token_exchanged",
         "leak_refused",
         "egress_hook_dispatched",
         "tool_output_redacted",
