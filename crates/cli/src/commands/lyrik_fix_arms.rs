@@ -1590,10 +1590,6 @@ pub struct RootCauseClaim {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<Site>,
     pub evidence_state: ClaimEvidence,
-    /// Whether the baseline run showed the defect with output naming the
-    /// origin: the root-cause arm's rule for a patch at the origin.
-    #[serde(skip)]
-    pub shown_and_named: bool,
     /// Set when the variant arm failed: a fix at this origin left
     /// another path open.
     pub suspect: bool,
@@ -1631,7 +1627,6 @@ pub fn root_cause_claim(
             (true, false, true) => ClaimEvidence::NamedInOutput,
             _ => ClaimEvidence::AssertedOnly,
         },
-        shown_and_named: named && reproduction.baseline == Poc::Shown,
         suspect: false,
     }
 }
@@ -1685,31 +1680,28 @@ pub fn root_cause_arm(
         );
     }
     if at_origin {
-        // The pass rule is a baseline run that showed the defect with
-        // output naming the origin. What the pass rests on is the
-        // label: the runner's trace of the origin line, or the output
-        // alone, which is in band.
-        if claim.shown_and_named {
-            let basis = match claim.evidence_state {
-                ClaimEvidence::ConfirmedByExecutedPoc => Basis::Executed,
-                _ => Basis::InBand,
-            };
-            return (
-                ArmResult::new("root_cause", ArmState::Pass, Some(basis), Vec::new()),
-                false,
-            );
-        }
+        // A baseline run that showed the defect, with the runner's
+        // trace of the origin line or with output naming the origin,
+        // passes. The trace is the stronger of the two and passes
+        // wherever the output would: what the pass rests on is its
+        // basis, the runner's own record or the output, which is in
+        // band.
         return match claim.evidence_state {
-            ClaimEvidence::ConfirmedByExecutedPoc | ClaimEvidence::NamedInOutput => (
+            ClaimEvidence::ConfirmedByExecutedPoc => (
                 ArmResult::new(
                     "root_cause",
-                    ArmState::Inconclusive,
-                    judged,
-                    vec![format!(
-                        "the patch touches the recorded origin {}, and the baseline output \
-                         does not name it",
-                        at(origin)
-                    )],
+                    ArmState::Pass,
+                    Some(Basis::Executed),
+                    Vec::new(),
+                ),
+                false,
+            ),
+            ClaimEvidence::NamedInOutput => (
+                ArmResult::new(
+                    "root_cause",
+                    ArmState::Pass,
+                    Some(Basis::InBand),
+                    Vec::new(),
                 ),
                 false,
             ),
@@ -3215,10 +3207,17 @@ pub(crate) mod tests {
         assert_eq!(arm.state, ArmState::Pass);
         assert_eq!(arm.basis, Some(Basis::Executed));
         // A trace alone, with output that does not name the origin, is
-        // confirmed, and the arm's rule is unchanged: it does not pass.
+        // confirmed and passes: the stronger evidence passes wherever
+        // the weaker does.
         let quiet = root_cause_claim(&f, &reproduction(Poc::Shown, Some("boom")), true);
         assert_eq!(quiet.evidence_state, ClaimEvidence::ConfirmedByExecutedPoc);
         let (arm, _) = root_cause_arm(&shape, &f, &quiet, &Poc::NotShown, false);
+        assert_eq!(arm.state, ArmState::Pass);
+        assert_eq!(arm.basis, Some(Basis::Executed));
+        // Without the trace, the same run with that output is asserted
+        // only and does not pass.
+        let untraced = root_cause_claim(&f, &reproduction(Poc::Shown, Some("boom")), false);
+        let (arm, _) = root_cause_arm(&shape, &f, &untraced, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Inconclusive);
         // A trace of a run that did not show the defect confirms nothing.
         let unshown = root_cause_claim(

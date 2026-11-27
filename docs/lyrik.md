@@ -1126,10 +1126,10 @@ The arms, in `arms` order:
   under test can name the origin whether or not it ran. It is `asserted_only`
   otherwise. A fix on a `named_in_output` claim carries the label
   `in_band_root_cause`, and one on an asserted claim
-  `asserted_only_root_cause`. The root-cause arm passes, as before, on a patch
-  at the origin with a baseline run that showed the defect and named the
-  origin; its basis is `executed` when the trace confirms the origin ran and
-  `in_band` when it does not. A failed variant arm sets
+  `asserted_only_root_cause`. The root-cause arm passes on a patch at the
+  origin when the claim is `confirmed_by_executed_poc`, with basis `executed`,
+  or `named_in_output`, with basis `in_band`: the trace passes wherever the
+  output would. An asserted claim does not pass. A failed variant arm sets
   `suspect` and the label `root_cause_suspect`.
 - **Relocation.** The `fix-recheck` agent applies the staged `invariant-walk`
   and `differential-walk` texts to everything reachable from the patched
