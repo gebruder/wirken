@@ -17765,6 +17765,48 @@ mod consecutive_asks {
         );
     }
 
+    /// A channel's turn is never read as an ask, whatever its inbound id
+    /// says: the id on it is the platform's, and the row names the
+    /// adapter. Two channel turns that carry ask-shaped ids replay as
+    /// one lane, as two channel turns do.
+    #[tokio::test]
+    async fn a_channel_turn_with_an_ask_shaped_id_is_not_an_ask() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let (base_url, server, _) = stub(vec![text("first reply"), text("second reply")]).await;
+        for (message, id) in [
+            ("first question", ask_inbound_id()),
+            ("second question", ask_inbound_id()),
+        ] {
+            let mut agent = verifier("plan", &base_url, log.clone(), &tmp);
+            agent
+                .process_inbound(
+                    message,
+                    id,
+                    crate::runtime::InboundContext {
+                        adapter_id: Some("telegram".into()),
+                        sender_id: Some("111".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        server.await.unwrap();
+        let report = verifier("plan", &base_url, log, &tmp)
+            .verify_with(VerifyOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            report
+                .events_divergent
+                .iter()
+                .any(|d| d.kind == "messages_hash"),
+            "{:?}",
+            report.events_divergent
+        );
+    }
+
     #[test]
     fn only_a_minted_ask_id_counts_as_an_ask() {
         let id = ask_inbound_id();

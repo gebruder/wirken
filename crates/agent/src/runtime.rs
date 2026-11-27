@@ -6461,6 +6461,7 @@ impl Agent {
                 wirken_audit::SessionEvent::UserMessage {
                     content,
                     inbound_id,
+                    adapter_id,
                     ..
                 } => {
                     // Every `wirken ask` on this agent shares the lane,
@@ -6468,7 +6469,10 @@ impl Agent {
                     // a clean projection under the last recorded prompt.
                     // A gateway lane is not reset: it replays its history
                     // across `SessionEnd`, so its turns carry earlier ones.
-                    if is_ask_inbound(inbound_id.as_deref()) {
+                    // A channel's turn names its adapter, and the inbound
+                    // id on it is the platform's, so only a turn with no
+                    // adapter is read for the ask's id.
+                    if adapter_id.is_none() && is_ask_inbound(inbound_id.as_deref()) {
                         conv = crate::conversation::Conversation::new(100_000);
                         if let Some(prompt) = &recorded_prompt {
                             conv.set_system_prompt(prompt);
