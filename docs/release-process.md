@@ -415,6 +415,18 @@ This replaces the old `install.sh` smoke test: `install.sh` is exercised by
 `scripts/test-install.sh` in the pre-flight, and the update path is the one
 only a published release can exercise.
 
+**The served installer.** If `install.sh` changed in this release, copy it to
+the website's `wirken/install.sh`, put its SHA-256 in the website's install
+page, and deploy the site. Then run the check that `wirken.ai/install.sh`
+serves the file the README pins:
+
+```bash
+gh workflow run installer-served.yml -R gebruder/wirken
+gh run list -R gebruder/wirken --workflow installer-served.yml -L 1
+```
+
+It also runs daily, and fails if the served copy drifts or is changed.
+
 **Housekeeping.** Re-read `README.md` for any count or version that shifted.
 If `crates/audit/src/session_log.rs` changed since the previous release, sync
 the `wirken-siem` repo's compatibility table and field index in the same

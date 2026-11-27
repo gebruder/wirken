@@ -1,0 +1,53 @@
+# Fail when the installer wirken.ai serves is not the one the README pins.
+#
+# The README and the website both tell users to run
+# `curl -fsSL https://wirken.ai/install.sh | sh`. That URL is served by
+# the website, from a copy of install.sh synced by hand, not from this
+# repository. A copy that drifts from the committed install.sh, or that
+# someone with access to the domain or the host replaced, would install
+# from a script nobody reviewed here. The installer still verifies the
+# release it downloads, but the script that does the verifying is the one
+# served.
+#
+# Scheduled and on demand only: a push that changes install.sh is expected
+# to leave the served copy behind until the website is deployed, and the
+# run after that deploy is the check.
+
+name: Installer served
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: wirken.ai/install.sh matches the README pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare SHA
+        run: |
+          set -eu
+          PINNED=$(grep -oE '[0-9a-f]{64}' README.md | head -1)
+          if [ -z "$PINNED" ]; then
+            echo "Could not find a 64-char hex SHA in README.md" >&2
+            exit 1
+          fi
+          # HTTPS only, redirects included, and no more of them than the
+          # one the domain answers with today.
+          SERVED=$(curl -fsSL --proto '=https' --proto-redir '=https' --max-redirs 3 \
+            https://wirken.ai/install.sh | sha256sum | awk '{print $1}')
+          echo "README pin: $PINNED"
+          echo "served:     $SERVED"
+          if [ "$SERVED" != "$PINNED" ]; then
+            echo "::error::wirken.ai/install.sh is not the install.sh README.md pins"
+            echo "Sync the website's copy of install.sh and deploy it, or find out who changed it." >&2
+            exit 1
+          fi
+          echo "wirken.ai/install.sh matches the README pin."
