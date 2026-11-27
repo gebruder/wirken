@@ -20,6 +20,14 @@
 //! `sessions verify` and the answers are checked against each other,
 //! and then the provider is stopped and the gateway started again: with
 //! no keys to be had, the token that was accepted is refused.
+//!
+//! A second realm carries the token exchange (RFC 8693): a client for
+//! the person, one for the gateway allowed the standard token exchange,
+//! and the downstream. An HTTP MCP server on loopback, signed with an
+//! `exchange` block, records the bearer of each call. A call made at
+//! the MCP endpoint with the person's token reaches it as the token
+//! Keycloak exchanged that one for, and a token Wirken issued does not
+//! reach it at all.
 #![cfg(target_os = "linux")]
 
 mod common;
@@ -221,18 +229,30 @@ fn client(id: &str, audience: &str, team: &str, lifespan: Option<u32>) -> serde_
 }
 
 fn start_provider(dir: &Path) -> Provider {
+    start_provider_with(
+        dir,
+        vec![
+            client("wirken-ok", AUDIENCE, "engineers", None),
+            client("wirken-short", AUDIENCE, "engineers", Some(1)),
+            client(
+                "wirken-other-audience",
+                "another-service",
+                "engineers",
+                None,
+            ),
+            client("wirken-unmapped", AUDIENCE, "visitors", None),
+        ],
+    )
+}
+
+fn start_provider_with(dir: &Path, clients: Vec<serde_json::Value>) -> Provider {
     let image = std::env::var("WIRKEN_TEST_OIDC_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.into());
     let realm = dir.join("realm.json");
     std::fs::write(
         &realm,
         serde_json::json!({
             "realm": "wirken", "enabled": true, "accessTokenLifespan": 300,
-            "clients": [
-                client("wirken-ok", AUDIENCE, "engineers", None),
-                client("wirken-short", AUDIENCE, "engineers", Some(1)),
-                client("wirken-other-audience", "another-service", "engineers", None),
-                client("wirken-unmapped", AUDIENCE, "visitors", None),
-            ],
+            "clients": clients,
         })
         .to_string(),
     )
@@ -565,4 +585,453 @@ fn jwts_of_a_local_provider_are_accepted_or_refused_each_for_its_reason() {
         Some(ProxyRefusal::JwtKeysUnavailable)
     );
     stop(gateway);
+}
+
+/// The audience the gateway exchanges a caller's token for, and the
+/// client it is at the provider to do so.
+const DOWNSTREAM: &str = "downstream-api";
+const EXCHANGE_CLIENT: &str = "wirken-exchange";
+const TOOL: &str = "mcp_crm_lookup";
+
+/// A client of the realm that the token exchange needs: the gateway's
+/// own, allowed the standard token exchange and given the downstream as
+/// an audience it may ask for, or the downstream itself.
+fn exchange_clients() -> Vec<serde_json::Value> {
+    let audience = |name: &str, to: &str| {
+        serde_json::json!({
+            "name": name, "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "config": {"included.client.audience": to,
+                       "access.token.claim": "true", "id.token.claim": "false"},
+        })
+    };
+    // The person's client: its tokens are for the proxy and name the
+    // gateway's exchange client as an audience too, which the
+    // provider asks of a subject token it exchanges.
+    let mut person = client("wirken-person", AUDIENCE, "engineers", None);
+    person["protocolMappers"]
+        .as_array_mut()
+        .unwrap()
+        .push(audience("exchanger", EXCHANGE_CLIENT));
+    vec![
+        person,
+        serde_json::json!({
+            "clientId": EXCHANGE_CLIENT, "enabled": true, "publicClient": false,
+            "secret": "exchange-secret", "serviceAccountsEnabled": false,
+            "standardFlowEnabled": false, "directAccessGrantsEnabled": false,
+            "protocol": "openid-connect",
+            "attributes": {"standard.token.exchange.enabled": "true"},
+            "protocolMappers": [audience("downstream", DOWNSTREAM)],
+        }),
+        serde_json::json!({
+            "clientId": DOWNSTREAM, "enabled": true, "publicClient": false,
+            "secret": "downstream-secret", "serviceAccountsEnabled": false,
+            "standardFlowEnabled": false, "protocol": "openid-connect",
+        }),
+    ]
+}
+
+/// An HTTP MCP server on loopback with one tool, `lookup`. It answers
+/// `initialize` and `tools/list` with no credential, as the proxy asks
+/// them at start, and records the `Authorization` header of each
+/// `tools/call`.
+fn downstream_server() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 8192];
+            let (head, body) = loop {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break (String::new(), String::new()),
+                    Ok(n) => raw.extend_from_slice(&buf[..n]),
+                }
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length {
+                        break (head.to_string(), body.to_string());
+                    }
+                }
+            };
+            let message: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let result = match message["method"].as_str().unwrap_or_default() {
+                "initialize" => serde_json::json!({
+                    "protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "crm", "version": "1"},
+                }),
+                "tools/list" => serde_json::json!({"tools": [{
+                    "name": "lookup", "description": "Look a customer up",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }]}),
+                "tools/call" => {
+                    let authorization = head.lines().find_map(|l| {
+                        l.split_once(':')
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                            .map(|(_, value)| value.trim().to_string())
+                    });
+                    recorded.lock().unwrap().push(authorization);
+                    serde_json::json!({"content": [{"type": "text", "text": "customer 42"}]})
+                }
+                _ => serde_json::json!({}),
+            };
+            let answer = match message.get("id") {
+                Some(id) => {
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()
+                }
+                None => String::new(),
+            };
+            let status = if answer.is_empty() {
+                "202 Accepted"
+            } else {
+                "200 OK"
+            };
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    (port, calls)
+}
+
+/// POST one JSON-RPC message to the MCP endpoint with `token`. Returns
+/// the session id the answer carries and the answer.
+fn mcp(
+    base: &str,
+    token: &str,
+    session: Option<&str>,
+    message: serde_json::Value,
+) -> (Option<String>, serde_json::Value) {
+    let mut args = vec![
+        "-sS".to_string(),
+        "-D".into(),
+        "-".into(),
+        "-H".into(),
+        format!("Authorization: Bearer {token}"),
+        "-H".into(),
+        "Content-Type: application/json".into(),
+        "-H".into(),
+        "Accept: application/json, text/event-stream".into(),
+        "-d".into(),
+        message.to_string(),
+    ];
+    if let Some(session) = session {
+        args.extend(["-H".into(), format!("Mcp-Session-Id: {session}")]);
+    }
+    args.push(format!("{base}/mcp"));
+    let out = Command::new("curl").args(&args).output().expect("curl");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let session = head.lines().find_map(|l| {
+        l.split_once(':')
+            .filter(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
+            .map(|(_, value)| value.trim().to_string())
+    });
+    (
+        session,
+        serde_json::from_str(body).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+fn initialize(base: &str, token: &str) -> String {
+    let (session, answer) = mcp(
+        base,
+        token,
+        None,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "curl", "version": "0"}}}),
+    );
+    session.unwrap_or_else(|| panic!("no session: {answer}"))
+}
+
+/// Call the tool on `session`, approving it at the operator's terminal
+/// when the gate asks.
+fn call_approved(data: &Path, base: &str, token: &str, session: &str) -> serde_json::Value {
+    let (base, token, session) = (base.to_string(), token.to_string(), session.to_string());
+    let call = std::thread::spawn(move || {
+        mcp(
+            &base,
+            &token,
+            Some(&session),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "crm_lookup", "arguments": {}}}),
+        )
+        .1
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !call.is_finished() && Instant::now() < deadline {
+        let out = wirken(data)
+            .args(["permissions", "pending", "list"])
+            .output()
+            .unwrap();
+        let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+        if let Some(id) = listed
+            .lines()
+            .filter(|line| line.contains(TOOL))
+            .find_map(|line| line.split_whitespace().next())
+        {
+            assert!(
+                wirken(data)
+                    .args(["permissions", "pending", "approve", id])
+                    .stdout(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    call.join().unwrap()
+}
+
+/// A JWT of the local provider reaches an MCP server whose signed entry
+/// asks for an exchange as a token the provider exchanged it for
+/// (RFC 8693): the downstream sees the same subject, its own audience,
+/// and the gateway's exchange client as the party it was issued to. The
+/// exchange is one row; a second call uses the token held and writes
+/// none. A token Wirken issued is refused for that server, and neither
+/// token is on any row.
+#[test]
+#[ignore = "live: needs docker, the Keycloak image, curl and script"]
+fn a_jwt_reaches_a_downstream_as_the_token_the_provider_exchanged_it_for() {
+    let root = tempfile::Builder::new()
+        .prefix("wkx")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let data = root.path().join("d");
+    let served = root.path().join("idp");
+    for dir in [&data, &served] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let provider = start_provider_with(&served, exchange_clients());
+    let issuer = provider.issuer();
+    let (downstream_port, downstream_calls) = downstream_server();
+    let proxy_port = free_port();
+    std::fs::write(
+        data.join("provider.json"),
+        r#"{"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:9"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("proxy.json"),
+        serde_json::json!({
+            "bind": format!("127.0.0.1:{proxy_port}"),
+            // Inference is not used here; the listener needs somewhere
+            // to forward to.
+            "upstreams": {"unused": {"provider": "ollama", "base_url": "http://127.0.0.1:9/v1"}},
+            "oidc": {
+                "issuer": issuer,
+                "audience": AUDIENCE,
+                "grant_claim": "team",
+                "max_token_lifetime_secs": 600,
+                "exchange": {"client_id": EXCHANGE_CLIENT, "client_secret": "idp-exchange-secret"},
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("mcp.json"),
+        serde_json::json!({"servers": {"crm": {
+            "transport": "http",
+            "url": format!("http://127.0.0.1:{downstream_port}/mcp"),
+            "exchange": {"audience": DOWNSTREAM},
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    assert!(
+        wirken(&data)
+            .args(["mcp", "sign", "crm"])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    // The exchange client's secret, for the provider's token endpoint
+    // and nowhere else.
+    let mut add = wirken(&data)
+        .args([
+            "credentials",
+            "add",
+            "idp-exchange-secret",
+            "--stdin",
+            "--token-exchange",
+            &format!("127.0.0.1:{}", provider.port),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    add.stdin
+        .take()
+        .unwrap()
+        .write_all(b"exchange-secret\n")
+        .unwrap();
+    assert!(add.wait().unwrap().success());
+
+    let said = at_terminal(
+        &data,
+        &[
+            "proxy",
+            "identity",
+            "grant-set",
+            "set",
+            "engineers",
+            "--mcp-server",
+            "crm",
+        ],
+    );
+    assert!(said.contains("Wrote grant set engineers"), "{said}");
+    let said = at_terminal(
+        &data,
+        &[
+            "proxy",
+            "identity",
+            "map",
+            "engineers",
+            "--claim-value",
+            "engineers",
+        ],
+    );
+    assert!(said.contains("Mapped claim engineers"), "{said}");
+    let issued = at_terminal(
+        &data,
+        &["proxy", "token", "issue", "desk", "--mcp-server", "crm"],
+    );
+    let hand_issued = issued
+        .split_whitespace()
+        .find(|word| word.starts_with("wkp_"))
+        .unwrap_or_else(|| panic!("no token in: {issued}"))
+        .to_string();
+
+    let gateway = start_gateway(&data, proxy_port);
+    let base = format!("http://127.0.0.1:{proxy_port}");
+
+    // 1. Two calls with the person's JWT, on one session.
+    let person = provider.token("wirken-person");
+    let session = initialize(&base, &person);
+    for _ in 0..2 {
+        let answer = call_approved(&data, &base, &person, &session);
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        assert_eq!(
+            answer["result"]["content"][0]["text"], "customer 42",
+            "{answer}"
+        );
+    }
+    let seen = downstream_calls.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    let exchanged = seen[0]
+        .as_deref()
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .expect("a bearer on the call")
+        .to_string();
+    assert_eq!(seen[1].as_deref(), seen[0].as_deref(), "the held token");
+    assert_ne!(exchanged, person);
+    let (theirs, ours) = (claims(&person), claims(&exchanged));
+    assert_eq!(ours["iss"], issuer);
+    assert_eq!(ours["sub"], theirs["sub"]);
+    assert_eq!(ours["azp"], EXCHANGE_CLIENT);
+    let audience = &ours["aud"];
+    assert!(
+        audience == DOWNSTREAM
+            || audience
+                .as_array()
+                .is_some_and(|a| a.contains(&DOWNSTREAM.into())),
+        "{ours}"
+    );
+
+    // 2. A token Wirken issued is refused for the server, and the
+    //    downstream is not called.
+    let desk = initialize(&base, &hand_issued);
+    let (_, answer) = mcp(
+        &base,
+        &hand_issued,
+        Some(&desk),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "crm_lookup", "arguments": {}}}),
+    );
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("names no person")),
+        "{answer}"
+    );
+    assert_eq!(downstream_calls.lock().unwrap().len(), 2);
+
+    // The rows: one exchange, on the subject's lane, before the calls.
+    let lane = lanes(&data)
+        .into_iter()
+        .find(|l| l.starts_with("proxy-u") && l.matches('-').count() >= 2)
+        .expect("the subject's session lane");
+    let recorded = rows(&data, &lane);
+    let exchanges: Vec<&SessionEvent> = recorded
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::ProxyTokenExchanged { .. }))
+        .collect();
+    let [
+        SessionEvent::ProxyTokenExchanged {
+            server,
+            audience,
+            identity,
+            expires_at,
+            ..
+        },
+    ] = exchanges[..]
+    else {
+        panic!("{recorded:?}");
+    };
+    assert_eq!((server.as_str(), audience.as_str()), ("crm", DOWNSTREAM));
+    assert_eq!(identity.issuer, issuer);
+    assert_eq!(identity.grant_set.as_deref(), Some("engineers"));
+    assert_eq!(
+        expires_at.as_second(),
+        ours["exp"].as_i64().unwrap(),
+        "the expiry the provider gave"
+    );
+    let calls = recorded
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::ProxyToolCall { success: true, .. }))
+        .count();
+    assert_eq!(calls, 2);
+
+    // Neither token, nor any part of one, nor the subject, is on a row.
+    let subject = theirs["sub"].as_str().unwrap();
+    for lane in lanes(&data) {
+        for row in rows(&data, &lane) {
+            let text = serde_json::to_string(&row).unwrap();
+            for token in [&person, &exchanged, &hand_issued] {
+                for part in token.split('.').filter(|p| p.len() > 8) {
+                    assert!(!text.contains(part), "a row holds part of a token: {text}");
+                }
+            }
+            assert!(!text.contains(subject), "{text}");
+        }
+    }
+
+    stop(gateway);
+    let verified = wirken(&data)
+        .args(["sessions", "verify", &lane])
+        .output()
+        .unwrap();
+    let report = String::from_utf8_lossy(&verified.stdout).into_owned();
+    assert!(verified.status.success(), "{report}");
+    assert!(report.contains("tokens exchanged: 1"), "{report}");
 }
