@@ -32,21 +32,27 @@ Three changes can need operator action.
 - The inference proxy refuses provider-run tools. This is the fix listed under
   3.6.1, which was tagged and not published; 3.6.2 is the first release that
   carries it.
-- Typed approvals need the card's code. Every approval card shows the request
-  id the gateway minted for the ask, a random UUID the model is never sent. A
-  typed answer carries its first four hex characters: `!approve <code>` and
-  `!deny <code>` on Signal and iMessage, where the code was eight characters
-  and longer ones still answer, and `y <code>` in `wirken chat`, where a lone
-  `y` now approves nothing. A code two pending requests share answers neither
-  until more of the id is typed, and answering one leaves the other pending.
-- No decision reads a marker from model-writable text. Where the gateway holds
-  the answer, it reads its own record: the context engine marks a trimmed
-  message with a field instead of reading its `[trimmed: ` prefix, an `exec`
-  result row records `timed_out` in its `sandbox` record and Lyrik reads the
-  timeout there, verify takes a turn for a `wirken ask` only when its row
-  names no adapter, a conversation id that carries the sub-agent marker is
-  written as `%23sub-` in its session id, and Lyrik's `detection_source` is
-  always the seed set's.
+- Signal, iMessage and wirken chat approvals need the card's code. Every
+  approval card shows the request id the gateway minted for the ask, a random
+  UUID the model is never sent. A typed answer carries its first four hex
+  characters: `!approve <code>` and `!deny <code>` on Signal and iMessage,
+  where the code was eight characters and longer ones still answer, and
+  `y <code>` in `wirken chat`, where a lone `y` now approves nothing. A code
+  two pending requests share answers neither until more of the id is typed,
+  and answering one leaves the other pending.
+- Forged harness tags in messages and tool results reach the model broken. The
+  compaction fence tags are broken in the content of every message that enters
+  an agent's conversation, in any case and with whitespace or characters that
+  draw nothing between their parts; tool-call arguments are not covered. A
+  skill whose name, description or body carries a tag is refused at load. The
+  default system prompt says a summary in a fence is model-written from
+  earlier turns, tool results included, and is no instruction.
+- The context engine marks a trimmed message with a field instead of reading
+  its `[trimmed: ` prefix. An `exec` result row records `timed_out` in its
+  `sandbox` record and Lyrik reads the timeout there. Verify takes a turn for
+  a `wirken ask` only when its row names no adapter. A conversation id that
+  carries the sub-agent marker is written as `%23sub-` in its session id.
+  Lyrik sets a finding's `detection_source` from the run's seed set.
 - Lyrik reads its config and ledger from the data directory. `wirken lyrik`
   reads the rubric and context from the target's inputs directory, beside the
   run config, and the ledger is kept there too. A `.lyrik/rubric.md`,
@@ -89,13 +95,6 @@ Three changes can need operator action.
   carry each value in a text run, which Teams does not read as Markdown;
   Google Chat cards escape each value (`crates/adapter-core/src/approval_card.rs`,
   `tests/hostile/corpus.jsonl`).
-- The compaction fence tags are broken in every message that enters an
-  agent's conversation, in any case and with whitespace or characters
-  that draw nothing between their parts, so only the harness writes a
-  fence. A skill whose name, description or body carries a tag is refused
-  at load. The default system prompt says a summary in a fence is
-  model-written from earlier turns, tool results included, and is no
-  instruction.
 - A model summary of trimmed messages is a `compaction` row with
   `via_model: true` and the summary in `extracts.summary`, written before
   the summary is placed in the context.
