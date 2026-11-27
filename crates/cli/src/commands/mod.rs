@@ -38,6 +38,7 @@ pub mod lyrik_walks;
 pub mod mcp;
 pub mod mcp_proxy;
 pub mod oauth_scope;
+pub mod one_line_logs;
 pub mod permission;
 pub mod persona;
 pub mod plan_sign_in;

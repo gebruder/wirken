@@ -2045,15 +2045,17 @@ async fn main() -> Result<()> {
     let logs = tracing_subscriber::fmt()
         .with_env_filter(build_env_filter(std::env::var("RUST_LOG").ok().as_deref()));
     // The chat holds log output while it has the screen, so a line
-    // cannot draw over it. Every other command writes as it always has.
+    // cannot draw over it. Every other command writes each event on
+    // one line of stdout, so an event cannot print a line of its own
+    // beside an approval prompt.
     #[cfg(unix)]
     if matches!(cli.command, Commands::Chat { .. }) {
         logs.with_writer(commands::chat::log_writer).init();
     } else {
-        logs.init();
+        logs.with_writer(commands::one_line_logs::writer).init();
     }
     #[cfg(not(unix))]
-    logs.init();
+    logs.with_writer(commands::one_line_logs::writer).init();
 
     if let Some((command, invocation)) = authority_change(&cli.command) {
         commands::refuse_inside_exec(command, invocation)?;

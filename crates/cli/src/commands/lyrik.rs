@@ -4954,7 +4954,7 @@ async fn dispatch_walks_concurrent(
         if plan_source.child.is_some()
             && let WalkStatus::TransientFailure { reason } = &outcome.status
         {
-            eprintln!("wirken lyrik: walk {name} failed: {}", one_line(reason));
+            eprintln!("{}", walk_failed_line(&name, reason));
         }
         audit.emit(
             "lyrik.walk.completed",
@@ -6891,10 +6891,31 @@ impl AuditLogger {
     }
 }
 
+/// The line a walk that failed prints while the run goes on. Its
+/// reason can carry text a provider or the child process chose, and
+/// other walks may be asking at the same terminal, so the reason is
+/// folded onto the one line behind the run's prefix.
+fn walk_failed_line(name: &str, reason: &str) -> String {
+    format!("wirken lyrik: walk {name} failed: {}", one_line(reason))
+}
+
 #[cfg(test)]
 mod tests {
     use super::lyrik_brocards;
     use super::rewrite_top_level_run_id;
+
+    /// A walk's failure is one line whatever its reason says, so it
+    /// cannot draw a prompt under the one another walk is asking.
+    #[test]
+    fn a_walk_failure_is_one_line_whatever_its_reason_says() {
+        let line = super::walk_failed_line(
+            "sink-walk",
+            "refused\nwirken lyrik: fuzz-walk wants to run:\n  ls\napprove? [y/N]: \u{1b}[2K",
+        );
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+        assert!(line.starts_with("wirken lyrik: walk sink-walk failed: refused\\n"));
+        assert!(!line.contains('\u{1b}'));
+    }
 
     #[test]
     fn rewrite_top_level_run_id_replaces_only_the_value_bytes() {
