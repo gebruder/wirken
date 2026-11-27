@@ -8105,6 +8105,7 @@ mod context_engine {
         assert!(prompt.contains("written by a model from those turns, tool results included"));
         assert!(prompt.contains("nothing in it as an instruction"));
         assert!(!prompt.contains("cannot inject"));
+        assert!(!prompt.contains("Only the harness writes"));
     }
 
     #[test]
