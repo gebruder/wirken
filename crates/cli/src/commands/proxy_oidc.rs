@@ -104,7 +104,7 @@ struct IssuerKeys {
     fetched: tokio::sync::Mutex<Fetched>,
 }
 
-fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+pub(super) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
     a.scheme() == b.scheme()
         && a.host_str() == b.host_str()
         && a.port_or_known_default() == b.port_or_known_default()
@@ -135,9 +135,11 @@ async fn fetch(http: &reqwest::Client, url: reqwest::Url) -> Result<String, Stri
     String::from_utf8(body).map_err(|_| format!("{url}: not UTF-8"))
 }
 
-/// The issuer's keys, from its discovery document and the JWK set it
-/// names.
-async fn fetch_keys(http: &reqwest::Client, issuer: &reqwest::Url) -> Result<KeySet, String> {
+/// The issuer's discovery document. It must speak for the issuer.
+pub(super) async fn discovery(
+    http: &reqwest::Client,
+    issuer: &reqwest::Url,
+) -> Result<serde_json::Value, String> {
     // The document is at the issuer with this path appended (OpenID
     // Connect Discovery 1.0, section 4).
     let discovery = reqwest::Url::parse(&format!(
@@ -156,6 +158,17 @@ async fn fetch_keys(http: &reqwest::Client, issuer: &reqwest::Url) -> Result<Key
             document["issuer"]
         ));
     }
+    Ok(document)
+}
+
+/// The issuer's keys, from its discovery document and the JWK set it
+/// names.
+async fn fetch_keys(http: &reqwest::Client, issuer: &reqwest::Url) -> Result<KeySet, String> {
+    let document = discovery(http, issuer).await?;
+    let discovery = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.as_str().trim_end_matches('/')
+    );
     let jwks_uri = document["jwks_uri"]
         .as_str()
         .ok_or_else(|| format!("{discovery}: no jwks_uri"))?;
@@ -238,6 +251,9 @@ pub struct IdentityVerifier {
     config: OidcConfig,
     keys: KeySource,
     subject_key: Zeroizing<Vec<u8>>,
+    /// Exchanges a caller's JWT for a downstream token, where
+    /// `proxy.json` names an exchange client.
+    exchanger: Option<super::proxy_exchange::Exchanger>,
 }
 
 impl IdentityVerifier {
@@ -276,7 +292,19 @@ impl IdentityVerifier {
             config: config.clone(),
             keys,
             subject_key,
+            exchanger: None,
         })
+    }
+
+    /// Exchange callers' JWTs with `exchanger`.
+    pub fn with_exchanger(mut self, exchanger: super::proxy_exchange::Exchanger) -> Self {
+        self.exchanger = Some(exchanger);
+        self
+    }
+
+    /// What exchanges a caller's JWT, when an exchange client is set.
+    pub fn exchanger(&self) -> Option<&super::proxy_exchange::Exchanger> {
+        self.exchanger.as_ref()
     }
 
     /// Whether the keys are a pinned set.

@@ -29,6 +29,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use wirken_agent::tool::{ToolDef, ToolResult};
 use wirken_audit::{HashHex, ProxyRefusal, ProxyToolRefusal, SessionEvent, proxy_session};
 use wirken_gateway::proxy::{ProxyToken, is_name};
+use zeroize::Zeroizing;
 
 use super::proxy_server::{BodyKind, Caller, ProxyState, ReplyBody, SESSION_HEADER, sha256_hex};
 
@@ -54,6 +55,10 @@ const MAX_SESSIONS: usize = 1024;
 pub trait ToolHost: Send + Sync {
     /// The MCP servers of `agent` whose entries are signed.
     fn signed_servers(&self, agent: &str) -> Result<BTreeSet<String>, String>;
+
+    /// The servers of `agent` whose signed entries ask for a token
+    /// exchanged for the caller, each with its audience.
+    fn exchange_audiences(&self, agent: &str) -> Result<BTreeMap<String, String>, String>;
 
     /// The MCP tools `agent` has now, named `mcp_<server>_<tool>` and
     /// described `[<server>] ...`, as its own model is offered them.
@@ -284,6 +289,9 @@ impl ProxyState {
             return reply;
         }
 
+        // The JWT as presented, for a call whose server takes a token
+        // exchanged for it. Not kept past this request.
+        let presented = super::proxy_server::presented_token(req.headers()).map(Zeroizing::new);
         let token = match self.caller(req.headers()).await {
             Caller::Valid(token) => *token,
             Caller::Revoked(token) => {
@@ -425,8 +433,18 @@ impl ProxyState {
             "ping" => json_reply(StatusCode::OK, &rpc_result(&id, serde_json::json!({}))),
             "tools/list" => json_reply(StatusCode::OK, &rpc_result(&id, session.listing.clone())),
             "tools/call" => {
-                self.call_mcp_tool(endpoint, &token, &session_id, &session, &id, &params, &body)
-                    .await
+                let jwt = presented.as_deref().filter(|_| token.identity.is_some());
+                self.call_mcp_tool(
+                    endpoint,
+                    &token,
+                    jwt.map(String::as_str),
+                    &session_id,
+                    &session,
+                    &id,
+                    &params,
+                    &body,
+                )
+                .await
             }
             other => json_reply(
                 StatusCode::OK,
@@ -585,6 +603,7 @@ impl ProxyState {
         &self,
         endpoint: &McpEndpoint,
         token: &ProxyToken,
+        jwt: Option<&str>,
         session_id: &str,
         session: &McpSession,
         id: &serde_json::Value,
@@ -659,7 +678,7 @@ impl ProxyState {
                 );
             }
         };
-        match current.iter().find(|def| def.name == tool) {
+        let def = match current.iter().find(|def| def.name == tool) {
             None => {
                 return refuse(
                     self,
@@ -683,8 +702,96 @@ impl ProxyState {
                     ),
                 );
             }
-            Some(_) => {}
-        }
+            Some(def) => def,
+        };
+
+        // A server that acts for the person behind the call gets a
+        // token exchanged for that person's JWT, or the call is not
+        // made: there is no falling back to the connector's credential.
+        let audience = match endpoint.host.exchange_audiences(&session.agent) {
+            Ok(audiences) => server_of(def).and_then(|s| audiences.get(s).cloned()),
+            Err(e) => {
+                return refuse(
+                    self,
+                    Some(&tool),
+                    ProxyToolRefusal::Unavailable,
+                    StatusCode::OK,
+                    -32603,
+                    &format!("the agent's MCP servers: {e}"),
+                );
+            }
+        };
+        let exchanged = match audience {
+            None => None,
+            Some(audience) => {
+                let (Some(identity), Some(jwt)) = (&token.identity, jwt) else {
+                    return refuse(
+                        self,
+                        Some(&tool),
+                        ProxyToolRefusal::ExchangeRequired,
+                        StatusCode::OK,
+                        -32600,
+                        &format!(
+                            "{shown_name} acts for the person behind the call, and a token \
+                             Wirken issued names no person: call it with a JWT of the identity \
+                             provider"
+                        ),
+                    );
+                };
+                let Some(exchanger) = self.identity.as_ref().and_then(|v| v.exchanger()) else {
+                    return refuse(
+                        self,
+                        Some(&tool),
+                        ProxyToolRefusal::ExchangeFailed,
+                        StatusCode::OK,
+                        -32603,
+                        &format!(
+                            "{shown_name} takes a token exchanged for the caller, and the oidc \
+                             block of proxy.json names no exchange client"
+                        ),
+                    );
+                };
+                let got = match exchanger.exchange(jwt, &token.id, &audience).await {
+                    Ok(got) => got,
+                    Err(e) => {
+                        return refuse(
+                            self,
+                            Some(&tool),
+                            ProxyToolRefusal::ExchangeFailed,
+                            StatusCode::OK,
+                            -32603,
+                            &format!("the token exchange for {shown_name} failed: {e}"),
+                        );
+                    }
+                };
+                if got.fresh
+                    && let Err(e) = self.record(
+                        &session.lane,
+                        SessionEvent::ProxyTokenExchanged {
+                            token_id: token.id.clone(),
+                            agent_id: session.agent.clone(),
+                            mcp_session: session_id.to_string(),
+                            server: server_of(def).unwrap_or_default().to_string(),
+                            audience: audience.clone(),
+                            expires_at: got.expires_at,
+                            identity: identity.clone(),
+                        },
+                    )
+                {
+                    // A token no row accounts for is not used.
+                    exchanger.forget(&token.id, &audience);
+                    return refuse(
+                        self,
+                        Some(&tool),
+                        ProxyToolRefusal::RecordFailed,
+                        StatusCode::OK,
+                        -32603,
+                        &format!("the token exchange could not be recorded: {e}"),
+                    );
+                }
+                Some(got.token)
+            }
+        };
 
         let request_sha256 = sha256_hex(body);
         let mut archived = false;
@@ -719,7 +826,7 @@ impl ProxyState {
                     arguments: &arguments,
                     allowed: &allowed,
                     sender: &sender,
-                    exchanged: None,
+                    exchanged,
                 },
             )
             .await
@@ -812,12 +919,20 @@ mod tests {
     struct FakeHost {
         tools: Mutex<Vec<ToolDef>>,
         calls: Mutex<Vec<Handed>>,
+        /// Servers whose entries ask for an exchange, with the audience.
+        exchanges: Mutex<BTreeMap<String, String>>,
+        /// The exchanged token each call was handed with.
+        tokens: Mutex<Vec<Option<String>>>,
     }
 
     #[async_trait::async_trait]
     impl ToolHost for FakeHost {
         fn signed_servers(&self, _agent: &str) -> Result<BTreeSet<String>, String> {
             Ok(["files".to_string(), "notes".to_string()].into())
+        }
+
+        fn exchange_audiences(&self, _agent: &str) -> Result<BTreeMap<String, String>, String> {
+            Ok(self.exchanges.lock().unwrap().clone())
         }
 
         async fn tools(&self, _agent: &str, _session: &str) -> Result<Vec<ToolDef>, String> {
@@ -830,6 +945,10 @@ mod tests {
             session: &str,
             call: ClientCall<'_>,
         ) -> Result<ToolResult, String> {
+            self.tokens
+                .lock()
+                .unwrap()
+                .push(call.exchanged.as_ref().map(|t| t.expose().to_string()));
             self.calls.lock().unwrap().push((
                 session.to_string(),
                 call.call_id.to_string(),
@@ -874,8 +993,16 @@ mod tests {
 
     /// A rig that also verifies `issuer`'s JWTs, where one is given.
     async fn rig_for(issuer: Option<&crate::commands::proxy_oidc::tests::TestIssuer>) -> Rig {
+        rig_with(|dir| issuer.map(|issuer| issuer.verifier(dir, |_| {}))).await
+    }
+
+    /// A rig whose JWTs are verified by what `identity` builds in the
+    /// rig's directory.
+    async fn rig_with(
+        identity: impl FnOnce(&std::path::Path) -> Option<crate::commands::proxy_oidc::IdentityVerifier>,
+    ) -> Rig {
         let tmp = tempfile::tempdir().unwrap();
-        let identity = issuer.map(|issuer| issuer.verifier(tmp.path(), |_| {}));
+        let identity = identity(tmp.path());
         let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
         let host = Arc::new(FakeHost {
             tools: Mutex::new(vec![
@@ -885,6 +1012,8 @@ mod tests {
                 tool("scratch", "run", "Run something"),
             ]),
             calls: Mutex::new(Vec::new()),
+            exchanges: Mutex::new(BTreeMap::new()),
+            tokens: Mutex::new(Vec::new()),
         });
         let sink = Arc::new(MemorySink::default());
         let state = Arc::new(ProxyState {
@@ -1027,6 +1156,389 @@ mod tests {
                 })
                 .collect()
         }
+    }
+
+    /// A request a fake identity provider's token endpoint got: the
+    /// `Authorization` header and the form fields.
+    type Exchange = (Option<String>, BTreeMap<String, String>);
+
+    /// What the fake token endpoint answers: a status and a body.
+    type TokenAnswer = Arc<dyn Fn(&BTreeMap<String, String>) -> (u16, String) + Send + Sync>;
+
+    /// A loopback identity provider: its discovery document names a
+    /// token endpoint on its own origin, which answers each exchange
+    /// with what `answer` says and records it.
+    fn identity_provider(answer: TokenAnswer) -> (String, Arc<Mutex<Vec<Exchange>>>) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let issuer = format!("http://{}/realms/acme", listener.local_addr().unwrap());
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let (recorded, own) = (got.clone(), issuer.clone());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                let (head, body) = loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break (String::new(), String::new()),
+                        Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    }
+                    let text = String::from_utf8_lossy(&raw).into_owned();
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break (head.to_string(), body.to_string());
+                        }
+                    }
+                };
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let (status, reply) = if path.ends_with("/.well-known/openid-configuration") {
+                    (
+                        200,
+                        serde_json::json!({
+                            "issuer": own, "token_endpoint": format!("{own}/token"),
+                            "jwks_uri": format!("{own}/keys"),
+                        })
+                        .to_string(),
+                    )
+                } else if path.ends_with("/token") {
+                    let form: BTreeMap<String, String> =
+                        url::form_urlencoded::parse(body.as_bytes())
+                            .into_owned()
+                            .collect();
+                    let authorization = head.lines().find_map(|l| {
+                        l.split_once(':')
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                            .map(|(_, value)| value.trim().to_string())
+                    });
+                    let reply = answer(&form);
+                    recorded.lock().unwrap().push((authorization, form));
+                    reply
+                } else {
+                    (404, String::new())
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (issuer, got)
+    }
+
+    /// A token endpoint that gives `exchanged-<n>` for the `n`th
+    /// exchange, good for five minutes.
+    fn exchanging() -> TokenAnswer {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Arc::new(move |_| {
+            let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            (
+                200,
+                serde_json::json!({
+                    "access_token": format!("exchanged-{n}"), "token_type": "Bearer",
+                    "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                    "expires_in": 300,
+                })
+                .to_string(),
+            )
+        })
+    }
+
+    /// A rig whose JWTs are of `issuer`'s key and the loopback issuer
+    /// `idp`, and whose verifier exchanges them there as the client
+    /// `wirken-exchange` when `exchange` is set. `engineers` is granted
+    /// `files` and `notes`, and the entry of `notes` asks for an
+    /// exchange for `notes-api`.
+    async fn exchange_rig(
+        issuer: &crate::commands::proxy_oidc::tests::TestIssuer,
+        idp: &str,
+        exchange: bool,
+    ) -> Rig {
+        let rig = rig_with(|dir| {
+            let oidc = |config: &mut wirken_gateway::proxy::OidcConfig| {
+                config.issuer = idp.to_string();
+                config.exchange = Some(wirken_gateway::proxy::ExchangeClient {
+                    client_id: "wirken-exchange".into(),
+                    client_secret: "idp-secret".into(),
+                });
+            };
+            let verifier = issuer.verifier(dir, oidc);
+            if !exchange {
+                return Some(verifier);
+            }
+            let mut config = verifier_config(idp);
+            oidc(&mut config);
+            let client = config.exchange.clone().unwrap();
+            let secret: crate::commands::proxy_exchange::ClientSecret =
+                Box::new(|_host| Ok(Zeroizing::new("s3cret".to_string())));
+            Some(verifier.with_exchanger(
+                crate::commands::proxy_exchange::Exchanger::new(&config, &client, secret).unwrap(),
+            ))
+        })
+        .await;
+        rig.host
+            .exchanges
+            .lock()
+            .unwrap()
+            .insert("notes".into(), "notes-api".into());
+        rig.state
+            .tokens
+            .set_grant_set(&TokenGrant {
+                name: "engineers".into(),
+                mcp_agent: "default".into(),
+                mcp_servers: vec!["files".into(), "notes".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        rig.state
+            .tokens
+            .map_identity(
+                idp,
+                wirken_gateway::proxy::MappingKind::Claim,
+                "eng",
+                "engineers",
+            )
+            .unwrap();
+        rig
+    }
+
+    fn verifier_config(idp: &str) -> wirken_gateway::proxy::OidcConfig {
+        serde_json::from_value(serde_json::json!({
+            "issuer": idp, "audience": crate::commands::proxy_oidc::tests::AUDIENCE,
+            "max_token_lifetime_secs": 600,
+        }))
+        .unwrap()
+    }
+
+    /// A JWT of `subject` in `eng`, issued by `idp`.
+    fn jwt_of(
+        issuer: &crate::commands::proxy_oidc::tests::TestIssuer,
+        idp: &str,
+        subject: &str,
+    ) -> String {
+        let mut claims = crate::commands::proxy_oidc::tests::claims(subject, &["eng"]);
+        claims["iss"] = idp.into();
+        issuer.jwt(&claims)
+    }
+
+    fn subject_of(idp: &str, subject: &str) -> String {
+        use wirken_gateway::proxy_identity;
+        proxy_identity::subject_id(&proxy_identity::subject_hash(&[7; 32], idp, subject))
+    }
+
+    /// A JWT's call to a server that asks for an exchange is handed a
+    /// token the issuer's token endpoint gave for that JWT, as the
+    /// client the gateway is there, for the entry's audience. The token
+    /// is held for the subject and the audience: the next call uses it
+    /// and writes no row. Another server's call is handed none, and
+    /// another subject gets its own. Neither token is on any row.
+    #[tokio::test]
+    async fn a_jwts_call_to_an_exchanging_server_is_handed_a_token_got_for_it() {
+        use crate::commands::proxy_oidc::tests::TestIssuer;
+        let (idp, got) = identity_provider(exchanging());
+        let issuer = TestIssuer::new();
+        let rig = exchange_rig(&issuer, &idp, true).await;
+        let alice = jwt_of(&issuer, &idp, "alice");
+        let id = subject_of(&idp, "alice");
+
+        let session = rig.open(&alice, Some("work")).await;
+        for _ in 0..2 {
+            let answer = rig.call(&alice, &session, "notes_add").await;
+            assert_eq!(answer.json["result"]["isError"], false, "{}", answer.body);
+        }
+        assert_eq!(rig.call(&alice, &session, "files_read").await.status, 200);
+        assert_eq!(
+            *rig.host.tokens.lock().unwrap(),
+            [
+                Some("exchanged-1".to_string()),
+                Some("exchanged-1".to_string()),
+                None
+            ]
+        );
+
+        let exchanges = got.lock().unwrap().clone();
+        let [(authorization, form)] = &exchanges[..] else {
+            panic!("{exchanges:?}");
+        };
+        use base64::Engine as _;
+        assert_eq!(
+            authorization.as_deref(),
+            Some(
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("wirken-exchange:s3cret")
+                )
+                .as_str()
+            )
+        );
+        let field = |name: &str| form.get(name).map(String::as_str);
+        assert_eq!(
+            field("grant_type"),
+            Some("urn:ietf:params:oauth:grant-type:token-exchange")
+        );
+        assert_eq!(field("subject_token"), Some(alice.as_str()));
+        for name in ["subject_token_type", "requested_token_type"] {
+            assert_eq!(
+                field(name),
+                Some("urn:ietf:params:oauth:token-type:access_token")
+            );
+        }
+        assert_eq!(field("audience"), Some("notes-api"));
+        assert_eq!(form.len(), 5, "{form:?}");
+
+        let lane = format!("proxy-{id}-work");
+        let exchanged: Vec<SessionEvent> = rig
+            .rows(&lane)
+            .into_iter()
+            .filter(|e| matches!(e, SessionEvent::ProxyTokenExchanged { .. }))
+            .collect();
+        let [
+            SessionEvent::ProxyTokenExchanged {
+                token_id,
+                agent_id,
+                mcp_session,
+                server,
+                audience,
+                expires_at,
+                identity,
+            },
+        ] = &exchanged[..]
+        else {
+            panic!("{exchanged:?}");
+        };
+        assert_eq!(
+            (token_id, agent_id, mcp_session),
+            (&id, &"default".to_string(), &session)
+        );
+        assert_eq!((server.as_str(), audience.as_str()), ("notes", "notes-api"));
+        assert_eq!(identity.issuer, idp);
+        assert_eq!(identity.grant_set.as_deref(), Some("engineers"));
+        let left = expires_at.as_second() - wirken_time::now().as_second();
+        assert!((290..=300).contains(&left), "{left}");
+
+        // Another subject's call gets a token of its own.
+        let bob = jwt_of(&issuer, &idp, "bob");
+        let theirs = rig.open(&bob, None).await;
+        rig.call(&bob, &theirs, "notes_add").await;
+        assert_eq!(
+            rig.host
+                .tokens
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("exchanged-2")
+        );
+        assert_eq!(got.lock().unwrap().len(), 2);
+
+        for lane in rig.lanes() {
+            let text = serde_json::to_string(&rig.rows(&lane)).unwrap();
+            for secret in ["exchanged-1", "exchanged-2", alice.as_str(), bob.as_str()] {
+                assert!(!text.contains(secret), "{lane}: {text}");
+            }
+        }
+    }
+
+    /// No call to a server that asks for an exchange is made without
+    /// one: not with a token Wirken issued, not when the provider
+    /// refuses or answers without an expiry, and not when no exchange
+    /// client is configured. Each is refused before the agent is handed
+    /// anything, and says why.
+    #[tokio::test]
+    async fn a_call_that_cannot_be_exchanged_for_is_refused_and_not_made() {
+        use crate::commands::proxy_oidc::tests::TestIssuer;
+        let issuer = TestIssuer::new();
+
+        let (idp, _) = identity_provider(exchanging());
+        let rig = exchange_rig(&issuer, &idp, true).await;
+        let (issued, value) = rig.token("laptop", &["notes"]);
+        let session = rig.open(&value, None).await;
+        let answer = rig.call(&value, &session, "notes_add").await;
+        assert!(
+            answer.json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("names no person"),
+            "{}",
+            answer.body
+        );
+        let lane = format!("proxy-{}-m{}", issued.id, &session[..12]);
+        assert_eq!(
+            rig.refusals(&lane),
+            [(
+                Some("mcp_notes_add".to_string()),
+                ProxyToolRefusal::ExchangeRequired
+            )]
+        );
+
+        let refusing: TokenAnswer = Arc::new(|_| {
+            (
+                400,
+                r#"{"error":"invalid_target","error_description":"audience not allowed"}"#.into(),
+            )
+        });
+        let no_expiry: TokenAnswer = Arc::new(|_| {
+            (
+                200,
+                r#"{"access_token":"exchanged-x","token_type":"Bearer"}"#.into(),
+            )
+        });
+        for (answer, says) in [
+            (refusing, "invalid_target: audience not allowed"),
+            (no_expiry, "nothing of when the token expires"),
+        ] {
+            let (idp, _) = identity_provider(answer);
+            let rig = exchange_rig(&issuer, &idp, true).await;
+            let alice = jwt_of(&issuer, &idp, "alice");
+            let session = rig.open(&alice, Some("work")).await;
+            let answer = rig.call(&alice, &session, "notes_add").await;
+            let message = answer.json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(message.contains(says), "{message}");
+            assert!(!message.contains(&alice), "{message}");
+            let lane = format!("proxy-{}-work", subject_of(&idp, "alice"));
+            assert_eq!(
+                rig.refusals(&lane),
+                [(
+                    Some("mcp_notes_add".to_string()),
+                    ProxyToolRefusal::ExchangeFailed
+                )]
+            );
+            assert!(rig.host.calls.lock().unwrap().is_empty());
+        }
+
+        let (idp, got) = identity_provider(exchanging());
+        let rig = exchange_rig(&issuer, &idp, false).await;
+        let alice = jwt_of(&issuer, &idp, "alice");
+        let session = rig.open(&alice, None).await;
+        let answer = rig.call(&alice, &session, "notes_add").await;
+        assert!(
+            answer.json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("names no exchange client"),
+            "{}",
+            answer.body
+        );
+        // A server that asks for none is called as before.
+        assert_eq!(rig.call(&alice, &session, "files_read").await.status, 200);
+        assert_eq!(*rig.host.tokens.lock().unwrap(), [None]);
+        assert!(got.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -160,6 +160,24 @@ pub struct OidcConfig {
     /// The vault entry holding the key subjects are hashed under.
     #[serde(default = "default_subject_key")]
     pub subject_key: String,
+    /// The client the gateway is at the issuer's token endpoint, to
+    /// exchange a caller's JWT for a token of a downstream audience
+    /// (RFC 8693). Without it no MCP server whose entry asks for an
+    /// exchange can be called with a JWT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange: Option<ExchangeClient>,
+}
+
+/// The gateway's client at the identity provider, for token exchange.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExchangeClient {
+    /// The client id the provider knows the gateway by.
+    pub client_id: String,
+    /// The vault entry holding the client's secret. It is read only
+    /// for the token endpoint, under a `--token-exchange` binding to
+    /// that endpoint's host.
+    pub client_secret: String,
 }
 
 fn default_clock_skew() -> u64 {
@@ -242,6 +260,24 @@ impl OidcConfig {
                 "subject_key {:?} is not letters, digits, - or _",
                 self.subject_key
             ));
+        }
+        if let Some(exchange) = &self.exchange {
+            // Sent in a Basic header, form-encoded: anything printable.
+            if exchange.client_id.is_empty()
+                || !exchange.client_id.chars().all(|c| c.is_ascii_graphic())
+            {
+                return bad(format!(
+                    "exchange.client_id {:?} is not printable ASCII",
+                    exchange.client_id
+                ));
+            }
+            if !is_name(&exchange.client_secret) {
+                return bad(format!(
+                    "exchange.client_secret {:?} is not a vault entry name: letters, digits, - \
+                     or _",
+                    exchange.client_secret
+                ));
+            }
         }
         Ok(())
     }
@@ -1645,6 +1681,14 @@ mod tests {
             load(oidc).map(|_| ()).map_err(|e| e.to_string())
         };
         assert!(with("issuer", "http://127.0.0.1:8080/realms/acme".into()).is_ok());
+        assert!(oidc.exchange.is_none());
+        assert!(
+            with(
+                "exchange",
+                serde_json::json!({"client_id": "wirken-exchange", "client_secret": "idp-secret"})
+            )
+            .is_ok()
+        );
         for (name, value, why) in [
             ("issuer", "http://idp.example.com".into(), "not https"),
             ("issuer", "http://localhost.example.com".into(), "not https"),
@@ -1668,6 +1712,21 @@ mod tests {
             (
                 "jwks_uri",
                 "https://idp.example.com/keys".into(),
+                "unknown field",
+            ),
+            (
+                "exchange",
+                serde_json::json!({"client_id": "", "client_secret": "s"}),
+                "exchange.client_id",
+            ),
+            (
+                "exchange",
+                serde_json::json!({"client_id": "wirken", "client_secret": "vault:s"}),
+                "exchange.client_secret",
+            ),
+            (
+                "exchange",
+                serde_json::json!({"client_id": "wirken", "client_secret": "s", "scope": "x"}),
                 "unknown field",
             ),
         ] {

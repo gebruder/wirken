@@ -332,6 +332,13 @@ impl super::proxy_mcp::ToolHost for FactoryToolHost {
             .map_err(|e| e.to_string())
     }
 
+    fn exchange_audiences(
+        &self,
+        agent: &str,
+    ) -> std::result::Result<std::collections::BTreeMap<String, String>, String> {
+        super::proxy::exchange_audiences(&self.data_dir, agent).map_err(|e| e.to_string())
+    }
+
     async fn tools(
         &self,
         agent: &str,
@@ -433,10 +440,33 @@ fn proxy_state(
                 super::proxy_oidc::subject_key(&store, &oidc.subject_key)
                     .map_err(|e| anyhow::anyhow!("proxy.json: oidc: {e}"))?
             };
-            Some(
-                super::proxy_oidc::IdentityVerifier::new(oidc, &cfg.data_dir, key)
-                    .map_err(|e| anyhow::anyhow!("proxy.json: oidc: {e}"))?,
-            )
+            let verifier = super::proxy_oidc::IdentityVerifier::new(oidc, &cfg.data_dir, key)
+                .map_err(|e| anyhow::anyhow!("proxy.json: oidc: {e}"))?;
+            Some(match &oidc.exchange {
+                None => verifier,
+                Some(client) => {
+                    // Read at each exchange, for the endpoint it is
+                    // made at: a rotation or a revoked binding is
+                    // taken up at the next one.
+                    let vault = store.clone();
+                    let name = client.client_secret.clone();
+                    let secret: super::proxy_exchange::ClientSecret = Box::new(move |host| {
+                        let vault = vault
+                            .lock()
+                            .map_err(|_| "vault mutex poisoned".to_string())?;
+                        vault
+                            .retrieve_for(
+                                &name,
+                                &wirken_vault::Destination::TokenExchange(host.to_string()),
+                            )
+                            .map(|(secret, _)| zeroize::Zeroizing::new(secret.expose().to_string()))
+                            .map_err(|e| format!("the exchange client's secret '{name}': {e}"))
+                    });
+                    let exchanger = super::proxy_exchange::Exchanger::new(oidc, client, secret)
+                        .map_err(|e| anyhow::anyhow!("proxy.json: oidc: exchange: {e}"))?;
+                    verifier.with_exchanger(exchanger)
+                }
+            })
         }
         (Some(_), None) => {
             anyhow::bail!("proxy.json: oidc: the vault is not open, so there is no subject key")
@@ -2419,6 +2449,13 @@ pub async fn run(port: Option<u16>, over: ProviderOverride) -> Result<()> {
                             oidc.issuer
                         );
                     }
+                }
+                if let Some(client) = &oidc.exchange {
+                    println!(
+                        "  Proxy identity: exchanges a caller's JWT at the issuer as client {} \
+                         for MCP servers that ask for it",
+                        client.client_id
+                    );
                 }
             }
             let addr = proxy_config

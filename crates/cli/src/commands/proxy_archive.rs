@@ -1309,6 +1309,10 @@ pub async fn verify_session(session_id: &str, skip_archive: bool) -> anyhow::Res
     if tool_calls + tool_refusals > 0 {
         println!("  tool calls: {tool_calls} answered, {tool_refusals} refused before the gate");
     }
+    let exchanges = count(|e| matches!(e, SessionEvent::ProxyTokenExchanged { .. }));
+    if exchanges > 0 {
+        println!("  tokens exchanged: {exchanges}");
+    }
     match log.verify(&handle).context("chain verification failed")? {
         SessionVerifyResult::Ok { rows_verified } => println!("  chain: OK ({rows_verified} rows)"),
         SessionVerifyResult::Empty => println!("  chain: EMPTY"),

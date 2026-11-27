@@ -52,13 +52,8 @@ pub(crate) fn signed_mcp_servers(
     data_dir: &std::path::Path,
     agent: &str,
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    let per_agent = data_dir.join("agents").join(agent).join("mcp.json");
-    let path = if per_agent.exists() {
-        per_agent
-    } else {
-        data_dir.join("mcp.json")
-    };
-    let config = wirken_mcp_proxy::McpConfig::load(&path).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let config = wirken_mcp_proxy::McpConfig::load(&agent_mcp_path(data_dir, agent))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(config
         .servers
         .iter()
@@ -67,6 +62,36 @@ pub(crate) fn signed_mcp_servers(
                 .map(|digest| (name.clone(), digest))
         })
         .collect())
+}
+
+/// The signed MCP entries of `agent` that ask for a token exchanged
+/// for the caller, each with the audience it names. An entry whose
+/// signature does not verify asks for nothing: it is not served.
+pub(crate) fn exchange_audiences(
+    data_dir: &std::path::Path,
+    agent: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let config = wirken_mcp_proxy::McpConfig::load(&agent_mcp_path(data_dir, agent))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(config
+        .servers
+        .iter()
+        .filter(|(name, server)| {
+            wirken_mcp_proxy::mcp_signing::verified_entry_digest(name, server).is_some()
+        })
+        .filter_map(|(name, server)| Some((name.clone(), server.exchange()?.audience.clone())))
+        .collect())
+}
+
+/// The `mcp.json` an agent's servers are read from: its own, or the
+/// data directory's.
+fn agent_mcp_path(data_dir: &std::path::Path, agent: &str) -> std::path::PathBuf {
+    let per_agent = data_dir.join("agents").join(agent).join("mcp.json");
+    if per_agent.exists() {
+        per_agent
+    } else {
+        data_dir.join("mcp.json")
+    }
 }
 
 /// What a token is allowed, as one line for a row or a listing.
