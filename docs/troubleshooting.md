@@ -70,7 +70,7 @@ Fix what stops it from starting, usually one of the causes above, then restart `
 **With Ollama:**
 - Small local models (e.g., llama3.2) may hallucinate tool calls, causing the agent to loop without producing a response. Tools are on by default for every provider, Ollama included; turn them off for an agent with `wirken agents set <ID> --tools-enabled false`.
 - Non-streaming requests (used by channel adapters) wait for the full response before replying. This can take 10-30 seconds depending on your hardware. WebChat uses streaming and feels faster.
-- Verify Ollama is running: wirken prints the detected version at startup (e.g., `Ollama version: 0.19.0`).
+- Verify Ollama is running: wirken prints the detected version at startup (e.g., `Ollama version: 0.40.18`).
 
 ## Vault passphrase mismatch
 

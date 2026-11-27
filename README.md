@@ -111,7 +111,7 @@ routes messages to the agent, and serves a WebChat UI at
   ──────
 
   Provider: ollama/llama3.2
-  Ollama version: 0.19.0
+  Ollama version: 0.40.18
   Route: Telegram -> agent:default
   WebChat: http://127.0.0.1:18790 (log in with `wirken webchat open`)
 
