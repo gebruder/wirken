@@ -12,6 +12,16 @@ tagged.
 
 ### Security
 
+- `wirken lyrik` reads the rubric and context from the target's inputs
+  directory, beside the run config, and the ledger is kept there too. A
+  `.lyrik/rubric.md`, `.lyrik/context.md` or `.lyrik/ledger/` in the assessed
+  tree is not read, and the run says so. Walks read a copy of the ledger
+  staged into the run's directory; the refusal to register a settled place
+  reads the inputs directory's ledger, which only the runner writes. Move
+  existing files there; `findings.json` records an operator rubric's
+  `source` as `operator`.
+- A root-cause claim the runner's trace confirms passes the root-cause arm
+  wherever output naming the origin would.
 - `wirken lyrik` reads its run config, supplied patches and supplied
   reproductions from `<data_dir>/lyrik/targets/<key>/`, keyed by the
   target's canonical path, where no run can write. A `.lyrik/config.json`,
