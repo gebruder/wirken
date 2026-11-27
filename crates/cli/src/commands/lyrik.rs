@@ -5691,9 +5691,10 @@ fn write_findings_with_funnel(
 }
 
 /// Set `detection_source` on a staged finding based on whether its
-/// `(file, line_start)` matches a seed location. Does not overwrite
-/// an existing value: a future producer that sets the field itself
-/// stays authoritative. Findings whose location cannot be derived
+/// `(file, line_start)` matches a seed location. The finding is the
+/// walk's JSON, so a `detection_source` already on it is one the model
+/// wrote, and it is replaced: where a finding came from is what the
+/// run's own seed set says. Findings whose location cannot be derived
 /// pass through unchanged (the validator will reject them on the
 /// missing-location ground).
 pub(super) fn annotate_detection_source(
@@ -5707,8 +5708,10 @@ pub(super) fn annotate_detection_source(
         None => return,
     };
     if let Some(obj) = finding.as_object_mut() {
-        obj.entry("detection_source".to_string())
-            .or_insert(serde_json::Value::String(provenance.to_string()));
+        obj.insert(
+            "detection_source".to_string(),
+            serde_json::Value::String(provenance.to_string()),
+        );
     }
 }
 
@@ -8685,19 +8688,25 @@ mod tests {
     }
 
     #[test]
-    fn annotate_detection_source_does_not_overwrite_existing_value() {
-        let mut f = finding("src/a.rs", 10, "auth", "HIGH");
-        f.as_object_mut()
-            .unwrap()
-            .insert("detection_source".to_string(), serde_json::json!("both"));
-        let mut seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
-        seeds.insert("src/a.rs:10".to_string());
-        annotate_detection_source(&mut f, &seeds);
-        assert_eq!(
-            f.get("detection_source").and_then(|v| v.as_str()),
-            Some("both"),
-            "annotator must not downgrade an existing value"
-        );
+    fn a_detection_source_the_walk_wrote_is_replaced_by_the_seed_set() {
+        let seeded: std::collections::HashSet<String> = ["src/a.rs:10".to_string()].into();
+        let unseeded = std::collections::HashSet::new();
+        for (claimed, seeds, want) in [
+            ("static_prescreen", &unseeded, "model_reasoning"),
+            ("both", &unseeded, "model_reasoning"),
+            ("model_reasoning", &seeded, "static_prescreen"),
+        ] {
+            let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+            f.as_object_mut()
+                .unwrap()
+                .insert("detection_source".to_string(), serde_json::json!(claimed));
+            annotate_detection_source(&mut f, seeds);
+            assert_eq!(
+                f.get("detection_source").and_then(|v| v.as_str()),
+                Some(want),
+                "the walk claimed {claimed}"
+            );
+        }
     }
 
     #[test]
