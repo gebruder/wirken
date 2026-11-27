@@ -42,7 +42,10 @@ commands, each a row on the chain
 
 With an `oidc` block in `proxy.json`, a client can present a JWT from the
 organization's identity provider in place of a token, and is given the grant
-set the operator mapped it to ([proxy-identity.md](proxy-identity.md)).
+set the operator mapped it to ([proxy-identity.md](proxy-identity.md)). An
+MCP server whose signed entry asks for it is then called with a token the
+identity provider exchanged that JWT for, so it acts for the caller and not
+for Wirken ([token exchange](proxy-identity.md#token-exchange)).
 
 ## What is gated
 

@@ -135,6 +135,9 @@ When a session opens, on its lane:
 
 For each call, in order:
 
+- `proxy_token_exchanged`, for a call made with a JWT to a server that acts
+  for the caller, when a token was got for it now and not held from an
+  earlier call ([proxy-identity.md](proxy-identity.md#token-exchange)).
 - `assistant_tool_calls`, with the tool and its arguments, `sender_id`
   `proxy-token:<token id>` and the agent's id.
 - `permission_approved`, or `permission_denied` with its `denial_reason`:
@@ -163,13 +166,15 @@ before a session exists is on the token's lane, `proxy-<token id>`.
 | `definition_changed` | The tool's definition is not the one shown. |
 | `malformed` | The body is not one JSON-RPC message, the call names no tool, its arguments are not an object, or the body is over `max_body_bytes`. |
 | `unavailable` | The agent's tools could not be reached, the tool is not served now, or the call could not be run. |
-| `record_failed` | The session's `proxy_tools_listed` row could not be written. |
+| `record_failed` | The session's `proxy_tools_listed` row, or a call's `proxy_token_exchanged` row, could not be written. |
 | `archive_failed` | The tool list, or a call's request, could not be written to the archive. |
+| `exchange_required` | The tool's server acts for the caller, and the token is one Wirken issued, which names no person ([proxy-identity.md](proxy-identity.md#token-exchange)). |
+| `exchange_failed` | The tool's server acts for the caller, and no token could be had for the caller's JWT at the issuer. |
 
 A request with no token, or a revoked one, is a `proxy_refused` row as for
 inference ([inference-proxy.md](inference-proxy.md#what-is-refused)).
 
-All three rows are forwarded to a SIEM by default, with the token in the
+All four rows are forwarded to a SIEM by default, with the token in the
 sender column.
 
 ## Archive, verify, export and redaction

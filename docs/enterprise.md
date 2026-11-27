@@ -149,8 +149,11 @@ build on top.
   at the proxy listener, where a client can present a JWT from the
   organization's identity provider in place of a proxy token
   ([proxy-identity.md](proxy-identity.md)), and is still no identity
-  provider: no accounts, no login flow, no tokens issued or exchanged
-  ([threat-model.md](threat-model.md#senders-and-approvals),
+  provider: no accounts, no login flow, no tokens issued. A caller's JWT is
+  exchanged at the identity provider, for a token the provider issues, only
+  for an MCP server whose signed entry asks for it
+  ([proxy-identity.md](proxy-identity.md#token-exchange),
+  [threat-model.md](threat-model.md#senders-and-approvals),
   [permissions-and-identity.md](permissions-and-identity.md#identity-scope)).
 - **Permissions are scoped per agent and channel, not per user.** A grant
   the operator records for a channel covers every admitted sender on that

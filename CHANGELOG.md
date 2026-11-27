@@ -10,6 +10,36 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- An MCP server can act for the person behind a call at the proxy's MCP
+  endpoint. Its signed entry names an `exchange` audience; a `tools/call`
+  made with a JWT of the configured issuer is then made with a token the
+  issuer's token endpoint gave for that JWT (RFC 8693), as the client the
+  new `exchange` field of the `oidc` block names. An HTTP server gets it as
+  the bearer of the call; a contained stdio server's injected route sets it
+  while the call runs, and the server never holds it. The token is held in
+  memory per subject and audience until 30 seconds before it expires. A
+  token Wirken issued is refused for such a server (`exchange_required`),
+  and so is a call whose exchange fails (`exchange_failed`): neither falls
+  back to the entry's own credential. Each exchange is a
+  `proxy_token_exchanged` row; neither token is on any row. The client's
+  secret is a vault entry bound with the new `--token-exchange` destination,
+  which `http_request` cannot use. The agent's own calls are not exchanged
+  (`a_jwts_call_to_an_exchanging_server_is_handed_a_token_got_for_it`,
+  `a_call_that_cannot_be_exchanged_for_is_refused_and_not_made`,
+  `crates/cli/src/commands/proxy_mcp.rs`;
+  `crates/cli/src/commands/proxy_exchange.rs`;
+  `a_calls_exchanged_token_is_set_in_place_of_the_credential_while_it_runs`,
+  `crates/mcp-proxy/src/inject.rs`;
+  `an_exchanged_token_is_the_bearer_of_its_call_at_a_server_that_asks_for_one`,
+  `crates/mcp-proxy/src/mcp_registry.rs`;
+  `the_exchange_audience_is_covered_by_the_signature`,
+  `crates/mcp-proxy/src/mcp_signing.rs`;
+  `a_jwt_reaches_a_downstream_as_the_token_the_provider_exchanged_it_for`,
+  `crates/cli/tests/proxy_oidc_live_round_trip.rs`;
+  [docs/proxy-identity.md](docs/proxy-identity.md#token-exchange)).
+
 ### Changed
 
 - While a model thinks before it answers, `wirken chat` says so: the rule

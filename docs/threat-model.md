@@ -484,6 +484,18 @@ What each control leaves outside it, stated once. Other pages link here.
   rate-limited. A subject's keyed hash is on rows that cannot be removed, and
   whoever holds the vault key can match it to a subject
   ([proxy-identity.md](proxy-identity.md)).
+- A token exchanged for a caller is held in memory until shortly before it
+  expires. It is used only with a JWT the listener accepts at that call, and
+  only while a mapping still gives the caller the server, but it carries what
+  the issuer put in it at the exchange: a role or scope the issuer has since
+  taken away lasts in it until it expires. The downstream server is handed it on each call
+  and can do with it whatever its audience allows, for as long as it lives. A
+  contained server's injected route sets the token of the call under way, and
+  a request the server sends after its call has answered gets the token of
+  the next call to that server, or the entry's credential. The exchange client's
+  secret goes to the issuer's token endpoint only, and a compromise of the
+  issuer is a compromise of every downstream that accepts its tokens
+  ([proxy-identity.md](proxy-identity.md#token-exchange)).
 - Without `tls` the listener speaks plain HTTP: on a loopback bind any local
   process that can read the client's traffic reads its token, and on a wider
   bind the network does.

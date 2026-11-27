@@ -35,6 +35,7 @@ An `oidc` block in `proxy.json`:
 | `jwks_cache_secs` | 3600 | How long fetched keys are used before they are fetched again. |
 | `record_subject` | `false` | Record the subject on each row as issued, in place of its keyed hash. |
 | `subject_key` | `proxy-subject-key` | The vault entry holding the key subjects are hashed under. Made on first use. |
+| `exchange` | none | The client Wirken is at the issuer's token endpoint, to exchange a caller's JWT for an MCP server that acts for the caller. See [Token exchange](#token-exchange). |
 
 There is one issuer. Without the block a JWT is an unknown token.
 `wirken run` prints the issuer and how many keys it holds at start.
@@ -148,10 +149,118 @@ most one a second together with unknown tokens:
 A refusal after the grant set is applied (a model not allowed, a ceiling
 reached) is on the subject's own lane, with `identity`.
 
+## Token exchange
+
+An MCP server can act for the person behind a call rather than for Wirken.
+Its signed entry names the audience the downstream system is known by at the
+identity provider:
+
+```json
+"crm": {
+    "transport": "http",
+    "url": "https://crm.example.com/mcp",
+    "exchange": {"audience": "crm-api"}
+}
+```
+
+A `tools/call` at the MCP endpoint ([proxy-mcp.md](proxy-mcp.md)) made with a
+JWT, to one of that server's tools, is made with a token the issuer gave for
+that JWT. Wirken sends the JWT to the issuer's token endpoint as the subject
+token of an RFC 8693 exchange and asks for an access token of the entry's
+audience. The downstream gets the token the issuer exchanged the JWT for, and
+sees the caller's subject and its own audience.
+
+- An HTTP server gets the token as the bearer of the call, in place of the
+  entry's `auth`. `initialize` and `tools/list` are sent at start, before
+  there is a caller, with the entry's `auth`, or none.
+- A stdio server needs a `sandbox` block with `inject`
+  ([mcp.md](mcp.md#injecting-a-credential)). While the call runs, its
+  injected route sets the token in place of the entry's credential, and each
+  `mcp_credential_injected` row of the call names the audience in
+  `exchanged_for`. The server never holds the token. The proxy makes one
+  call at a time, so the token a request gets is that of the call the server
+  is answering.
+
+The `exchange` block is inside the signed hash: adding one, or changing its
+audience, needs `wirken mcp sign` again. An entry whose block cannot be
+served (a stdio server without `inject`, an audience that is not one word of
+printable ASCII) is not started: `mcp_entry_refused` with `exchange_invalid`.
+
+Wirken's client at the issuer is named in the `oidc` block:
+
+```json
+"oidc": {
+    "issuer": "https://idp.example.com/realms/acme",
+    "audience": "wirken-proxy",
+    "max_token_lifetime_secs": 900,
+    "exchange": {"client_id": "wirken-exchange", "client_secret": "idp-exchange-secret"}
+}
+```
+
+`client_secret` is a vault entry, bound to the token endpoint's host:
+
+```bash
+wirken credentials add idp-exchange-secret --token-exchange idp.example.com
+```
+
+A `--token-exchange` binding sends the secret to that endpoint and nowhere
+else, not even to `http_request` for the same host
+([credentials.md](credentials.md#where-a-credential-may-go)). The secret is
+read at each exchange, so a rotation takes effect at the next one.
+
+The token endpoint is the `token_endpoint` of the issuer's discovery
+document, which must be on the issuer's origin. It is reached over HTTPS, or
+plain HTTP for a loopback issuer, and no redirect is followed. The request
+is `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` with the JWT
+as `subject_token`, both token types
+`urn:ietf:params:oauth:token-type:access_token`, and `audience`, with the
+client authenticated by HTTP Basic. The answer must carry a bearer
+`access_token` and `expires_in`. One without `expires_in` is refused.
+
+What is held:
+
+- The JWT is sent in the exchange and kept no longer than the request it
+  came with.
+- The token got for it is held in memory, for the subject and the audience,
+  until 30 seconds before it expires. A token that lives less than 30
+  seconds is used for its call only. A restart drops every token held.
+- Neither token is on any row, in any log line, or on disk.
+
+No call falls back to Wirken's own credential:
+
+- A token Wirken issued, calling a tool of such a server, is refused:
+  `exchange_required`. Such a token has no person to exchange for.
+- An exchange that fails is refused: `exchange_failed`. That covers no
+  `exchange` block in `proxy.json`, a token endpoint that cannot be reached,
+  that refuses (its `error` code reaches the client, and what it echoed of
+  the request does not), or that answers without a bearer token and an
+  expiry.
+- Output that carries the token is withheld, and the call answers as failed.
+
+Calls the agent's own model makes to the same server are not exchanged. They
+carry the entry's credential, as before.
+
+Each exchange is one `proxy_token_exchanged` row on the caller's lane,
+written before the call reaches the gate:
+
+| Field | Meaning |
+|---|---|
+| `token_id` | The subject's id. |
+| `agent_id`, `mcp_session` | The agent and the MCP session of the call. |
+| `server`, `audience` | The server and the audience its entry names. |
+| `expires_at` | When the exchanged token expires, as the issuer said. |
+| `identity` | As on every row of the call. |
+
+A call made with a token still held writes none. An exchange whose row
+cannot be written is not used: `record_failed`.
+
 ## What it does not do
 
-- It does not issue, refresh or exchange a token. A downstream system still
-  sees Wirken's credential, not the caller's.
+- It does not issue or refresh a token. It exchanges a caller's JWT only at
+  the configured issuer, and only for an MCP server whose signed entry asks
+  for it ([Token exchange](#token-exchange)). Every other downstream system
+  still sees Wirken's credential, not the caller's. `http_request` and the
+  agent's own calls are not exchanged.
 - It does not provision users or groups. No SCIM.
 - It does not authenticate channel senders. They are admitted by the sender
   allowlist, as before.

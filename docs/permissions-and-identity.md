@@ -369,6 +369,14 @@ service account, an API key, a vault-held credential. The downstream sees that
 identity and not the person whose message set the action in motion, so it
 cannot apply that principal's authorization or record who really acted.
 
+One path is the exception. A client of the proxy's MCP endpoint that presents
+a JWT of the organization's identity provider, calling an MCP server whose
+signed entry asks for it, reaches that server with a token the identity
+provider exchanged the JWT for (RFC 8693), and the downstream sees the
+caller's subject ([proxy-identity.md](proxy-identity.md#token-exchange)).
+Channel senders, the agent's own calls and `http_request` still act as the
+connector.
+
 Attribution on Wirken's own chain is closed: `sender_id` rides the LLM call
 boundary, so `LlmRequest` and `LlmResponse` carry the platform-side sender
 alongside the inbound and tool-facing rows that already did. It is `None` for
@@ -388,8 +396,11 @@ can present a JWT from the organization's identity provider in place of a
 proxy token; Wirken checks it against the issuer's keys and gives the caller
 the grants the operator mapped it to
 ([proxy-identity.md](proxy-identity.md)). The identity is the issuer's:
-Wirken issues no token for it and exchanges none, so a downstream system
-still sees Wirken's credential.
+Wirken issues no token for it. For an MCP server whose signed entry asks for
+it, Wirken exchanges the caller's JWT at the issuer's token endpoint for a
+token of the server's audience, and the server is called with that
+([proxy-identity.md](proxy-identity.md#token-exchange)). Any other downstream
+system still sees Wirken's credential.
 
 Platform sender identity is checked against the inbound sender allowlist and
 recorded on every inbound audit event; it is not an identity Wirken
