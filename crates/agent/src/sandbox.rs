@@ -685,9 +685,16 @@ impl DockerSandbox {
         #[cfg(not(unix))]
         let decision = egress_decision(egress.is_some(), None);
         #[cfg(unix)]
-        let env = resources.route.as_ref().map(EgressRoute::proxy_env);
+        let mut env = resources
+            .route
+            .as_ref()
+            .map(EgressRoute::proxy_env)
+            .unwrap_or_default();
         #[cfg(not(unix))]
-        let env: Option<Vec<String>> = None;
+        let mut env: Vec<String> = Vec::new();
+        let reach = reach_value();
+        env.push(format!("{REACH_ENV}={reach}"));
+        let env = Some(env);
 
         // The same profile on either runtime, handed over the way that
         // runtime takes it. Decided before anything is provisioned, so
@@ -709,7 +716,9 @@ impl DockerSandbox {
             ..Default::default()
         };
 
-        let result = self.run_container(container_config, &mut resources).await;
+        let result = self
+            .run_container(container_config, &reach, &mut resources)
+            .await;
 
         // Tear down unconditionally. The proxy dies with its handle;
         // the network needs an explicit removal, and leaking one per
@@ -723,6 +732,7 @@ impl DockerSandbox {
     async fn run_container(
         &self,
         container_config: ContainerCreateBody,
+        reach: &str,
         resources: &mut ExecResources,
     ) -> Result<ToolResult, AgentError> {
         let container_name = format!("wirken-sandbox-{}", short_id());
@@ -755,6 +765,7 @@ impl DockerSandbox {
             container_id: Some(container.id.clone()),
             limits: self.config.non_default_limits(),
             timed_out: false,
+            reached: false,
         };
 
         // Attached before the start, so nothing the command prints is
@@ -850,10 +861,14 @@ impl DockerSandbox {
             AgentError::Sandbox("read container output: attach did not end".into())
         })?;
 
+        let (stdout, reached) = take_reach(&stdout, reach);
         Ok(ToolResult {
             output: exec_output(&stdout, &stderr),
             success: exit_code == 0,
-            sandbox: Some(provenance),
+            sandbox: Some(wirken_audit::SandboxProvenance {
+                reached,
+                ..provenance
+            }),
         })
     }
 
@@ -1200,6 +1215,38 @@ pub async fn detect_gvisor() -> bool {
 /// empty, cut at 32,000 bytes. Everything from the first line that
 /// starts with `[stderr] ` on is stderr, which is how a reader of the
 /// session log tells the two apart.
+/// The variable every `exec` is given a fresh value in. A harness that
+/// shows a defect prints the value on a line of its own once it
+/// reaches its assertion, and the result row records that it did
+/// ([`wirken_audit::SandboxProvenance::reached`]), with the line taken
+/// out of the output it records. A fixed word could
+/// be printed by the code under test, or sit in its files; this value
+/// exists only in the command's environment, from the moment it
+/// starts.
+pub const REACH_ENV: &str = "LYRIK_REACHED";
+
+/// A fresh value for [`REACH_ENV`].
+pub fn reach_value() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// `stdout` without the lines that are `value`, and whether there was
+/// one. The row keeps the fact and not the value, so two runs of one
+/// harness record the same output, and no reader learns a value to
+/// print another time.
+pub fn take_reach(stdout: &str, value: &str) -> (String, bool) {
+    let mut reached = false;
+    let mut kept = String::with_capacity(stdout.len());
+    for line in stdout.split_inclusive('\n') {
+        if line.trim() == value {
+            reached = true;
+        } else {
+            kept.push_str(line);
+        }
+    }
+    (kept, reached)
+}
+
 pub fn exec_output(stdout: &str, stderr: &str) -> String {
     let mut result = String::new();
     if !stdout.is_empty() {

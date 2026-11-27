@@ -3087,6 +3087,7 @@ mod identity_tests {
             container_id: Some("70f792320e59b7c016b16ff2ebba57669af17efb".into()),
             limits: None,
             timed_out: false,
+            reached: false,
         })));
         assert!(docker.contains("sandbox_mode=ExecOnly"), "{docker}");
         assert!(docker.contains("runtime=Docker"), "{docker}");
@@ -3101,6 +3102,7 @@ mod identity_tests {
             container_id: Some("abc123abc123abc123".into()),
             limits: None,
             timed_out: false,
+            reached: false,
         })));
         assert!(gvisor.contains("sandbox_mode=Gvisor"), "{gvisor}");
         assert!(gvisor.contains("runtime=Gvisor"), "{gvisor}");
@@ -3111,6 +3113,7 @@ mod identity_tests {
             container_id: None,
             limits: None,
             timed_out: false,
+            reached: false,
         })));
         assert!(host.contains("sandbox_mode=Off"), "{host}");
         assert!(host.contains("runtime=Host"), "{host}");
@@ -3127,6 +3130,7 @@ mod identity_tests {
             container_id: Some("aaaaaaaaaaa\u{e9}b".into()),
             limits: None,
             timed_out: false,
+            reached: false,
         })));
         assert!(split.contains("container=aaaaaaaaaaa\u{e9}b"), "{split}");
 
@@ -3165,6 +3169,7 @@ mod identity_tests {
                 container_id: Some("70f792320e59".into()),
                 limits: None,
                 timed_out: false,
+                reached: false,
             }),
         };
         let wire = serde_json::to_string(&row).expect("serializes");
@@ -3190,6 +3195,7 @@ mod identity_tests {
                 container_id: None,
                 limits: None,
                 timed_out: false,
+                reached: false,
             }),
         };
         let wire = serde_json::to_string(&host).expect("serializes");

@@ -9973,6 +9973,7 @@ mod tests {
                     container_id: Some("70f792320e59".into()),
                     limits: None,
                     timed_out: false,
+                    reached: false,
                 }),
             ),
             (
@@ -9983,6 +9984,7 @@ mod tests {
                     container_id: Some("abc123abc123".into()),
                     limits: None,
                     timed_out: false,
+                    reached: false,
                 }),
             ),
             (
@@ -9993,6 +9995,7 @@ mod tests {
                     container_id: None,
                     limits: None,
                     timed_out: false,
+                    reached: false,
                 }),
             ),
             ("in-process", None),

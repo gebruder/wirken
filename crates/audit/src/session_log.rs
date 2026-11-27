@@ -634,6 +634,15 @@ pub struct SandboxProvenance {
     /// wrote.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
+    /// The command printed, on a line of its own on stdout, the value
+    /// this `exec` was given in its environment under `LYRIK_REACHED`.
+    /// The value is drawn fresh for each `exec` and kept nowhere a
+    /// file or a model can read before the command runs, so the flag
+    /// says the command itself echoed it: the reach line of a
+    /// defect-showing harness. The line is taken out of `output`, so
+    /// the value is on no row. Absent when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reached: bool,
 }
 
 /// Non-default limits an `exec` ran under.

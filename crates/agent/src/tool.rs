@@ -796,6 +796,8 @@ impl ToolRegistry {
         // `wirken ask` it is the operator's terminal, where approval
         // answers are typed.
         host_exec_env(&mut cmd);
+        let reach = crate::sandbox::reach_value();
+        cmd.env(crate::sandbox::REACH_ENV, &reach);
         // The shell leads a process group of its own, so everything it
         // starts and does not move out of the group (`&`, `nohup`, a
         // double fork) can be ended with it. See `HostGroup`.
@@ -825,6 +827,7 @@ impl ToolRegistry {
                         container_id: None,
                         limits: self.sandbox_config.non_default_limits(),
                         timed_out: true,
+                        reached: false,
                     }),
                 });
             }
@@ -847,6 +850,7 @@ impl ToolRegistry {
         // sees what files were listed, what stdout reported, etc.,
         // just without the color codes and cursor moves.
         let stdout = crate::ansi::strip_control_sequences(&String::from_utf8_lossy(&output.stdout));
+        let (stdout, reached) = crate::sandbox::take_reach(&stdout, &reach);
         let stderr = crate::ansi::strip_control_sequences(&String::from_utf8_lossy(&output.stderr));
 
         Ok(ToolResult {
@@ -861,6 +865,7 @@ impl ToolRegistry {
                 container_id: None,
                 limits: self.sandbox_config.non_default_limits(),
                 timed_out: false,
+                reached,
             }),
         })
     }

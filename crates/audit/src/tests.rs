@@ -3540,6 +3540,7 @@ fn every_session_event() -> Vec<SessionEvent> {
                 container_id: None,
                 limits: None,
                 timed_out: false,
+                reached: false,
             },
             agent_id: String::new(),
             adapter_id: None,

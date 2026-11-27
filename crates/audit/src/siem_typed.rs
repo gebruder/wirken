@@ -948,6 +948,7 @@ mod tests {
                 container_id: None,
                 limits: None,
                 timed_out: false,
+                reached: false,
             },
             agent_id: "slackbot".into(),
             adapter_id: Some("slack".into()),

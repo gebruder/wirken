@@ -14517,6 +14517,7 @@ fn the_row_carries_what_the_dispatch_reported() {
             container_id: Some("70f792320e59".into()),
             limits: None,
             timed_out: false,
+            reached: false,
         },
         SandboxProvenance {
             mode: SandboxModeLabel::Gvisor,
@@ -14524,6 +14525,7 @@ fn the_row_carries_what_the_dispatch_reported() {
             container_id: Some("abc123abc123".into()),
             limits: None,
             timed_out: false,
+            reached: false,
         },
         SandboxProvenance {
             mode: SandboxModeLabel::Off,
@@ -14531,6 +14533,7 @@ fn the_row_carries_what_the_dispatch_reported() {
             container_id: None,
             limits: None,
             timed_out: false,
+            reached: false,
         },
     ] {
         assert_eq!(
@@ -14624,6 +14627,59 @@ async fn a_host_exec_that_times_out_still_records_the_host() {
         .expect("a result");
     assert!(printed.output.contains("Command timed out after 1s"));
     assert!(!printed.sandbox.expect("it ran").timed_out);
+}
+
+/// An `exec` is given a fresh value under `LYRIK_REACHED`, and its row
+/// says whether it printed that value on a line of its own. Printing
+/// the variable's name, or a value from another run, is not reaching.
+#[tokio::test]
+async fn an_exec_row_records_whether_the_command_printed_its_reach_value() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tools = ToolRegistry::new(
+        tmp.path().to_path_buf(),
+        ToolConfig {
+            sandbox: SandboxConfig {
+                mode: SandboxMode::Off,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .expect("registry");
+    let reached = |command: &str| {
+        let tools = &tools;
+        let command = command.to_string();
+        async move {
+            let args = serde_json::json!({ "command": command }).to_string();
+            let result = tools.execute("exec", &args).await.expect("a result");
+            result.sandbox.expect("it ran").reached
+        }
+    };
+    assert!(reached(r#"echo start; echo "$LYRIK_REACHED"; exit 1"#).await);
+    assert!(!reached("echo LYRIK_REACHED; exit 1").await);
+    assert!(!reached("echo 0123456789abcdef0123456789abcdef").await);
+    assert!(
+        !reached(r#"echo "$LYRIK_REACHED" 1>&2"#).await,
+        "stderr is not stdout"
+    );
+    // The line is taken out of what the row records, and each exec
+    // gets a value of its own.
+    let run = |command: &str| {
+        let tools = &tools;
+        let args = serde_json::json!({ "command": command }).to_string();
+        async move { tools.execute("exec", &args).await.unwrap().output }
+    };
+    assert_eq!(
+        run(r#"echo a; echo "$LYRIK_REACHED"; echo b"#).await,
+        "a\nb\n"
+    );
+    let first = run(r#"echo "x$LYRIK_REACHED""#).await;
+    let second = run(r#"echo "x$LYRIK_REACHED""#).await;
+    assert_ne!(first, second);
+    assert_eq!(first.trim().len(), 33, "{first}");
 }
 
 // --- Text arriving beside tool calls, one fixture per parse site ---
@@ -15493,7 +15549,9 @@ mod host_exec_inherits_nothing {
             assert!(
                 crate::tool::HOST_EXEC_ENV_ALLOWLIST.contains(&name)
                     || SHELL_SET.contains(&name)
-                    || name == crate::tool::EXEC_MARKER_ENV,
+                    || name == crate::tool::EXEC_MARKER_ENV
+                    // Set by the runtime for this command, not inherited.
+                    || name == crate::sandbox::REACH_ENV,
                 "{name} reached the command from the gateway's environment:\n{}",
                 result.output
             );
@@ -16378,6 +16436,7 @@ mod exec_location_disagreements {
                 container_id: None,
                 limits: None,
                 timed_out: false,
+                reached: false,
             }),
             agent_id: "slackbot".into(),
             adapter_id: None,
