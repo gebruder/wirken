@@ -40,6 +40,11 @@ pub struct Binding {
     /// row sealed before this list existed opens as it did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archives: Vec<String>,
+    /// Hosts of an identity provider's token endpoint the credential
+    /// authenticates a token exchange at, as the proxy's client. Left
+    /// out of the stored form when empty, as `archives` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_exchanges: Vec<String>,
 }
 
 fn version() -> u32 {
@@ -60,6 +65,10 @@ pub enum Destination {
     /// The bucket endpoint of a proxy archive, by host: the credential
     /// signs requests to it. Not a host `http_request` may send to.
     Archive(String),
+    /// The token endpoint of the proxy's identity provider, by host:
+    /// the credential authenticates the proxy's token exchanges there.
+    /// Not a host `http_request` may send to.
+    TokenExchange(String),
 }
 
 impl Destination {
@@ -72,6 +81,7 @@ impl Destination {
             Self::Adapter(_) => "adapter",
             Self::Plan => "plan",
             Self::Archive(_) => "archive",
+            Self::TokenExchange(_) => "token_exchange",
         }
     }
 
@@ -84,6 +94,7 @@ impl Destination {
             Self::Adapter(a) => a.clone(),
             Self::Plan => "plan sign-in endpoints".into(),
             Self::Archive(h) => format!("archive at {h}"),
+            Self::TokenExchange(h) => format!("token exchange at {h}"),
         }
     }
 
@@ -96,6 +107,7 @@ impl Destination {
             Self::Adapter(a) => format!("--adapter {a}"),
             Self::Plan => "--plan".into(),
             Self::Archive(h) => format!("--archive {h}"),
+            Self::TokenExchange(h) => format!("--token-exchange {h}"),
         }
     }
 }
@@ -129,6 +141,7 @@ impl Binding {
             && self.adapters.is_empty()
             && !self.plan
             && self.archives.is_empty()
+            && self.token_exchanges.is_empty()
     }
 
     /// Whether `destination` is allowed. Hosts compare case-insensitively.
@@ -142,6 +155,10 @@ impl Binding {
             Destination::Adapter(a) => self.adapters.iter().any(|x| x == a),
             Destination::Plan => self.plan,
             Destination::Archive(h) => self.archives.iter().any(|x| x.eq_ignore_ascii_case(h)),
+            Destination::TokenExchange(h) => self
+                .token_exchanges
+                .iter()
+                .any(|x| x.eq_ignore_ascii_case(h)),
         }
     }
 
@@ -162,6 +179,7 @@ impl Binding {
             Destination::Adapter(a) => self.adapters.push(a),
             Destination::Plan => self.plan = true,
             Destination::Archive(h) => self.archives.push(h),
+            Destination::TokenExchange(h) => self.token_exchanges.push(h),
         }
         self.normalize();
         true
@@ -178,6 +196,9 @@ impl Binding {
             Destination::Adapter(a) => self.adapters.retain(|x| x != a),
             Destination::Plan => self.plan = false,
             Destination::Archive(h) => self.archives.retain(|x| !x.eq_ignore_ascii_case(h)),
+            Destination::TokenExchange(h) => {
+                self.token_exchanges.retain(|x| !x.eq_ignore_ascii_case(h))
+            }
         }
         *self != before
     }
@@ -193,6 +214,12 @@ impl Binding {
             out.push(Destination::Plan);
         }
         out.extend(self.archives.iter().cloned().map(Destination::Archive));
+        out.extend(
+            self.token_exchanges
+                .iter()
+                .cloned()
+                .map(Destination::TokenExchange),
+        );
         out
     }
 
@@ -217,6 +244,12 @@ impl Binding {
         self.archives.retain(|h| !h.is_empty());
         self.archives.sort();
         self.archives.dedup();
+        for h in &mut self.token_exchanges {
+            *h = h.trim().to_ascii_lowercase();
+        }
+        self.token_exchanges.retain(|h| !h.is_empty());
+        self.token_exchanges.sort();
+        self.token_exchanges.dedup();
     }
 
     /// The bytes stored in the `binding` column and sealed into the

@@ -43,6 +43,7 @@ credential somewhere new.
 | A channel adapter | the adapter id | `--adapter slack` |
 | A plan sign-in | the plan endpoints | `--plan` |
 | A proxy archive's bucket | the endpoint's host and port: 443, or the port the entry names. Not a host `http_request` may send to | `--archive s3.example.com` |
+| The proxy's token exchange | the host and port of the identity provider's token endpoint: 443, or the port it names. Not a host `http_request` may send to | `--token-exchange idp.example.com` |
 
 A provider's key goes to the origin of its base URL and nowhere else. The
 origin is the host the HTTP client connects to for that URL: a base URL the
@@ -84,7 +85,10 @@ is refused, an MCP server starts without it, an agent starts with no key, an
 adapter is not started, and a call a proxy client makes to that upstream is
 refused (`credential_refused`). The bucket credentials of a proxy archive are
 read under an `--archive` binding to the archive's endpoint
-([proxy-archive.md](proxy-archive.md#write-once-archive)). A proxy client's
+([proxy-archive.md](proxy-archive.md#write-once-archive)), and the client
+secret of the proxy's token exchange under a `--token-exchange` binding to the
+identity provider's token endpoint
+([proxy-identity.md](proxy-identity.md#token-exchange)). A proxy client's
 token is not in the vault: only its SHA-256 is kept, in `proxy_tokens.db`. Each refusal is a `credential_destination_refused`
 row naming the configuration that asked, and the gateway logs the `grant`
 command that would allow it. Each handoff at start or respawn is a

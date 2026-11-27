@@ -9132,6 +9132,51 @@ mod resolver_tests {
         ));
     }
 
+    /// The client credential of the proxy's token exchange is bound to
+    /// the identity provider's token endpoint as an exchange, not as a
+    /// host `http_request` may send to.
+    #[test]
+    fn a_token_exchange_credential_is_not_handed_to_http_request() {
+        use wirken_agent::http_tool::CredentialError;
+        use wirken_vault::{Binding, CredentialKind, Destination};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CredentialStore::open_with_key(
+            &tmp.path().join("vault.db"),
+            VaultSecret::new("a".repeat(64)),
+        )
+        .unwrap();
+        let mut binding = Binding::default();
+        binding.grant(Destination::TokenExchange("idp.example.com".into()));
+        store
+            .store_bound(
+                "proxy-exchange-secret",
+                "",
+                &VaultSecret::new("exchange-client-secret-0123456789".into()),
+                None,
+                None,
+                &binding,
+                CredentialKind::Secret,
+            )
+            .unwrap();
+        assert!(
+            store
+                .retrieve_for(
+                    "proxy-exchange-secret",
+                    &Destination::TokenExchange("idp.example.com".into())
+                )
+                .is_ok()
+        );
+        let resolver = VaultCredentialResolver {
+            store: std::sync::Mutex::new(store),
+            leak: Arc::new(wirken_gateway::leak::LeakMatcher::new()),
+        };
+        assert!(matches!(
+            resolver.resolve("proxy-exchange-secret", "idp.example.com"),
+            Err(CredentialError::HostNotPermitted { .. })
+        ));
+    }
+
     /// A credential bound to a host is bound to it on port 443. A
     /// request to another port of that host asks for `host:port`,
     /// which the binding does not name, and gets no secret.

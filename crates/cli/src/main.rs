@@ -1203,6 +1203,12 @@ enum CredentialCommands {
         /// a host `http_request` may send it to.
         #[arg(long = "archive")]
         archive: Vec<String>,
+        /// Host of the identity provider's token endpoint where it
+        /// authenticates the proxy's token exchanges: `host` for port
+        /// 443, or `host:port` (repeatable). Not a host `http_request`
+        /// may send it to.
+        #[arg(long = "token-exchange")]
+        token_exchange: Vec<String>,
         /// Store the value as an identifier (an address, a number, a
         /// URL) rather than a secret. Leak detection refuses
         /// model-authored content that contains a stored secret; an
@@ -1303,6 +1309,12 @@ enum CredentialCommands {
         /// a host `http_request` may send it to.
         #[arg(long = "archive")]
         archive: Vec<String>,
+        /// Host of the identity provider's token endpoint where it
+        /// authenticates the proxy's token exchanges: `host` for port
+        /// 443, or `host:port` (repeatable). Not a host `http_request`
+        /// may send it to.
+        #[arg(long = "token-exchange")]
+        token_exchange: Vec<String>,
     },
     /// Remove a destination from a credential. Takes the vault
     /// passphrase at a terminal; refuses inside a Wirken `exec`.
@@ -1333,6 +1345,12 @@ enum CredentialCommands {
         /// a host `http_request` may send it to.
         #[arg(long = "archive")]
         archive: Vec<String>,
+        /// Host of the identity provider's token endpoint where it
+        /// authenticates the proxy's token exchanges: `host` for port
+        /// 443, or `host:port` (repeatable). Not a host `http_request`
+        /// may send it to.
+        #[arg(long = "token-exchange")]
+        token_exchange: Vec<String>,
     },
     /// Show one credential's non-secret metadata (provider, granted
     /// scopes for OAuth, timestamps). The secret value is never
@@ -2254,6 +2272,7 @@ async fn main() -> Result<()> {
                 adapter,
                 plan,
                 archive,
+                token_exchange,
                 identifier,
             } => {
                 commands::credential::add(
@@ -2268,6 +2287,7 @@ async fn main() -> Result<()> {
                         adapters: adapter,
                         plan,
                         archives: archive,
+                        token_exchanges: token_exchange,
                     },
                     if identifier {
                         wirken_vault::CredentialKind::Identifier
@@ -2310,6 +2330,7 @@ async fn main() -> Result<()> {
                 adapter,
                 plan,
                 archive,
+                token_exchange,
             } => commands::credential_binding::grant(
                 &name,
                 &commands::credential_binding::Destinations {
@@ -2320,6 +2341,7 @@ async fn main() -> Result<()> {
                     adapters: adapter,
                     plan,
                     archives: archive,
+                    token_exchanges: token_exchange,
                 },
             ),
             CredentialCommands::Revoke {
@@ -2331,6 +2353,7 @@ async fn main() -> Result<()> {
                 adapter,
                 plan,
                 archive,
+                token_exchange,
             } => commands::credential_binding::revoke(
                 &name,
                 &commands::credential_binding::Destinations {
@@ -2341,6 +2364,7 @@ async fn main() -> Result<()> {
                     adapters: adapter,
                     plan,
                     archives: archive,
+                    token_exchanges: token_exchange,
                 },
             ),
             CredentialCommands::Show { name } => commands::credential::show(&name).await,
