@@ -1112,10 +1112,19 @@ The arms, in `arms` order:
   It fails, with the label `symptom_patch`, when the variant arm has an
   executed variant that still shows the defect in the patched copy.
 - **Root-cause claim.** `root_cause_claim` holds the invariant the fix was
-  given, the `origin`, and `evidence_state`: `confirmed_by_executed_poc` when
-  the baseline run showed the defect and its output names the origin's file
-  or function, `asserted_only` otherwise. A fix built on an asserted claim
-  carries the label `asserted_only_root_cause`. A failed variant arm sets
+  given, the `origin`, and `evidence_state`. It is `confirmed_by_executed_poc`
+  when the baseline run showed the defect and the runner's tracer, run on the
+  reproduction's command, recorded the origin line executing; the tracer
+  follows a `python3` harness and a Python origin file and nothing else. It
+  is `named_in_output` when the baseline run showed the defect and its output
+  names the origin's file or function: the output is in band, so the code
+  under test can name the origin whether or not it ran. It is `asserted_only`
+  otherwise. A fix on a `named_in_output` claim carries the label
+  `in_band_root_cause`, and one on an asserted claim
+  `asserted_only_root_cause`. The root-cause arm passes, as before, on a patch
+  at the origin with a baseline run that showed the defect and named the
+  origin; its basis is `executed` when the trace confirms the origin ran and
+  `in_band` when it does not. A failed variant arm sets
   `suspect` and the label `root_cause_suspect`.
 - **Relocation.** The `fix-recheck` agent applies the staged `invariant-walk`
   and `differential-walk` texts to everything reachable from the patched
@@ -1386,11 +1395,11 @@ Each entry under `fixes` in `findings.json`:
   "label": "candidate fix: 3 of 5 arms passed, 2 inconclusive, 0 not_run",
   "patch_source": "generated",
   "arms": [
-    { "arm": "reproduction", "state": "pass",         "basis": "executed" },
-    { "arm": "variant",      "state": "pass",         "basis": "executed" },
+    { "arm": "reproduction", "state": "pass",         "basis": "in_band" },
+    { "arm": "variant",      "state": "pass",         "basis": "in_band" },
     { "arm": "root_cause",   "state": "inconclusive", "basis": "model_judged" },
     { "arm": "relocation",   "state": "inconclusive", "basis": "model_judged" },
-    { "arm": "functionality","state": "pass",         "basis": "executed" }
+    { "arm": "functionality","state": "pass",         "basis": "in_band" }
   ],
   "variants": [
     { "outcome": "held", "source": "agent", "id": "variants/v1_sibling_a/run.sh" },
@@ -1421,8 +1430,12 @@ partial fix: the reproduction no longer shows the defect and 1 other path(s) sti
 ```
 
 Reading it: `verdict` and `label` first (the label carries the tally). `arms`
-is the five arms with each one's `state`, its `basis` (`executed` or
-`model_judged`), and `reasons`. `variants` lists every variant that ran, where
+is the five arms with each one's `state`, its `basis`, and `reasons`. The
+basis is `in_band` when the state rests on what the code under test can
+write: its output, its exit status, and its reach value, which it can read
+from its own environment. It is `executed` when the state rests on what the
+runner recorded itself: its tracer's record of which lines ran. It is
+`model_judged` when it rests on a model's reading. `variants` lists every variant that ran, where
 it came from (`reproduction` or `agent`) and its `outcome` (`held`, `open`,
 `open_by_configuration`, `introduced`, `not_a_variant`, `inconclusive`).
 `partial`, when present, names the paths a fix closed one reproduction but left

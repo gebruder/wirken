@@ -3562,7 +3562,7 @@ async fn dispatch_fixes(
         api_key_credential,
         plan_source,
         session_log: session_log.clone(),
-        sandbox,
+        sandbox: sandbox.clone(),
         permissions,
         leak_matcher,
         lyrik_staged_dir,
@@ -3912,6 +3912,7 @@ async fn dispatch_fixes(
     for (c, rel_dir, revision, agents) in finished {
         let layout = lyrik_fix_arms::Layout::new(&run_id, &rel_dir);
         lyrik_fix::save_observed(&run_dir.join(&rel_dir), &layout, &observed)?;
+        let origin_ran = origin_ran(&sandbox, &target, &run_id, &c).await;
         let out = lyrik_fix::judge(&lyrik_fix::JudgeInput {
             run_dir,
             rel_dir: &rel_dir,
@@ -3925,6 +3926,7 @@ async fn dispatch_fixes(
             fix_model: &llm_config.model,
             inputs,
             changes: &changes,
+            origin_ran,
         });
         audit.emit(
             "lyrik.fix.verdict",
@@ -4135,6 +4137,35 @@ async fn trace_reproduction(
     ) else {
         return Execution::untraced("", 0, "no staged finding carries the record's stable_id");
     };
+    trace_line(
+        sandbox,
+        target,
+        run_id,
+        walks,
+        walk,
+        command,
+        &cited_file,
+        cited_line,
+    )
+    .await
+}
+
+/// Run `command`, a walk's reproduction, under the runner's tracer and
+/// say which lines of `cited_file` executed. See [`trace_reproduction`].
+#[allow(clippy::too_many_arguments)]
+async fn trace_line(
+    sandbox: &wirken_agent::sandbox::SandboxConfig,
+    target: &Path,
+    run_id: &str,
+    walks: &[String],
+    walk: &str,
+    command: &str,
+    cited_file: &str,
+    cited_line: u64,
+) -> super::lyrik_trace::Execution {
+    use super::lyrik_trace::Execution;
+    let staging = format!(".lyrik/state/runs/{run_id}/staging/{walk}");
+    let cited_file = cited_file.to_string();
     let untraced = |why: &str| Execution::untraced(&cited_file, cited_line, why);
     let plain_path = !cited_file.contains(['\'', '\\'])
         && Path::new(&cited_file)
@@ -4182,6 +4213,55 @@ async fn trace_reproduction(
         ),
         Err(e) => untraced(&format!("the traced run could not start: {e}")),
     }
+}
+
+/// Whether the runner's tracer, run on a confirmed finding's
+/// reproduction, records the finding's origin line executing. The
+/// reproduction's command names the walk whose harness it runs; the
+/// trace runs as that walk's replay trace does. Anything the tracer
+/// cannot follow, a file that is not Python among them, is `false`.
+async fn origin_ran(
+    sandbox: &wirken_agent::sandbox::SandboxConfig,
+    target: &Path,
+    run_id: &str,
+    confirmed: &lyrik_fix::Confirmed,
+) -> bool {
+    let Some(origin) = lyrik_fix_arms::site(&confirmed.finding, "origin") else {
+        return false;
+    };
+    let command = confirmed.reproduction.command.trim();
+    let staging = format!(".lyrik/state/runs/{run_id}/staging/");
+    let Some(walk) = command
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix(&staging))
+        .and_then(|rest| rest.split('/').next())
+        .map(str::to_string)
+    else {
+        return false;
+    };
+    let walks: Vec<String> = std::fs::read_dir(target.join(&staging))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let line = u64::from(origin.line_start);
+    trace_line(
+        sandbox,
+        target,
+        run_id,
+        &walks,
+        &walk,
+        command,
+        &origin.file,
+        line,
+    )
+    .await
+    .executed_lines
+    .contains(&line)
 }
 
 /// Run a fresh-context replay for each reproduction record the walks

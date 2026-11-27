@@ -627,10 +627,24 @@ impl ArmState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Basis {
-    /// Commands that ran, read from the session log.
+    /// What the runner itself recorded of a command that ran: its
+    /// tracer's record of which lines executed.
     Executed,
+    /// Commands that ran, read from what the code under test can
+    /// write: its output, its exit status and its reach value, which
+    /// it can read from its own environment. Evidence from inside the
+    /// run, not about it.
+    InBand,
     /// A model's reading, with or without executed parts beside it.
     ModelJudged,
+}
+
+impl Basis {
+    /// Whether the state rests on a run, in band or recorded by the
+    /// runner.
+    pub fn ran(basis: Option<Basis>) -> bool {
+        matches!(basis, Some(Basis::Executed | Basis::InBand))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -655,9 +669,7 @@ pub struct ArmResult {
 impl ArmResult {
     fn with_claims(mut self, claims: Vec<String>) -> Self {
         debug_assert!(
-            claims.is_empty()
-                || self.state != ArmState::Fail
-                || self.basis == Some(Basis::Executed),
+            claims.is_empty() || self.state != ArmState::Fail || Basis::ran(self.basis),
             "an arm fails on executed evidence, not on a claim"
         );
         self.model_claims = claims;
@@ -680,11 +692,11 @@ impl ArmResult {
 
     fn new(arm: &'static str, state: ArmState, basis: Option<Basis>, reasons: Vec<String>) -> Self {
         debug_assert!(
-            !(state == ArmState::Pass && basis != Some(Basis::Executed)),
+            !(state == ArmState::Pass && !Basis::ran(basis)),
             "an arm passes on executed evidence only"
         );
         debug_assert!(
-            !(state == ArmState::Fail && basis != Some(Basis::Executed)),
+            !(state == ArmState::Fail && !Basis::ran(basis)),
             "an arm fails on executed evidence only"
         );
         Self {
@@ -1164,7 +1176,7 @@ pub fn reproduction_arm(log: &Log, layout: &Layout, command: &str, revision: &st
         arm: ArmResult::new(
             "reproduction",
             state,
-            ran_any.then_some(Basis::Executed),
+            ran_any.then_some(Basis::InBand),
             reasons,
         ),
         baseline: b,
@@ -1418,7 +1430,7 @@ pub fn variant_arm_in(
             untested.len()
         ));
     }
-    let basis = (ran_any || state == ArmState::Pass).then_some(Basis::Executed);
+    let basis = (ran_any || state == ArmState::Pass).then_some(Basis::InBand);
     (
         ArmResult::new("variant", state, basis, reasons),
         untested,
@@ -1482,7 +1494,7 @@ pub fn combined_reproduction_arm(
     ArmResult::new(
         "reproduction",
         state,
-        ran_any.then_some(Basis::Executed),
+        ran_any.then_some(Basis::InBand),
         reasons,
     )
 }
@@ -1528,7 +1540,7 @@ pub fn combined_functionality_arm(log: &Log, layout: &Layout, test: Option<&str>
     ArmResult::new(
         "functionality",
         state,
-        (ran(&base) || ran(&patched)).then_some(Basis::Executed),
+        (ran(&base) || ran(&patched)).then_some(Basis::InBand),
         vec![reason.to_string()],
     )
 }
@@ -1557,9 +1569,15 @@ pub fn site(finding: &Value, key: &str) -> Option<Site> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimEvidence {
-    /// The baseline run of the reproduction showed the defect and its
-    /// output names the origin.
+    /// The baseline run of the reproduction showed the defect, and the
+    /// runner's tracer, run on the same command, recorded the origin
+    /// line executing.
     ConfirmedByExecutedPoc,
+    /// The baseline run showed the defect and its output names the
+    /// origin's file or function. The output is in band: the code
+    /// under test writes it, so it can name the origin whether or not
+    /// the origin ran.
+    NamedInOutput,
     AssertedOnly,
 }
 
@@ -1572,6 +1590,10 @@ pub struct RootCauseClaim {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<Site>,
     pub evidence_state: ClaimEvidence,
+    /// Whether the baseline run showed the defect with output naming the
+    /// origin: the root-cause arm's rule for a patch at the origin.
+    #[serde(skip)]
+    pub shown_and_named: bool,
     /// Set when the variant arm failed: a fix at this origin left
     /// another path open.
     pub suspect: bool,
@@ -1579,9 +1601,14 @@ pub struct RootCauseClaim {
 
 /// The claim as the fix step was given it. It is confirmed only when
 /// the runner saw the reproduction show the defect in the baseline and
-/// the output of that run names the origin's file or function.
-/// Anything else is asserted only.
-pub fn root_cause_claim(finding: &Value, reproduction: &Reproduction) -> RootCauseClaim {
+/// its tracer recorded the origin line executing (`origin_ran`). Shown
+/// with output that names the origin's file or function, it is named
+/// in output. Anything else is asserted only.
+pub fn root_cause_claim(
+    finding: &Value,
+    reproduction: &Reproduction,
+    origin_ran: bool,
+) -> RootCauseClaim {
     let origin = site(finding, "origin");
     let named = origin.as_ref().is_some_and(|o| {
         reproduction.baseline_output.as_deref().is_some_and(|out| {
@@ -1599,11 +1626,12 @@ pub fn root_cause_claim(finding: &Value, reproduction: &Reproduction) -> RootCau
             .trim()
             .to_string(),
         origin,
-        evidence_state: if named && reproduction.baseline == Poc::Shown {
-            ClaimEvidence::ConfirmedByExecutedPoc
-        } else {
-            ClaimEvidence::AssertedOnly
+        evidence_state: match (reproduction.baseline == Poc::Shown, origin_ran, named) {
+            (true, true, _) => ClaimEvidence::ConfirmedByExecutedPoc,
+            (true, false, true) => ClaimEvidence::NamedInOutput,
+            _ => ClaimEvidence::AssertedOnly,
         },
+        shown_and_named: named && reproduction.baseline == Poc::Shown,
         suspect: false,
     }
 }
@@ -1657,13 +1685,31 @@ pub fn root_cause_arm(
         );
     }
     if at_origin {
+        // The pass rule is a baseline run that showed the defect with
+        // output naming the origin. What the pass rests on is the
+        // label: the runner's trace of the origin line, or the output
+        // alone, which is in band.
+        if claim.shown_and_named {
+            let basis = match claim.evidence_state {
+                ClaimEvidence::ConfirmedByExecutedPoc => Basis::Executed,
+                _ => Basis::InBand,
+            };
+            return (
+                ArmResult::new("root_cause", ArmState::Pass, Some(basis), Vec::new()),
+                false,
+            );
+        }
         return match claim.evidence_state {
-            ClaimEvidence::ConfirmedByExecutedPoc => (
+            ClaimEvidence::ConfirmedByExecutedPoc | ClaimEvidence::NamedInOutput => (
                 ArmResult::new(
                     "root_cause",
-                    ArmState::Pass,
-                    Some(Basis::Executed),
-                    Vec::new(),
+                    ArmState::Inconclusive,
+                    judged,
+                    vec![format!(
+                        "the patch touches the recorded origin {}, and the baseline output \
+                         does not name it",
+                        at(origin)
+                    )],
                 ),
                 false,
             ),
@@ -1695,7 +1741,7 @@ pub fn root_cause_arm(
                 ArmResult::new(
                     "root_cause",
                     ArmState::Fail,
-                    Some(Basis::Executed),
+                    Some(Basis::InBand),
                     vec![format!(
                         "{claim_text}; a variant by another path shows the defect in the \
                          patched copy"
@@ -1820,7 +1866,7 @@ pub fn relocation_arm(
         confirmed = true;
     }
     if confirmed {
-        return ArmResult::new("relocation", ArmState::Fail, Some(Basis::Executed), reasons)
+        return ArmResult::new("relocation", ArmState::Fail, Some(Basis::InBand), reasons)
             .with_claims(claims);
     }
     if !claims.is_empty() {
@@ -1848,7 +1894,7 @@ pub fn relocation_arm(
         Some(Poc::NotShown) => ArmResult::new(
             "relocation",
             ArmState::Pass,
-            Some(Basis::Executed),
+            Some(Basis::InBand),
             Vec::new(),
         ),
         Some(Poc::Inconclusive(w) | Poc::NotRun(w)) => ArmResult::new(
@@ -2136,7 +2182,7 @@ pub fn functionality_arm(
     ArmResult::new(
         "functionality",
         state,
-        ran_any.then_some(Basis::Executed),
+        ran_any.then_some(Basis::InBand),
         reasons,
     )
     .with_claims(regression_claims)
@@ -2557,7 +2603,7 @@ pub(crate) mod tests {
     fn the_reproduction_arm_passes_on_runs_observed_in_order() {
         let out = repro(&Runs::good());
         assert_eq!(out.arm.state, ArmState::Pass, "{:?}", out.arm.reasons);
-        assert_eq!(out.arm.basis, Some(Basis::Executed));
+        assert_eq!(out.arm.basis, Some(Basis::InBand));
         assert_eq!(out.baseline, Poc::Shown);
         assert_eq!(out.patched, Poc::NotShown);
         assert!(!out.left_reverted);
@@ -2706,7 +2752,7 @@ pub(crate) mod tests {
         let (arm, untested, results) =
             variant_arm(&Log(&r.0), &l, &specs, Ok(None), REPRO, 2, &|_| None);
         assert_eq!(arm.state, ArmState::Pass, "{:?}", arm.reasons);
-        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert_eq!(arm.basis, Some(Basis::InBand));
         assert!(untested.is_empty());
         assert_eq!(
             results.iter().map(|v| v.outcome).collect::<Vec<_>>(),
@@ -2784,7 +2830,7 @@ pub(crate) mod tests {
         variant_runs(&mut r, &l2, &specs[1], true, true);
         let (arm, _, results) = variant_arm(&Log(&r.0), &l2, &specs, Ok(None), REPRO, 1, &|_| None);
         assert_eq!(arm.state, ArmState::Fail);
-        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert_eq!(arm.basis, Some(Basis::InBand));
         assert!(
             arm.reasons.iter().any(|x| x.contains(
                 "reproduction:sink-walk/second_setup.sh: shows the defect in the baseline and \
@@ -2979,7 +3025,7 @@ pub(crate) mod tests {
         );
         let func = functionality_arm(&Log(&r.0), &l, &with_kind("regression"), &shape, &config);
         assert_eq!(func.state, ArmState::Fail);
-        assert_eq!(func.basis, Some(Basis::Executed));
+        assert_eq!(func.basis, Some(Basis::InBand));
         assert!(
             func.reasons[0]
                 .starts_with("regression at src/a.rs:9: peers can no longer reach each other")
@@ -3116,7 +3162,11 @@ pub(crate) mod tests {
     #[test]
     fn a_symptom_patch_fails_only_with_an_executed_variant_behind_it() {
         let f = finding();
-        let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("panic in decode_len")));
+        let claim = root_cause_claim(
+            &f,
+            &reproduction(Poc::Shown, Some("panic in decode_len")),
+            false,
+        );
         let shape = parse_patch(SINK_PATCH);
         // The walks' placement of the origin alone: a claim, not a failure.
         let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown, false);
@@ -3134,7 +3184,7 @@ pub(crate) mod tests {
         // With a variant that still works on the patched code: fails.
         let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown, true);
         assert_eq!(arm.state, ArmState::Fail);
-        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert_eq!(arm.basis, Some(Basis::InBand));
         assert!(symptom);
         assert!(
             arm.reasons[0].starts_with("symptom_patch:"),
@@ -3147,16 +3197,37 @@ pub(crate) mod tests {
     fn the_root_cause_arm_passes_only_on_a_claim_an_executed_run_confirms() {
         let f = finding();
         let shape = parse_patch(ORIGIN_PATCH);
-        // The baseline run showed the defect and its output names the origin.
-        let claim = root_cause_claim(
-            &f,
-            &reproduction(Poc::Shown, Some("thread panicked at src/header.rs:12")),
-        );
-        assert_eq!(claim.evidence_state, ClaimEvidence::ConfirmedByExecutedPoc);
+        let named = reproduction(Poc::Shown, Some("thread panicked at src/header.rs:12"));
+        // The baseline run showed the defect and its output names the
+        // origin: in band, and the arm passes on it as it always has.
+        let claim = root_cause_claim(&f, &named, false);
+        assert_eq!(claim.evidence_state, ClaimEvidence::NamedInOutput);
         assert_eq!(claim.claim, "len never exceeds the buffer");
         let (arm, symptom) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Pass);
+        assert_eq!(arm.basis, Some(Basis::InBand));
         assert!(!symptom);
+        // The runner's trace recorded the origin line running: confirmed,
+        // and the same pass rests on what the runner recorded.
+        let traced = root_cause_claim(&f, &named, true);
+        assert_eq!(traced.evidence_state, ClaimEvidence::ConfirmedByExecutedPoc);
+        let (arm, _) = root_cause_arm(&shape, &f, &traced, &Poc::NotShown, false);
+        assert_eq!(arm.state, ArmState::Pass);
+        assert_eq!(arm.basis, Some(Basis::Executed));
+        // A trace alone, with output that does not name the origin, is
+        // confirmed, and the arm's rule is unchanged: it does not pass.
+        let quiet = root_cause_claim(&f, &reproduction(Poc::Shown, Some("boom")), true);
+        assert_eq!(quiet.evidence_state, ClaimEvidence::ConfirmedByExecutedPoc);
+        let (arm, _) = root_cause_arm(&shape, &f, &quiet, &Poc::NotShown, false);
+        assert_eq!(arm.state, ArmState::Inconclusive);
+        // A trace of a run that did not show the defect confirms nothing.
+        let unshown = root_cause_claim(
+            &f,
+            &reproduction(Poc::Inconclusive("x".into()), Some("src/header.rs")),
+            true,
+        );
+        assert_eq!(unshown.evidence_state, ClaimEvidence::AssertedOnly);
+        let claim = root_cause_claim(&f, &named, false);
         // Same patch and claim, but the patched copy did not build: the
         // reproduction never reached its assertion there.
         for patched in [
@@ -3173,7 +3244,7 @@ pub(crate) mod tests {
             assert!(!symptom);
         }
         // Same patch, origin asserted only: a model's placement cannot pass.
-        let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("boom")));
+        let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("boom")), false);
         assert_eq!(claim.evidence_state, ClaimEvidence::AssertedOnly);
         let (arm, _) = root_cause_arm(&shape, &f, &claim, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Inconclusive);
@@ -3182,18 +3253,19 @@ pub(crate) mod tests {
         let claim = root_cause_claim(
             &f,
             &reproduction(Poc::Inconclusive("x".into()), Some("src/header.rs")),
+            false,
         );
         assert_eq!(claim.evidence_state, ClaimEvidence::AssertedOnly);
         // No origin on the finding.
         let mut bare = f.clone();
         bare.as_object_mut().unwrap().remove("origin");
-        let claim = root_cause_claim(&bare, &reproduction(Poc::Shown, Some("x")));
+        let claim = root_cause_claim(&bare, &reproduction(Poc::Shown, Some("x")), false);
         let (arm, symptom) = root_cause_arm(&shape, &bare, &claim, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Inconclusive);
         assert!(!symptom);
         // A patch that touches neither site.
         let other = parse_patch("--- a/src/z.rs\n+++ b/src/z.rs\n@@ -1,2 +1,3 @@\n x\n+y\n");
-        let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("x")));
+        let claim = root_cause_claim(&f, &reproduction(Poc::Shown, Some("x")), false);
         let (arm, symptom) = root_cause_arm(&other, &f, &claim, &Poc::NotShown, false);
         assert_eq!(arm.state, ArmState::Inconclusive);
         assert!(!symptom);
@@ -3245,7 +3317,7 @@ pub(crate) mod tests {
         r.add(l.in_copy("patched", cmd), false, &shown());
         let arm = relocation_arm(&Log(&r.0), &l, &candidate(Some(cmd)));
         assert_eq!(arm.state, ArmState::Fail);
-        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert_eq!(arm.basis, Some(Basis::InBand));
         assert!(arm.model_claims.is_empty());
         assert!(
             arm.reasons[0].ends_with("shows it in the patched copy and not in the baseline"),
@@ -3271,7 +3343,7 @@ pub(crate) mod tests {
         r.add(l.in_copy("patched", "./fuzz -runs=1000"), false, &shown());
         let arm = relocation_arm(&Log(&r.0), &l, &rc);
         assert_eq!(arm.state, ArmState::Fail);
-        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert_eq!(arm.basis, Some(Basis::InBand));
     }
 
     #[test]
@@ -3289,7 +3361,7 @@ pub(crate) mod tests {
         r.add(l.in_copy("patched", "./fuzz -runs=1000"), true, &clean());
         let arm = relocation_arm(&Log(&r.0), &l, &recheck(fuzzed.clone()));
         assert_eq!(arm.state, ArmState::Pass);
-        assert_eq!(arm.basis, Some(Basis::Executed));
+        assert_eq!(arm.basis, Some(Basis::InBand));
         // The fuzz build broke: inconclusive.
         let mut r = Runs::new();
         r.add(
@@ -3542,8 +3614,8 @@ pub(crate) mod tests {
     #[test]
     fn fixes_are_counted_by_arm_outcome() {
         let arms = [
-            ArmResult::new("variant", ArmState::Fail, Some(Basis::Executed), Vec::new()),
-            ArmResult::new("variant", ArmState::Fail, Some(Basis::Executed), Vec::new()),
+            ArmResult::new("variant", ArmState::Fail, Some(Basis::InBand), Vec::new()),
+            ArmResult::new("variant", ArmState::Fail, Some(Basis::InBand), Vec::new()),
             ArmResult::new("variant", ArmState::NotRun, None, Vec::new()),
             ArmResult::new("relocation", ArmState::Inconclusive, None, Vec::new()),
         ];

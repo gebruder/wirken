@@ -266,8 +266,8 @@ pub struct FixOutcome {
     /// Why the verdict is not `candidate_fix`.
     pub reasons: Vec<String>,
     /// `symptom_patch`, `symptom_patch_claimed`,
-    /// `asserted_only_root_cause`, `root_cause_suspect`,
-    /// `functionality_unverified`.
+    /// `asserted_only_root_cause`, `in_band_root_cause`,
+    /// `root_cause_suspect`, `functionality_unverified`.
     pub labels: Vec<&'static str>,
     pub arms: Vec<ArmResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1146,6 +1146,9 @@ pub struct JudgeInput<'a> {
     pub inputs: &'a FixInputs,
     /// Which of them differ on disk now.
     pub changes: &'a InputChanges,
+    /// Whether the runner's tracer, run on the reproduction's command,
+    /// recorded the finding's origin line executing.
+    pub origin_ran: bool,
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -1200,7 +1203,8 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         input.revision,
     );
     let left_reverted = reproduction.left_reverted;
-    let mut claim = arms::root_cause_claim(&input.confirmed.finding, &reproduction);
+    let mut claim =
+        arms::root_cause_claim(&input.confirmed.finding, &reproduction, input.origin_ran);
     let attack = arms::read_json::<arms::Attack>(&fix_dir.join("attack.json"));
     // The variants on record: the finding's other confirmed
     // reproductions, then the scripts under variants/.
@@ -1273,8 +1277,10 @@ pub fn judge(input: &JudgeInput) -> FixOutcome {
         // executed says so: a claim for a maintainer, not a rejection.
         labels.push("symptom_patch_claimed");
     }
-    if claim.evidence_state == arms::ClaimEvidence::AssertedOnly {
-        labels.push("asserted_only_root_cause");
+    match claim.evidence_state {
+        arms::ClaimEvidence::AssertedOnly => labels.push("asserted_only_root_cause"),
+        arms::ClaimEvidence::NamedInOutput => labels.push("in_band_root_cause"),
+        arms::ClaimEvidence::ConfirmedByExecutedPoc => {}
     }
     if claim.suspect {
         labels.push("root_cause_suspect");
@@ -2379,6 +2385,7 @@ mod tests {
                 fix_model: "some-model",
                 inputs: &inputs(supplied),
                 changes,
+                origin_ran: false,
             })
         }
     }
@@ -2475,13 +2482,12 @@ mod tests {
         assert_eq!(v["verdict"], "candidate_fix");
         assert_eq!(v["patch_source"], "generated");
         assert_eq!(v["arm_tally"]["not_run"], 2);
-        assert_eq!(v["arms"][0]["basis"], "executed");
+        assert_eq!(v["arms"][0]["basis"], "in_band");
         assert_eq!(v["arms"][3]["state"], "not_run");
         assert!(v["arms"][3].get("basis").is_none());
-        assert_eq!(
-            v["root_cause_claim"]["evidence_state"],
-            "confirmed_by_executed_poc"
-        );
+        // No trace of the origin: the output named it, which is in band.
+        assert_eq!(v["root_cause_claim"]["evidence_state"], "named_in_output");
+        assert!(out.labels.contains(&"in_band_root_cause"));
         assert_eq!(
             v["artifacts"]["variants"][0],
             format!("{REL}/variants/v1/run.py")
@@ -2610,7 +2616,7 @@ mod tests {
             out.arms[0].reasons
         );
         assert_eq!(out.arms[1].state, ArmState::Fail);
-        assert_eq!(out.arms[1].basis, Some(arms::Basis::Executed));
+        assert_eq!(out.arms[1].basis, Some(arms::Basis::InBand));
         let partial = out.partial.expect("partial");
         assert_eq!(
             partial.open_paths[0].id,
@@ -2654,6 +2660,7 @@ mod tests {
                 fix_model: "some-model",
                 inputs: &i,
                 changes: &InputChanges::default(),
+                origin_ran: false,
             })
         };
         // Nothing declared: the open variant rejects the fix as partial.
@@ -3172,6 +3179,7 @@ mod tests {
                 fix_model: "some-model",
                 inputs: &i,
                 changes: &changes,
+                origin_ran: false,
             })
         };
         // The arms ran on the walk's reproduction: a supplied script
@@ -3234,6 +3242,7 @@ mod tests {
             fix_model: "some-model",
             inputs: &inputs(None),
             changes: &InputChanges::default(),
+            origin_ran: false,
         });
         let incomplete = |arm: &str| {
             out.arms
@@ -3296,6 +3305,7 @@ mod tests {
                 fix_model: "some-model",
                 inputs: &inputs(None),
                 changes: &InputChanges::default(),
+                origin_ran: false,
             })
         };
         let out = judged(TreeRecord::Unchanged);
@@ -3357,7 +3367,7 @@ mod tests {
         assert_eq!(out.verdict, Verdict::Rejected);
         assert!(out.labels.contains(&"symptom_patch"));
         assert_eq!(arm(&out, "root_cause").state, ArmState::Fail);
-        assert_eq!(arm(&out, "root_cause").basis, Some(arms::Basis::Executed));
+        assert_eq!(arm(&out, "root_cause").basis, Some(arms::Basis::InBand));
         assert!(
             out.reasons
                 .iter()
@@ -3388,7 +3398,7 @@ mod tests {
         assert!(
             out.arms
                 .iter()
-                .all(|a| a.state != ArmState::Fail || a.basis == Some(arms::Basis::Executed))
+                .all(|a| a.state != ArmState::Fail || arms::Basis::ran(a.basis))
         );
         // The same candidate with a proof that shows it in the patched
         // copy rejects the fix.
@@ -3406,7 +3416,7 @@ mod tests {
         .unwrap();
         let out = case.judge();
         assert_eq!(arm(&out, "relocation").state, ArmState::Fail);
-        assert_eq!(arm(&out, "relocation").basis, Some(arms::Basis::Executed));
+        assert_eq!(arm(&out, "relocation").basis, Some(arms::Basis::InBand));
         assert_eq!(out.verdict, Verdict::Rejected);
     }
 
@@ -4093,6 +4103,7 @@ mod tests {
                     fix_model: "none: commands run by the test",
                     inputs: &inputs(None),
                     changes: &InputChanges::default(),
+                    origin_ran: false,
                 });
                 println!("{}", serde_json::to_string_pretty(&out).unwrap());
                 out
