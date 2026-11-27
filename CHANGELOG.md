@@ -10,6 +10,23 @@ tagged.
 
 ## [Unreleased]
 
+## [3.6.2] - 2026-11-27
+
+### Operator notes
+
+Three changes can need operator action.
+
+- `wirken lyrik` reads a target's config, rubric, context, ledger, supplied
+  patches and supplied reproductions from
+  `<data_dir>/lyrik/targets/<key>/`, not from the target's `.lyrik/`. Move
+  existing files there; a run with no config there stops and names the
+  path.
+- A Lyrik harness prints the value of `LYRIK_REACHED`, which is new on every
+  `exec` (`echo "$LYRIK_REACHED"`). One that prints the fixed word
+  `LYRIK_REACHED` reads as `inconclusive`.
+- In `wirken chat`, `y` approves only with the code the card shows
+  (`y <code>`); a lone `y` approves nothing.
+
 ### Security
 
 - `wirken lyrik` reads the rubric and context from the target's inputs
@@ -82,6 +99,15 @@ tagged.
 - `wirken lyrik` reads a call as refused before it ran from its result
   row alone: a row with no record of where the command ran. What the
   command printed never marks it.
+
+### Deferred
+
+- Dependabot alerts #26, #27 and #28, all against rustls 0.22.4 under
+  serenity 0.12.5 in the Discord adapter, stay open as in 3.6.0 and 3.6.1.
+  The fix for all three is serenity on rustls 0.23, held until the migrated
+  adapter passes a live Discord round-trip.
+- #322 (slack-morphism 2.34.0) is held, as in 3.6.0 and 3.6.1, until the
+  Slack adapter passes a live round-trip.
 
 ## [3.6.1] - 2026-11-27
 

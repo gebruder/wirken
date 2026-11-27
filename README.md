@@ -107,7 +107,7 @@ routes messages to the agent, and serves a WebChat UI at
 `http://127.0.0.1:18790`; log in with `wirken webchat open --browser`:
 
 ```
-  wirken v3.6.1
+  wirken v3.6.2
   ──────
 
   Provider: ollama/llama3.2
