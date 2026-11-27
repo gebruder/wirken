@@ -2748,6 +2748,105 @@ mod wake {
         );
     }
 
+    /// A model summary placed in the context is on the chain, word for
+    /// word, before it is placed, and the trim aggregate beside it
+    /// does not count it as a trim round.
+    #[tokio::test]
+    async fn a_model_summary_placed_in_the_context_is_on_the_chain() {
+        use wirken_audit::{SessionEvent, SessionId};
+        let (base_url, _served) = counting_ollama().await;
+        let log = make_log();
+        let llm = LlmConfig {
+            base_url,
+            ..LlmConfig::ollama("counting")
+        };
+        let session = "agent-summary-row/test/conv-1";
+        let (factory, _tmp) = make_factory_with_llm("agent-summary-row", log.clone(), llm);
+        let agent_arc = factory.wake("agent-summary-row", session).unwrap();
+        let mut agent = agent_arc.lock().await;
+        agent.process_message("first", String::new()).await.unwrap();
+        agent.conversation_mut_for_test().insert_at(
+            1,
+            crate::conversation::Message {
+                role: crate::conversation::Role::Compaction,
+                content: "aggregate".into(),
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: None,
+            },
+        );
+        agent
+            .maybe_summarize_trimmed(&[crate::context::TrimmedMessage {
+                role: crate::conversation::Role::User,
+                content: "an older message".into(),
+            }])
+            .await
+            .unwrap();
+
+        let placed = agent
+            .conversation_mut_for_test()
+            .messages()
+            .iter()
+            .find(|m| m.role == crate::conversation::Role::Compaction)
+            .map(|m| m.content.clone())
+            .unwrap();
+        assert_eq!(
+            placed,
+            "aggregate\n\nModel summary of trimmed content:\nreply 2"
+        );
+
+        let rows = log
+            .get_since(&log.handle_for(SessionId::new(session.to_string())), 0)
+            .unwrap();
+        let recorded: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::Compaction {
+                    extracts,
+                    via_model: true,
+                    spans,
+                    provider,
+                    model,
+                    ..
+                } => Some((
+                    extracts["summary"].as_str().map(str::to_string),
+                    spans.clone(),
+                    provider.clone(),
+                    model.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![(
+                Some("reply 2".to_string()),
+                Vec::new(),
+                Some("ollama".to_string()),
+                Some("counting".to_string())
+            )]
+        );
+
+        let engine = crate::context::ContextEngine::for_test(200, 1);
+        assert!(
+            engine
+                .compaction_summary_message(
+                    log.as_ref(),
+                    &log.handle_for(SessionId::new(session.to_string()))
+                )
+                .unwrap()
+                .is_none(),
+            "a summary row is not a trim round"
+        );
+
+        let report = agent.verify().await.unwrap();
+        assert!(
+            report.events_divergent.is_empty(),
+            "{:?}",
+            report.events_divergent
+        );
+    }
+
     // ---- WIRKEN_CACHE_MODE=drop ------------------------------------
 
     #[tokio::test]

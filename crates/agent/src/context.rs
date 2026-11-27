@@ -350,7 +350,6 @@ impl ContextEngine {
         let mut total_trimmed_bytes: u64 = 0;
         let mut total_dropped: u64 = 0;
         let mut seqs: Vec<u64> = Vec::new();
-        let mut via_model_seen = false;
 
         for row in &rows {
             if let SessionEvent::Compaction {
@@ -359,11 +358,15 @@ impl ContextEngine {
                 ..
             } = &row.event
             {
+                // A model summary's row records the summary placed in
+                // the context; it trimmed nothing. The aggregate is
+                // built from the trim rounds alone, as the verifier's
+                // dry run rebuilds it.
+                if *via_model {
+                    continue;
+                }
                 compaction_count += 1;
                 seqs.push(row.seq);
-                if *via_model {
-                    via_model_seen = true;
-                }
                 if let Some(b) = extracts.get("trimmed_bytes").and_then(|v| v.as_u64()) {
                     total_trimmed_bytes += b;
                 }
@@ -377,16 +380,10 @@ impl ContextEngine {
             return Ok(None);
         }
 
-        let model_note = if via_model_seen {
-            " (at least one summary used a model call; treat with caution)"
-        } else {
-            ""
-        };
-
         let content = format!(
             "Earlier in this session, the wirken context engine trimmed older \
              messages to fit the model's context window:\n\
-             - {compaction_count} trim round(s){model_note}\n\
+             - {compaction_count} trim round(s)\n\
              - {total_dropped} message(s) dropped\n\
              - {total_trimmed_bytes} byte(s) reclaimed\n\
              - See session log compaction events at seqs {seqs:?}\n\

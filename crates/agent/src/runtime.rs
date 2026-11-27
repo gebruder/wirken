@@ -2993,6 +2993,23 @@ impl Agent {
                     .iter()
                     .position(|m| m.role == crate::conversation::Role::Compaction);
                 if let Some(idx) = existing {
+                    // The summary is model text the harness places in
+                    // the model's context under its own label, so it is
+                    // on the chain before it is placed: the operator can
+                    // read every word the context holds. The
+                    // `LlmResponse` row above carries the call's counts,
+                    // not its text.
+                    self.log_event(
+                        TrustLevel::Compaction,
+                        SessionEvent::Compaction {
+                            spans: Vec::new(),
+                            extracts: serde_json::json!({ "summary": &summary }),
+                            via_model: true,
+                            agent_id: self.audited_agent_id(),
+                            provider: Some(self.llm.config().provider.clone()),
+                            model: Some(self.llm.config().model.clone()),
+                        },
+                    )?;
                     let combined = format!(
                         "{}\n\nModel summary of trimmed content:\n{}",
                         self.conversation.messages()[idx].content,

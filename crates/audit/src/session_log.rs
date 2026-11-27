@@ -1771,10 +1771,13 @@ pub enum SessionEvent {
         before_hash: HashHex,
         after_hash: HashHex,
     },
-    /// Compaction event from the context engine. The
-    /// `extracts` are structured key-value claims, not free-text.
-    /// `via_model: true` flags the rare free-text fallback path
-    /// which the context engine treats as untrusted on replay.
+    /// Compaction event from the context engine. On a trim round
+    /// (`via_model: false`) the `extracts` are structured counts of
+    /// what was trimmed. On `via_model: true` the row records a model's
+    /// summary of the trimmed messages, placed in the model's context
+    /// after the trim round's aggregate: `extracts.summary` is its
+    /// text as the model returned it, `spans` is empty, and the
+    /// aggregate does not count the row as a trim round.
     Compaction {
         spans: Vec<u64>,
         extracts: serde_json::Value,
@@ -1784,8 +1787,7 @@ pub enum SessionEvent {
         agent_id: String,
         /// LLM provider used to summarise when `via_model: true`.
         /// `None` for the deterministic structured-extract path
-        /// (`via_model: false`), which is the only path Compaction
-        /// emits today.
+        /// (`via_model: false`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
         /// LLM model used to summarise when `via_model: true`. Same
