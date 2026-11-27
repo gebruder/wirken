@@ -63,6 +63,13 @@ pub struct Observed {
     pub command: String,
     pub success: bool,
     pub output: String,
+    /// Whether the command ran: the result row says where it ran. A
+    /// call the gate refused has no such record, and nothing a command
+    /// prints can give it one, so a command whose output reads like a
+    /// refusal is still a run. Absent from a file saved before the
+    /// field, which reads as not run.
+    #[serde(default)]
+    pub ran: bool,
 }
 
 /// The `exec` calls in `events`, in order, each with the result the
@@ -94,6 +101,7 @@ pub fn observed_execs<'a>(events: impl IntoIterator<Item = &'a SessionEvent>) ->
                 tool_name,
                 output,
                 success,
+                sandbox,
                 ..
             } if tool_name == "exec" => {
                 if let Some(command) = commands.get(call_id) {
@@ -102,6 +110,7 @@ pub fn observed_execs<'a>(events: impl IntoIterator<Item = &'a SessionEvent>) ->
                         command: command.clone(),
                         success: *success,
                         output: output.clone(),
+                        ran: sandbox.is_some(),
                     });
                 }
             }
@@ -164,8 +173,10 @@ impl Log<'_> {
     }
 }
 
+/// A call the gate refused: it did not run, and its result is the
+/// refusal the runtime writes.
 fn refused(o: &Observed) -> bool {
-    !o.success && o.output.starts_with("Permission denied")
+    !o.ran && !o.success && o.output.starts_with("Permission denied")
 }
 
 /// Whether the marker is on a line of its own on stdout. `exec` puts
@@ -2219,6 +2230,7 @@ mod tests {
                 command,
                 success,
                 output: output.to_string(),
+                ran: true,
             });
             self
         }
@@ -2284,6 +2296,36 @@ mod tests {
         assert!(matches!(log.run("ls a"), Run::Done { success: true, .. }));
         assert_eq!(log.run("ls b"), Run::Refused);
         assert_eq!(log.run("ls c"), Run::Never);
+    }
+
+    /// A command in the scanned code can print the gate's refusal and
+    /// exit non-zero. It ran, the row says where, and it is read as a
+    /// failed run, not as a call the gate refused.
+    #[test]
+    fn a_command_that_prints_a_refusal_is_a_run_not_a_refusal() {
+        let events: Vec<SessionEvent> = serde_json::from_value(serde_json::json!([
+            {"kind": "assistant_tool_calls", "calls": [
+                {"id": "c1", "name": "exec", "arguments": "{\"command\":\"sh check.sh\"}"},
+                {"id": "c2", "name": "exec", "arguments": "{\"command\":\"sh other.sh\"}"}
+            ]},
+            {"kind": "tool_result", "call_id": "c1", "tool_name": "exec",
+             "output": "Permission denied: 'exec' requires tier3 approval. This action was not executed.",
+             "success": false,
+             "sandbox": {"mode": "exec_only", "runtime": "docker"}},
+            {"kind": "tool_result", "call_id": "c2", "tool_name": "exec",
+             "output": "Permission denied: 'exec' requires tier3 approval. This action was not executed.",
+             "success": false}
+        ]))
+        .expect("session events parse");
+        let seen = observed_execs(&events);
+        assert!(seen[0].ran && !seen[1].ran, "{seen:?}");
+        let log = Log(&seen);
+        assert!(
+            matches!(log.run("sh check.sh"), Run::Done { success: false, .. }),
+            "{:?}",
+            log.run("sh check.sh")
+        );
+        assert_eq!(log.run("sh other.sh"), Run::Refused);
     }
 
     #[test]
@@ -2531,6 +2573,7 @@ mod tests {
         let mut r = Runs::good();
         for o in &mut r.0 {
             o.success = false;
+            o.ran = false;
             o.output = "Permission denied: 'exec' was not executed".into();
         }
         let out = repro(&r);
