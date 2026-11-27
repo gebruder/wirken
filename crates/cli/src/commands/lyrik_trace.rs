@@ -194,7 +194,15 @@ pub fn tracer_command(nonce: &str, cited_file: &str, cited_line: u64, run: &Trac
 }
 
 /// Read the tracer's line out of a traced run's output.
-pub fn parse_traced(output: &str, nonce: &str, cited_file: &str, cited_line: u64) -> Execution {
+/// `reached` is the traced run's row record of whether the harness
+/// printed its reach value.
+pub fn parse_traced(
+    output: &str,
+    reached: bool,
+    nonce: &str,
+    cited_file: &str,
+    cited_line: u64,
+) -> Execution {
     #[derive(Deserialize)]
     struct Line {
         executed: Vec<u64>,
@@ -211,7 +219,7 @@ pub fn parse_traced(output: &str, nonce: &str, cited_file: &str, cited_line: u64
             cited_line,
             cited_function_lines: t.span,
             executed_lines: t.executed,
-            marker: super::lyrik_fix_arms::has_marker(output),
+            marker: reached,
             untraced: None,
         },
         None => Execution::untraced(
@@ -283,7 +291,11 @@ mod tests {
     /// it. `None` when the host has none.
     fn traced(dir: &Path, cited_line: u64, harness: &str) -> Option<Execution> {
         std::fs::write(dir.join("h.py"), harness).unwrap();
+        // A reach value as the runtime gives one, and its row record
+        // as the runtime writes it.
+        let reach = wirken_agent::sandbox::reach_value();
         let out = std::process::Command::new("python3")
+            .env(wirken_agent::sandbox::REACH_ENV, &reach)
             .current_dir(dir)
             .args([
                 "-c",
@@ -295,11 +307,10 @@ mod tests {
             ])
             .output()
             .ok()?;
+        let (stdout, reached) =
+            wirken_agent::sandbox::take_reach(&String::from_utf8_lossy(&out.stdout), &reach);
         Some(parse_traced(
-            &String::from_utf8_lossy(&out.stdout),
-            "NONCE-1",
-            "app.py",
-            cited_line,
+            &stdout, reached, "NONCE-1", "app.py", cited_line,
         ))
     }
 
@@ -313,17 +324,17 @@ mod tests {
     fn a_harness_earns_observed_only_when_the_cited_function_ran() {
         let tmp = tempdir().unwrap();
         std::fs::write(tmp.path().join("app.py"), APP).unwrap();
-        let ast_walk = "import ast, sys\ntree = ast.parse(open(\"app.py\").read())\n\
-                        print(\"LYRIK_REACHED\", flush=True)\nsys.exit(1)\n";
-        let text_search = "import sys\nsrc = open(\"app.py\").read()\n\
-                           print(\"LYRIK_REACHED\", flush=True)\n\
+        let ast_walk = "import ast, os, sys\ntree = ast.parse(open(\"app.py\").read())\n\
+                        print(os.environ[\"LYRIK_REACHED\"], flush=True)\nsys.exit(1)\n";
+        let text_search = "import os, sys\nsrc = open(\"app.py\").read()\n\
+                           print(os.environ[\"LYRIK_REACHED\"], flush=True)\n\
                            sys.exit(1 if \"eval(\" in src else 0)\n";
         // Imports the module, so its top level runs, and never calls
         // the cited function.
         let import_only = "import os, sys\nsys.path.insert(0, os.getcwd())\nimport app\n\
-                           print(\"LYRIK_REACHED\", flush=True)\nsys.exit(1)\n";
+                           print(os.environ[\"LYRIK_REACHED\"], flush=True)\nsys.exit(1)\n";
         let calls_it = "import os, sys\nsys.path.insert(0, os.getcwd())\nimport app\n\
-                        print(\"LYRIK_REACHED\", flush=True)\n\
+                        print(os.environ[\"LYRIK_REACHED\"], flush=True)\n\
                         sys.exit(1 if app.analyze(\"1+1\") == \"2\" else 0)\n";
         let Some(first) = traced(tmp.path(), 5, ast_walk) else {
             eprintln!("skipping: no python3 on this host");
@@ -411,7 +422,7 @@ mod tests {
 
     #[test]
     fn output_with_no_trace_line_is_untraced_and_static() {
-        let e = parse_traced("LYRIK_REACHED\n", "NONCE-1", "app.py", 5);
+        let e = parse_traced("LYRIK_REACHED\n", true, "NONCE-1", "app.py", 5);
         assert!(e.untraced.is_some());
         assert_eq!(e.evidence(), STATIC_CONFIRMED);
     }

@@ -1071,8 +1071,11 @@ fn reproduction_section(walk_name: &str) -> String {
          replay that could not run the command is recorded and is not a disagreement. \
          Write the record so that a reader with only the record can run it.\n\n\
          A command that shows a finding follows one contract, so that a later fix can be \
-         checked from the command's exit status and output alone. It prints `{reached}` on \
-         a line of its own on stdout, flushed, immediately before its assertion, and that \
+         checked from the command's exit status and output alone. It prints the value of \
+         the `{reached}` environment variable (`echo \"${reached}\"`, \
+         `print(os.environ[\"{reached}\"], flush=True)`) on a line of its own on stdout, \
+         flushed, immediately before its assertion, never the variable's name or a value \
+         copied from an earlier run, and that \
          line reaches the command's output (a test runner that hides a passing test's output \
          needs its flag to show it). It exits non-zero when the finding holds and zero when it does \
          not. It runs from the project root and keeps every file of its own (inputs, \

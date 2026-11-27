@@ -8,8 +8,8 @@
 //! run; the arms do not know which, and a patch that matches a
 //! reference fix gets nothing for it.
 //!
-//! A command that shows a defect follows one contract. It prints
-//! [`REACHED`] on a line of its own on stdout immediately before its assertion,
+//! A command that shows a defect follows one contract. It prints the
+//! value of [`REACHED`] on a line of its own on stdout immediately before its assertion,
 //! exits non-zero when the defect shows and zero when it does not.
 //! With no such line in the recorded output the harness never reached
 //! its assertion (a failed build, a missing dependency, an import
@@ -34,8 +34,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wirken_audit::SessionEvent;
 
-/// The line a defect-showing command prints before its assertion.
-pub const REACHED: &str = "LYRIK_REACHED";
+/// The variable whose value a defect-showing command prints, on a line
+/// of its own on stdout, before its assertion. Each `exec` is given a
+/// fresh value, and its result row records whether the command printed
+/// it, so nothing the code under test prints or holds can stand for
+/// the line.
+pub const REACHED: &str = wirken_agent::sandbox::REACH_ENV;
 
 /// The copies of the scanned revision a fix is checked in. The
 /// baseline is made once per run and shared by every finding, so its
@@ -74,6 +78,10 @@ pub struct Observed {
     /// row's run record says. Never read from the output.
     #[serde(default)]
     pub timed_out: bool,
+    /// Whether the command printed its reach value, as the result row's
+    /// run record says. Never read from the output.
+    #[serde(default)]
+    pub reached: bool,
 }
 
 /// The `exec` calls in `events`, in order, each with the result the
@@ -116,6 +124,7 @@ pub fn observed_execs<'a>(events: impl IntoIterator<Item = &'a SessionEvent>) ->
                         output: output.clone(),
                         ran: sandbox.is_some(),
                         timed_out: sandbox.as_ref().is_some_and(|s| s.timed_out),
+                        reached: sandbox.as_ref().is_some_and(|s| s.reached),
                     });
                 }
             }
@@ -141,6 +150,8 @@ pub enum Run {
         success: bool,
         output: String,
         seq: usize,
+        /// Whether it printed its reach value.
+        reached: bool,
     },
 }
 
@@ -172,6 +183,7 @@ impl Log<'_> {
             success: first.success,
             output: first.output.clone(),
             seq: first.seq,
+            reached: first.reached,
         }
     }
 }
@@ -181,17 +193,6 @@ impl Log<'_> {
 /// refusal's words, and a refusal's words change between releases.
 fn refused(o: &Observed) -> bool {
     !o.ran
-}
-
-/// Whether the marker is on a line of its own on stdout. `exec` puts
-/// stderr after stdout behind a `[stderr] ` prefix; that part is not
-/// read, because an interpreter's error can echo the harness's own
-/// source, marker included, for a harness that ran nothing.
-pub(super) fn has_marker(output: &str) -> bool {
-    output
-        .lines()
-        .take_while(|l| !l.starts_with("[stderr] "))
-        .any(|l| l.trim() == REACHED)
 }
 
 /// What a defect-showing command showed.
@@ -210,12 +211,10 @@ pub fn poc(run: &Run) -> Poc {
         Run::TimedOut => Poc::Inconclusive("timed out".into()),
         Run::Disagree => Poc::Inconclusive("its runs disagree".into()),
         Run::Done {
-            success, output, ..
+            success, reached, ..
         } => {
-            if !has_marker(output) {
-                Poc::Inconclusive(format!(
-                    "no {REACHED} line in its output: the harness did not reach its assertion"
-                ))
+            if !reached {
+                Poc::Inconclusive(no_reach_line())
             } else if *success {
                 Poc::NotShown
             } else {
@@ -223,6 +222,14 @@ pub fn poc(run: &Run) -> Poc {
             }
         }
     }
+}
+
+/// Why a run that did not print its reach value is inconclusive.
+pub(super) fn no_reach_line() -> String {
+    format!(
+        "it did not print its {REACHED} value on a line of its own: the harness did not \
+         reach its assertion"
+    )
 }
 
 fn seq_of(run: &Run) -> Option<usize> {
@@ -1037,6 +1044,7 @@ fn as_run(o: &Observed) -> Run {
             success: o.success,
             output: o.output.clone(),
             seq: o.seq,
+            reached: o.reached,
         }
     }
 }
@@ -2051,6 +2059,7 @@ pub fn functionality_arm(
                     Run::Done {
                         success: true,
                         output: b,
+                        reached: b_reached,
                         ..
                     },
                     Run::Done {
@@ -2059,9 +2068,9 @@ pub fn functionality_arm(
                         ..
                     },
                 ) => {
-                    if !has_marker(b) {
+                    if !b_reached {
                         reasons.push(format!(
-                            "the benign-input harness printed no {REACHED} line in the \
+                            "the benign-input harness printed no {REACHED} value in the \
                              baseline copy"
                         ));
                     } else if base_runs.len() < 2 {
@@ -2203,7 +2212,7 @@ pub fn count_by_arm<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tempfile::tempdir;
 
@@ -2222,6 +2231,17 @@ mod tests {
         format!("start\n{REACHED}\nok")
     }
 
+    /// What the row of a fixture's run records: a fixture writes the
+    /// harness's reach line as the variable's name on stdout, standing
+    /// for the value the runtime would have given it, and the row says
+    /// whether stdout carried it.
+    pub(crate) fn fixture_reached(output: &str) -> bool {
+        output
+            .lines()
+            .take_while(|l| !l.starts_with("[stderr] "))
+            .any(|l| l.trim() == REACHED)
+    }
+
     struct Runs(Vec<Observed>);
 
     impl Runs {
@@ -2236,6 +2256,7 @@ mod tests {
                 output: output.to_string(),
                 ran: true,
                 timed_out: false,
+                reached: fixture_reached(output),
             });
             self
         }
@@ -2270,6 +2291,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no run {n} of {command}"));
             o.success = success;
             o.output = output.to_string();
+            o.reached = fixture_reached(output);
             self
         }
     }
@@ -2376,67 +2398,53 @@ mod tests {
 
     #[test]
     fn a_run_without_the_marker_is_neither_a_reproduction_nor_a_pass() {
-        let done = |success, output: &str| Run::Done {
+        let done = |success, reached, output: &str| Run::Done {
             success,
             output: output.to_string(),
             seq: 0,
+            reached,
         };
-        assert_eq!(poc(&done(false, &shown())), Poc::Shown);
-        assert_eq!(poc(&done(true, &clean())), Poc::NotShown);
+        assert_eq!(poc(&done(false, true, "AssertionError")), Poc::Shown);
+        assert_eq!(poc(&done(true, true, "ok")), Poc::NotShown);
         // A failed build exits non-zero and never reaches the assertion.
         assert!(matches!(
-            poc(&done(false, "error: linker `cc` not found")),
+            poc(&done(false, false, "error: linker `cc` not found")),
             Poc::Inconclusive(_)
         ));
         // Exit zero with no marker is not a pass either.
-        assert!(matches!(poc(&done(true, "ok")), Poc::Inconclusive(_)));
+        assert!(matches!(
+            poc(&done(true, false, "ok")),
+            Poc::Inconclusive(_)
+        ));
         assert!(matches!(poc(&Run::TimedOut), Poc::Inconclusive(_)));
         assert!(matches!(poc(&Run::Refused), Poc::NotRun(_)));
         assert!(matches!(poc(&Run::Never), Poc::NotRun(_)));
-        // The marker on stderr does not count: a traceback can echo it.
-        assert!(matches!(
-            poc(&done(false, &format!("[stderr] {REACHED}\nboom"))),
-            Poc::Inconclusive(_)
-        ));
-        assert!(matches!(
-            poc(&done(false, &format!("out\n[stderr] print(x)\n{REACHED}"))),
-            Poc::Inconclusive(_)
-        ));
     }
 
-    /// The container path and the host path both build the recorded
-    /// output with `wirken_agent::sandbox::exec_output`. Through it, a
-    /// marker counts only when the command printed it on stdout.
+    /// The row's record decides whether a harness reached its
+    /// assertion. Output that carries the variable's name, or any text
+    /// at all, on a line of its own counts for nothing: the code under
+    /// test can print it, and the repository can hold it.
     #[test]
-    fn the_marker_is_read_from_stdout_only_as_exec_records_the_streams() {
-        use wirken_agent::sandbox::exec_output;
-        let run = |stdout: &str, stderr: &str, success| Run::Done {
-            success,
-            output: exec_output(stdout, stderr),
-            seq: 0,
-        };
-        // On stdout, with noise on stderr after it.
-        assert_eq!(
-            poc(&run(
-                &format!("start\n{REACHED}\n"),
-                "assert failed\n",
-                false
-            )),
-            Poc::Shown
-        );
-        assert_eq!(poc(&run(&format!("{REACHED}\n"), "", true)), Poc::NotShown);
-        // Only on stderr: first line, and a later line of a traceback.
-        for stderr in [
-            format!("{REACHED}\n"),
-            format!("Traceback (most recent call last):\n{REACHED}\nSyntaxError\n"),
+    fn the_reach_line_is_the_rows_record_and_never_the_output() {
+        for output in [
+            format!("{REACHED}\nAssertionError"),
+            format!("start\n{REACHED}\n"),
+            "0123456789abcdef0123456789abcdef\n".to_string(),
         ] {
-            for stdout in ["", "building\n", "no newline at the end"] {
-                assert!(
-                    matches!(poc(&run(stdout, &stderr, false)), Poc::Inconclusive(_)),
-                    "{stdout:?} {stderr:?}"
-                );
-            }
+            let run = Run::Done {
+                success: false,
+                output: output.clone(),
+                seq: 0,
+                reached: false,
+            };
+            assert!(matches!(poc(&run), Poc::Inconclusive(_)), "{output:?}");
         }
+    }
+
+    #[test]
+    fn exec_output_holds_both_streams() {
+        use wirken_agent::sandbox::exec_output;
         // The streams as the log holds them.
         assert_eq!(exec_output("out\n", "err\n"), "out\n\n[stderr] err\n");
         assert_eq!(exec_output("", "err"), "[stderr] err");
@@ -2824,7 +2832,7 @@ mod tests {
         assert_eq!(arm.state, ArmState::Inconclusive, "{:?}", arm.reasons);
         for want in [
             "variant variants/v2/run.py: does not show the defect in the baseline, so it is not a variant",
-            "variant variants/v3/run.py: in the baseline copy: no LYRIK_REACHED line",
+            "variant variants/v3/run.py: in the baseline copy: it did not print its LYRIK_REACHED value",
             "variant variants/v4/run.py: in the patched copy: not run",
             "1 variant(s) held; 2 are required",
         ] {

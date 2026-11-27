@@ -39,12 +39,12 @@ fn shell_quote(s: &str) -> String {
 /// The same shape as the harnesses a walk wrote in a real run: parse
 /// the source, print the marker, exit non-zero. Nothing of `app.py`
 /// runs.
-const STATIC_HARNESS: &str = r#"import ast, sys
+const STATIC_HARNESS: &str = r#"import ast, os, sys
 tree = ast.parse(open("app.py").read())
 uses_eval = any(
     isinstance(n, ast.Call) and getattr(n.func, "id", "") == "eval" for n in ast.walk(tree)
 )
-print("LYRIK_REACHED", flush=True)
+print(os.environ["LYRIK_REACHED"], flush=True)
 print(f"analyze_uses_eval: {uses_eval}")
 sys.exit(1 if uses_eval else 0)
 "#;
@@ -53,7 +53,7 @@ sys.exit(1 if uses_eval else 0)
 const EXECUTING_HARNESS: &str = r#"import os, sys
 sys.path.insert(0, os.getcwd())
 import app
-print("LYRIK_REACHED", flush=True)
+print(os.environ["LYRIK_REACHED"], flush=True)
 sys.exit(1 if app.analyze("1+1") == "2" else 0)
 "#;
 

@@ -85,6 +85,8 @@ struct Call {
     /// The exit status of the line, which is that of its last simple
     /// command.
     exit_zero: bool,
+    /// Whether it printed its reach value, as its row records.
+    reached: bool,
 }
 
 /// The `exec` calls of a run, read off its chain. What a walk or a
@@ -230,6 +232,7 @@ impl ExecutedCommands {
                             after_replays_began,
                             simple: simple_commands(&command),
                             ran: sandbox.is_some(),
+                            reached: sandbox.as_ref().is_some_and(|s| s.reached),
                             output,
                             exit_zero: success,
                         });
@@ -319,7 +322,7 @@ impl ExecutedCommands {
             .collect();
         let Some(first) = own.first() else {
             let output = ran[0].0.output.clone();
-            return if super::lyrik_fix_arms::has_marker(&output) {
+            return if ran[0].0.reached {
                 Shown::Reached { output }
             } else {
                 Shown::Inconclusive {
@@ -335,7 +338,7 @@ impl ExecutedCommands {
                 output,
             };
         }
-        if !super::lyrik_fix_arms::has_marker(&output) {
+        if !first.reached {
             return Shown::Inconclusive {
                 why: no_marker(),
                 output,
@@ -350,10 +353,7 @@ impl ExecutedCommands {
 }
 
 fn no_marker() -> String {
-    format!(
-        "no {} line in its output: the harness did not reach its assertion",
-        super::lyrik_fix_arms::REACHED
-    )
+    super::lyrik_fix_arms::no_reach_line()
 }
 
 /// The simple commands of a shell line, in order: the line split on
@@ -648,7 +648,8 @@ mod tests {
                 row(serde_json::json!({
                     "kind": "tool_result", "call_id": id, "tool_name": "exec",
                     "output": output, "success": false,
-                    "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c0"},
+                    "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c0",
+                                "reached": crate::commands::lyrik_fix_arms::tests::fixture_reached(output)},
                 })),
             ]
         };

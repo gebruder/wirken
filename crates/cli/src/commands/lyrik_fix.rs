@@ -1792,16 +1792,19 @@ const NO_VERDICT: &str = "You decide nothing. The runner reads each command's ex
 /// The contract a command that shows a defect follows.
 fn poc_contract() -> String {
     format!(
-        "A proof of concept follows one contract. It prints `{}` on a line of its own, \
-         flushed, immediately before its assertion; it exits non-zero when the defect shows \
+        "A proof of concept follows one contract. It prints the value of the `{}` \
+         environment variable on a line of its own, flushed, immediately before its \
+         assertion: each command is given a fresh value, so print the variable, never a \
+         value seen in an earlier output; it exits non-zero when the defect shows \
          and zero when it does not. The line goes to stdout; stderr is not read. It prints \
          the line only once the code under test has \
          run and returned what the assertion reads: a harness that could not build or call \
          that code exits non-zero without printing it. The same command string runs \
          unchanged in each copy, \
          from the copy's root, so it must not name a copy (`baseline`, `patched`, \
-         `reverted`) and must not look at which copy it is in. A run with no `{}` line is \
-         read as a harness that never reached its assertion, whatever it exited with.",
+         `reverted`) and must not look at which copy it is in. A run that does not print the \
+         `{}` value is read as a harness that never reached its assertion, whatever it \
+         exited with.",
         arms::REACHED,
         arms::REACHED
     )
@@ -2315,6 +2318,7 @@ mod tests {
                 output: output.to_string(),
                 ran: true,
                 timed_out: false,
+                reached: super::arms::tests::fixture_reached(output),
             });
         }
 
@@ -2799,6 +2803,7 @@ mod tests {
                 output: output.to_string(),
                 ran: true,
                 timed_out: false,
+                reached: super::arms::tests::fixture_reached(output),
             });
         };
         add(
@@ -3083,6 +3088,7 @@ mod tests {
             success,
             output: output.to_string(),
             seq: 0,
+            reached: arms::tests::fixture_reached(output),
         };
         // Never run, refused, or timed out: no confirmation.
         for run in [arms::Run::Never, arms::Run::Refused, arms::Run::TimedOut] {
@@ -3411,6 +3417,7 @@ mod tests {
         let baseline = Layout::for_reproduction(RUN, REL, REPRO).in_copy("baseline", REPRO);
         for o in case.observed.iter_mut().filter(|o| o.command == baseline) {
             o.output = format!("{}\nboom", arms::REACHED);
+            o.reached = arms::tests::fixture_reached(&o.output);
         }
         let out = case.judge();
         assert_eq!(out.verdict, Verdict::CandidateFix);
@@ -3661,6 +3668,7 @@ mod tests {
         {
             o.success = false;
             o.output = "ModuleNotFoundError".into();
+            o.reached = arms::tests::fixture_reached(&o.output);
         }
         let out = case.judge();
         assert_eq!(arm(&out, "variant").state, ArmState::Inconclusive);
@@ -3671,6 +3679,7 @@ mod tests {
         let patched = Layout::for_reproduction(RUN, REL, REPRO).in_copy("patched", REPRO);
         for o in case.observed.iter_mut().filter(|o| o.command == patched) {
             o.output = "nothing ran".into();
+            o.reached = arms::tests::fixture_reached(&o.output);
         }
         let out = case.judge();
         assert_eq!(arm(&out, "variant").state, ArmState::Pass);
@@ -3763,6 +3772,7 @@ mod tests {
             output: "x".into(),
             ran: true,
             timed_out: false,
+            reached: false,
         });
         save_observed(&dir, &Layout::for_reproduction(RUN, REL, REPRO), &observed).unwrap();
         let saved: Vec<Observed> =
@@ -3910,13 +3920,20 @@ mod tests {
             /// Run `command` from the project root, as `exec` does, and
             /// keep what it did.
             fn exec(&mut self, command: &str) -> bool {
+                // A reach value as the runtime gives one, and its row
+                // record as the runtime writes it.
+                let reach = wirken_agent::sandbox::reach_value();
                 let out = Command::new("sh")
                     .arg("-c")
                     .arg(command)
+                    .env(wirken_agent::sandbox::REACH_ENV, &reach)
                     .current_dir(self.root())
                     .output()
                     .expect("sh runs");
-                let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+                let (mut output, reached) = wirken_agent::sandbox::take_reach(
+                    &String::from_utf8_lossy(&out.stdout),
+                    &reach,
+                );
                 output.push_str(&String::from_utf8_lossy(&out.stderr));
                 self.observed.push(Observed {
                     seq: self.observed.len(),
@@ -3925,6 +3942,7 @@ mod tests {
                     output,
                     ran: true,
                     timed_out: false,
+                    reached,
                 });
                 out.status.success()
             }
@@ -3976,7 +3994,7 @@ mod tests {
                     format!(
                         "d=.lyrik/state/runs/r1/staging/fuzz-walk/harness\n\
                          sh {script} {arg} > \"$d/out-{script}-{arg}.txt\" || exit 2\n\
-                         echo {}\nn=$(cut -d' ' -f3 \"$d/out-{script}-{arg}.txt\")\n\
+                         echo \"${}\"\nn=$(cut -d' ' -f3 \"$d/out-{script}-{arg}.txt\")\n\
                          [ \"$n\" -le 8 ] || {{ echo \"decode_len in len.sh gave $n\"; exit 1; }}\n",
                         arms::REACHED
                     )
@@ -4002,7 +4020,10 @@ mod tests {
                 );
                 write(
                     &fix.join("benign/run.sh"),
-                    &format!("echo {}\nsh a.sh 3\nsh b.sh 5\nsh a.sh 8\n", arms::REACHED),
+                    &format!(
+                        "echo \"${}\"\nsh a.sh 3\nsh b.sh 5\nsh a.sh 8\n",
+                        arms::REACHED
+                    ),
                 );
                 write(
                     &fix.join("recheck.json"),
@@ -4118,7 +4139,7 @@ mod tests {
             let cmd = carried.in_copy("baseline", REPRO);
             assert!(!p.exec(&cmd), "the defect shows: non-zero exit");
             let seen = p.observed.last().unwrap().clone();
-            assert!(seen.output.contains(arms::REACHED), "{}", seen.output);
+            assert!(seen.reached, "{}", seen.output);
             assert!(
                 seen.output.contains("decode_len in len.sh gave 99"),
                 "{}",

@@ -4173,9 +4173,13 @@ async fn trace_reproduction(
         Err(e) => Err(e.to_string()),
     };
     match traced {
-        Ok(result) => {
-            super::lyrik_trace::parse_traced(&result.output, &nonce, &cited_file, cited_line)
-        }
+        Ok(result) => super::lyrik_trace::parse_traced(
+            &result.output,
+            result.sandbox.as_ref().is_some_and(|s| s.reached),
+            &nonce,
+            &cited_file,
+            cited_line,
+        ),
         Err(e) => untraced(&format!("the traced run could not start: {e}")),
     }
 }
@@ -8918,8 +8922,9 @@ mod tests {
             .unwrap(),
             serde_json::from_value(serde_json::json!({
                 "kind": "tool_result", "call_id": command, "tool_name": "exec",
-                "output": "LYRIK_REACHED\nassertion failed\n", "success": exit_zero,
-                "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c"},
+                "output": "assertion failed\n", "success": exit_zero,
+                "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c",
+                            "reached": true},
             }))
             .unwrap(),
         ]

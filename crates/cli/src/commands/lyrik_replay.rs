@@ -571,8 +571,8 @@ mod tests {
             "success": exit_zero,
         });
         if ran {
-            result["sandbox"] =
-                serde_json::json!({"mode": "exec_only", "runtime": "docker", "container_id": "c"});
+            result["sandbox"] = serde_json::json!({"mode": "exec_only", "runtime": "docker",
+                                                   "container_id": "c", "reached": marker});
         }
         vec![
             serde_json::from_value(serde_json::json!({
@@ -718,7 +718,8 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "kind": "tool_result", "call_id": id, "tool_name": "exec",
                 "output": output, "success": exit_zero,
-                "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c"},
+                "sandbox": {"mode": "exec_only", "runtime": "docker", "container_id": "c",
+                            "reached": crate::commands::lyrik_fix_arms::tests::fixture_reached(output)},
             }))
             .unwrap(),
         ]

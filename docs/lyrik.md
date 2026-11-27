@@ -1012,14 +1012,21 @@ carries `inputs` with `config_sha256` and, for a supplied patch,
 and `lyrik.fix.verdict` rows carry the config and patch digests. A link under
 `.lyrik/fix-patches/` or `.lyrik/fix-reproductions/` is not read.
 
-**The contract for a command that shows a defect.** It prints `LYRIK_REACHED`
-on a line of its own on stdout immediately before its assertion, once the
+**The contract for a command that shows a defect.** It prints the value of the
+`LYRIK_REACHED` environment variable on a line of its own on stdout
+immediately before its assertion (`echo "$LYRIK_REACHED"`, or
+`print(os.environ["LYRIK_REACHED"], flush=True)`), once the
 code under test has run and returned what the assertion reads, and exits
 non-zero when the defect shows and zero when it does not. Stderr is not read
 for the line. One command string runs unchanged
-in each copy; a command that names a copy is refused. A run with no
-`LYRIK_REACHED` line never reached its assertion (a failed build, a missing
-dependency) and is `inconclusive`, whatever it exited with. The staged walk
+in each copy; a command that names a copy is refused. Every `exec` is given a
+fresh value, and its result row records `reached` when stdout carried it on a
+line of its own; the line is taken out of the recorded output. The code under
+test cannot print a value it was never shown, and no file in the tree can hold
+one, so the row, not the output, says the harness reached its assertion. A run
+that did not print it never reached its assertion (a failed build, a missing
+dependency) and is `inconclusive`, whatever it exited with. Code under test
+that reads its own process environment can still see the value. The staged walk
 wrapper tells every walk to write reproductions this way.
 
 **Copies and build reuse.** A fix is checked in two copies of the scanned
@@ -1281,7 +1288,7 @@ and the input digests, `lyrik.fix.combined`, and `lyrik.fix.summary`.
   with the same pattern. A default or a configuration that keeps producing
   new instances is not a code site.
 - **Reproductions written before the marker contract.** A reproduction
-  command that does not print `LYRIK_REACHED` cannot be read, so a finding
+  command that does not print the value of `$LYRIK_REACHED` cannot be read, so a finding
   from a run before this contract gets a fix whose `reproduction` arm, and
   with it the verdict, is `inconclusive`.
 - **A dependency that is not the package intended.** `patch` lists any
@@ -1442,7 +1449,7 @@ the runs.
 When you already have a script that shows a defect, give it to the run. Put it
 at `.lyrik/fix-reproductions/<slug>.sh` (or `<slug>.py`) in the target, with
 `<slug>` formed as for a supplied patch. It follows the same contract as any
-proof of concept: it prints `LYRIK_REACHED` on its own line on stdout once the
+proof of concept: it prints the value of `$LYRIK_REACHED` on its own line on stdout once the
 code under test has run, then exits non-zero when the defect shows and zero
 when it does not, and it must run unchanged from the root of any copy of the
 source.
