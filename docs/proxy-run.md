@@ -77,6 +77,128 @@ tools, its settings and its saved conversations last from one run to the
 next. A run without a workspace has a home of its own. A home is the
 operator's to remove.
 
+## Running a coding agent
+
+What a coding client needs to run here, in the order it is set up. `<client>`,
+`<image>` and the file names stand for the client's own.
+
+### 1. An image with the client in it
+
+A run does not pull or install. Build an image on the host with the client
+and what it calls: its runtime, `git`, the search tools its file tools use.
+Pin the client's version.
+
+```dockerfile
+FROM <runtime image>
+RUN <install git and the tools the client calls>
+RUN <install the client at a pinned version>
+```
+
+Whatever the client would fetch at start, such as a newer version, a model
+catalog or a helper binary, it cannot fetch in a run unless the host is named
+with `--egress`. Put it in the image, or turn the fetch off (step 4).
+
+### 2. Its configuration, through a read-only folder
+
+A run takes no environment variables and no config files on its command line.
+Put the client's config files and a start script in a folder and give it
+with `--read-only`; the folder is at `/mnt/ro/<folder name>`. The script
+copies the files into the client's home, which is writable and kept for the
+workspace, sets what the client reads from its environment, and starts it:
+
+```sh
+#!/bin/sh
+mkdir -p "$HOME/<config dir>"
+cp /mnt/ro/<folder name>/<config files> "$HOME/<config dir>/"
+cd /workspace
+exec <client> <flags>
+```
+
+Give the script as the command, `-- sh /mnt/ro/<folder name>/start.sh`. The
+command is not run through a shell, so a variable in it is not expanded: one
+more reason for the script.
+
+### 3. A model provider at the listener
+
+Configure the client with a provider for an OpenAI chat-completions endpoint
+at `http://127.0.0.1:18791/v1`, or an Anthropic messages endpoint at
+`http://127.0.0.1:18791`, with its key read from `$OPENAI_API_KEY` or
+`$ANTHROPIC_AUTH_TOKEN`. Both hold the run's token. The model is one the
+token allows (`--model`), named as the upstream names it. A client that reads
+`OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` needs no provider entry. A client
+that only signs in to a subscription cannot be run.
+
+Turn off the client's use of tools the provider runs, such as a web search,
+a fetch or code execution: the listener refuses a request that names one
+(`provider_tool`, [inference-proxy.md](inference-proxy.md#what-is-forwarded)).
+
+### 4. Its own network calls, off
+
+Clients reach out at start: an update check, a model or price catalog,
+telemetry, the download of a helper tool. In a run each is refused at the
+sidecar and recorded as a `sandbox_egress_verdict` row on the run's lane, and
+the client carries on, or fails, as it would offline. Turn them off with the
+client's offline or no-telemetry settings, or name a host with `--egress`
+when the client needs it. The verdict rows show what it tried.
+
+### 5. Tools at the MCP endpoint
+
+For tools the operator holds, grant the run an agent's signed MCP servers
+with `--mcp-server` and `--agent`, and configure the client with one
+streamable-HTTP MCP server at `http://127.0.0.1:18791/mcp` that sends
+`Authorization: Bearer <the value of WIRKEN_PROXY_TOKEN>`, in whatever form
+the client reads a variable into a header. Where the client offers a choice,
+declare the tools to the model directly: a small model calls a declared tool
+more reliably than one it has to search for. The tools are named
+`<server>_<tool>` ([proxy-mcp.md](proxy-mcp.md)).
+
+Each call waits at the agent's gate until the operator answers, from another
+terminal:
+
+```bash
+wirken permissions pending list
+wirken permissions pending approve <id>
+```
+
+A call nobody answers is denied after 300 seconds
+([proxy-mcp.md](proxy-mcp.md#the-gate)), and the client gets the refusal as
+the tool's result.
+
+### 6. A git identity
+
+The home starts empty, so `git` in the run has no name or email, and a client
+that commits uses a placeholder or fails. Write one into the workspace's home
+once, from the host. The home is `<data dir>/proxy-run/<workspace id>/home`,
+made by the workspace's first run, where the id is the first sixteen hex
+characters of the SHA-256 of the workspace's resolved path:
+
+```bash
+id=$(printf '%s' "$(realpath <workspace>)" | sha256sum | cut -c1-16)
+git config --file <data dir>/proxy-run/$id/home/.gitconfig user.name "<name>"
+git config --file <data dir>/proxy-run/$id/home/.gitconfig user.email "<email>"
+```
+
+### 7. Start it at a terminal
+
+The run attaches the client to the terminal it is started at, and refuses to
+start without one. Start it from a shell of your own, not from a tool that
+runs commands without a terminal. Ctrl-C goes to the client; quit the client
+the way it quits, and the run ends with it.
+
+### A first run
+
+Try a one-shot task before an interactive session: most clients take a
+prompt and exit. Then read what the run recorded:
+
+```bash
+wirken proxy sessions --token <token id>
+wirken sessions verify proxy-<token id>
+```
+
+The run's lane carries what the client tried to reach; the conversation
+lanes, its model calls; an MCP session's lane, its tool calls and their
+approvals.
+
 ## What is recorded
 
 On the run token's lane, `proxy-<token id>`:
