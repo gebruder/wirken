@@ -1,6 +1,6 @@
 # Security properties
 
-Four mapping tables, the exec perimeter, and the escape-hatch inventory. Every mechanism named
+Four mapping tables, the model's context, the exec perimeter, and the escape-hatch inventory. Every mechanism named
 here is owned by another page; the cells say what the control is and link to
 where it is described, rather than restating it.
 
@@ -76,6 +76,7 @@ the test that shows it. What is outside these is in
 | A request with no valid token is refused with a row | `an_unknown_or_revoked_token_is_refused_with_a_row` (`proxy_server.rs`) |
 | A token reaches only its models and stops at its ceilings | `a_tokens_model_list_and_ceilings_are_enforced`, `a_reached_spend_ceiling_refuses_the_call` (`proxy_server.rs`) |
 | The provider key goes only where its vault entry allows, and no redirect is followed | `a_key_that_may_not_be_sent_refuses_the_call` (`proxy_server.rs`), `a_forwarded_request_follows_no_redirect` (`crates/agent/src/llm.rs`) |
+| A forwarded request body is the client's, byte for byte: Wirken adds nothing to it | `a_request_is_forwarded_byte_for_byte_with_the_providers_key` (`crates/agent/src/llm.rs`), `a_chat_completion_is_forwarded_and_recorded_with_both_hashes` (`proxy_server.rs`) |
 | A request carrying a stored secret is refused | `a_malformed_oversized_or_leaking_body_is_refused` (`proxy_server.rs`) |
 | A call is not forwarded unless its row, and with an archive its body, is written first | `a_call_that_cannot_be_recorded_is_not_forwarded`, `an_archive_failure_stops_the_request_and_is_recorded_for_the_response` (`proxy_server.rs`) |
 | A client is shown only the tools of signed servers its token was granted | `a_token_is_granted_signed_mcp_servers_only` (`crates/cli/src/commands/proxy.rs`), `a_session_is_shown_the_granted_signed_servers_tools_and_they_are_recorded` (`crates/cli/src/commands/proxy_mcp.rs`) |
@@ -89,6 +90,21 @@ the test that shows it. What is outside these is in
 | `sessions search` refuses inside a Wirken `exec` | `authority_commands_refuse_inside_exec_and_record_it` (`crates/cli/tests/authority_commands_refuse_inside_exec.rs`) |
 | An injected MCP credential is not in the server's container, and each request that carries it is a row first | `an_injected_server_holds_a_placeholder_and_its_request_carries_the_credential` (`crates/mcp-proxy/src/container.rs`), `a_request_that_cannot_be_recorded_is_not_made` (`crates/mcp-proxy/src/inject.rs`) |
 | The bound host of an injected credential is refused on the server's direct route | `the_bound_host_of_an_injected_entry_is_refused_on_the_direct_route` (`crates/mcp-proxy/src/egress.rs`) |
+
+## The model's context in agent mode
+
+What reaches an agent's model, each with the test that shows it.
+Enforcement is at dispatch: no gate, grant, tier or egress decision is
+read from text the model sees, and no text in the context changes one.
+
+| Property | Test |
+|---|---|
+| Text the gateway adds to the context is the system prompt (the operator's prompt and the skill envelope), the body of a skill invoked by name ahead of the message, the results it writes for calls it refused, withheld or could not complete, the reply it writes in place of an empty or withheld one, the placeholders and aggregate of a trim round, and the label on a model summary. Each is on the chain: the prompt as `SystemPromptSet`, the message as `UserMessage`, a result as `ToolResult`, a reply as `AssistantMessage`, a trim round as `Compaction`, and a model summary as a `Compaction` row with `via_model: true` written before the summary is placed. The built-in tool definitions are fixed in the build, and each `LlmRequest` row carries their hash. A summary's own call is sent the trimmed messages under a fixed instruction and is an `LlmRequest` row with purpose `compaction_summary` | `a_model_summary_placed_in_the_context_is_on_the_chain` (`crates/agent/src/tests.rs`), `a_flagged_message_reaches_the_model_as_sent` (`crates/cli/src/commands/run.rs`) |
+| None of that text tells the model to keep anything from the user | The texts are listed in the row above; none carries such an instruction |
+| A tool result, an inbound message, memory, imported chat and MCP output reach the model as the content of their message, with no text marker around them. Provenance is held in fields of the gateway's own records, not in the text | `a_forged_gateway_message_changes_nothing_the_gateway_decides` (`crates/agent/tests/hostile_corpus.rs`) |
+| Only the harness writes the compaction fence. Its tags in any other message reach the model broken, and a skill that carries one is refused at load | `compaction_fence_from_outside` (`crates/agent/src/tests.rs`) |
+| Text that claims an approval, a grant or a tier change, or imitates the refusal the runtime writes, in a tool result or an inbound message, changes no gate outcome, grant or session state: the operator is asked, nothing is stored, and the chain records the refusal | `a_forged_gateway_message_changes_nothing_the_gateway_decides`, the `forged` lines of `tests/hostile/corpus.jsonl` |
+| An injection-scan detection is a row on the chain (`message.threat_flagged`) and writes nothing into the context: the model is sent the recorded system prompt and the message as it arrived | `a_flagged_message_reaches_the_model_as_sent` (`crates/cli/src/commands/run.rs`) |
 
 ## The exec perimeter
 
