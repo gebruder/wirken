@@ -188,11 +188,23 @@ impl McpProxyClient {
 
     /// Execute a tool by its prefixed name (`mcp_{server}_{tool}`).
     pub async fn execute(&mut self, name: &str, arguments: &str) -> Result<ToolResult, AgentError> {
+        self.execute_as(name, arguments, None).await
+    }
+
+    /// [`Self::execute`] with a token exchanged for the person behind a
+    /// proxy client's call, sent on this one request.
+    pub async fn execute_as(
+        &mut self,
+        name: &str,
+        arguments: &str,
+        exchanged: Option<&wirken_mcp_proxy::wire::ExchangedToken>,
+    ) -> Result<ToolResult, AgentError> {
         let id = self.next_request_id();
         let req = Request::CallTool {
             id,
             name: name.to_string(),
             arguments: arguments.to_string(),
+            exchanged: exchanged.cloned(),
         };
         let resp = self.rpc(req).await?;
         match resp {

@@ -142,6 +142,17 @@ impl McpClient {
         name: &str,
         arguments: &str,
     ) -> Result<McpToolResult, ProxyError> {
+        self.call_tool_as(name, arguments, None).await
+    }
+
+    /// [`Self::call_tool`] with a token exchanged for the call's
+    /// caller. See [`Transport::request_as`].
+    pub async fn call_tool_as(
+        &mut self,
+        name: &str,
+        arguments: &str,
+        exchanged: Option<&crate::wire::ExchangedToken>,
+    ) -> Result<McpToolResult, ProxyError> {
         let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
 
         let params = serde_json::json!({
@@ -149,7 +160,10 @@ impl McpClient {
             "arguments": args,
         });
 
-        let resp = self.transport.request("tools/call", Some(params)).await?;
+        let resp = self
+            .transport
+            .request_as("tools/call", Some(params), exchanged)
+            .await?;
 
         // Snapshot the auth context once (cheap clone of two
         // strings) so both error-handling branches below can run

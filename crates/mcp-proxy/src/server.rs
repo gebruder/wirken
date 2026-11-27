@@ -260,9 +260,13 @@ async fn dispatch(
             id,
             name,
             arguments,
+            exchanged,
         } => {
             let mut reg = registry.lock().await;
-            match reg.execute(agent_id, &name, &arguments).await {
+            match reg
+                .execute(agent_id, &name, &arguments, exchanged.as_ref())
+                .await
+            {
                 Ok(result) => Response::CallToolResult {
                     id,
                     output: result.output,

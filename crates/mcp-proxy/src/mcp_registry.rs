@@ -86,6 +86,10 @@ pub struct ProxyRegistry {
     /// name. Read from the signed `mcp.json` entry at load time and
     /// stamped onto each definition handed to an agent.
     costs_by_agent: HashMap<String, HashMap<String, HashMap<String, u64>>>,
+    /// The audience each server whose entry asks for a token exchange
+    /// is exchanged for, per agent, and where its injected route reads
+    /// a call's token from.
+    exchanges_by_agent: HashMap<String, (SharedCredentials, HashMap<String, String>)>,
     /// agent_id → Ed25519 public key used to authenticate incoming
     /// proxy connections claiming this agent_id. Populated at proxy
     /// startup from each agent's `identity.pub` file.
@@ -131,6 +135,7 @@ impl ProxyRegistry {
         Self {
             by_agent: HashMap::new(),
             costs_by_agent: HashMap::new(),
+            exchanges_by_agent: HashMap::new(),
             identities: HashMap::new(),
             oauth_refresh_locks: HashMap::new(),
             sandbox: SandboxHost::unavailable(),
@@ -508,6 +513,17 @@ impl ProxyRegistry {
         if !costs.is_empty() {
             self.costs_by_agent.insert(agent_id.to_string(), costs);
         }
+        let exchanges: HashMap<String, String> = config
+            .servers
+            .iter()
+            .filter_map(|(server, c)| Some((server.clone(), c.exchange()?.audience.clone())))
+            .collect();
+        if exchanges.is_empty() {
+            self.exchanges_by_agent.remove(agent_id);
+        } else {
+            self.exchanges_by_agent
+                .insert(agent_id.to_string(), (credentials.clone(), exchanges));
+        }
         if !clients.is_empty() {
             self.by_agent.insert(agent_id.to_string(), clients);
         }
@@ -583,6 +599,7 @@ impl ProxyRegistry {
             }
         }
         self.costs_by_agent.remove(agent_id);
+        self.exchanges_by_agent.remove(agent_id);
         self.host_servers.retain(|h| h.agent_id != agent_id);
         self.pending.retain(|p| p.agent_id != agent_id);
         self.supervised_agents.remove(agent_id);
@@ -618,11 +635,20 @@ impl ProxyRegistry {
     /// Execute a tool call from one agent. Routes to the correct MCP
     /// server by name prefix and rejects calls that target a tool the
     /// agent does not own.
+    ///
+    /// `exchanged` is a token the gateway exchanged for the caller of a
+    /// proxy client's call. It is refused for a server whose entry asks
+    /// for no exchange. For one that does, an HTTP server gets it as
+    /// the call's bearer, and a contained server's injected route sets
+    /// it while the call runs. Calls are made one at a time, under the
+    /// lock the registry is held by, so no other call's token is set at
+    /// that server meanwhile.
     pub async fn execute(
         &mut self,
         agent_id: &str,
         prefixed_name: &str,
         arguments: &str,
+        exchanged: Option<&crate::wire::ExchangedToken>,
     ) -> Result<McpToolResult, ProxyError> {
         let rest = prefixed_name
             .strip_prefix("mcp_")
@@ -635,9 +661,32 @@ impl ProxyRegistry {
 
         for (server_name, client) in servers.iter_mut() {
             let prefix = format!("{server_name}_");
-            if let Some(tool_name) = rest.strip_prefix(&prefix) {
+            let Some(tool_name) = rest.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some(token) = exchanged else {
                 return client.call_tool(tool_name, arguments).await;
-            }
+            };
+            let exchange =
+                self.exchanges_by_agent
+                    .get(agent_id)
+                    .and_then(|(credentials, audiences)| {
+                        Some((credentials, audiences.get(server_name)?))
+                    });
+            let Some((credentials, audience)) = exchange else {
+                return Err(ProxyError::Mcp(format!(
+                    "server '{server_name}' takes no exchanged token; the call was not made"
+                )));
+            };
+            let _held = credentials.exchanged_during(
+                agent_id,
+                server_name,
+                crate::credentials::ExchangedCall {
+                    audience: audience.clone(),
+                    token: token.clone(),
+                },
+            );
+            return client.call_tool_as(tool_name, arguments, Some(token)).await;
         }
 
         Err(ProxyError::Mcp(format!(
@@ -1213,6 +1262,135 @@ mod start_tests {
             "{events:?}"
         );
         assert_eq!(refused(&events), [REFUSED_SANDBOX_CONFIG_INVALID]);
+    }
+
+    /// Each request's method and `Authorization` header.
+    type Seen = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+    /// A loopback HTTP MCP server with one tool, `lookup`. It records
+    /// the method and the `Authorization` header of each request.
+    fn http_server() -> (String, Seen) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                let (head, body) = loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break (String::new(), String::new()),
+                        Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    }
+                    let text = String::from_utf8_lossy(&raw).into_owned();
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break (head.to_string(), body.to_string());
+                        }
+                    }
+                };
+                let message: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                let method = message["method"].as_str().unwrap_or_default().to_string();
+                let authorization = head.lines().find_map(|l| {
+                    l.split_once(':')
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                        .map(|(_, value)| value.trim().to_string())
+                });
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), authorization));
+                let result = match method.as_str() {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": "2025-06-18", "capabilities": {},
+                        "serverInfo": {"name": "crm", "version": "1"},
+                    }),
+                    "tools/list" => serde_json::json!({"tools": [{
+                        "name": "lookup", "description": "Look a customer up",
+                        "inputSchema": {"type": "object"},
+                    }]}),
+                    _ => serde_json::json!({"content": [{"type": "text", "text": "found"}]}),
+                };
+                let answer = match message.get("id") {
+                    Some(id) => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+                        .to_string(),
+                    None => String::new(),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (url, seen)
+    }
+
+    /// A call made with a token exchanged for its caller carries it as
+    /// the bearer of that call only, at a server whose entry asks for
+    /// it; a server whose entry does not is never sent one.
+    #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
+    #[tokio::test]
+    async fn an_exchanged_token_is_the_bearer_of_its_call_at_a_server_that_asks_for_one() {
+        let (url, seen) = http_server();
+        let config: McpConfig = serde_json::from_value(serde_json::json!({"servers": {
+            "crm": {"transport": "http", "url": url, "exchange": {"audience": "crm-api"}},
+            "plain": {"transport": "http", "url": url},
+        }}))
+        .unwrap();
+        let mut registry = ProxyRegistry::new();
+        let loaded = registry
+            .load_agent("agent-1", &config, no_vault(), None)
+            .await
+            .unwrap();
+        assert_eq!(loaded, 2);
+        seen.lock().unwrap().clear();
+
+        let token = crate::wire::ExchangedToken::new("exchanged-for-alice".into());
+        let made = registry
+            .execute("agent-1", "mcp_crm_lookup", "{}", Some(&token))
+            .await
+            .unwrap();
+        assert!(made.success, "{}", made.output);
+        // The agent's own call to the same server: the entry's auth,
+        // here none.
+        registry
+            .execute("agent-1", "mcp_crm_lookup", "{}", None)
+            .await
+            .unwrap();
+        let refused = registry
+            .execute("agent-1", "mcp_plain_lookup", "{}", Some(&token))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("takes no exchanged token"),
+            "{refused}"
+        );
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                (
+                    "tools/call".to_string(),
+                    Some("Bearer exchanged-for-alice".to_string())
+                ),
+                ("tools/call".to_string(), None),
+            ]
+        );
+        registry.shutdown().await;
     }
 
     /// An entry asking for an exchange nothing can set the token for

@@ -19341,7 +19341,14 @@ mod a_client_tool_call {
 
         let allowed: BTreeSet<String> = [TOOL.to_string()].into();
         let result = agent
-            .run_tool_for_client("call-1", tool, &arguments, &allowed, "proxy-token:0a0a0a0a")
+            .run_tool_for_client(
+                "call-1",
+                tool,
+                &arguments,
+                &allowed,
+                "proxy-token:0a0a0a0a",
+                None,
+            )
             .await
             .expect("the call is answered");
         let events = log
@@ -19393,6 +19400,30 @@ mod a_client_tool_call {
                 if call_id == "call-1" && tool_name == TOOL
         )));
         assert!(denial(&r.events).is_none());
+    }
+
+    /// Output that carries the token exchanged for the caller is not
+    /// handed back or recorded; other output is.
+    #[test]
+    fn output_carrying_the_exchanged_token_is_withheld() {
+        let token = wirken_mcp_proxy::wire::ExchangedToken::new("eyJ.exchanged.token".into());
+        let answer = |output: &str| crate::tool::ToolResult {
+            output: output.to_string(),
+            success: true,
+            sandbox: None,
+        };
+        let mut echoed = answer("your token is eyJ.exchanged.token");
+        crate::runtime::withhold_exchanged_token(TOOL, &token, &mut echoed);
+        assert!(!echoed.success);
+        assert!(
+            !echoed.output.contains("eyJ.exchanged.token"),
+            "{}",
+            echoed.output
+        );
+        let mut plain = answer("found the customer");
+        crate::runtime::withhold_exchanged_token(TOOL, &token, &mut plain);
+        assert!(plain.success);
+        assert_eq!(plain.output, "found the customer");
     }
 
     #[tokio::test]

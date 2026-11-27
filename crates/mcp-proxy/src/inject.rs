@@ -27,6 +27,7 @@ use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use wirken_audit::{McpInjectRefusal, SessionEvent, SessionId, SessionLog, TrustLevel};
 use wirken_sandbox::egress::{InjectRoute, InjectStream, is_global_unicast, is_ip_literal};
+use wirken_vault::VaultSecret;
 
 use crate::credentials::{ServerPin, SharedCredentials};
 use crate::mcp_config::SandboxInject;
@@ -550,11 +551,16 @@ impl Injector {
             Ok(mapped) => mapped,
             Err(reason) => return self.refuse(&seen, reason),
         };
-        let Some(secret) = self
-            .credentials
-            .get_for(&self.pin, &self.plan.credential)
-            .filter(|s| !s.expose().is_empty())
-        else {
+        // A token exchanged for the caller of the call under way is
+        // set in place of the entry's credential. Between such calls
+        // the credential is, as for any call the agent's own model
+        // makes.
+        let exchanged = self.credentials.exchanged_for(&self.agent_id, &self.server);
+        let secret = match &exchanged {
+            Some(call) => Some(VaultSecret::new(call.token.expose().to_string())),
+            None => self.credentials.get_for(&self.pin, &self.plan.credential),
+        };
+        let Some(secret) = secret.filter(|s| !s.expose().is_empty()) else {
             return self.refuse(&seen, McpInjectRefusal::CredentialUnavailable);
         };
         let Some(credential_header) = self.plan.header_value(secret.expose()) else {
@@ -594,7 +600,7 @@ impl Injector {
                 host: self.plan.host.clone(),
                 method: seen.method.clone(),
                 path: row_path(url.path()),
-                exchanged_for: None,
+                exchanged_for: exchanged.as_ref().map(|call| call.audience.clone()),
             }) {
                 tracing::error!("MCP injected route: request not recorded, so not made: {e}");
                 return self.refuse(&seen, McpInjectRefusal::RecordFailed);
@@ -1300,6 +1306,61 @@ mod tests {
             "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:3180\r\n\
              Authorization: Bearer {PLACEHOLDER}\r\nConnection: close\r\n\r\n"
         )
+    }
+
+    /// While a call made with a token exchanged for its caller runs,
+    /// that token is set in place of the entry's credential, and the
+    /// row names the audience. A token held for another server is not
+    /// used here, and once the call is over the credential is again.
+    #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
+    #[tokio::test]
+    async fn a_calls_exchanged_token_is_set_in_place_of_the_credential_while_it_runs() {
+        use crate::credentials::ExchangedCall;
+        use crate::wire::ExchangedToken;
+        const EXCHANGED: &str = "exchanged-for-the-caller-0123456789";
+        let rig = rig(|_, _| ok("{}")).await;
+        let call = |token: &str| ExchangedCall {
+            audience: "github-api".into(),
+            token: ExchangedToken::new(token.into()),
+        };
+        {
+            let _elsewhere = rig.injector.credentials.exchanged_during(
+                "agent-1",
+                "linear",
+                call("held-for-another-server"),
+            );
+            let _held =
+                rig.injector
+                    .credentials
+                    .exchanged_during("agent-1", "github", call(EXCHANGED));
+            rig.send(&get("/api/v3/user")).await;
+        }
+        rig.send(&get("/api/v3/user")).await;
+
+        let sent: Vec<Option<String>> = rig
+            .got()
+            .iter()
+            .map(|g| g.header("authorization").map(str::to_string))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                Some(format!("Bearer {EXCHANGED}")),
+                Some(format!("Bearer {SECRET}"))
+            ]
+        );
+        let audiences: Vec<Option<String>> = rig
+            .rows()
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::McpCredentialInjected { exchanged_for, .. } => Some(exchanged_for),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(audiences, [Some("github-api".to_string()), None]);
+        let rows = serde_json::to_string(&rig.rows()).unwrap();
+        assert!(!rows.contains(EXCHANGED), "{rows}");
+        rig.assert_no_value_in_rows();
     }
 
     /// The header the server sent is dropped and the vault value set in

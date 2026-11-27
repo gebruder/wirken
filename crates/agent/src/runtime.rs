@@ -462,6 +462,10 @@ pub struct Agent {
     /// of the spawn call's `tools` field and the ceiling's
     /// `tool_allowlist`. `None` means no narrowing.
     restrict_tools: Option<BTreeSet<String>>,
+    /// The token exchanged for the person behind the client call under
+    /// way in [`Self::run_tool_for_client`], sent on that call's MCP
+    /// request and on no other. `None` between such calls.
+    client_exchanged: Option<wirken_mcp_proxy::wire::ExchangedToken>,
     /// Effective per-skill permissions for this agent, computed at
     /// `attach_skills` time as the union of every loaded skill's
     /// declared `permissions:` block. `EffectiveProfile::Legacy` when
@@ -541,6 +545,29 @@ const LLM_ERROR_MAX_BYTES: usize = 1024;
 /// What a channel gets in place of a reply that carried a stored secret.
 pub(crate) fn reply_withheld(credential: &str) -> String {
     format!("Reply withheld: it contained stored credential {credential}.")
+}
+
+/// The token exchanged for a proxy client's person is that person's
+/// credential, and a call's output goes on the chain and back to the
+/// client. Output that carries it is withheld.
+pub(crate) fn withhold_exchanged_token(
+    tool: &str,
+    token: &wirken_mcp_proxy::wire::ExchangedToken,
+    result: &mut crate::tool::ToolResult,
+) {
+    if token.expose().is_empty() || !result.output.contains(token.expose()) {
+        return;
+    }
+    tracing::warn!(
+        tool,
+        "the tool's output carried the token exchanged for the caller; withheld"
+    );
+    *result = crate::tool::ToolResult {
+        output: "the tool's output carried the token exchanged for the caller, and is withheld"
+            .to_string(),
+        success: false,
+        sandbox: None,
+    };
 }
 
 /// The result a tool call whose arguments carried a stored secret gets
@@ -878,6 +905,7 @@ impl Agent {
             budget_name: None,
             budget_uncosted_warned: false,
             restrict_tools: None,
+            client_exchanged: None,
             effective_permissions: crate::skill_perms::PhasedEffective::default(),
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
             tool_validation_failures: HashMap::new(),
@@ -998,6 +1026,7 @@ impl Agent {
             budget_name: None,
             budget_uncosted_warned: false,
             restrict_tools: None,
+            client_exchanged: None,
             effective_permissions: crate::skill_perms::PhasedEffective::default(),
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
             tool_validation_failures: HashMap::new(),
@@ -1333,8 +1362,28 @@ impl Agent {
     /// the session-log rows a model's call gets. `allowed` is every
     /// tool the client may call; any other name is refused by the same
     /// clamp a sub-agent's tool grant is. `sender` is recorded as the
-    /// call's sender. The conversation is not touched.
+    /// call's sender. `exchanged` is a token the gateway exchanged for
+    /// the client's person, for a server whose entry asks for one: the
+    /// MCP proxy is handed it with this call and with nothing else. The
+    /// conversation is not touched.
     pub async fn run_tool_for_client(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        allowed: &BTreeSet<String>,
+        sender: &str,
+        exchanged: Option<wirken_mcp_proxy::wire::ExchangedToken>,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        self.client_exchanged = exchanged;
+        let result = self
+            .run_client_call(call_id, name, arguments, allowed, sender)
+            .await;
+        self.client_exchanged = None;
+        result
+    }
+
+    async fn run_client_call(
         &mut self,
         call_id: &str,
         name: &str,
@@ -4879,7 +4928,15 @@ impl Agent {
                 });
             }
 
-            let result = mcp.lock().await.execute(name, arguments).await;
+            let exchanged = self.client_exchanged.take();
+            let mut result = mcp
+                .lock()
+                .await
+                .execute_as(name, arguments, exchanged.as_ref())
+                .await;
+            if let (Some(token), Ok(r)) = (&exchanged, &mut result) {
+                withhold_exchanged_token(name, token, r);
+            }
 
             // Debit only a call that happened. A refused or failed
             // call bought nothing, and charging for it would make the

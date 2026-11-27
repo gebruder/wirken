@@ -516,6 +516,18 @@ impl HttpTransport {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<JsonRpcResponse, ProxyError> {
+        self.request_as(method, params, None).await
+    }
+
+    /// [`Self::request`], with `bearer` as the request's credential in
+    /// place of what the entry's auth gives, when it is set: a token
+    /// exchanged for the caller of this one call.
+    pub async fn request_as(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        bearer: Option<&crate::wire::ExchangedToken>,
+    ) -> Result<JsonRpcResponse, ProxyError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -527,7 +539,21 @@ impl HttpTransport {
         };
 
         let mut req = self.client.post(&self.url).json(&payload);
-        if let Some(header) = self.auth.authorization_header().await? {
+        let header = match bearer {
+            Some(token) => {
+                let mut value =
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.expose()))
+                        .map_err(|_| {
+                        ProxyError::Mcp(format!(
+                            "MCP HTTP {method}: the exchanged token is not a header value"
+                        ))
+                    })?;
+                value.set_sensitive(true);
+                Some(value)
+            }
+            None => self.auth.authorization_header().await?,
+        };
+        if let Some(header) = header {
             req = req.header(reqwest::header::AUTHORIZATION, header);
         }
 
@@ -539,6 +565,15 @@ impl HttpTransport {
         let status = resp.status();
         if let Some(redirected) = redirect_refusal(method, status, resp.headers()) {
             return Err(redirected);
+        }
+        if bearer.is_some() && credential_refused(status, resp.headers()) {
+            // The caller's token, not the vault's: there is nothing in
+            // the vault to fetch again.
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProxyError::Mcp(format!(
+                "MCP HTTP {method} returned {status} for the token exchanged for the caller: \
+                 {body}"
+            )));
         }
         if credential_refused(status, resp.headers()) {
             let body = resp.text().await.unwrap_or_default();
@@ -674,9 +709,21 @@ impl Transport {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<JsonRpcResponse, ProxyError> {
+        self.request_as(method, params, None).await
+    }
+
+    /// [`Self::request`] for a call made with a token exchanged for
+    /// its caller. An HTTP server gets it as the bearer. A stdio
+    /// server never sees it: its injected route sets it.
+    pub async fn request_as(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        bearer: Option<&crate::wire::ExchangedToken>,
+    ) -> Result<JsonRpcResponse, ProxyError> {
         match self {
             Transport::Stdio(t) => t.request(method, params).await,
-            Transport::Http(t) => t.request(method, params).await,
+            Transport::Http(t) => t.request_as(method, params, bearer).await,
         }
     }
 

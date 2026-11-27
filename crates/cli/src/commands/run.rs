@@ -363,6 +363,7 @@ impl super::proxy_mcp::ToolHost for FactoryToolHost {
                 call.arguments,
                 call.allowed,
                 call.sender,
+                call.exchanged,
             )
             .await
             .map_err(|e| e.to_string())

@@ -104,6 +104,33 @@ pub struct ProxyCredentials {
     pins: Mutex<Option<HashMap<String, BTreeSet<ServerPin>>>>,
     /// The placeholder for each injected credential, by vault name.
     placeholders: HashMap<String, String>,
+    /// The token exchanged for the caller of the call under way at a
+    /// server, by agent and server, while that call runs.
+    exchanged: Mutex<HashMap<(String, String), ExchangedCall>>,
+}
+
+/// A token exchanged for one call's caller, and the audience it is for.
+#[derive(Clone)]
+pub struct ExchangedCall {
+    pub audience: String,
+    pub token: crate::wire::ExchangedToken,
+}
+
+/// Holds a call's exchanged token at its server, and clears it when
+/// dropped.
+pub(crate) struct ExchangedCallGuard<'a> {
+    credentials: &'a ProxyCredentials,
+    key: (String, String),
+}
+
+impl Drop for ExchangedCallGuard<'_> {
+    fn drop(&mut self) {
+        self.credentials
+            .exchanged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
 }
 
 /// Shared by every auth provider and the stdio start path.
@@ -116,7 +143,39 @@ impl ProxyCredentials {
             gateway,
             pins: Mutex::new(None),
             placeholders: HashMap::new(),
+            exchanged: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Hold `call` as the exchanged token of the call under way at
+    /// `agent_id`'s `server` until the guard is dropped. Calls to the
+    /// proxy's servers are made one at a time, so the token held is
+    /// that of the one call the server is answering.
+    pub(crate) fn exchanged_during(
+        &self,
+        agent_id: &str,
+        server: &str,
+        call: ExchangedCall,
+    ) -> ExchangedCallGuard<'_> {
+        let key = (agent_id.to_string(), server.to_string());
+        self.exchanged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), call);
+        ExchangedCallGuard {
+            credentials: self,
+            key,
+        }
+    }
+
+    /// The exchanged token of the call under way at `agent_id`'s
+    /// `server`, if one is.
+    pub fn exchanged_for(&self, agent_id: &str, server: &str) -> Option<ExchangedCall> {
+        self.exchanged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(agent_id.to_string(), server.to_string()))
+            .cloned()
     }
 
     /// Give contained servers these placeholders in place of the

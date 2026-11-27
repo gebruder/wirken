@@ -156,15 +156,21 @@ fn request_call_tool_round_trip() {
         id: 11,
         name: "mcp_filesystem_read_file".into(),
         arguments: "{\"path\":\"x\"}".into(),
+        exchanged: None,
     };
     let s = serde_json::to_string(&r).unwrap();
+    // A call with nothing exchanged is the frame it was before the
+    // field existed.
+    assert!(!s.contains("exchanged"), "{s}");
     let parsed: Request = serde_json::from_str(&s).unwrap();
     match parsed {
         Request::CallTool {
             id,
             name,
             arguments,
+            exchanged,
         } => {
+            assert_eq!(exchanged, None);
             assert_eq!(id, 11);
             assert_eq!(name, "mcp_filesystem_read_file");
             assert!(arguments.contains("\"path\""));

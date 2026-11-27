@@ -78,6 +78,9 @@ pub struct ClientCall<'a> {
     pub allowed: &'a BTreeSet<String>,
     /// Who the call is recorded as sent by.
     pub sender: &'a str,
+    /// The token exchanged for the caller, for a server whose entry
+    /// asks for one.
+    pub exchanged: Option<wirken_mcp_proxy::wire::ExchangedToken>,
 }
 
 /// The tools one MCP session was shown.
@@ -716,6 +719,7 @@ impl ProxyState {
                     arguments: &arguments,
                     allowed: &allowed,
                     sender: &sender,
+                    exchanged: None,
                 },
             )
             .await

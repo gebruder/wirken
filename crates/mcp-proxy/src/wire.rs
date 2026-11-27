@@ -143,6 +143,12 @@ pub enum Request {
         id: u64,
         name: String,
         arguments: String,
+        /// The token the gateway exchanged for the person behind a
+        /// proxy client's call, for a server whose entry asks for one.
+        /// Set on this call only. Left out of the frame when absent, so
+        /// either side of this field talks to the other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exchanged: Option<ExchangedToken>,
     },
     /// Request the proxy shut down its servers and close the connection.
     Shutdown { id: u64 },
@@ -155,6 +161,36 @@ impl Request {
                 *id
             }
         }
+    }
+}
+
+/// A token the gateway exchanged at the identity provider for the
+/// person behind one proxy client's call (RFC 8693). The proxy sends it
+/// on that call and keeps it no longer. Its debug form shows no part
+/// of it, and its memory is cleared when it is dropped.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ExchangedToken(String);
+
+impl ExchangedToken {
+    pub fn new(token: String) -> Self {
+        Self(token)
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ExchangedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExchangedToken(..)")
+    }
+}
+
+impl Drop for ExchangedToken {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
 
