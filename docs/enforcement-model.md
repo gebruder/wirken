@@ -153,6 +153,28 @@ Model pinning pairs with cost metering: the pinned pair is what per-call cost
 is priced against and what per-agent spend attributes to. See
 [cost-monitoring.md](cost-monitoring.md).
 
+### Policy is written, not compiled
+
+Every rule the gate applies is one the operator wrote: a tier, a grant, an
+allowlist, a ceiling, a signed entry. No model writes, compiles, widens or
+approves one. There is no step that turns a description in plain language
+into rules, and none is planned.
+
+A model that wrote policy would read the same inputs the policy exists to
+guard against: a document, a web page, a message from a sender, any of which
+can carry instructions. Rules compiled from prose would also be reviewed in a
+vocabulary other than the one they were written in, so what the operator
+approved and what the gate enforces could differ without either one showing
+it. Hand-written rules have neither problem. The cost is that writing them is
+work, and that a rule says only what it says.
+
+The one place a model chooses its own tools is a sub-agent spawn. There it
+narrows: the child gets the tools the parent asked for that are also on the
+operator's ceiling, and nothing the ceiling leaves out
+([multi-agent.md](multi-agent.md#sub-agent-orchestration)). No approval is
+made by a model either. An approval comes from the operator or times out into
+a denial ([permissions-and-identity.md](permissions-and-identity.md)).
+
 ### Prompt injection detection
 
 `crates/gateway/src/injection_detect.rs`. `InjectionDetector` scans inbound
