@@ -12,6 +12,18 @@ tagged.
 
 ### Security
 
+- No decision reads a marker from text a model, a tool or a channel can
+  write where the gateway holds the answer: the context engine marks a
+  trimmed message with a field instead of reading its `[trimmed: ` prefix,
+  an `exec` result row records `timed_out` in its `sandbox` record and
+  Lyrik reads the timeout there, verify takes a turn for a `wirken ask`
+  only when its row names no adapter, a conversation id that carries the
+  sub-agent marker is written as `%23sub-` in its session id, and Lyrik's
+  `detection_source` is always the seed set's.
+- The text a model reads when a veto or egress hook times out names no
+  override. Each log event prints on one line, so a value a model chose
+  cannot print a line of its own beside an approval prompt.
+- The default system prompt no longer says who writes the compaction tags.
 - Every approval card shows the request id the gateway minted for the ask,
   a random UUID the model is never sent. A typed answer carries its first
   four hex characters: `!approve <code>` and `!deny <code>` on Signal and

@@ -265,7 +265,9 @@ compare freshly-produced source bytes against operator-redacted ones.
 **Timeout posture.** Both dispatchers fail closed by default.
 `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` flips the timeout path to fail open with a
 `tracing::warn!`; the audit row records the timeout regardless, so a reviewer
-can distinguish "hook timed out" from "hook ran clean".
+can distinguish "hook timed out" from "hook ran clean". Fail closed, the
+model reads that the call was refused or the output withheld; the text it
+reads names no override.
 
 **Registered but not connected.** Every veto and egress hook registered in
 `hooks.db` when `wirken run` starts must be connected. While one is not, every

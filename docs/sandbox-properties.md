@@ -124,7 +124,10 @@ emitted:
 
 `mode` is the configured mode of the sandbox that dispatched the call,
 `runtime` is what actually ran it (`docker`, `gvisor` or `host`), and
-`container_id` is the id Docker returned, absent on the host. Both output
+`container_id` is the id Docker returned, absent on the host. `timed_out`
+is present, and `true`, when the command was stopped at its time limit; it is
+set by the branch that stopped it, so a command that prints a timeout's words
+is still a command that finished. Both output
 paths write the same `output` and `success` shape, so before this field an
 auditor reading `audit.db` could not tell a containerised `exec` from a host
 one.
