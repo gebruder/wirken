@@ -2494,6 +2494,11 @@ async fn main() -> Result<()> {
             session,
             reason,
         })) => commands::proxy::archive_redact(sha256.as_deref(), session.as_deref(), &reason),
+        #[cfg(not(unix))]
+        Commands::Proxy(ProxyCommands::Run { .. }) => anyhow::bail!(
+            "wirken proxy run needs a Unix host: the client's route out is a Unix socket"
+        ),
+        #[cfg(unix)]
         Commands::Proxy(ProxyCommands::Run {
             image,
             workspace,
