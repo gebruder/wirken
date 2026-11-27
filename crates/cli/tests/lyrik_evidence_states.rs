@@ -203,8 +203,15 @@ fn run(run: &str, harness: &str) -> Option<Outcome> {
             .unwrap_or_else(|e| panic!("{e}\n{shown}")),
     )
     .unwrap();
+    // The ledger the runner wrote, in the target's inputs directory; the
+    // assessed tree holds none.
+    assert!(!target.join(".lyrik/ledger").exists());
+    let ledger_dir = common::lyrik_config(&data, &target)
+        .parent()
+        .unwrap()
+        .join("ledger");
     let mut ledger = Vec::new();
-    for entry in std::fs::read_dir(target.join(".lyrik/ledger")).unwrap() {
+    for entry in std::fs::read_dir(ledger_dir).unwrap() {
         let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
         ledger.push(serde_json::from_str(&text).unwrap());
     }

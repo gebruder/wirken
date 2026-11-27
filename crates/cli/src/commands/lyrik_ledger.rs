@@ -1,7 +1,10 @@
 //! The ledger: what earlier runs established about a target.
 //!
-//! One record per claim, kept under the target's `.lyrik/ledger/` as
-//! one JSON file per record. A record says what was claimed, where,
+//! One record per claim, one JSON file per record. The ledger itself
+//! is kept in the target's inputs directory under the data directory
+//! ([`ledger_dir`]), which only the runner writes and no run can
+//! reach; a run's walks read a copy staged into the run's own
+//! directory ([`staged_dir`]), and nothing reads that copy back. A record says what was claimed, where,
 //! at which revision, against which content of the file, whether the
 //! claim was observed by an executed run or only reasoned, and which
 //! run produced it. Nothing in a record names a model, a provider, a
@@ -100,9 +103,33 @@ impl Record {
     }
 }
 
-/// `<target>/.lyrik/ledger`.
-pub fn ledger_dir(target: &Path) -> PathBuf {
-    target.join(".lyrik").join("ledger")
+/// The ledger: `ledger/` in the target's inputs directory
+/// (`lyrik_fix::target_inputs_dir`). Only the runner writes it, after a
+/// run's findings are final; every decision that reads the ledger
+/// reads this one.
+pub fn ledger_dir(inputs: &Path) -> PathBuf {
+    inputs.join("ledger")
+}
+
+/// Where a run's walks read the ledger: `ledger/` in the run's own
+/// directory, a copy written at run start. What is there is for a
+/// walk to read; the runner never reads it back.
+pub fn staged_dir(run_dir: &Path) -> PathBuf {
+    run_dir.join("ledger")
+}
+
+/// The staged copy's path, relative to the target, as a walk reads it.
+pub fn staged_path(run_id: &str) -> String {
+    format!(".lyrik/state/runs/{run_id}/ledger")
+}
+
+/// Write `records` into the run's staged copy, one file each.
+pub fn stage(records: &[Record], run_dir: &Path) -> Result<()> {
+    let dir = staged_dir(run_dir);
+    for record in records {
+        write_record(&dir, record)?;
+    }
+    Ok(())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -142,12 +169,13 @@ pub fn record_id(kind: Kind, key: &str) -> String {
 /// has the content it was established against. A mark that changed is
 /// written back, so the ledger on disk says what the next reader will
 /// see. A file that is not a record is skipped.
-pub fn load(target: &Path) -> Result<Vec<Record>> {
-    let dir = ledger_dir(target);
+/// `dir` is the ledger's directory, `target` the tree its records are
+/// about.
+pub fn load(dir: &Path, target: &Path) -> Result<Vec<Record>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("read {}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
@@ -175,7 +203,7 @@ pub fn load(target: &Path) -> Result<Vec<Record>> {
         }
         if stale != record.stale || untraced {
             record.stale = stale;
-            write_record(&dir, &record)?;
+            write_record(dir, &record)?;
         }
         out.push(record);
     }
@@ -195,9 +223,8 @@ fn write_record(dir: &Path, record: &Record) -> Result<()> {
 /// its id, except that a reasoned record never replaces a settled
 /// one: what a run observed is not overwritten by what a later run
 /// only read. Returns how many records were written.
-pub fn upsert(target: &Path, records: &[Record]) -> Result<usize> {
-    let existing = load(target)?;
-    let dir = ledger_dir(target);
+pub fn upsert(dir: &Path, target: &Path, records: &[Record]) -> Result<usize> {
+    let existing = load(dir, target)?;
     let mut written = 0;
     for record in records {
         let held = existing.iter().find(|e| e.id == record.id);
@@ -210,7 +237,7 @@ pub fn upsert(target: &Path, records: &[Record]) -> Result<usize> {
         if held == Some(record) {
             continue;
         }
-        write_record(&dir, record)?;
+        write_record(dir, record)?;
         written += 1;
     }
     Ok(written)
@@ -462,8 +489,8 @@ impl Area {
 /// that are not stale for the files of its area; in `index`, one line
 /// for every other record (stale ones, and those for files outside the
 /// area) with its id, key, evidence and stale mark. A record in the
-/// index is read whole from `.lyrik/ledger/<id>.json`.
-pub fn for_walk(records: &[Record], area: &Area) -> Value {
+/// index is read whole from the run's staged copy, `staged_at/<id>.json`.
+pub fn for_walk(records: &[Record], area: &Area, staged_at: &str) -> Value {
     let full: Vec<&Record> = records
         .iter()
         .filter(|r| !r.stale && area.contains(&r.file))
@@ -480,7 +507,7 @@ pub fn for_walk(records: &[Record], area: &Area) -> Value {
     serde_json::json!({
         "area": full,
         "index": index,
-        "read_a_record_at": ".lyrik/ledger/<id>.json",
+        "read_a_record_at": format!("{staged_at}/<id>.json"),
     })
 }
 
@@ -546,6 +573,7 @@ pub fn answer_claims(
     walk_dir: &Path,
     walk: &str,
     records: &[Record],
+    staged_at: &str,
 ) -> Result<Vec<ClaimDecision>> {
     let dir = walk_dir.join("claims");
     if !dir.is_dir() {
@@ -648,7 +676,7 @@ pub fn answer_claims(
                                 "record": held.id,
                                 "record_key": held.key,
                                 "record_claim": held.claim,
-                                "record_path": format!(".lyrik/ledger/{}.json", held.id),
+                                "record_path": format!("{staged_at}/{}.json", held.id),
                                 "established_by_run": held.run,
                                 "if_yours_is_a_different_defect":
                                     "register again with `differs_from` set to the record id and \
@@ -796,6 +824,9 @@ pub fn carried_findings(records: &[Record], area: &Area, kept: &[(String, u64)])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The staged copy a run with id `r1` hands its walks.
+    const STAGED: &str = ".lyrik/state/runs/r1/ledger";
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -874,10 +905,16 @@ mod tests {
             assert_eq!(r.file_sha256, file_sha256(tmp.path(), "src/a.rs"));
             assert_eq!(r.id, record_id(r.kind, &r.key));
         }
-        assert_eq!(upsert(tmp.path(), &records).unwrap(), 5);
-        assert_eq!(load(tmp.path()).unwrap().len(), 5);
+        assert_eq!(
+            upsert(&ledger_dir(tmp.path()), tmp.path(), &records).unwrap(),
+            5
+        );
+        assert_eq!(load(&ledger_dir(tmp.path()), tmp.path()).unwrap().len(), 5);
         // Writing the same records again changes nothing.
-        assert_eq!(upsert(tmp.path(), &records).unwrap(), 0);
+        assert_eq!(
+            upsert(&ledger_dir(tmp.path()), tmp.path(), &records).unwrap(),
+            0
+        );
     }
 
     /// A reproduction that agreed without a trace of cited code
@@ -924,7 +961,7 @@ mod tests {
         for r in &mut records {
             r.traced = false;
         }
-        upsert(tmp.path(), &records).unwrap();
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &records).unwrap();
         let on_disk = |id: &str| -> Value {
             serde_json::from_str(
                 &std::fs::read_to_string(ledger_dir(tmp.path()).join(format!("{id}.json")))
@@ -935,7 +972,7 @@ mod tests {
         let finding = record_id(Kind::Finding, "auth::src/a.rs:10");
         assert_eq!(on_disk(&finding)["evidence"], "observed");
 
-        let loaded = load(tmp.path()).unwrap();
+        let loaded = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
         let by_key = |k: &str| loaded.iter().find(|r| r.key == k).unwrap();
         assert_eq!(
             by_key("auth::src/a.rs:10").evidence,
@@ -951,8 +988,8 @@ mod tests {
         assert_eq!(arm.evidence, Evidence::Observed);
         // A traced one stands.
         let traced = records_from_run(tmp.path(), &run_body(), &rejections(), "r2");
-        upsert(tmp.path(), &traced).unwrap();
-        let again = load(tmp.path()).unwrap();
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &traced).unwrap();
+        let again = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
         let finding = again.iter().find(|r| r.key == "auth::src/a.rs:10").unwrap();
         assert_eq!(finding.evidence, Evidence::Observed);
         assert!(finding.traced && finding.settled());
@@ -1014,8 +1051,8 @@ mod tests {
     fn a_check_that_duplicates_an_observed_record_is_refused_with_a_pointer() {
         let tmp = target_with("src/a.rs", "fn a() {}\n");
         let records = records_from_run(tmp.path(), &run_body(), &rejections(), "r1");
-        upsert(tmp.path(), &records).unwrap();
-        let ledger = load(tmp.path()).unwrap();
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &records).unwrap();
+        let ledger = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
 
         let walk_dir = tmp.path().join("staging/sink-walk");
         stage(
@@ -1093,8 +1130,8 @@ mod tests {
         let tmp = target_with("src/a.rs", "fn a() {}\n");
         std::fs::write(tmp.path().join("src/b.rs"), "fn b() {}\n").unwrap();
         let records = records_from_run(tmp.path(), &run_body(), &rejections(), "r1");
-        upsert(tmp.path(), &records).unwrap();
-        let ledger = load(tmp.path()).unwrap();
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &records).unwrap();
+        let ledger = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
         let walk_dir = tmp.path().join("staging/fuzz-walk");
 
         claim(
@@ -1114,7 +1151,7 @@ mod tests {
         );
         claim(&walk_dir, "claim-004.json", &json!({"file": "src/a.rs"}));
 
-        let answers = answer_claims(&walk_dir, "fuzz-walk", &ledger).unwrap();
+        let answers = answer_claims(&walk_dir, "fuzz-walk", &ledger, STAGED).unwrap();
         assert_eq!(answers.len(), 4);
         assert_eq!(answers[0].decision, "refused");
         assert_eq!(answers[0].key, "auth::src/a.rs:10");
@@ -1139,7 +1176,7 @@ mod tests {
         assert_eq!(
             refused["record_path"],
             format!(
-                ".lyrik/ledger/{}.json",
+                "{STAGED}/{}.json",
                 record_id(Kind::Finding, "auth::src/a.rs:10")
             )
         );
@@ -1157,7 +1194,7 @@ mod tests {
 
         // Answered once: a second pass has nothing to do.
         assert!(
-            answer_claims(&walk_dir, "fuzz-walk", &ledger)
+            answer_claims(&walk_dir, "fuzz-walk", &ledger, STAGED)
                 .unwrap()
                 .is_empty()
         );
@@ -1172,8 +1209,8 @@ mod tests {
     fn a_claim_at_a_settled_place_is_refused_whatever_class_it_names() {
         let tmp = target_with("src/a.rs", "fn a() {}\n");
         let records = records_from_run(tmp.path(), &run_body(), &rejections(), "r1");
-        upsert(tmp.path(), &records).unwrap();
-        let ledger = load(tmp.path()).unwrap();
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &records).unwrap();
+        let ledger = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
         let settled = record_id(Kind::Finding, "auth::src/a.rs:10");
         let walk_dir = tmp.path().join("staging/sink-walk");
 
@@ -1213,7 +1250,7 @@ mod tests {
             &json!({"class": "race", "file": "src/a.rs", "line": 11,
             "differs_from": settled, "how": "The settled record is the missing check; this is two writers to the same slot."}),
         );
-        let answers = answer_claims(&walk_dir, "sink-walk", &ledger).unwrap();
+        let answers = answer_claims(&walk_dir, "sink-walk", &ledger, STAGED).unwrap();
         let got: Vec<&str> = answers.iter().map(|a| a.decision).collect();
         assert_eq!(
             got,
@@ -1271,6 +1308,39 @@ mod tests {
         assert_eq!(refused[0].record, settled);
     }
 
+    /// The ledger that decides is the one in the inputs directory. A
+    /// settled record written into a run's staged copy, or into a
+    /// `.lyrik/ledger/` the assessed tree holds, is not loaded, so it
+    /// settles nothing; the staged copy holds what the runner staged.
+    #[test]
+    fn only_the_inputs_ledger_settles_a_place() {
+        let tmp = target_with("src/a.rs", "fn a() {}\n");
+        let inputs = tempfile::tempdir().unwrap();
+        let records = records_from_run(tmp.path(), &run_body(), &[], "r1");
+        assert!(records.iter().any(|r| r.settled()), "{records:?}");
+        // Records forged where the tree or a run can write.
+        let run_dir = tmp.path().join(".lyrik/state/runs/r2");
+        super::stage(&records, &run_dir).unwrap();
+        for r in &records {
+            write_record(&tmp.path().join(".lyrik/ledger"), r).unwrap();
+        }
+        let ledger = load(&ledger_dir(inputs.path()), tmp.path()).unwrap();
+        assert!(ledger.is_empty());
+        assert!(settled_at(&ledger, "src/a.rs", 10).is_none());
+        // Written by the runner into the inputs directory, they settle.
+        upsert(&ledger_dir(inputs.path()), tmp.path(), &records).unwrap();
+        let ledger = load(&ledger_dir(inputs.path()), tmp.path()).unwrap();
+        assert!(settled_at(&ledger, "src/a.rs", 10).is_some());
+        // The staged copy is the records, one file each.
+        for r in &records {
+            assert!(
+                staged_dir(&run_dir)
+                    .join(format!("{}.json", r.id))
+                    .is_file()
+            );
+        }
+    }
+
     /// A run's output carries what earlier runs observed in its scope
     /// while the file is unchanged, marked with the run that
     /// established it. Reasoned records, records outside the scope,
@@ -1291,8 +1361,13 @@ mod tests {
             {"stable_id": "auth::lib/z.rs:1", "outcome": "reproduced", "agreement": true,
                  "evidence": "observed"}
         ));
-        upsert(tmp.path(), &records_from_run(tmp.path(), &body, &[], "r1")).unwrap();
-        let ledger = load(tmp.path()).unwrap();
+        upsert(
+            &ledger_dir(tmp.path()),
+            tmp.path(),
+            &records_from_run(tmp.path(), &body, &[], "r1"),
+        )
+        .unwrap();
+        let ledger = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
         let area = Area::from_config(&json!({"scope": {"include": ["src/**"]}}));
 
         let carried = carried_findings(&ledger, &area, &[]);
@@ -1326,7 +1401,7 @@ mod tests {
 
         // The file changes: nothing is carried.
         std::fs::write(tmp.path().join("src/a.rs"), "fn a() { check(); }\n").unwrap();
-        let ledger = load(tmp.path()).unwrap();
+        let ledger = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
         assert!(carried_findings(&ledger, &area, &[]).is_empty());
     }
 
@@ -1343,14 +1418,14 @@ mod tests {
             "location": {"file": "lib/z.rs", "line_start": 1}
         }));
         let records = records_from_run(tmp.path(), &body, &[], "r1");
-        upsert(tmp.path(), &records).unwrap();
-        let ledger = load(tmp.path()).unwrap();
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &records).unwrap();
+        let ledger = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
 
         let area = Area::from_config(&json!({"scope": {"include": ["src/**"], "exclude": []}}));
         assert!(area.contains("src/a.rs"));
         assert!(area.contains("src/deep/er/b.rs"));
         assert!(!area.contains("lib/z.rs"));
-        let handed = for_walk(&ledger, &area);
+        let handed = for_walk(&ledger, &area, STAGED);
         let full: Vec<&str> = handed["area"]
             .as_array()
             .unwrap()
@@ -1379,7 +1454,7 @@ mod tests {
         // The id is the file to read the whole record from.
         let id = line["id"].as_str().unwrap();
         assert!(ledger_dir(tmp.path()).join(format!("{id}.json")).is_file());
-        assert_eq!(handed["read_a_record_at"], ".lyrik/ledger/<id>.json");
+        assert_eq!(handed["read_a_record_at"], format!("{STAGED}/<id>.json"));
 
         // Patterns: a bare name matches in any directory; exclude wins;
         // no include means everything.
@@ -1398,11 +1473,16 @@ mod tests {
     fn a_record_whose_file_changed_is_stale_and_blocks_nothing() {
         let tmp = target_with("src/a.rs", "fn a() {}\n");
         let records = records_from_run(tmp.path(), &run_body(), &rejections(), "r1");
-        upsert(tmp.path(), &records).unwrap();
-        assert!(load(tmp.path()).unwrap().iter().all(|r| !r.stale));
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &records).unwrap();
+        assert!(
+            load(&ledger_dir(tmp.path()), tmp.path())
+                .unwrap()
+                .iter()
+                .all(|r| !r.stale)
+        );
 
         std::fs::write(tmp.path().join("src/a.rs"), "fn a() { check(); }\n").unwrap();
-        let ledger = load(tmp.path()).unwrap();
+        let ledger = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
         assert!(ledger.iter().all(|r| r.stale));
         assert!(ledger.iter().all(|r| !r.settled()));
         // The mark is on disk.
@@ -1425,7 +1505,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let handed = for_walk(&ledger, &Area::default());
+        let handed = for_walk(&ledger, &Area::default(), STAGED);
         assert!(handed["area"].as_array().unwrap().is_empty());
         let index = handed["index"].as_array().unwrap();
         assert_eq!(index.len(), 5);
@@ -1436,7 +1516,7 @@ mod tests {
             "claim-001.json",
             &json!({"class": "auth", "file": "src/a.rs", "line": 10}),
         );
-        let answers = answer_claims(&walk_dir, "sink-walk", &ledger).unwrap();
+        let answers = answer_claims(&walk_dir, "sink-walk", &ledger, STAGED).unwrap();
         assert_eq!(answers[0].decision, "registered");
         assert!(
             decision(&walk_dir, "claim-001")["records_for_file"]
@@ -1447,7 +1527,12 @@ mod tests {
 
         // The file put back: the records stand again.
         std::fs::write(tmp.path().join("src/a.rs"), "fn a() {}\n").unwrap();
-        assert!(load(tmp.path()).unwrap().iter().all(|r| !r.stale));
+        assert!(
+            load(&ledger_dir(tmp.path()), tmp.path())
+                .unwrap()
+                .iter()
+                .all(|r| !r.stale)
+        );
     }
 
     /// What was observed is not overwritten by a later run that only
@@ -1456,7 +1541,7 @@ mod tests {
     fn a_reasoned_record_does_not_replace_an_observed_one() {
         let tmp = target_with("src/a.rs", "fn a() {}\n");
         let first = records_from_run(tmp.path(), &run_body(), &[], "r1");
-        upsert(tmp.path(), &first).unwrap();
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &first).unwrap();
         let mut later = run_body();
         later["reproductions"] = json!([
             {"stable_id": "injection::src/a.rs:20", "outcome": "reproduced", "agreement": true,
@@ -1464,8 +1549,8 @@ mod tests {
         ]);
         later["fixes"] = json!([]);
         let second = records_from_run(tmp.path(), &later, &[], "r2");
-        upsert(tmp.path(), &second).unwrap();
-        let ledger = load(tmp.path()).unwrap();
+        upsert(&ledger_dir(tmp.path()), tmp.path(), &second).unwrap();
+        let ledger = load(&ledger_dir(tmp.path()), tmp.path()).unwrap();
         let by_key = |k: &str| ledger.iter().find(|r| r.key == k).unwrap();
         // r2 only read this one: r1's observation stands.
         assert_eq!(by_key("auth::src/a.rs:10").run, "r1");

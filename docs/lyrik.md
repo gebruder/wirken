@@ -200,7 +200,8 @@ config found there is not read.
 | `<data_dir>/lyrik/targets/<key>/rubric.md` | the team's severity rubric |
 | `<data_dir>/lyrik/targets/<key>/context.md` | the team's project context |
 | `<repo>/THREAT_MODEL.md`, else `<repo>/docs/threat-model.md` | the target's own threat model, loaded when committed and unmodified. The first of the two that exists is the one checked; when it is uncommitted or modified it is skipped with its reason and the other path is not tried (`load_target_threat_model`, `crates/cli/src/commands/lyrik.rs`); see [lyrik-brocards.md](lyrik-brocards.md#the-targets-threat-model) |
-| `<repo>/.lyrik/ledger/` | what earlier runs established about the target, one JSON record per claim; written by the runner, never by a run's agents |
+| `<data_dir>/lyrik/targets/<key>/ledger/` | what earlier runs established about the target, one JSON record per claim; written by the runner alone, after a run |
+| `<repo>/.lyrik/state/runs/<run-id>/ledger/` | the copy of the ledger staged for a run's walks to read; nothing reads it back |
 | `<repo>/.lyrik/state/runs/<run-id>/` | `findings.json`, `rejections.jsonl`, `audit.log`, `proposed/`, staging; the only place a run's agents may `write_file` |
 
 The run config names the provider, not its key:
@@ -534,8 +535,15 @@ A run costs model time, and most of that goes on showing that a finding is
 real: writing a harness, running it, replaying it, checking a patch. Once a
 run has shown something by running it, the next run on the same code should
 not pay for it again. The ledger is the list of what earlier runs established
-about the target, kept in the target under `.lyrik/ledger/`, one small JSON
-file per claim.
+about the target, one small JSON file per claim, kept in the target's inputs
+directory under the data directory, `<data_dir>/lyrik/targets/<key>/ledger/`.
+Only the runner writes it, after a run's findings are final; no run and
+nothing in the assessed tree can. At the start of a run the runner stages a
+copy into the run's own directory, `.lyrik/state/runs/<run-id>/ledger/`, for
+the walks to read. Every decision on the ledger, the refusal to register a
+settled place again and the answer to a walk's claim among them, reads the
+records loaded from the inputs directory, never the staged copy. A
+`.lyrik/ledger/` the assessed tree holds is not read, and the run says so.
 
 It records three strengths of knowledge and treats them differently:
 
@@ -578,7 +586,7 @@ test target kept outside this repository):
 
 | Field | Meaning |
 |---|---|
-| `id` | stable for a `(kind, key)` pair; also the file name, `.lyrik/ledger/<id>.json` |
+| `id` | stable for a `(kind, key)` pair; also the file name, `<id>.json` |
 | `kind` | `finding` (the defect is there), `rejection` (a proposed defect was set aside) or `arm_result` (a check of a patch gave a result) |
 | `key` | `<class>::<file>:<line>`; for an arm result, the finding's key and `#<arm>` |
 | `claim` | the claim in words |
@@ -625,7 +633,7 @@ Before a run's walks start, the runner reads the ledger and writes each walk
   and no `exclude` pattern does; every file when there is no `include`.
 - `index`: one line for every other record, stale ones included, with `id`,
   `key`, `evidence` and `stale`. A walk reads one of these whole at
-  `.lyrik/ledger/<id>.json`.
+  `.lyrik/state/runs/<run-id>/ledger/<id>.json`, the staged copy.
 
 In run `ledger-c`, after the decoder file had changed, the hand-off was:
 
@@ -635,7 +643,7 @@ In run `ledger-c`, after the decoder file had changed, the hand-off was:
   "index": [
     { "evidence": "observed", "id": "8d119573a9960912", "key": "missing_bounds_check::len.sh:3", "stale": true }
   ],
-  "read_a_record_at": ".lyrik/ledger/<id>.json"
+  "read_a_record_at": ".lyrik/state/runs/ledger-c/ledger/<id>.json"
 }
 ```
 
@@ -662,7 +670,7 @@ had scanned:
   "key": "missing_bounds_check::len.sh:3",
   "reason": "an earlier run observed this claim against the file as it is now; do not check it again and do not stage a finding for it",
   "record": "8d119573a9960912",
-  "record_path": ".lyrik/ledger/8d119573a9960912.json"
+  "record_path": ".lyrik/state/runs/<run-id>/ledger/8d119573a9960912.json"
 }
 ```
 
@@ -784,8 +792,8 @@ returns to that content the mark is removed. A new observation of the same
 claim replaces the stale record.
 
 The ledger is read and written only in per-walk runs. A `--bench` run and a
-fixture replay neither read nor write it. `.lyrik/ledger/` can be committed
-with the repository or ignored; delete it to start over.
+fixture replay neither read nor write it. Delete the inputs directory's
+`ledger/` to start over.
 
 ## Cost guard
 

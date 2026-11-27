@@ -623,8 +623,13 @@ pub async fn run(
     // unchanged code does not read as empty. Read before this run's
     // own records are written.
     if !bench_mode && use_fixture.is_none() {
-        let carried = carry_settled_findings(target, &config, &findings_dest)
-            .context("carry settled findings")?;
+        let carried = carry_settled_findings(
+            &super::lyrik_ledger::ledger_dir(&inputs_dir),
+            target,
+            &config,
+            &findings_dest,
+        )
+        .context("carry settled findings")?;
         if !carried.is_empty() {
             println!(
                 "carried from the ledger: {} finding(s) an earlier run observed, files unchanged: {}",
@@ -641,8 +646,14 @@ pub async fn run(
     // Record what this run established, for the next one. Not in
     // bench mode, and not for a fixture replay, which ran nothing.
     if !bench_mode && use_fixture.is_none() {
-        let written =
-            update_ledger(target, &findings_dest, &run_dir, run_id).context("update the ledger")?;
+        let written = update_ledger(
+            &super::lyrik_ledger::ledger_dir(&inputs_dir),
+            target,
+            &findings_dest,
+            &run_dir,
+            run_id,
+        )
+        .context("update the ledger")?;
         audit.emit(
             "lyrik.ledger.updated",
             serde_json::json!({ "written": written }),
@@ -752,6 +763,7 @@ fn one_line(s: &str) -> String {
 /// run that established it. Returns the keys carried. A place where
 /// this run kept a finding of its own is not carried as well.
 fn carry_settled_findings(
+    ledger: &Path,
     target: &Path,
     config: &serde_json::Value,
     findings: &Path,
@@ -761,7 +773,7 @@ fn carry_settled_findings(
     };
     let mut body: serde_json::Value =
         serde_json::from_str(&text).with_context(|| format!("parse {}", findings.display()))?;
-    let ledger = super::lyrik_ledger::load(target)?;
+    let ledger = super::lyrik_ledger::load(ledger, target)?;
     let area = super::lyrik_ledger::Area::from_config(config);
     let kept: Vec<(String, u64)> = body
         .get("findings")
@@ -812,8 +824,16 @@ fn carry_settled_findings(
 }
 
 /// Write the ledger records a finished run establishes, from its
-/// `findings.json` and the rejection records beside it.
-fn update_ledger(target: &Path, findings: &Path, run_dir: &Path, run_id: &str) -> Result<usize> {
+/// `findings.json` and the rejection records beside it, into the
+/// ledger in the target's inputs directory. The runner is the one
+/// writer of that ledger.
+fn update_ledger(
+    ledger: &Path,
+    target: &Path,
+    findings: &Path,
+    run_dir: &Path,
+    run_id: &str,
+) -> Result<usize> {
     let Ok(text) = std::fs::read_to_string(findings) else {
         return Ok(0);
     };
@@ -826,7 +846,7 @@ fn update_ledger(target: &Path, findings: &Path, run_dir: &Path, run_id: &str) -
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
     let records = super::lyrik_ledger::records_from_run(target, &body, &rejections, run_id);
-    super::lyrik_ledger::upsert(target, &records)
+    super::lyrik_ledger::upsert(ledger, target, &records)
 }
 
 /// The detail of the `lyrik.run.started` row.
@@ -1923,7 +1943,19 @@ async fn dispatch_via_agent_runtime(
     let ledger = if audit.bench_mode {
         Vec::new()
     } else {
-        super::lyrik_ledger::load(target).context("read the ledger")?
+        // The ledger in the target's inputs directory, which only the
+        // runner writes. A ledger directory the assessed tree holds is
+        // not read: its records would settle places for the run.
+        let in_tree = target.join(".lyrik").join("ledger");
+        if in_tree.is_dir() {
+            eprintln!(
+                "  {} is in the assessed tree and is not read; the ledger is {}",
+                in_tree.display(),
+                super::lyrik_ledger::ledger_dir(&fix_inputs.dir).display()
+            );
+        }
+        super::lyrik_ledger::load(&super::lyrik_ledger::ledger_dir(&fix_inputs.dir), target)
+            .context("read the ledger")?
     };
     if !ledger.is_empty() {
         audit.emit(
@@ -1942,9 +1974,16 @@ async fn dispatch_via_agent_runtime(
             // index of staged records it can read another walk's
             // output through.
             if !ledger.is_empty() {
+                // The walks read a copy staged into the run's own
+                // directory. Nothing reads it back: every decision on
+                // the ledger reads the records loaded above.
+                super::lyrik_ledger::stage(&ledger, &run_dir).context("stage the ledger")?;
                 let area = super::lyrik_ledger::Area::from_config(config);
-                let handed =
-                    serde_json::to_string_pretty(&super::lyrik_ledger::for_walk(&ledger, &area))?;
+                let handed = serde_json::to_string_pretty(&super::lyrik_ledger::for_walk(
+                    &ledger,
+                    &area,
+                    &super::lyrik_ledger::staged_path(run_id),
+                ))?;
                 for w in &wc.walks {
                     let path = run_dir.join("staging").join(w).join("ledger.json");
                     std::fs::write(&path, &handed)
@@ -2062,15 +2101,19 @@ async fn dispatch_via_agent_runtime(
                 let records = ledger.clone();
                 let walks = wc.walks.clone();
                 let staging = run_dir.join("staging");
+                let staged_at = super::lyrik_ledger::staged_path(run_id);
                 tokio::spawn(async move {
                     loop {
                         // Read the flag first, so the pass after the
                         // walks have returned sees every claim.
                         let last = done.load(std::sync::atomic::Ordering::Acquire);
                         for w in &walks {
-                            if let Ok(answers) =
-                                super::lyrik_ledger::answer_claims(&staging.join(w), w, &records)
-                            {
+                            if let Ok(answers) = super::lyrik_ledger::answer_claims(
+                                &staging.join(w),
+                                w,
+                                &records,
+                                &staged_at,
+                            ) {
                                 log.lock()
                                     .unwrap_or_else(|e| e.into_inner())
                                     .extend(answers);
@@ -9970,7 +10013,12 @@ mod tests {
                  "evidence": "observed"}]
         });
         let records = super::super::lyrik_ledger::records_from_run(target, &earlier, &[], "r1");
-        super::super::lyrik_ledger::upsert(target, &records).unwrap();
+        super::super::lyrik_ledger::upsert(
+            &super::super::lyrik_ledger::ledger_dir(target),
+            target,
+            &records,
+        )
+        .unwrap();
         // This run kept one finding of its own, in src/b.rs.
         let findings = target.join("findings.json");
         std::fs::write(
@@ -9985,8 +10033,13 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let carried =
-            super::carry_settled_findings(target, &serde_json::json!({}), &findings).unwrap();
+        let carried = super::carry_settled_findings(
+            &super::super::lyrik_ledger::ledger_dir(target),
+            target,
+            &serde_json::json!({}),
+            &findings,
+        )
+        .unwrap();
         assert_eq!(carried, vec!["auth::src/a.rs:1".to_string()]);
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&findings).unwrap()).unwrap();
@@ -10007,9 +10060,14 @@ mod tests {
         )
         .unwrap();
         assert!(
-            super::carry_settled_findings(target, &serde_json::json!({}), &findings)
-                .unwrap()
-                .is_empty()
+            super::carry_settled_findings(
+                &super::super::lyrik_ledger::ledger_dir(target),
+                target,
+                &serde_json::json!({}),
+                &findings,
+            )
+            .unwrap()
+            .is_empty()
         );
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&findings).unwrap()).unwrap();

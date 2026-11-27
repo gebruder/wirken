@@ -847,7 +847,8 @@ fn staging_section(walk_name: &str) -> String {
          it before you start. It holds what earlier runs established about this \
          project. `area` has the full records for the files this run covers; `index` \
          has one line (`id`, `key`, `evidence`, `stale`) for every other record, and \
-         you read one of those whole at `.lyrik/ledger/<id>.json` when you need it. A \
+         you read one of those whole at `.lyrik/state/runs/<run-id>/ledger/<id>.json` when \
+         you need it. A \
          record with `evidence: observed` and no `stale` mark was shown by an executed \
          run against the file as it is now: it is settled. A record with `evidence: \
          static_confirmed` had a check agree with it and nothing shows the code ran, \
@@ -1827,7 +1828,7 @@ mod tests {
             ".lyrik/state/runs/<run-id>/staging/index.json` first",
             "read only the records you need",
             ".lyrik/state/runs/<run-id>/staging/chain-walk/ledger.json",
-            "you read one of those whole at `.lyrik/ledger/<id>.json`",
+            "you read one of those whole at `.lyrik/state/runs/<run-id>/ledger/<id>.json`",
             "Register a claim before you work on it",
             "staging/chain-walk/claims/claim-NNN.json",
             "{\"class\": \"<class>\", \"file\": \"<file>\", \"line\": <line>}",
