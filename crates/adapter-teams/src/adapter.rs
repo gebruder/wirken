@@ -6,7 +6,6 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
-use wirken_adapter_core::approval_card::CardStyle;
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
     AdapterIdentity, IpcFrameReader, IpcFrameWriter, connect, perform_adapter_handshake,
@@ -487,12 +486,41 @@ async fn emit_approval_failure(
 /// (Teams has no ephemeral equivalent to Slack's chat.postEphemeral
 /// or Telegram's callback-query toast, so silent ack is the
 /// umbrella-consistent choice).
-/// The approval message body: the card every surface renders, in the
-/// Markdown an Adaptive Card text block draws. The card's actions carry
-/// the decision.
-pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
-    fields.card().render(CardStyle::Markdown)
+/// The approval message body: the card every surface renders, one
+/// `RichTextBlock` per line. The label is one text run, set bold by
+/// the run's own property, and the value is another. A text run is not
+/// read as Markdown, so a value is shown as written: it cannot bold
+/// itself into a label, close the claim's italics or draw a link that
+/// looks like an action. The key and the arguments are set in the
+/// monospace font, the model's claim in italics. The card's actions
+/// carry the decision.
+pub(crate) fn approval_body(fields: &convert::ApprovalRequestFields) -> Vec<serde_json::Value> {
+    fields
+        .card()
+        .lines()
+        .into_iter()
+        .map(|line| {
+            let mut value = serde_json::json!({ "type": "TextRun", "text": line.value });
+            if CODE_LABELS.contains(&line.label) {
+                value["fontType"] = "Monospace".into();
+            }
+            if line.is_model_claim {
+                value["italic"] = true.into();
+            }
+            serde_json::json!({
+                "type": "RichTextBlock",
+                "inlines": [
+                    { "type": "TextRun", "text": format!("{}: ", line.label), "weight": "Bolder" },
+                    value,
+                ],
+            })
+        })
+        .collect()
 }
+
+/// The lines whose value is the key the gate matched or the arguments
+/// that will run, as the shared card names them.
+const CODE_LABELS: [&str; 2] = ["action key", "arguments"];
 
 async fn send_approval_request(
     http: &reqwest::Client,
@@ -532,15 +560,13 @@ async fn send_approval_request(
         }
     };
 
-    let prompt = approval_text(fields);
+    let body = approval_body(fields);
 
     let card = serde_json::json!({
         "type": "AdaptiveCard",
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "version": "1.4",
-        "body": [
-            { "type": "TextBlock", "text": prompt, "wrap": true }
-        ],
+        "body": body,
         "actions": [
             {
                 "type": "Action.Submit",

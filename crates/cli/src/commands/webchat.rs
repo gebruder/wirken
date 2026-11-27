@@ -876,12 +876,17 @@ function runtimeWords(runtime) {
   if (runtime === 'host') return 'this host, no container';
   return String(runtime || '');
 }
-// A value as one line, as every surface shows it: line breaks folded
-// and a long value cut with a marker, so an argument cannot write a
-// second line that reads as part of the card. A text node renders no
-// escape sequence, so there is nothing to strip here.
+// A value as one line, as every surface shows it: line breaks folded,
+// a character that reorders or hides the text around it written out
+// as its code point, and a long value cut with a marker, so an
+// argument cannot write a second line that reads as part of the card
+// or be drawn in another order than it runs. A text node renders no
+// escape sequence, so there is nothing to strip here. The characters
+// are the ones `one_line` in the shared card writes out.
+const SHOWN_AS_CODE_POINT = /[\u{061C}\u{180E}\u{200B}-\u{200F}\u{2028}-\u{202E}\u{2060}-\u{2064}\u{2066}-\u{2069}\u{FEFF}\u{E0000}-\u{E007F}]/gu;
 function oneLine(v) {
-  const folded = String(v).replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t');
+  const folded = String(v).replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t')
+    .replace(SHOWN_AS_CODE_POINT, (c) => '\\u{' + c.codePointAt(0).toString(16) + '}');
   const chars = Array.from(folded);
   return chars.length > 2000 ? chars.slice(0, 2000).join('') + ' … (cut)' : folded;
 }

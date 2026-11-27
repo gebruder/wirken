@@ -411,10 +411,12 @@ enum FrameAction {
 /// access token with refresh-on-expiry, parallel to how the Teams
 /// adapter would land real auth. Pre-existing limitation; not
 /// introduced by the approval slice. Its own slice.
-/// The approval message body: the card every surface renders, in
-/// Markdown. The card's buttons carry the decision.
+/// The approval message body: the card every surface renders, in the
+/// HTML subset a card's text paragraph takes, every value escaped, so
+/// a value cannot open a tag, break a line or draw a link. The card's
+/// buttons carry the decision.
 pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
-    fields.card().render(CardStyle::Markdown)
+    fields.card().render(CardStyle::GoogleChatHtml)
 }
 
 async fn send_approval_request(

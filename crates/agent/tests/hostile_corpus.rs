@@ -45,7 +45,9 @@
 //!   addresses, so a name that clears the allow-set and resolves
 //!   outside global unicast replays to `refused:egress`.
 //! - `card`: approval-card styles. The arguments line of the card, read
-//!   the way that channel displays it, has to be the arguments.
+//!   the way that channel displays it, has to be the arguments, with
+//!   nothing in it that reorders or hides text, and no value may
+//!   write a row of its own.
 //! - `ask`: `asked`, or `refused:arguments_too_long` for a call the
 //!   approval card could not show whole.
 //! - `container`: what the exec container is given under the named
@@ -69,7 +71,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use wirken_adapter_core::approval_card::{ApprovalCard, CardStyle, one_line, shown_whole};
+use wirken_adapter_core::approval_card::{
+    ApprovalCard, CardStyle, one_line, shown_as_code_point, shown_whole,
+};
 use wirken_agent::approval_gate::{ApprovalGate, ApprovalOutcome};
 use wirken_agent::egress::{
     EgressClient, EgressDenyReason, EgressEnforcement, HostResolver, HttpAccessDenied,
@@ -934,16 +938,39 @@ fn displayed_arguments(card: &ApprovalCard, style: &str) -> String {
     let (style, label) = match style {
         "discord" => (CardStyle::Discord, "**arguments:** "),
         "telegram" => (CardStyle::TelegramHtml, "<b>arguments:</b> "),
+        "googlechat" => (CardStyle::GoogleChatHtml, "<b>arguments:</b> "),
         "plain" => (CardStyle::Plain, "arguments: "),
-        other => panic!("unknown card style '{other}'. One of: discord, telegram, plain."),
+        other => {
+            panic!("unknown card style '{other}'. One of: discord, telegram, googlechat, plain.")
+        }
     };
     let text = card.render(style);
-    let line = text
-        .lines()
+    let rows: Vec<&str> = match style {
+        CardStyle::GoogleChatHtml => {
+            assert!(
+                !text.contains('\n'),
+                "the card breaks its own lines: {text}"
+            );
+            text.split("<br>").collect()
+        }
+        _ => text.lines().collect(),
+    };
+    assert_eq!(
+        rows.len(),
+        card.lines().len(),
+        "one row per card line, so no value wrote a row of its own: {text}"
+    );
+    let line = rows
+        .iter()
         .find_map(|l| l.strip_prefix(label))
         .unwrap_or_else(|| panic!("the card has an arguments line: {text}"));
     match style {
         CardStyle::Plain => line.to_string(),
+        // The value is escaped, with no element around it.
+        CardStyle::GoogleChatHtml => line
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
         // The value is escaped inside `<code>`.
         CardStyle::TelegramHtml => line
             .strip_prefix("<code>")
@@ -978,7 +1005,6 @@ fn displayed_arguments(card: &ApprovalCard, style: &str) -> String {
                 shown
             }
         },
-        _ => unreachable!("styles are matched above"),
     }
 }
 
@@ -1004,11 +1030,20 @@ fn approval_cards_show_the_arguments_as_sent() {
         };
         for style in styles.as_array().expect("'card' is an array of styles") {
             let style = style.as_str().expect("a card style is a string");
+            let displayed = displayed_arguments(&card, style);
             assert_eq!(
-                displayed_arguments(&card, style),
+                displayed,
                 one_line(&arguments),
                 "\n{CORPUS_PATH}:{}  id={}\n  the {style} card does not show the \
                  arguments as sent\n  why       {}\n",
+                entry.lineno,
+                entry.id,
+                entry.why,
+            );
+            assert!(
+                !displayed.chars().any(shown_as_code_point),
+                "\n{CORPUS_PATH}:{}  id={}\n  the {style} card draws a character \
+                 that reorders or hides the arguments\n  why       {}\n",
                 entry.lineno,
                 entry.id,
                 entry.why,

@@ -17,9 +17,11 @@
 //! needs, so the text a channel displays is the text of the value: a
 //! character the channel would read as markup is escaped, never
 //! dropped or left to restyle what follows it. Every value goes through [`one_line`] first: escape
-//! sequences stripped, line breaks folded and a long value cut with a
-//! marker, so an argument cannot repaint the surface it is judged on
-//! or write a second line that reads as part of the card.
+//! sequences stripped, line breaks folded, characters that reorder or
+//! hide text written out as code points and a long value cut with a
+//! marker, so an argument cannot repaint the surface it is judged on,
+//! read in another order than it runs, or write a second line that
+//! reads as part of the card.
 //!
 //! The arguments are what will run if approved and are never labeled
 //! a claim. What the model said beside the call is its own account of
@@ -98,9 +100,11 @@ pub struct CardLine {
 pub enum CardStyle {
     /// No markup and no escaping: Signal, WhatsApp, iMessage, Matrix.
     Plain,
-    /// Markdown as Teams and Google Chat are sent it: `**bold**`
-    /// labels, code spans and `_italic_`. Nothing is escaped.
-    Markdown,
+    /// The HTML subset a Google Chat card's text takes: `<b>` labels,
+    /// the claim in `<i>`, every value escaped and the lines joined by
+    /// `<br>`. The card's text has no code element, so the key and the
+    /// arguments are shown as escaped text.
+    GoogleChatHtml,
     /// Discord Markdown: `**bold**` labels and `_italic_`, with every
     /// value escaped. The key and the arguments sit in a code span,
     /// where Discord reads nothing as markup; a value holding a
@@ -162,11 +166,15 @@ impl ApprovalCard {
     /// The card as text, one line per [`CardLine`], in `style`. The
     /// surface appends its own decision instructions after it.
     pub fn render(&self, style: CardStyle) -> String {
+        let separator = match style {
+            CardStyle::GoogleChatHtml => "<br>",
+            _ => "\n",
+        };
         self.lines()
             .iter()
             .map(|line| style.line(line))
             .collect::<Vec<_>>()
-            .join("\n")
+            .join(separator)
     }
 }
 
@@ -175,11 +183,15 @@ impl CardStyle {
         let code = CODE_LABELS.contains(&line.label);
         match self {
             CardStyle::Plain => format!("{}: {}", line.label, line.value),
-            CardStyle::Markdown => format!(
-                "**{}:** {}",
-                line.label,
-                span(&line.value, code, line.is_model_claim)
-            ),
+            CardStyle::GoogleChatHtml => {
+                let value = html_escape(&line.value);
+                let value = if line.is_model_claim {
+                    format!("<i>{value}</i>")
+                } else {
+                    value
+                };
+                format!("<b>{}:</b> {value}", line.label)
+            }
             CardStyle::Discord => {
                 let value = if code && !line.value.contains('`') {
                     format!("`{}`", line.value)
@@ -220,17 +232,6 @@ fn discord_escape(value: &str) -> String {
     out
 }
 
-/// A value in the Markdown dialect: a code span or italics.
-fn span(value: &str, code: bool, claim: bool) -> String {
-    if code {
-        format!("`{value}`")
-    } else if claim {
-        format!("_{value}_")
-    } else {
-        value.to_string()
-    }
-}
-
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -255,12 +256,14 @@ pub fn runtime_words(runtime: &str) -> String {
 
 /// A value as one printable line.
 ///
-/// Three steps, and each is needed. [`strip_control_sequences`] takes
+/// Four steps, and each is needed. [`strip_control_sequences`] takes
 /// out the escapes, which is what stops a model from erasing the line
 /// above or repainting the question. Folding the line breaks is what
 /// stops it from writing a second line that looks like a label: an
 /// argument that contains a newline would otherwise be printed as two
-/// lines, the second of which the model chooses in full. The cut past
+/// lines, the second of which the model chooses in full. A character
+/// that reorders or hides the text around it is written out as its
+/// code point, so the value reads in the order it runs. The cut past
 /// [`MAX_VALUE_CHARS`] is marked, so a decision is never made on text
 /// that silently ended.
 ///
@@ -279,12 +282,44 @@ pub fn one_line(s: &str) -> String {
     }
 }
 
-/// `s` with its escapes out and its line breaks folded, uncut.
+/// `s` with its escapes out, its line breaks folded and every
+/// character that changes how the text around it reads written out as
+/// its code point, uncut.
 fn fold(s: &str) -> String {
-    strip_control_sequences(s)
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    let mut out = String::with_capacity(s.len());
+    for c in strip_control_sequences(s).chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if shown_as_code_point(c) => out.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A character a card shows as `\u{...}` rather than as itself: one
+/// that draws nothing and changes how the characters around it are
+/// shown. The bidirectional overrides, embeddings, isolates and marks
+/// reorder what follows them, so `rm` can be drawn after the text it
+/// precedes. The zero-width characters and the tag characters hide
+/// text inside a word. The line and paragraph separators start a new
+/// line on a surface that honours them, which is a second line the
+/// model wrote. Shown as code points, each is visible where it sits
+/// and the rest of the value reads in the order it runs.
+pub fn shown_as_code_point(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
 }
 
 /// Whether a card line shows `s` to its end, with no cut. The gateway
@@ -421,13 +456,27 @@ mod tests {
     }
 
     #[test]
-    fn markdown_bolds_labels_codes_the_key_and_arguments_and_italicises_the_claim() {
-        let text = exec_card().render(CardStyle::Markdown);
-        assert!(text.starts_with("**request:** agent default requests exec (tier2)\n"));
-        assert!(text.contains("\n**action key:** `shell:ls`\n"));
-        assert!(text.contains("\n**arguments:** `{\"command\":\"ls -la\"}`\n"));
-        assert!(text.contains("\n**runs:** runs on this host as davi\n"));
-        assert!(text.ends_with("\n**model's claim (unverified):** _I'll list them._"));
+    fn google_chat_html_escapes_every_value_and_breaks_lines_itself() {
+        let mut card = exec_card();
+        card.arguments = Some(r#"{"command":"echo <br><b>x</b> &amp;"}"#.into());
+        card.assistant_text = Some("ok<br><b>action key:</b> shell:ls".into());
+        let text = card.render(CardStyle::GoogleChatHtml);
+        let rows: Vec<&str> = text.split("<br>").collect();
+        assert_eq!(rows.len(), card.lines().len(), "{text}");
+        assert_eq!(
+            rows[0],
+            "<b>request:</b> agent default requests exec (tier2)"
+        );
+        assert_eq!(rows[1], "<b>action key:</b> shell:ls");
+        assert_eq!(
+            rows[2],
+            "<b>arguments:</b> {\"command\":\"echo &lt;br&gt;&lt;b&gt;x&lt;/b&gt; &amp;amp;\"}"
+        );
+        assert_eq!(
+            rows[6],
+            "<b>model's claim (unverified):</b> <i>ok&lt;br&gt;&lt;b&gt;action key:&lt;/b&gt; shell:ls</i>"
+        );
+        assert!(!text.contains('\n'));
     }
 
     #[test]
@@ -518,6 +567,55 @@ mod tests {
             .unwrap();
         assert_eq!(arguments.value, "ls\\r\\nrm -rf /\\tnow");
         assert!(!card.render(CardStyle::Plain).contains('\x1b'));
+    }
+
+    #[test]
+    fn a_character_that_reorders_or_hides_text_is_shown_as_its_code_point() {
+        let mut card = exec_card();
+        // Drawn by a bidi-aware surface as `{"command":"ls # sl- fr- mr"}`
+        // without the fold: the override reverses what follows it.
+        card.arguments = Some("{\"command\":\"rm -rf ~ \u{202E}# ls\"}".into());
+        card.assistant_text =
+            Some("listing\u{2028}action key: shell:ls\u{200B}\u{2066}x\u{2069}\u{E0041}".into());
+        let lines = card.lines();
+        let value = |label: &str| {
+            lines
+                .iter()
+                .find(|l| l.label == label)
+                .map(|l| l.value.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            value("arguments"),
+            "{\"command\":\"rm -rf ~ \\u{202e}# ls\"}"
+        );
+        assert_eq!(
+            value(CLAIM_LABEL),
+            "listing\\u{2028}action key: shell:ls\\u{200b}\\u{2066}x\\u{2069}\\u{e0041}"
+        );
+        for style in [
+            CardStyle::Plain,
+            CardStyle::Discord,
+            CardStyle::TelegramHtml,
+        ] {
+            let text = card.render(style);
+            assert!(
+                !text.chars().any(shown_as_code_point),
+                "{style:?}: {text:?}"
+            );
+            assert_eq!(text.lines().count(), lines.len(), "{style:?}: {text:?}");
+        }
+        // A written-out code point counts toward the cut like any
+        // other character, so it cannot carry a value past it unseen.
+        let padded = format!("{}\u{202E}", "a".repeat(MAX_VALUE_CHARS - 1));
+        assert!(!shown_whole(&padded));
+    }
+
+    #[test]
+    fn text_that_reads_as_it_runs_is_unchanged() {
+        for s in ["héllo 世界 🙂", "a\u{00A0}b", "ﷺ", "שלום"] {
+            assert_eq!(one_line(s), s);
+        }
     }
 
     #[test]
