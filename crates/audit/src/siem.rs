@@ -979,6 +979,12 @@ fn extract_identity_for_sentinel(
             Some(proxy_token_actor(token_id)),
             Some(agent_id.clone()),
         ),
+        // A run's container: its token is the principal, and no agent
+        // of Wirken's runs it.
+        SessionEvent::ProxyRunStarted { token_id, .. }
+        | SessionEvent::ProxyRunEnded { token_id, .. } => {
+            (None, Some(proxy_token_actor(token_id)), None)
+        }
         // A body hash and an operator; none of the three.
         SessionEvent::ProxyArchiveRedacted { .. } => (None, None, None),
         // A credential name; none of the three.
@@ -1477,6 +1483,24 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             "proxy_token_exchanged token={token_id} server={server} audience={audience} \
              expires_at={}",
             expires_at.to_rfc3339()
+        ),
+        SessionEvent::ProxyRunStarted {
+            token_id,
+            image,
+            egress_hosts,
+            ..
+        } => format!(
+            "proxy_run_started token={token_id} image={image} egress_hosts={}",
+            egress_hosts.len()
+        ),
+        SessionEvent::ProxyRunEnded {
+            token_id,
+            exit_code,
+            stopped,
+            ..
+        } => format!(
+            "proxy_run_ended token={token_id} exit_code={} stopped={stopped}",
+            exit_code.map_or("none".to_string(), |c| c.to_string())
         ),
         SessionEvent::ProxyArchiveRedacted {
             sha256, operator, ..

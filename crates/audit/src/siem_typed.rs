@@ -88,6 +88,8 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   counts.
 /// - `ProxyTokenExchanged`: a client's JWT exchanged for a token of a
 ///   downstream audience. The audience and the expiry, never a token.
+/// - `ProxyRunStarted`, `ProxyRunEnded`: a client `wirken proxy run`
+///   started in a container, what it was given, and how it ended.
 /// - `McpCredentialInjected`, `McpInjectRefused`: each request on a
 ///   contained server's injected route, made with the credential or
 ///   refused.
@@ -176,6 +178,9 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::ProxyToolCall { .. } => true,
         SessionEvent::ProxyToolRefused { .. } => true,
         SessionEvent::ProxyTokenExchanged { .. } => true,
+        // A client Wirken started in a container, and how it ended.
+        SessionEvent::ProxyRunStarted { .. } => true,
+        SessionEvent::ProxyRunEnded { .. } => true,
         SessionEvent::ProxyArchiveRedacted { .. } => true,
         // A refresh that lost to a removal or a new sign-in.
         SessionEvent::McpCredentialRefreshDiscarded { .. } => true,
@@ -401,6 +406,8 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::ProxyToolCall { .. } => "proxy_tool_call",
         SessionEvent::ProxyToolRefused { .. } => "proxy_tool_refused",
         SessionEvent::ProxyTokenExchanged { .. } => "proxy_token_exchanged",
+        SessionEvent::ProxyRunStarted { .. } => "proxy_run_started",
+        SessionEvent::ProxyRunEnded { .. } => "proxy_run_ended",
         SessionEvent::ProxyArchiveRedacted { .. } => "proxy_archive_redacted",
         SessionEvent::McpCredentialRefreshDiscarded { .. } => "mcp_credential_refresh_discarded",
         SessionEvent::CredentialDestinationRefused { .. } => "credential_destination_refused",

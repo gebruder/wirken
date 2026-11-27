@@ -2500,6 +2500,52 @@ pub enum SessionEvent {
         /// every row of the call.
         identity: ProxyIdentity,
     },
+    /// `wirken proxy run` started a proxy client in a container, with a
+    /// token minted for the run. The container reaches the proxy
+    /// listener on its own loopback and `egress_hosts` through its
+    /// sidecar, and nothing else. On the run token's lane,
+    /// `proxy-<token id>`. Never the token.
+    ProxyRunStarted {
+        token_id: String,
+        image: String,
+        /// The local image id, a digest of its configuration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_id: Option<String>,
+        /// The image's registry digest, absent for an image that never
+        /// came from a registry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_digest: Option<String>,
+        runtime: SandboxRuntimeLabel,
+        container_id: String,
+        /// The command the container runs, as the operator gave it.
+        command: Vec<String>,
+        /// `source:target:ro` or `source:target:rw`: the workspace, the
+        /// read-only folders and the client's home.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mounts: Vec<String>,
+        /// Domain patterns the client may reach through its sidecar.
+        /// Empty means the listener only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        egress_hosts: Vec<String>,
+        memory_bytes: i64,
+        pids: i64,
+        nano_cpus: i64,
+    },
+    /// The container of a `wirken proxy run` exited, or was stopped
+    /// because the run was. Its token is revoked after this row. On
+    /// the run token's lane.
+    ProxyRunEnded {
+        token_id: String,
+        container_id: String,
+        /// The container's exit code, absent when the runtime gave none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+        /// True when the run stopped the container: a signal to the
+        /// run, or a terminal that went away.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stopped: bool,
+        duration_ms: u64,
+    },
     /// The key an archived body was encrypted under was destroyed. The
     /// object stays in the bucket for its retention period and can no
     /// longer be read. `sha256` is the body's hash, as on the

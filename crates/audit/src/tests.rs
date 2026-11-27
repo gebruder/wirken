@@ -4008,6 +4008,27 @@ fn every_session_event() -> Vec<SessionEvent> {
             reason: crate::session_log::ProxyToolRefusal::NotGranted,
             identity: None,
         },
+        SessionEvent::ProxyRunStarted {
+            token_id: String::new(),
+            image: String::new(),
+            image_id: None,
+            image_digest: None,
+            runtime: crate::session_log::SandboxRuntimeLabel::Docker,
+            container_id: String::new(),
+            command: Vec::new(),
+            mounts: Vec::new(),
+            egress_hosts: Vec::new(),
+            memory_bytes: 0,
+            pids: 0,
+            nano_cpus: 0,
+        },
+        SessionEvent::ProxyRunEnded {
+            token_id: String::new(),
+            container_id: String::new(),
+            exit_code: None,
+            stopped: false,
+            duration_ms: 0,
+        },
         SessionEvent::ProxyTokenExchanged {
             token_id: String::new(),
             agent_id: String::new(),
@@ -4294,6 +4315,8 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::ProxyToolCall { .. } => "ProxyToolCall",
         SessionEvent::ProxyToolRefused { .. } => "ProxyToolRefused",
         SessionEvent::ProxyTokenExchanged { .. } => "ProxyTokenExchanged",
+        SessionEvent::ProxyRunStarted { .. } => "ProxyRunStarted",
+        SessionEvent::ProxyRunEnded { .. } => "ProxyRunEnded",
         SessionEvent::ProxyArchiveRedacted { .. } => "ProxyArchiveRedacted",
         SessionEvent::LeakRefused { .. } => "LeakRefused",
         SessionEvent::LlmRequestFailed { .. } => "LlmRequestFailed",
@@ -4302,7 +4325,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 103;
+const SESSION_EVENT_VARIANTS: usize = 105;
 
 /// The list covers the enum.
 #[test]
